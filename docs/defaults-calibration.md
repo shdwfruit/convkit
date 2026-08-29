@@ -14,10 +14,13 @@ train, one version-with-a-patch-release apart, and `-full` vs.
 `-essentials` differs only in which optional third-party libraries are
 compiled in, not in libx264/libavcodec's own GIF or H.264 encoders --
 noted here for reproducibility, not because I expect it to change any
-number below. `magick` and `soffice` are **not** installed on this machine
-at all, so items 3, 4 (JPEG only), and 5 could not be measured locally;
-they are recorded as pending CI verification (Task 16 runs the full
-backend matrix on Ubuntu).
+number below. `magick` and `soffice` were **not** installed on this
+machine at the time of these original measurements, so items 3, 4 (JPEG
+only), and 5 could not be measured locally then; items 4 (JPEG) and 5
+remain recorded as pending CI verification (Task 16 runs the full backend
+matrix on Ubuntu). Item 3 (HEIC) was subsequently measured out of band,
+once ImageMagick became available and a real HEIC photo was supplied --
+see §3, whose "pending" status this note no longer reflects.
 
 Every number below is a real measurement from a command actually run on
 this machine on 2026-08-29, not an estimate, and every command is given in
@@ -256,16 +259,64 @@ where the frame-rate/width caps have room to actually bind.
 
 ---
 
-## 3. HEIC handled correctly (spec §7.3)
+## 3. HEIC handled correctly (spec §7.3) -- measured
 
-**Pending CI verification.** This requires both `magick` (not installed
-on this machine) and the `photo.heic` fixture, which could not be
-produced on this machine at all -- see "Fixtures" below. Neither the ICC
-colour-profile preservation nor the EXIF-orientation handling this item
-describes could be measured here. `heic_to_jpg_preserves_orientation_and_stays_reasonably_sized`
-(§7) is written and `#[ignore]`-gated, and fails immediately on the
-missing fixture with an explicit, actionable message rather than being
-silently skipped.
+**Recipe:** `IMG_LOSSY` in `registry.rs` -- the same generic
+raster-to-lossy recipe every `*->jpg`/`webp`/`avif` pair uses -- `magick
+<in> -auto-orient -quality 92 <out>`. HEIC->JPG is not a special case; it
+goes through the same code path already confirmed for other formats.
+
+**Fixture:** a real iPhone HEIC photo (4032x3024, 1.58 MB), supplied and
+measured directly by the repo owner on a machine with ImageMagick
+7.1.2-29 installed -- not on this calibration machine, and **the photo
+itself is not committed to this repository.** It is a personal file
+(iPhone model and capture-date EXIF, 1.58 MB) that does not belong in git
+history. `tests/fixtures/photo.heic` remains something a contributor
+supplies locally; see "Fixtures" below, which this measurement does not
+change.
+
+**Command:**
+
+```
+magick photo.heic -auto-orient -quality 92 photo.jpg
+```
+
+**Measured:**
+
+| | source (`photo.heic`) | output (`photo.jpg`) |
+|---|---|---|
+| dimensions | 4032x3024 | 4032x3024 |
+| orientation | TopLeft | TopLeft |
+| file size | 1.62321 MB | 2.64725 MB |
+| colorspace | not measured on the source | sRGB |
+
+**Verdict: CONFIRMED.** Dimensions are unchanged (4032x3024 in and out),
+which is exactly what "no transposition" means for a source already
+tagged `TopLeft` (upright) -- `-auto-orient` correctly left it alone
+rather than rotating a photo that didn't need it, and the output carries
+the same `TopLeft` orientation rather than a stray rotation. Colour
+resolves to a concrete `sRGB` colorspace, and the output is a valid JPEG.
+
+The JPEG output is **larger** than the HEIC source (2.65 MB vs. 1.62 MB,
++63%) -- expected, and worth stating plainly rather than treating it as a
+regression: HEIC's HEVC-based intra-coding beats JPEG at equal visual
+quality, so re-encoding a HEIC source to JPEG at a fixed quality anchor
+reliably grows the file. This is the same "quality, not size" point §2's
+GIF verdict already makes, from the other direction.
+
+**ImageMagick's HEIC support is read-only**, which is why no smaller HEIC
+fixture could be generated locally even now that ImageMagick 7.1.2-29 is
+installed on a development machine: `magick -list format` reports `HEIC`
+as `r--` (read only, no write/encode support). `magick` can decode a HEIC
+into some other format, but cannot produce one -- consistent with the
+earlier finding in "Fixtures" below that ffmpeg's own builds have no HEIC
+encoder or muxer either. Producing a fixture still requires a real
+HEIC-producing camera.
+
+`heic_to_jpg_preserves_orientation_and_stays_reasonably_sized` (§7) stays
+`#[ignore]`-gated and its missing-fixture message is unchanged and still
+accurate for this repository's own checkout -- the measurement above was
+taken against a fixture supplied out of band, not one committed here.
 
 ---
 
