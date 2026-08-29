@@ -114,7 +114,7 @@ impl Resolver {
     }
 
     /// Resolves a backend, caching the result so each backend is probed —
-    /// meaning: its candidates walked and, on a hit, its `--version` spawned
+    /// meaning: its candidates walked and, on a hit, its version probe spawned
     /// — at most once per `Resolver` (in practice, once per process, since
     /// one `Resolver` is expected to live for a whole `conv` invocation).
     /// Only successes are cached; a missing backend is cheap to re-check
@@ -140,8 +140,18 @@ impl Resolver {
         Err(ConvError::backend_missing(backend))
     }
 
-    /// First line of `<exe> --version`, trimmed. Never fails the resolve —
-    /// an unreadable version is reported as "unknown".
+    /// First line of the backend's version banner, trimmed. Never fails the
+    /// resolve — an unreadable version is reported as "unknown".
+    ///
+    /// Two things a naive `--version` probe gets wrong, discovered by
+    /// `conv doctor` reporting a real, working ffmpeg as "unknown":
+    /// `--version` is not a real ffmpeg (or ffprobe, or ImageMagick
+    /// `magick`) option at all — they take the single-dash `-version` —
+    /// and ffmpeg's version banner is written to stderr regardless of which
+    /// flag is used, leaving stdout empty. pandoc and soffice use the
+    /// conventional double-dash `--version` and do print it to stdout, so
+    /// this only falls back to stderr when stdout came back empty rather
+    /// than always preferring one stream.
     ///
     /// For `soffice` specifically, this is itself a soffice invocation, so
     /// it gets its own isolated `-env:UserInstallation` profile just like a
@@ -152,8 +162,8 @@ impl Resolver {
     /// basis; nothing downstream depends on it surviving.
     fn version_of(backend: Backend, path: &Path) -> Option<String> {
         let flag = match backend {
-            Backend::Magick => "-version",
-            _ => "--version",
+            Backend::Ffmpeg | Backend::Ffprobe | Backend::Magick => "-version",
+            Backend::Pandoc | Backend::Soffice => "--version",
         };
         let mut cmd = Command::new(path);
         cmd.arg(flag);
@@ -175,7 +185,12 @@ impl Resolver {
         if let Some(profile) = &profile {
             let _ = std::fs::remove_dir_all(profile);
         }
-        let text = String::from_utf8_lossy(&out.stdout);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let text = if stdout.trim().is_empty() {
+            String::from_utf8_lossy(&out.stderr).into_owned()
+        } else {
+            stdout.into_owned()
+        };
         text.lines().next().map(|l| l.trim().to_string())
     }
 }
@@ -242,5 +257,103 @@ mod tests {
         r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
         let e = r.resolve(Backend::Soffice).unwrap_err();
         assert_eq!(e.remediation.unwrap().managed, None);
+    }
+
+    // --- Controller review round 3: version_of used the wrong flag and
+    // ignored stderr, so a real ffmpeg was reported as "unknown" -------------
+
+    /// Writes a script that echoes its *first* argument to stdout and exits
+    /// 0, so a test can observe exactly which version flag `version_of`
+    /// passed. Must be the first argument, not the last: for `soffice`,
+    /// `version_of` appends `-env:UserInstallation=...` *after* the version
+    /// flag, so the flag is not reliably the last argument, only the first.
+    fn stub_that_echoes_first_arg(dir: &Path) -> PathBuf {
+        let (name, body) = if cfg!(windows) {
+            ("echo_first.bat", "@echo off\r\necho %~1\r\nexit /b 0\r\n")
+        } else {
+            ("echo_first.sh", "#!/bin/sh\necho \"$1\"\n")
+        };
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// Writes a script that prints fixed text to *stderr only* and exits 0 —
+    /// mirrors a real ffmpeg build, whose `--version`/`-version` banner never
+    /// touches stdout at all.
+    fn stub_that_prints_version_to_stderr_only(dir: &Path) -> PathBuf {
+        let (name, body) = if cfg!(windows) {
+            (
+                "stderr_version.bat",
+                "@echo off\r\n\
+                 echo banner-9.0 1>&2\r\n\
+                 exit /b 0\r\n",
+            )
+        } else {
+            (
+                "stderr_version.sh",
+                "#!/bin/sh\n\
+                 echo \"banner-9.0\" >&2\n",
+            )
+        };
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// `--version` isn't a real ffmpeg (or ffprobe, or ImageMagick `magick`)
+    /// option; all three take the single-dash `-version`.
+    #[test]
+    fn version_probe_uses_single_dash_for_ffmpeg_ffprobe_and_magick() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_echoes_first_arg(dir.path());
+        for backend in [Backend::Ffmpeg, Backend::Ffprobe, Backend::Magick] {
+            let mut r = Resolver::new();
+            r.with_override(backend, stub.clone());
+            let resolved = r.resolve(backend).unwrap();
+            assert_eq!(
+                resolved.version, "-version",
+                "{backend:?} must be probed with -version"
+            );
+        }
+    }
+
+    /// pandoc and soffice use the conventional double-dash `--version`.
+    #[test]
+    fn version_probe_uses_double_dash_for_pandoc_and_soffice() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_echoes_first_arg(dir.path());
+        for backend in [Backend::Pandoc, Backend::Soffice] {
+            let mut r = Resolver::new();
+            r.with_override(backend, stub.clone());
+            let resolved = r.resolve(backend).unwrap();
+            assert_eq!(
+                resolved.version, "--version",
+                "{backend:?} must be probed with --version"
+            );
+        }
+    }
+
+    /// A real ffmpeg build writes its `-version` banner to stderr, leaving
+    /// stdout empty; `version_of` must fall back to stderr rather than
+    /// reporting "unknown" for a backend that is actually installed.
+    #[test]
+    fn version_falls_back_to_stderr_when_stdout_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_prints_version_to_stderr_only(dir.path());
+        let mut r = Resolver::new();
+        r.with_override(Backend::Ffmpeg, stub);
+        let resolved = r.resolve(Backend::Ffmpeg).unwrap();
+        assert_eq!(resolved.version, "banner-9.0");
     }
 }
