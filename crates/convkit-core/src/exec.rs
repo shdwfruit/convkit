@@ -156,6 +156,16 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         None
     };
 
+    // Likewise: only check backend availability when this pair actually has
+    // more than one recipe to choose between (today: docx/odt -> pdf). An
+    // ordinary conversion never pays for the extra resolve() calls this
+    // would otherwise cost.
+    let available = if registry::has_fallback(req.from, req.to) {
+        Some(resolver.check_availability(registry::FALLBACK_BACKENDS))
+    } else {
+        None
+    };
+
     let dest_dir = req
         .output
         .parent()
@@ -174,7 +184,14 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     })?;
     let temp_final = scratch.join(final_name);
 
-    let built = plan::build(req.from, req.to, &req.inputs, &temp_final, probed.as_ref())?;
+    let built = plan::build(
+        req.from,
+        req.to,
+        &req.inputs,
+        &temp_final,
+        probed.as_ref(),
+        available.as_ref(),
+    )?;
     let first_step = built
         .steps
         .first()
@@ -224,9 +241,11 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                  step's first argv element"
             );
             cmd.arg(format!("-env:UserInstallation={url}"));
-            cmd.args(step.argv.iter().skip(1));
+            let rest = substitute_backend_paths(&step.argv[1..], resolver)?;
+            cmd.args(&rest);
         } else {
-            cmd.args(&step.argv);
+            let argv = substitute_backend_paths(&step.argv, resolver)?;
+            cmd.args(&argv);
         }
 
         let out = cmd.output().map_err(|e| {
@@ -311,6 +330,42 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
 
 fn is_non_empty(p: &Path) -> bool {
     std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
+}
+
+/// Every backend `Arg::BackendPath` could possibly name. Small and fixed —
+/// unlike the soffice `-env:UserInstallation` placeholder (a single fixed
+/// *position*, argv[0] of a `Soffice` step), a `BackendPath` placeholder can
+/// appear anywhere in a step's argv and for any backend, so substitution
+/// here is a token-by-token scan against this list rather than a positional
+/// swap. Mirrors the local `BACKENDS` list `conv`'s own `doctor` command
+/// already keeps for the same "every backend, enumerated by hand" need.
+const KNOWN_BACKENDS: &[Backend] = &[
+    Backend::Ffmpeg,
+    Backend::Ffprobe,
+    Backend::Magick,
+    Backend::Soffice,
+    Backend::Pandoc,
+    Backend::Typst,
+];
+
+/// Substitutes the real, resolved absolute path for every
+/// `Backend::path_placeholder()` token in `argv`, resolving each named
+/// backend the first time its placeholder is seen (`Resolver::resolve`
+/// caches, so a backend that's both substituted here and separately
+/// resolved as the step's own backend is never probed twice). A step whose
+/// recipe needs a backend this way that turns out to be missing surfaces
+/// the same `backend_missing` error naming that backend that any other
+/// resolution failure would.
+fn substitute_backend_paths(argv: &[String], resolver: &Resolver) -> Result<Vec<OsString>> {
+    let mut out = Vec::with_capacity(argv.len());
+    for tok in argv {
+        let named = KNOWN_BACKENDS.iter().find(|b| *tok == b.path_placeholder());
+        match named {
+            Some(&backend) => out.push(resolver.resolve(backend)?.path.into_os_string()),
+            None => out.push(OsString::from(tok)),
+        }
+    }
+    Ok(out)
 }
 
 /// In OutDir mode the backend names the file `<input-stem>.<ext>` itself.
@@ -1083,5 +1138,225 @@ mod tests {
             crate::plan::USER_INSTALLATION_PLACEHOLDER,
             "the real process must never see the dry-run placeholder text"
         );
+    }
+
+    // --- Task 2: Arg::BackendPath substitution for the pandoc+typst
+    // docx/odt -> pdf fallback -----------------------------------------------
+
+    /// Writes a script standing in for pandoc's role in the fallback
+    /// recipe: records every argv token it received (i.e. *after*
+    /// `run()`'s `Arg::BackendPath` substitution) to `record_path`, one per
+    /// line and in order, then writes its output at whatever path follows
+    /// `-o` -- mirroring `outdir_stub_that_records_argv_and_writes_pdf`'s
+    /// role for the unrelated soffice/`-env:UserInstallation` mechanism.
+    /// No-ops on a bare version probe, same reasoning as every other stub
+    /// here.
+    fn pandoc_stub_that_records_argv_and_writes_output(dir: &Path, record_path: &Path) -> PathBuf {
+        let record = record_path.display();
+        let (name, body) = if cfg!(windows) {
+            (
+                "pandoc_record_stub.bat",
+                format!(
+                    "@echo off\r\n\
+                     if not \"%~2\"==\"\" goto notversion\r\n\
+                     if \"%~1\"==\"--version\" exit /b 0\r\n\
+                     if \"%~1\"==\"-version\" exit /b 0\r\n\
+                     :notversion\r\n\
+                     set \"outfile=\"\r\n\
+                     type nul > \"{record}\"\r\n\
+                     :loop\r\n\
+                     if \"%~1\"==\"\" goto done\r\n\
+                     echo %~1>>\"{record}\"\r\n\
+                     if \"%~1\"==\"-o\" goto capture_out\r\n\
+                     shift\r\n\
+                     goto loop\r\n\
+                     :capture_out\r\n\
+                     shift\r\n\
+                     echo %~1>>\"{record}\"\r\n\
+                     set \"outfile=%~1\"\r\n\
+                     shift\r\n\
+                     goto loop\r\n\
+                     :done\r\n\
+                     <nul set /p \"=x\" >\"%outfile%\"\r\n\
+                     exit /b 0\r\n"
+                ),
+            )
+        } else {
+            (
+                "pandoc_record_stub.sh",
+                format!(
+                    "#!/bin/sh\n\
+                     if [ \"$#\" = \"1\" ] && {{ [ \"$1\" = \"--version\" ] || [ \"$1\" = \"-version\" ]; }}; then\n\
+                     \x20   exit 0\n\
+                     fi\n\
+                     outfile=\"\"\n\
+                     prev=\"\"\n\
+                     : > \"{record}\"\n\
+                     for a in \"$@\"; do\n\
+                     \x20   echo \"$a\" >> \"{record}\"\n\
+                     \x20   if [ \"$prev\" = \"-o\" ]; then outfile=\"$a\"; fi\n\
+                     \x20   prev=\"$a\"\n\
+                     done\n\
+                     printf x > \"$outfile\"\n"
+                ),
+            )
+        };
+        let p = dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// When soffice is unavailable but pandoc and typst both resolve,
+    /// `run()` must select the pandoc+typst fallback recipe and substitute
+    /// the real, resolved typst path for `Arg::BackendPath`'s placeholder
+    /// -- the process actually invoked must never see the literal
+    /// placeholder text `plan::build` prints for `--dry-run`, the same
+    /// proof `the_real_soffice_invocation_substitutes_the_real_url_for_
+    /// the_dry_run_placeholder` already requires for the unrelated
+    /// `-env:UserInstallation` mechanism.
+    ///
+    /// Soffice is deliberately left un-overridden here, relying on the real
+    /// host genuinely having no resolvable soffice -- true of this
+    /// project's own bare `cargo test --workspace` CI job (see
+    /// `.github/workflows/ci.yml`: "Runs on a bare runner with NO
+    /// conversion backends installed") and of every machine this task was
+    /// developed and verified against. `with_managed_dir` isolates the one
+    /// candidate that could otherwise leak a real installed pandoc/typst in
+    /// from this machine's own managed install directory.
+    #[test]
+    fn fallback_recipe_substitutes_the_real_typst_path_and_never_touches_soffice() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("pandoc-argv-record.txt");
+        let pandoc_stub = pandoc_stub_that_records_argv_and_writes_output(dir.path(), &record);
+        // Never actually invoked with real arguments in this test (only
+        // ever resolved and its path substituted in), so the same
+        // do-nothing-and-exit-0 stub used elsewhere stands in for it —
+        // a real, spawnable script rather than an inert marker file, which
+        // matters because `Resolver::resolve`'s version probe does try to
+        // run it.
+        let typst_stub = stub_that_writes_nothing(dir.path());
+
+        let mut r = Resolver::new();
+        r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
+        r.with_override(Backend::Pandoc, pandoc_stub);
+        r.with_override(Backend::Typst, typst_stub.clone());
+
+        let input = dir.path().join("report.docx");
+        std::fs::write(&input, b"docx-bytes").unwrap();
+        let req = Request {
+            from: Format::Docx,
+            to: Format::Pdf,
+            inputs: vec![input],
+            output: dir.path().join("out.pdf"),
+            overwrite: false,
+        };
+
+        let outcome = run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(
+            outcome.backends[0].0,
+            Backend::Pandoc,
+            "must have selected the pandoc+typst fallback, not soffice: {:?}",
+            outcome.backends
+        );
+
+        let recorded: Vec<String> = std::fs::read_to_string(&record)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let engine_idx = recorded
+            .iter()
+            .position(|t| t == "--pdf-engine")
+            .unwrap_or_else(|| panic!("argv must carry --pdf-engine: {recorded:?}"));
+        let engine_value = &recorded[engine_idx + 1];
+        assert_eq!(
+            PathBuf::from(engine_value),
+            typst_stub,
+            "the real resolved typst path must be substituted, not left as a placeholder"
+        );
+        assert_ne!(
+            *engine_value,
+            Backend::Typst.path_placeholder(),
+            "the real process must never see the dry-run placeholder text"
+        );
+    }
+
+    /// When soffice is absent and only one of pandoc/typst is available
+    /// (here: pandoc, not typst), `plan::select`'s safety net must *not*
+    /// choose the fallback recipe -- it requires *both* pandoc and typst --
+    /// so `run()` falls through to the canonical soffice recipe and
+    /// surfaces the ordinary `backend_missing` naming soffice, not a
+    /// confusing one naming typst (a backend the recipe it actually chose
+    /// never even mentions). This is the end-to-end proof of the same rule
+    /// `plan::tests::selection_falls_back_to_soffice_when_neither_route_is_
+    /// fully_available` checks at the pure planning layer. `with_managed_dir`
+    /// isolates the Managed candidate so a real pandoc/typst installed on
+    /// this machine (e.g. via `conv install`) can't leak in and change which
+    /// backends this test's `Resolver` sees as available.
+    #[test]
+    fn only_pandoc_available_still_reports_backend_missing_naming_soffice() {
+        let dir = tempfile::tempdir().unwrap();
+        let pandoc_stub = stub_that_creates_its_output(dir.path());
+        let mut r = Resolver::new();
+        r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
+        r.with_override(Backend::Pandoc, pandoc_stub);
+        r.with_override(Backend::Typst, PathBuf::from("/definitely/not/here"));
+        r.with_override(
+            Backend::Soffice,
+            PathBuf::from("/definitely/not/here/either"),
+        );
+
+        let input = dir.path().join("report.docx");
+        std::fs::write(&input, b"docx-bytes").unwrap();
+        let req = Request {
+            from: Format::Docx,
+            to: Format::Pdf,
+            inputs: vec![input],
+            output: dir.path().join("out.pdf"),
+            overwrite: false,
+        };
+
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::BackendMissing);
+        assert_eq!(
+            e.backend,
+            Some(Backend::Soffice),
+            "with typst unavailable, the fallback must never be chosen, so the \
+             error must name soffice -- the canonical recipe's own backend --  \
+             not typst"
+        );
+    }
+
+    /// The general `Arg::BackendPath` substitution mechanism itself: when a
+    /// step's argv names a backend that cannot be resolved, `run()` must
+    /// surface the ordinary `backend_missing` error naming that backend.
+    /// Exercised directly against `substitute_backend_paths` rather than
+    /// through the full `docx -> pdf` selection pipeline, because that
+    /// pipeline's own safety net (see the test above) means a real
+    /// `docx -> pdf` conversion can never reach this state: if `typst` were
+    /// truly unresolvable, `plan::select` would never have chosen the
+    /// pandoc+typst recipe that needs it in the first place.
+    #[test]
+    fn substitute_backend_paths_reports_backend_missing_naming_the_absent_backend() {
+        let argv = vec![
+            "in.docx".to_string(),
+            "--pdf-engine".to_string(),
+            Backend::Typst.path_placeholder(),
+            "-o".to_string(),
+            "out.pdf".to_string(),
+        ];
+        let mut r = Resolver::new();
+        r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
+        r.with_override(Backend::Typst, PathBuf::from("/definitely/not/here"));
+
+        let e = substitute_backend_paths(&argv, &r).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::BackendMissing);
+        assert_eq!(e.backend, Some(Backend::Typst));
     }
 }

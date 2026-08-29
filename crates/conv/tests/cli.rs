@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
 fn conv() -> Command {
@@ -269,6 +270,75 @@ fn install_soffice_json_refusal_has_no_managed_remediation() {
     assert_eq!(v["ok"], false);
     assert!(v["error"]["remediation"]["managed"].is_null());
     assert!(v["error"]["remediation"]["manual"].is_string());
+}
+
+// --- Task 2: docx/odt -> pdf availability-based recipe selection --------
+//
+// A previous review found `--dry-run` printing a transcode command for a
+// run that would actually stream-copy; the fix there was to have dry-run
+// probe (see `commands/convert.rs`'s `probed_for`). The same lesson applies
+// here: `--dry-run` must preview the pandoc+typst fallback command when
+// soffice is unavailable, not the (unusable) soffice one. `--soffice-path`
+// is pointed at a file guaranteed not to exist — the same per-backend
+// override mechanism `cli.rs`'s `Cli::resolver` already wires up for every
+// backend — so this is deterministic regardless of whether this host
+// happens to have a real LibreOffice installed elsewhere.
+#[test]
+fn dry_run_previews_the_pandoc_typst_fallback_when_soffice_path_is_unresolvable() {
+    let dir = tempfile::tempdir().unwrap();
+    // Any real, existing file resolves successfully — `Resolver::resolve`
+    // only requires `path.is_file()` plus a version probe that degrades to
+    // "unknown" on failure rather than erroring, so these don't need to be
+    // real pandoc/typst binaries.
+    let pandoc_stub = dir.path().join("pandoc_stub");
+    std::fs::write(&pandoc_stub, b"stub").unwrap();
+    let typst_stub = dir.path().join("typst_stub");
+    std::fs::write(&typst_stub, b"stub").unwrap();
+    let missing_soffice = dir.path().join("definitely-does-not-exist");
+
+    conv()
+        .args(["in.docx", "out.pdf", "--dry-run"])
+        .arg("--pandoc-path")
+        .arg(&pandoc_stub)
+        .arg("--typst-path")
+        .arg(&typst_stub)
+        .arg("--soffice-path")
+        .arg(&missing_soffice)
+        .assert()
+        .success()
+        .stdout(contains("pandoc"))
+        .stdout(contains("--pdf-engine"))
+        .stdout(contains("typst"))
+        .stdout(contains("soffice").not())
+        .stdout(contains("Install LibreOffice for higher fidelity"));
+}
+
+/// The mirror image: with soffice genuinely resolvable, `--dry-run` must
+/// keep previewing the canonical soffice command even though pandoc and
+/// typst are also both available — soffice wins whenever it's present.
+#[test]
+fn dry_run_still_previews_soffice_when_it_is_available_even_alongside_pandoc_and_typst() {
+    let dir = tempfile::tempdir().unwrap();
+    let soffice_stub = dir.path().join("soffice_stub");
+    std::fs::write(&soffice_stub, b"stub").unwrap();
+    let pandoc_stub = dir.path().join("pandoc_stub");
+    std::fs::write(&pandoc_stub, b"stub").unwrap();
+    let typst_stub = dir.path().join("typst_stub");
+    std::fs::write(&typst_stub, b"stub").unwrap();
+
+    conv()
+        .args(["in.docx", "out.pdf", "--dry-run"])
+        .arg("--soffice-path")
+        .arg(&soffice_stub)
+        .arg("--pandoc-path")
+        .arg(&pandoc_stub)
+        .arg("--typst-path")
+        .arg(&typst_stub)
+        .assert()
+        .success()
+        .stdout(contains("soffice"))
+        .stdout(contains("--convert-to"))
+        .stdout(contains("--pdf-engine").not());
 }
 
 /// A backend name this CLI doesn't recognise at all is a malformed

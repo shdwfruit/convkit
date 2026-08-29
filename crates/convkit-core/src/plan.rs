@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::error::Result;
 use crate::probe::MediaProbe;
+use crate::resolve::AvailableBackends;
 use crate::{registry, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe};
 
 /// The first argv element `build` inserts for every `Soffice` step, in
@@ -59,6 +60,7 @@ pub fn build(
     inputs: &[PathBuf],
     output: &Path,
     probe: Option<&MediaProbe>,
+    available: Option<&AvailableBackends>,
 ) -> Result<ConversionPlan> {
     if inputs.is_empty() {
         return Err(ConvError::new(
@@ -67,7 +69,8 @@ pub fn build(
         ));
     }
 
-    let recipe = select(from, to, probe).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
+    let recipe =
+        select(from, to, probe, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
 
     let last = recipe.steps.len() - 1;
 
@@ -128,7 +131,24 @@ pub fn build(
 /// stream-copy recipe is chosen per target container: `-movflags +faststart`
 /// is an mp4-muxer-only option that makes ffmpeg exit 1 on a WebM output, so
 /// `REMUX_MP4` and `REMUX_WEBM` are distinct recipes, not one shared const.
-fn select(from: Format, to: Format, probe: Option<&MediaProbe>) -> Option<Recipe> {
+///
+/// `available` picks between the canonical (soffice) and fallback
+/// (pandoc+typst) recipes for a pair that `registry::has_fallback` — today,
+/// only `docx`/`odt` → `pdf`. `None` (the caller has no availability
+/// information, or never bothered to check because the pair has no
+/// fallback anyway) always yields the canonical recipe, keeping the
+/// 107-pair argv snapshot byte-identical to before this existed. `Some`
+/// prefers soffice when present; otherwise pandoc+typst when *both* are
+/// present; otherwise falls through to the canonical (soffice) recipe
+/// anyway, so a user with neither route available gets the ordinary
+/// `backend_missing` naming soffice — the pair's own primary backend —
+/// rather than a confusing one naming typst.
+fn select(
+    from: Format,
+    to: Format,
+    probe: Option<&MediaProbe>,
+    available: Option<&AvailableBackends>,
+) -> Option<Recipe> {
     if registry::needs_probe(from, to) {
         if let Some(p) = probe {
             if registry::can_remux(to, p) {
@@ -142,6 +162,15 @@ fn select(from: Format, to: Format, probe: Option<&MediaProbe>) -> Option<Recipe
             }
         }
     }
+
+    if let Some(avail) = available {
+        if !avail.has(Backend::Soffice) && avail.has(Backend::Pandoc) && avail.has(Backend::Typst) {
+            if let Some(fallback) = registry::lookup_fallback(from, to) {
+                return Some(fallback);
+            }
+        }
+    }
+
     registry::lookup(from, to)
 }
 
@@ -163,6 +192,7 @@ mod tests {
             &[p("in.pdf")],
             Path::new("out.mp4"),
             None,
+            None,
         )
         .unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::UnsupportedPair);
@@ -180,6 +210,7 @@ mod tests {
             &[p("in.mkv")],
             Path::new("out.mp4"),
             Some(&probe),
+            None,
         )
         .unwrap();
         assert!(
@@ -201,6 +232,7 @@ mod tests {
             &[p("in.mkv")],
             Path::new("out.mp4"),
             Some(&probe),
+            None,
         )
         .unwrap();
         assert!(
@@ -218,6 +250,7 @@ mod tests {
             &[p("in.mkv")],
             Path::new("out.mp4"),
             None,
+            None,
         )
         .unwrap();
         assert!(plan.steps[0].argv.contains(&"libx264".to_string()));
@@ -230,6 +263,7 @@ mod tests {
             Format::Jpg,
             &[p("a.heic")],
             Path::new("b.jpg"),
+            None,
             None,
         )
         .unwrap();
@@ -244,6 +278,7 @@ mod tests {
             &[p("a.pdf")],
             Path::new("b.docx"),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(plan.warnings.len(), 1);
@@ -256,6 +291,7 @@ mod tests {
             Format::Pdf,
             &[p("a.md")],
             Path::new("out/b.pdf"),
+            None,
             None,
         )
         .unwrap();
@@ -286,6 +322,7 @@ mod tests {
             &[p("in.mkv")],
             Path::new("out.webm"),
             Some(&probe),
+            None,
         )
         .unwrap();
         assert!(
@@ -305,7 +342,15 @@ mod tests {
     /// any `Step` is ever rendered.
     #[test]
     fn empty_inputs_is_rejected_rather_than_panicking() {
-        let e = build(Format::Heic, Format::Jpg, &[], Path::new("b.jpg"), None).unwrap_err();
+        let e = build(
+            Format::Heic,
+            Format::Jpg,
+            &[],
+            Path::new("b.jpg"),
+            None,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::InputNotFound);
     }
 
@@ -320,6 +365,7 @@ mod tests {
             Format::Pdf,
             &[p("a.md")],
             Path::new("out/b.pdf"),
+            None,
             None,
         )
         .unwrap();
@@ -346,6 +392,7 @@ mod tests {
             &[p("in.docx")],
             Path::new("out.pdf"),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(plan.steps[0].backend, Backend::Soffice);
@@ -368,6 +415,7 @@ mod tests {
             &[p("a.md")],
             Path::new("out/b.pdf"),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(plan.steps.len(), 2);
@@ -383,6 +431,173 @@ mod tests {
         assert_eq!(
             plan.steps[1].argv.first().map(String::as_str),
             Some(USER_INSTALLATION_PLACEHOLDER)
+        );
+    }
+
+    // --- Task 2: availability-based selection for docx/odt -> pdf ----------
+
+    fn avail(backends: &[Backend]) -> AvailableBackends {
+        backends.iter().copied().collect()
+    }
+
+    /// `None` — no availability hint at all — must always yield the
+    /// canonical (soffice) recipe. This is what keeps the 107-pair argv
+    /// snapshot (which calls `build` with `None` for every pair) byte-
+    /// identical to before this selection existed.
+    #[test]
+    fn no_availability_hint_yields_the_canonical_soffice_recipe() {
+        let plan = build(
+            Format::Docx,
+            Format::Pdf,
+            &[p("in.docx")],
+            Path::new("out.pdf"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].backend, Backend::Soffice);
+    }
+
+    /// Both routes available: soffice wins.
+    #[test]
+    fn selection_prefers_soffice_when_both_routes_are_available() {
+        let available = avail(&[Backend::Soffice, Backend::Pandoc, Backend::Typst]);
+        let plan = build(
+            Format::Docx,
+            Format::Pdf,
+            &[p("in.docx")],
+            Path::new("out.pdf"),
+            None,
+            Some(&available),
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].backend, Backend::Soffice);
+    }
+
+    /// Only soffice available: soffice, obviously — there is no other route.
+    #[test]
+    fn selection_uses_soffice_when_only_soffice_is_available() {
+        let available = avail(&[Backend::Soffice]);
+        let plan = build(
+            Format::Docx,
+            Format::Pdf,
+            &[p("in.docx")],
+            Path::new("out.pdf"),
+            None,
+            Some(&available),
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].backend, Backend::Soffice);
+    }
+
+    /// Only pandoc+typst available (soffice absent): the fallback recipe is
+    /// chosen, and its argv carries the `--pdf-engine` flag and a
+    /// placeholder for the resolved typst path.
+    #[test]
+    fn selection_falls_back_to_pandoc_and_typst_when_soffice_is_unavailable() {
+        let available = avail(&[Backend::Pandoc, Backend::Typst]);
+        let plan = build(
+            Format::Docx,
+            Format::Pdf,
+            &[p("in.docx")],
+            Path::new("out.pdf"),
+            None,
+            Some(&available),
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].backend, Backend::Pandoc);
+        assert!(
+            plan.steps[0].argv.contains(&"--pdf-engine".to_string()),
+            "{:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            plan.steps[0].argv.iter().any(|a| a.contains("typst")),
+            "{:?}",
+            plan.steps[0].argv
+        );
+    }
+
+    /// Neither route fully available (soffice absent, and only one of
+    /// pandoc/typst present, or neither): must still fall back to the
+    /// canonical soffice recipe, so the user gets the ordinary
+    /// `backend_missing` naming soffice — the pair's own primary backend —
+    /// rather than a confusing one naming typst.
+    #[test]
+    fn selection_falls_back_to_soffice_when_neither_route_is_fully_available() {
+        for available in [
+            avail(&[]),
+            avail(&[Backend::Pandoc]),
+            avail(&[Backend::Typst]),
+        ] {
+            let plan = build(
+                Format::Docx,
+                Format::Pdf,
+                &[p("in.docx")],
+                Path::new("out.pdf"),
+                None,
+                Some(&available),
+            )
+            .unwrap();
+            assert_eq!(plan.steps[0].backend, Backend::Soffice);
+        }
+    }
+
+    /// `odt -> pdf` gets the same fallback treatment as `docx -> pdf`.
+    #[test]
+    fn odt_to_pdf_also_falls_back_to_pandoc_and_typst() {
+        let available = avail(&[Backend::Pandoc, Backend::Typst]);
+        let plan = build(
+            Format::Odt,
+            Format::Pdf,
+            &[p("in.odt")],
+            Path::new("out.pdf"),
+            None,
+            Some(&available),
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].backend, Backend::Pandoc);
+    }
+
+    /// pandoc cannot read spreadsheets or slide decks, so `xlsx`/`pptx` ->
+    /// `pdf` must stay LibreOffice-only even when soffice is unavailable and
+    /// pandoc+typst both are.
+    #[test]
+    fn xlsx_and_pptx_never_fall_back_even_when_soffice_is_unavailable() {
+        let available = avail(&[Backend::Pandoc, Backend::Typst]);
+        for from in [Format::Xlsx, Format::Pptx] {
+            let input = PathBuf::from(format!("in.{}", from.ext()));
+            let plan = build(
+                from,
+                Format::Pdf,
+                &[input],
+                Path::new("out.pdf"),
+                None,
+                Some(&available),
+            )
+            .unwrap();
+            assert_eq!(plan.steps[0].backend, Backend::Soffice, "{from:?}");
+        }
+    }
+
+    /// The fallback recipe must carry its fidelity warning on the plan.
+    #[test]
+    fn fallback_recipe_carries_its_fidelity_warning() {
+        let available = avail(&[Backend::Pandoc, Backend::Typst]);
+        let plan = build(
+            Format::Docx,
+            Format::Pdf,
+            &[p("in.docx")],
+            Path::new("out.pdf"),
+            None,
+            Some(&available),
+        )
+        .unwrap();
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(
+            plan.warnings[0].contains("LibreOffice"),
+            "{:?}",
+            plan.warnings
         );
     }
 }

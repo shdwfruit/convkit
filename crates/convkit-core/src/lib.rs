@@ -18,4 +18,4 @@ pub use plan::build as build_plan;
 pub use plan::{ConversionPlan, PlannedStep};
 pub use probe::MediaProbe;
 pub use recipe::{Arg, OutputMode, Recipe, Step};
-pub use resolve::{ResolvedBackend, Resolver, Source};
+pub use resolve::{AvailableBackends, ResolvedBackend, Resolver, Source};

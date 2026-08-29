@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,6 +6,34 @@ use std::sync::Mutex;
 
 use crate::error::{ConvError, Result};
 use crate::Backend;
+
+/// Which of a small set of backends this process could actually resolve, as
+/// of the moment `Resolver::check_availability` computed it. Exists solely
+/// so `plan::build` can choose between two recipes for the same pair
+/// (currently: soffice vs. pandoc+typst for docx/odt → pdf) without ever
+/// touching the filesystem or spawning a process itself — `plan::build`
+/// stays pure; only the caller (`exec::run`, `--dry-run`) ever asks a
+/// `Resolver`, exactly the same split `Option<&MediaProbe>` already uses for
+/// the auto-remux decision.
+///
+/// Built via `FromIterator<Backend>` (so `.collect()` works, including from
+/// a test that wants an exact, deterministic combination with no `Resolver`
+/// involved at all) or `Resolver::check_availability` (the real, I/O-backed
+/// path).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AvailableBackends(HashSet<Backend>);
+
+impl AvailableBackends {
+    pub fn has(&self, backend: Backend) -> bool {
+        self.0.contains(&backend)
+    }
+}
+
+impl FromIterator<Backend> for AvailableBackends {
+    fn from_iter<I: IntoIterator<Item = Backend>>(iter: I) -> Self {
+        AvailableBackends(iter.into_iter().collect())
+    }
+}
 
 /// Uniquifies the soffice version-probe's isolated profile directory across
 /// however many probes happen to run inside one process (in practice at
@@ -220,6 +248,24 @@ impl Resolver {
             }
         }
         Err(ConvError::backend_missing(backend))
+    }
+
+    /// Resolves exactly `candidates`, recording which ones succeeded, so
+    /// `plan::build` can be handed the answer instead of resolving anything
+    /// itself. Never probes a backend outside `candidates` — callers pass
+    /// only the small set relevant to the pair being converted (see
+    /// `registry::FALLBACK_BACKENDS`), gated on `registry::has_fallback` so
+    /// an ordinary conversion with only one possible recipe never pays for
+    /// a version probe it has no use for. Resolutions are cached the same
+    /// way `resolve` always caches them, so a backend checked here and later
+    /// actually used (e.g. the chosen step's own backend) is never probed
+    /// twice.
+    pub fn check_availability(&self, candidates: &[Backend]) -> AvailableBackends {
+        candidates
+            .iter()
+            .copied()
+            .filter(|b| self.resolve(*b).is_ok())
+            .collect()
     }
 
     /// Whether the ImageMagick-6 `convert` fallback should even be
@@ -825,6 +871,60 @@ mod tests {
         r.with_convert_search_dir(dir.path().to_path_buf());
 
         assert!(r.magick_convert_fallback().is_none());
+    }
+
+    // --- Task 2: AvailableBackends / check_availability --------------------
+
+    #[test]
+    fn available_backends_collects_from_an_iterator_of_backends() {
+        let available: AvailableBackends = [Backend::Pandoc, Backend::Typst].into_iter().collect();
+        assert!(available.has(Backend::Pandoc));
+        assert!(available.has(Backend::Typst));
+        assert!(!available.has(Backend::Soffice));
+    }
+
+    #[test]
+    fn available_backends_default_is_empty() {
+        let available = AvailableBackends::default();
+        for b in [
+            Backend::Ffmpeg,
+            Backend::Ffprobe,
+            Backend::Magick,
+            Backend::Soffice,
+            Backend::Pandoc,
+            Backend::Typst,
+        ] {
+            assert!(!available.has(b));
+        }
+    }
+
+    #[test]
+    fn check_availability_only_marks_backends_that_actually_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_echoes_first_arg(dir.path());
+        let mut r = Resolver::new();
+        r.with_override(Backend::Pandoc, stub);
+        r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
+
+        let available = r.check_availability(&[Backend::Pandoc, Backend::Soffice]);
+        assert!(available.has(Backend::Pandoc));
+        assert!(!available.has(Backend::Soffice));
+    }
+
+    #[test]
+    fn check_availability_never_probes_a_backend_outside_the_given_candidates() {
+        // Soffice is never passed in, so even though it would fail to
+        // resolve anyway here, this proves the method is scoped to exactly
+        // its `candidates` argument rather than some fixed internal list.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_echoes_first_arg(dir.path());
+        let mut r = Resolver::new();
+        r.with_override(Backend::Pandoc, stub);
+
+        let available = r.check_availability(&[Backend::Pandoc]);
+        assert!(available.has(Backend::Pandoc));
+        assert!(!available.has(Backend::Soffice));
+        assert!(!available.has(Backend::Typst));
     }
 
     /// When a real `magick` is found anywhere in the ordinary candidate

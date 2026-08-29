@@ -628,6 +628,43 @@ const OFFICE_SOURCES: &[Format] = &[
     Format::Ods,
 ];
 
+/// Fallback for `docx`/`odt` → `pdf` when LibreOffice isn't installed:
+/// pandoc parses the document and hands the result to a managed Typst as
+/// its `--pdf-engine`, verified end to end against a real `.docx` fixture
+/// (`pandoc sample.docx --pdf-engine <typst> -o out.pdf` → a valid 28 KB
+/// PDF). `--pdf-engine <path>` works as two separate argv tokens — pandoc
+/// does not require the `=`-joined form — which is what lets the path sit
+/// in its own `Arg::BackendPath` slot rather than needing string
+/// concatenation baked into the `Arg` itself.
+///
+/// pandoc can read `.docx` and `.odt` but not `.xlsx`/`.pptx` (no spreadsheet
+/// or slide-deck reader), so this recipe — and therefore this fallback —
+/// only ever gets registered for those two source formats; `xlsx`/`pptx` →
+/// `pdf` stay LibreOffice-only, see `FALLBACK_TABLE` below.
+///
+/// Because pandoc re-renders parsed content rather than reproducing Word's
+/// own layout engine, exact positioning and some styling do not survive —
+/// the warning says so and points at installing LibreOffice for higher
+/// fidelity, the same way `PDF_TO_DOCX`'s warning does for its own
+/// fidelity caveat.
+const PANDOC_TYPST_TO_PDF: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Pandoc,
+        [
+            Arg::Input,
+            Arg::Lit("--pdf-engine"),
+            Arg::BackendPath(Backend::Typst),
+            Arg::Lit("-o"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[
+        "The document is re-rendered from parsed content rather than laid out by \
+         Word's own model, so exact positioning and some styling will not survive. \
+         Install LibreOffice for higher fidelity.",
+    ],
+};
+
 fn insert_document_family(t: &mut Table) {
     for &from in OFFICE_SOURCES {
         t.insert((from, Format::Pdf), OFFICE_TO_PDF);
@@ -646,8 +683,44 @@ static TABLE: LazyLock<Table> = LazyLock::new(|| {
     t
 });
 
+/// Fallback recipes usable only when the canonical backend for a pair is
+/// unavailable. Sparser than `TABLE` — an entry exists only where a genuine
+/// second route exists, currently `docx`/`odt` → `pdf` — and every entry
+/// here names a pair `TABLE` already covers too; `plan::select` is the only
+/// reader, and only consults this when the caller supplies an
+/// `AvailableBackends` hint saying soffice is absent. `all_pairs` is
+/// unaffected: it walks `TABLE` alone, so this table can never change which
+/// pairs convkit advertises as supported, only which recipe answers one
+/// that's already listed.
+static FALLBACK_TABLE: LazyLock<Table> = LazyLock::new(|| {
+    let mut t = Table::new();
+    t.insert((Format::Docx, Format::Pdf), PANDOC_TYPST_TO_PDF);
+    t.insert((Format::Odt, Format::Pdf), PANDOC_TYPST_TO_PDF);
+    t
+});
+
+/// The backends `plan::select` needs an availability answer for on a pair
+/// where `lookup_fallback` might return something. Fixed today because
+/// there is exactly one fallback decision in the registry; a second one
+/// with a different backend set would need this to vary per pair.
+pub const FALLBACK_BACKENDS: &[Backend] = &[Backend::Soffice, Backend::Pandoc, Backend::Typst];
+
 pub fn lookup(from: Format, to: Format) -> Option<Recipe> {
     TABLE.get(&(from, to)).copied()
+}
+
+/// The alternate recipe for `from -> to`, if one exists. `None` for every
+/// pair but `docx`/`odt` → `pdf`.
+pub fn lookup_fallback(from: Format, to: Format) -> Option<Recipe> {
+    FALLBACK_TABLE.get(&(from, to)).copied()
+}
+
+/// True when `from -> to` has a second recipe `plan::select` could fall
+/// back to — the gate callers use to decide whether checking backend
+/// availability is even worth doing before building a plan (mirrors
+/// `needs_probe`'s role for the media-remux decision).
+pub fn has_fallback(from: Format, to: Format) -> bool {
+    FALLBACK_TABLE.contains_key(&(from, to))
 }
 
 pub fn all_pairs() -> Vec<(Format, Format)> {
@@ -965,6 +1038,71 @@ mod tests {
             assert!(
                 !matches!(to, Format::Heic | Format::Heif),
                 "{from:?}->{to:?} targets a read-only, encode-unsupported format"
+            );
+        }
+    }
+
+    // --- Task 2: pandoc+typst fallback for docx/odt -> pdf -----------------
+
+    #[test]
+    fn docx_and_odt_to_pdf_have_a_pandoc_typst_fallback() {
+        for from in [Format::Docx, Format::Odt] {
+            assert!(
+                has_fallback(from, Format::Pdf),
+                "{from:?}->pdf must have a fallback recipe"
+            );
+            let r = lookup_fallback(from, Format::Pdf)
+                .unwrap_or_else(|| panic!("{from:?}->pdf fallback must exist"));
+            assert_eq!(r.steps.len(), 1);
+            assert_eq!(r.steps[0].backend, Backend::Pandoc);
+        }
+    }
+
+    #[test]
+    fn xlsx_and_pptx_to_pdf_have_no_fallback() {
+        // pandoc cannot read spreadsheets or slide decks, so these two
+        // office-source pairs must stay LibreOffice-only.
+        for from in [Format::Xlsx, Format::Pptx] {
+            assert!(
+                !has_fallback(from, Format::Pdf),
+                "{from:?}->pdf must not have a pandoc fallback"
+            );
+            assert!(lookup_fallback(from, Format::Pdf).is_none());
+        }
+    }
+
+    #[test]
+    fn fallback_recipe_renders_pdf_engine_pointed_at_typst() {
+        let r = lookup_fallback(Format::Docx, Format::Pdf).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.docx")], Path::new("out.pdf"));
+        assert_eq!(
+            argv,
+            vec![
+                "in.docx",
+                "--pdf-engine",
+                "<resolved typst path>",
+                "-o",
+                "out.pdf",
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_recipe_warns_about_fidelity_and_suggests_libreoffice() {
+        let r = lookup_fallback(Format::Docx, Format::Pdf).unwrap();
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("LibreOffice"), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn fallback_table_never_adds_a_pair_all_pairs_does_not_already_list() {
+        // Every FALLBACK_TABLE key must already be a key in TABLE, i.e. in
+        // all_pairs() -- this table must never introduce a new supported
+        // pair, only offer a second recipe for one that already exists.
+        for from in [Format::Docx, Format::Odt] {
+            assert!(
+                all_pairs().contains(&(from, Format::Pdf)),
+                "{from:?}->pdf must already be listed by all_pairs"
             );
         }
     }

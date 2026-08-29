@@ -1,4 +1,6 @@
-use convkit_core::{plan, probe, registry, Backend, ConvError, ErrorCode, MediaProbe, Resolver};
+use convkit_core::{
+    plan, probe, registry, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe, Resolver,
+};
 use serde_json::json;
 
 use crate::batch;
@@ -41,6 +43,19 @@ fn probed_for(resolver: &Resolver, job: &input::Job) -> Option<MediaProbe> {
         .and_then(|p| probe::run(&p.path, &job.inputs[0]).ok())
 }
 
+/// Checks backend availability when, and only when, this pair has more
+/// than one recipe to choose between (`registry::has_fallback`) — mirrors
+/// `probed_for`'s own gate exactly, so `--dry-run` and the real run it
+/// previews always agree on whether this check happens at all, and an
+/// ordinary conversion (every pair but docx/odt -> pdf, today) never pays
+/// for it.
+fn available_for(resolver: &Resolver, job: &input::Job) -> Option<AvailableBackends> {
+    if !registry::has_fallback(job.from, job.to) {
+        return None;
+    }
+    Some(resolver.check_availability(registry::FALLBACK_BACKENDS))
+}
+
 /// Builds a plan per job and reports every one of them, never aborting early
 /// on the first failure — every job, one job included, is reported the same
 /// way: inside the `"plans"` array under `--json` (I2 — a consumer used to
@@ -55,13 +70,27 @@ fn probed_for(resolver: &Resolver, job: &input::Job) -> Option<MediaProbe> {
 /// itself stays pure; the probe runs here, in the caller, and its result is
 /// passed in, the same split `exec::run` already uses between itself and
 /// `plan::build`.
+///
+/// Task 2 applies the identical lesson to backend availability: a docx/odt
+/// -> pdf dry-run must preview the pandoc+typst command when soffice is
+/// absent, not the (unusable) soffice one — `available_for` (gated on
+/// `registry::has_fallback` exactly like `exec::run`'s own check) is what
+/// makes that true.
 fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
     let resolver = cli.resolver();
     let results: Vec<_> = jobs
         .iter()
         .map(|job| {
             let probed = probed_for(&resolver, job);
-            plan::build(job.from, job.to, &job.inputs, &job.output, probed.as_ref())
+            let available = available_for(&resolver, job);
+            plan::build(
+                job.from,
+                job.to,
+                &job.inputs,
+                &job.output,
+                probed.as_ref(),
+                available.as_ref(),
+            )
         })
         .collect();
 
@@ -240,5 +269,73 @@ mod tests {
             "out.docx",
         );
         assert!(probed_for(&r, &j).is_none());
+    }
+
+    // --- Task 2: available_for -----------------------------------------------
+
+    /// A minimal script that exits 0 no matter what it's invoked with
+    /// (including a bare version probe, either dash convention) — stands in
+    /// for "a backend that resolves successfully" without needing to model
+    /// any particular backend's real behaviour, since these tests only care
+    /// whether resolution itself succeeds or fails.
+    fn resolvable_stub(dir: &Path, name: &str) -> PathBuf {
+        let (file_name, body): (String, &str) = if cfg!(windows) {
+            (format!("{name}.bat"), "@echo off\r\nexit /b 0\r\n")
+        } else {
+            (name.to_string(), "#!/bin/sh\nexit 0\n")
+        };
+        let p = dir.join(file_name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// `available_for` must actually run `check_availability` for a pair
+    /// that has a fallback recipe (docx -> pdf), reporting exactly which of
+    /// soffice/pandoc/typst are resolvable. Soffice is deliberately left
+    /// pointed at a nonexistent override path rather than isolated via a
+    /// managed-dir override (unavailable from this crate — that escape
+    /// hatch is `pub(crate)` to `convkit-core`), relying on the real host
+    /// genuinely having no resolvable soffice, same as this project's own
+    /// bare `cargo test --workspace` CI job.
+    #[test]
+    fn available_for_checks_availability_for_a_pair_with_a_fallback_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pandoc_stub = resolvable_stub(dir.path(), "pandoc_stub");
+        let typst_stub = resolvable_stub(dir.path(), "typst_stub");
+        let mut r = Resolver::new();
+        r.with_override(Backend::Pandoc, pandoc_stub);
+        r.with_override(Backend::Typst, typst_stub);
+        r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
+
+        let j = job(
+            convkit_core::Format::Docx,
+            convkit_core::Format::Pdf,
+            "in.docx",
+            "out.pdf",
+        );
+        let available = available_for(&r, &j).expect("docx->pdf has a fallback recipe");
+        assert!(available.has(Backend::Pandoc));
+        assert!(available.has(Backend::Typst));
+        assert!(!available.has(Backend::Soffice));
+    }
+
+    /// A pair with only one possible recipe must never even check
+    /// availability — mirrors `probed_for_skips_the_probe_for_a_pair_that_
+    /// can_never_remux`'s reasoning for the media-remux probe.
+    #[test]
+    fn available_for_skips_the_check_for_a_pair_with_no_fallback() {
+        let r = Resolver::new();
+        let j = job(
+            convkit_core::Format::Mp4,
+            convkit_core::Format::Gif,
+            "in.mp4",
+            "out.gif",
+        );
+        assert!(available_for(&r, &j).is_none());
     }
 }

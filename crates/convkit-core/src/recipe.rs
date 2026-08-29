@@ -18,6 +18,25 @@ pub enum Arg {
     /// The directory containing the output path. For backends like `soffice`
     /// that take `--outdir` and name the file themselves.
     OutDir,
+    /// A resolved backend's absolute path, substituted in by `exec::run` at
+    /// execution time. `render` (and therefore `plan::build`) can't know the
+    /// real path — that requires filesystem access `plan::build` must never
+    /// perform — so this renders `Backend::path_placeholder` instead: a
+    /// fixed, readable stand-in `--dry-run` can show honestly.
+    ///
+    /// This is deliberately a plain value substitution, not a formatted one:
+    /// unlike `plan::USER_INSTALLATION_PLACEHOLDER` (a fixed *position* —
+    /// always argv[0] of a `Soffice` step, prepended by `plan::build` itself
+    /// outside any recipe's own `args`, and substituted with a per-run
+    /// *formatted* `-env:UserInstallation=<url>` string derived from a
+    /// scratch profile directory that has nothing to do with any backend's
+    /// own executable path), `BackendPath` is authored directly in a
+    /// recipe's own `args`, can sit anywhere in argv, and is always
+    /// substituted with exactly the named backend's resolved absolute path,
+    /// verbatim. The two needs looked alike (both are "argv content only
+    /// known at execution time") but have different shapes, so they stay
+    /// separate mechanisms rather than one forced into the other.
+    BackendPath(Backend),
 }
 
 /// How a step names its result, which determines what `exec` must do afterwards.
@@ -79,6 +98,7 @@ impl Step {
                         None => ".".to_string(),
                     });
                 }
+                Arg::BackendPath(backend) => out.push(backend.path_placeholder()),
             }
         }
         out
@@ -127,6 +147,33 @@ mod tests {
         assert_eq!(
             step.render(&[Path::new("in.docx")], Path::new("out.pdf")),
             vec!["."]
+        );
+    }
+
+    #[test]
+    fn backend_path_renders_a_readable_placeholder_not_a_real_path() {
+        let step = Step {
+            backend: Backend::Pandoc,
+            args: &[
+                Arg::Input,
+                Arg::Lit("--pdf-engine"),
+                Arg::BackendPath(Backend::Typst),
+                Arg::Lit("-o"),
+                Arg::Output,
+            ],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let argv = step.render(&[Path::new("in.docx")], Path::new("out.pdf"));
+        assert_eq!(
+            argv,
+            vec![
+                "in.docx",
+                "--pdf-engine",
+                "<resolved typst path>",
+                "-o",
+                "out.pdf"
+            ]
         );
     }
 

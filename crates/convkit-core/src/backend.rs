@@ -134,6 +134,21 @@ impl Backend {
         }
     }
 
+    /// The placeholder token `Step::render` emits for `Arg::BackendPath(_)`
+    /// naming this backend, standing in for its resolved absolute path until
+    /// `exec::run` substitutes the real one in at execution time.
+    /// `plan::build` must stay pure — no filesystem access, no resolution —
+    /// so it can never know the real path; this stays a fixed, readable
+    /// string instead, purely a function of the backend, so `--dry-run`
+    /// shows something a person can make sense of rather than opaque noise.
+    /// Mirrors `plan::USER_INSTALLATION_PLACEHOLDER`'s role for the
+    /// `Soffice`-specific `-env:UserInstallation` flag, generalised to any
+    /// backend a recipe's own argv needs to name — see `Arg::BackendPath`'s
+    /// docs for why the two are still separate mechanisms.
+    pub fn path_placeholder(&self) -> String {
+        format!("<resolved {} path>", self.exe_name())
+    }
+
     /// Fallback remediation used when no supported package manager can be
     /// detected on PATH. Points at the official download page so `manual`
     /// is never left empty — an undetected package manager must never mean

@@ -10,7 +10,7 @@ fn every_registered_pair_renders_stable_argv() {
     for (from, to) in registry::all_pairs() {
         let input = PathBuf::from(format!("in.{}", from.ext()));
         let output = PathBuf::from(format!("out.{}", to.ext()));
-        let p = plan::build(from, to, &[input], &output, None)
+        let p = plan::build(from, to, &[input], &output, None, None)
             .unwrap_or_else(|e| panic!("{from:?}->{to:?} failed to plan: {e}"));
         for step in &p.steps {
             lines.push(format!(
