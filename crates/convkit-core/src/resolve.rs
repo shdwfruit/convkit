@@ -44,6 +44,14 @@ pub struct Resolver {
     /// empty, not the real one.
     #[cfg(test)]
     managed_dir_override: Option<PathBuf>,
+    /// Test-only override of where the ImageMagick-6 `convert` fallback
+    /// (see `magick_convert_fallback`) looks for `convert`, in place of the
+    /// real `PATH`. Same rationale as `managed_dir_override`: a contributor
+    /// machine can genuinely have ImageMagick 6, or an unrelated `convert`,
+    /// on its real `PATH`, so a deterministic test needs a search location
+    /// it fully controls.
+    #[cfg(test)]
+    convert_search_dir_override: Option<PathBuf>,
     /// Successful resolutions, keyed by backend. `Mutex` rather than
     /// `RefCell` because a `Resolver` is expected to be shared across
     /// threads in Task 12's rayon batch mode — plain interior mutability
@@ -67,6 +75,15 @@ impl Resolver {
     #[cfg(test)]
     pub(crate) fn with_managed_dir(&mut self, dir: PathBuf) {
         self.managed_dir_override = Some(dir);
+    }
+
+    /// Redirects where `magick_convert_fallback` looks for `convert` to
+    /// `dir` instead of the real `PATH`, so a test can supply a stub
+    /// `convert` (or none at all) deterministically. See
+    /// `convert_search_dir_override`.
+    #[cfg(test)]
+    pub(crate) fn with_convert_search_dir(&mut self, dir: PathBuf) {
+        self.convert_search_dir_override = Some(dir);
     }
 
     /// Where `conv install` places managed binaries.
@@ -187,7 +204,84 @@ impl Resolver {
             self.cache.lock().unwrap().insert(backend, resolved.clone());
             return Ok(resolved);
         }
+        // No `magick` found anywhere in the candidate chain above. Ubuntu's
+        // (and Debian's) `apt-get install imagemagick` — the exact command
+        // `conv doctor`/`backend_missing` advise — installs ImageMagick 6,
+        // whose unified binary is `convert`, not `magick`; `magick` only
+        // exists in ImageMagick 7. `Self::magick_convert_fallback_applies`
+        // is `false` on Windows, where `convert.exe` is the OS's own
+        // destructive FAT->NTFS conversion tool, not ImageMagick — the very
+        // reason ImageMagick renamed its unified binary. See
+        // `magick_convert_fallback`'s docs for the acceptance check.
+        if Self::magick_convert_fallback_applies(backend, cfg!(windows)) {
+            if let Some(resolved) = self.magick_convert_fallback() {
+                self.cache.lock().unwrap().insert(backend, resolved.clone());
+                return Ok(resolved);
+            }
+        }
         Err(ConvError::backend_missing(backend))
+    }
+
+    /// Whether the ImageMagick-6 `convert` fallback should even be
+    /// attempted for `(backend, is_windows)`. Takes `is_windows` as an
+    /// explicit argument, rather than calling `cfg!(windows)` internally,
+    /// so this predicate — unlike the real call site in `resolve`, which
+    /// always passes the real `cfg!(windows)` — is itself testable for both
+    /// branches on every host in the CI matrix, including windows-latest,
+    /// where `cfg!(windows)` is always `true` and could otherwise never
+    /// exercise the `false` branch at all.
+    fn magick_convert_fallback_applies(backend: Backend, is_windows: bool) -> bool {
+        backend == Backend::Magick && !is_windows
+    }
+
+    /// The ImageMagick-6 `convert` fallback for `Backend::Magick`. Callers
+    /// (just `resolve`) must gate this on
+    /// `magick_convert_fallback_applies(..., cfg!(windows))` themselves —
+    /// this method has no platform check of its own, so tests can exercise
+    /// its acceptance logic directly on any host, including a Windows dev
+    /// machine, where the real call site never reaches it.
+    ///
+    /// `convert` is a generic enough name that something else on `PATH`
+    /// could easily answer to it (a different tool entirely, or — though
+    /// never reached here, since the call site gates this off on Windows —
+    /// the OS's own FAT->NTFS converter), so unlike every other candidate
+    /// in `candidates()`, existing as a file is not enough: this runs the
+    /// same version probe `version_of` uses and requires the banner to
+    /// actually contain `ImageMagick` before accepting it.
+    fn magick_convert_fallback(&self) -> Option<ResolvedBackend> {
+        let path = self.convert_candidate_path()?;
+        if !path.is_file() || !Self::looks_like_imagemagick(&path) {
+            return None;
+        }
+        let version = Self::version_of(Backend::Magick, &path).unwrap_or_else(|| "unknown".into());
+        Some(ResolvedBackend {
+            backend: Backend::Magick,
+            path,
+            version,
+            source: Source::Path,
+        })
+    }
+
+    /// Where the `convert` fallback looks for its candidate: the real
+    /// `PATH` in production, or `convert_search_dir_override` under test.
+    fn convert_candidate_path(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(dir) = &self.convert_search_dir_override {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            return which::which_in("convert", Some(dir.as_os_str()), cwd).ok();
+        }
+        which::which("convert").ok()
+    }
+
+    /// Runs `convert -version` and checks whether the banner mentions
+    /// `ImageMagick` at all — ImageMagick 6's `convert -version` banner has
+    /// the same "Version: ImageMagick 6.9.x ..." shape as `magick
+    /// -version`'s. A `convert` that isn't ImageMagick (some unrelated
+    /// program sharing the name) has no reason to print that word, so this
+    /// rejects it rather than adopting it as the image backend.
+    fn looks_like_imagemagick(path: &Path) -> bool {
+        Self::probe_first_line(Backend::Magick, path, "-version")
+            .is_some_and(|line| line.contains("ImageMagick"))
     }
 
     /// A short version token extracted from the first line of the
@@ -217,6 +311,20 @@ impl Resolver {
             Backend::Ffmpeg | Backend::Ffprobe | Backend::Magick => "-version",
             Backend::Pandoc | Backend::Soffice => "--version",
         };
+        let first_line = Self::probe_first_line(backend, path, flag)?;
+        extract_version_token(&first_line).map(str::to_string)
+    }
+
+    /// Runs `path` with `flag` and returns the first line of its version
+    /// banner (stdout, falling back to stderr when stdout came back empty —
+    /// see `version_of`'s docs on why). Factored out of `version_of` so
+    /// `looks_like_imagemagick` can inspect the same raw banner text
+    /// without needing `extract_version_token`'s short digit-bearing token,
+    /// which for a real ImageMagick banner ("Version: ImageMagick 6.9.11-60
+    /// ...") is just "6.9.11-60" — exactly the version number, and
+    /// therefore exactly the substring that does *not* contain the literal
+    /// word "ImageMagick" this needs to check for.
+    fn probe_first_line(backend: Backend, path: &Path, flag: &str) -> Option<String> {
         let mut cmd = Command::new(path);
         cmd.arg(flag);
 
@@ -243,8 +351,7 @@ impl Resolver {
         } else {
             stdout.into_owned()
         };
-        let first_line = text.lines().next()?;
-        extract_version_token(first_line).map(str::to_string)
+        text.lines().next().map(str::to_string)
     }
 }
 
@@ -479,6 +586,65 @@ mod tests {
         p
     }
 
+    /// Writes a script named `convert` (ImageMagick 6's unified-binary name
+    /// — the fallback always looks it up by this exact name) whose
+    /// `-version` banner has the same shape as a real ImageMagick 6
+    /// install's, so `magick_convert_fallback`'s ImageMagick check accepts
+    /// it.
+    fn stub_convert_that_is_really_imagemagick(dir: &Path) -> PathBuf {
+        let (name, body) = if cfg!(windows) {
+            (
+                "convert.bat",
+                "@echo off\r\n\
+                 echo Version: ImageMagick 6.9.11-60 Q16 x86_64 20200481 https://imagemagick.org\r\n\
+                 exit /b 0\r\n",
+            )
+        } else {
+            (
+                "convert",
+                "#!/bin/sh\n\
+                 echo \"Version: ImageMagick 6.9.11-60 Q16 x86_64 20200481 https://imagemagick.org\"\n",
+            )
+        };
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// Writes a script named `convert` whose version banner never mentions
+    /// ImageMagick at all — standing in for some unrelated program that
+    /// happens to share the name on `PATH`, which `magick_convert_fallback`
+    /// must reject rather than adopt as the image backend.
+    fn stub_convert_that_is_not_imagemagick(dir: &Path) -> PathBuf {
+        let (name, body) = if cfg!(windows) {
+            (
+                "convert.bat",
+                "@echo off\r\n\
+                 echo convert (some unrelated tool) version 1.0\r\n\
+                 exit /b 0\r\n",
+            )
+        } else {
+            (
+                "convert",
+                "#!/bin/sh\n\
+                 echo \"convert (some unrelated tool) version 1.0\"\n",
+            )
+        };
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
     /// `--version` isn't a real ffmpeg (or ffprobe, or ImageMagick `magick`)
     /// option; all three take the single-dash `-version`.
     #[test]
@@ -565,5 +731,120 @@ mod tests {
             extract_version_token("no digits anywhere on this line"),
             None
         );
+    }
+
+    // --- Fix 2: ImageMagick 6's `convert` fallback for `Backend::Magick` --
+    // Ubuntu/Debian's `apt-get install imagemagick` installs ImageMagick 6,
+    // whose unified binary is `convert`, not `magick` (ImageMagick 7 only).
+    // Without this fallback, `conv doctor`'s own advised install command
+    // leaves convkit still unable to find ImageMagick.
+
+    /// `magick_convert_fallback_applies` is the platform gate `resolve`
+    /// consults before ever attempting the fallback. It must be `false` on
+    /// Windows regardless of what's on `PATH` there — `convert.exe` on
+    /// Windows is the OS's own destructive FAT->NTFS conversion tool, not
+    /// ImageMagick, and is the reason ImageMagick renamed its unified
+    /// binary. Asserted directly on the predicate (not through `resolve`)
+    /// so this is deterministic on every host in the CI matrix, including
+    /// windows-latest, where `cfg!(windows)` is always `true` and a
+    /// `resolve`-based test could never itself prove the `false` branch
+    /// still behaves correctly.
+    #[test]
+    fn convert_fallback_never_applies_on_windows() {
+        assert!(!Resolver::magick_convert_fallback_applies(
+            Backend::Magick,
+            true
+        ));
+    }
+
+    /// The mirror image: off Windows, the fallback does apply to `Magick`.
+    #[test]
+    fn convert_fallback_applies_to_magick_off_windows() {
+        assert!(Resolver::magick_convert_fallback_applies(
+            Backend::Magick,
+            false
+        ));
+    }
+
+    /// The fallback is specific to `Backend::Magick` — ffmpeg, ffprobe,
+    /// pandoc, and soffice have no `convert`-shaped equivalent and must
+    /// never attempt this path, on any platform.
+    #[test]
+    fn convert_fallback_never_applies_to_other_backends() {
+        for backend in [
+            Backend::Ffmpeg,
+            Backend::Ffprobe,
+            Backend::Pandoc,
+            Backend::Soffice,
+        ] {
+            assert!(!Resolver::magick_convert_fallback_applies(backend, false));
+        }
+    }
+
+    /// A `convert` whose `-version` banner genuinely says ImageMagick is
+    /// accepted as the `Magick` backend, resolved via `Source::Path`.
+    #[test]
+    fn a_real_imagemagick_convert_is_accepted_by_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        stub_convert_that_is_really_imagemagick(dir.path());
+        let mut r = Resolver::new();
+        r.with_convert_search_dir(dir.path().to_path_buf());
+
+        let resolved = r
+            .magick_convert_fallback()
+            .expect("a real ImageMagick convert must be accepted");
+        assert_eq!(resolved.backend, Backend::Magick);
+        assert_eq!(resolved.source, Source::Path);
+        assert_eq!(resolved.version, "6.9.11-60");
+    }
+
+    /// A `convert` whose version output does not mention ImageMagick at all
+    /// — some unrelated program that merely shares the name — must be
+    /// rejected outright, not adopted as the image backend.
+    #[test]
+    fn a_convert_that_is_not_imagemagick_is_rejected_by_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        stub_convert_that_is_not_imagemagick(dir.path());
+        let mut r = Resolver::new();
+        r.with_convert_search_dir(dir.path().to_path_buf());
+
+        assert!(
+            r.magick_convert_fallback().is_none(),
+            "a convert that never mentions ImageMagick must not be accepted"
+        );
+    }
+
+    /// No `convert` anywhere in the (test-controlled) search directory: the
+    /// fallback must report nothing rather than panicking or picking up
+    /// some other file.
+    #[test]
+    fn no_convert_anywhere_yields_no_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.with_convert_search_dir(dir.path().to_path_buf());
+
+        assert!(r.magick_convert_fallback().is_none());
+    }
+
+    /// When a real `magick` is found anywhere in the ordinary candidate
+    /// chain (here: via an override, standing in for any of
+    /// override/env/managed/path), `resolve` must return it and must never
+    /// fall through to the `convert` fallback — even when a
+    /// perfectly-valid-looking ImageMagick `convert` also exists. `magick`
+    /// always wins.
+    #[test]
+    fn magick_takes_precedence_over_the_convert_fallback_when_both_exist() {
+        let magick_dir = tempfile::tempdir().unwrap();
+        let magick_stub = stub_that_echoes_first_arg(magick_dir.path());
+        let convert_dir = tempfile::tempdir().unwrap();
+        stub_convert_that_is_really_imagemagick(convert_dir.path());
+
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, magick_stub.clone());
+        r.with_convert_search_dir(convert_dir.path().to_path_buf());
+
+        let resolved = r.resolve(Backend::Magick).unwrap();
+        assert_eq!(resolved.path, magick_stub);
+        assert_eq!(resolved.source, Source::Override);
     }
 }
