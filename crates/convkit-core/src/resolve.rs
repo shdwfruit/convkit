@@ -140,8 +140,10 @@ impl Resolver {
         Err(ConvError::backend_missing(backend))
     }
 
-    /// First line of the backend's version banner, trimmed. Never fails the
-    /// resolve — an unreadable version is reported as "unknown".
+    /// A short version token extracted from the first line of the
+    /// backend's version banner (see `extract_version_token`), not the
+    /// whole line. Never fails the resolve — an unreadable version is
+    /// reported as "unknown".
     ///
     /// Two things a naive `--version` probe gets wrong, discovered by
     /// `conv doctor` reporting a real, working ffmpeg as "unknown":
@@ -191,8 +193,27 @@ impl Resolver {
         } else {
             stdout.into_owned()
         };
-        text.lines().next().map(|l| l.trim().to_string())
+        let first_line = text.lines().next()?;
+        extract_version_token(first_line).map(str::to_string)
     }
+}
+
+/// Picks the first whitespace-separated token on `line` that contains a
+/// digit, rather than returning the whole banner line. A naive whole-line
+/// return blew out `doctor`'s tabular version column — ffmpeg's own first
+/// line alone runs to roughly 90 characters — so this extracts a short,
+/// version-ish token instead. Works across every backend's banner shape
+/// without per-backend parsing, since each one puts a short version-like
+/// token near the front of its first line:
+///   "ffmpeg version 9.0-full_build-www.gyan.dev Copyright (c) ..." -> "9.0-full_build-www.gyan.dev"
+///   "Version: ImageMagick 7.1.1-29 Q16-HDRI x64 ..."                -> "7.1.1-29"
+///   "pandoc 3.1.11"                                                 -> "3.1.11"
+///   "LibreOffice 7.6.4.1"                                           -> "7.6.4.1"
+/// Returns `None` when no token on the line contains a digit at all, so
+/// the caller falls back to "unknown" rather than printing garbage.
+fn extract_version_token(line: &str) -> Option<&str> {
+    line.split_whitespace()
+        .find(|tok| tok.chars().any(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -262,16 +283,22 @@ mod tests {
     // --- Controller review round 3: version_of used the wrong flag and
     // ignored stderr, so a real ffmpeg was reported as "unknown" -------------
 
-    /// Writes a script that echoes its *first* argument to stdout and exits
-    /// 0, so a test can observe exactly which version flag `version_of`
-    /// passed. Must be the first argument, not the last: for `soffice`,
-    /// `version_of` appends `-env:UserInstallation=...` *after* the version
-    /// flag, so the flag is not reliably the last argument, only the first.
+    /// Writes a script that echoes its *first* argument, with a `-9`
+    /// suffix, to stdout and exits 0, so a test can observe exactly which
+    /// version flag `version_of` passed. Must be the first argument, not
+    /// the last: for `soffice`, `version_of` appends
+    /// `-env:UserInstallation=...` *after* the version flag, so the flag is
+    /// not reliably the last argument, only the first. The `-9` suffix
+    /// matters because `version_of` now extracts a digit-bearing token from
+    /// the banner line rather than returning it whole (see
+    /// `extract_version_token`); a bare `-version`/`--version` has no digit
+    /// in it, so without the suffix this stub would make every case report
+    /// "unknown" regardless of which flag was passed.
     fn stub_that_echoes_first_arg(dir: &Path) -> PathBuf {
         let (name, body) = if cfg!(windows) {
-            ("echo_first.bat", "@echo off\r\necho %~1\r\nexit /b 0\r\n")
+            ("echo_first.bat", "@echo off\r\necho %~1-9\r\nexit /b 0\r\n")
         } else {
-            ("echo_first.sh", "#!/bin/sh\necho \"$1\"\n")
+            ("echo_first.sh", "#!/bin/sh\necho \"$1-9\"\n")
         };
         let p = dir.join(name);
         std::fs::write(&p, body).unwrap();
@@ -322,7 +349,7 @@ mod tests {
             r.with_override(backend, stub.clone());
             let resolved = r.resolve(backend).unwrap();
             assert_eq!(
-                resolved.version, "-version",
+                resolved.version, "-version-9",
                 "{backend:?} must be probed with -version"
             );
         }
@@ -338,7 +365,7 @@ mod tests {
             r.with_override(backend, stub.clone());
             let resolved = r.resolve(backend).unwrap();
             assert_eq!(
-                resolved.version, "--version",
+                resolved.version, "--version-9",
                 "{backend:?} must be probed with --version"
             );
         }
@@ -355,5 +382,47 @@ mod tests {
         r.with_override(Backend::Ffmpeg, stub);
         let resolved = r.resolve(Backend::Ffmpeg).unwrap();
         assert_eq!(resolved.version, "banner-9.0");
+    }
+
+    // --- Controller review round 5: extract a version token, not the
+    // whole banner line, so doctor's tabular column can't be blown out ----
+
+    #[test]
+    fn extracts_the_version_token_from_a_real_ffmpeg_banner() {
+        let line = "ffmpeg version 9.0-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers";
+        assert_eq!(
+            extract_version_token(line),
+            Some("9.0-full_build-www.gyan.dev")
+        );
+    }
+
+    #[test]
+    fn extracts_the_version_token_from_a_real_imagemagick_banner() {
+        let line = "Version: ImageMagick 7.1.1-29 Q16-HDRI x64 20231001 https://imagemagick.org";
+        assert_eq!(extract_version_token(line), Some("7.1.1-29"));
+    }
+
+    #[test]
+    fn extracts_the_version_token_from_a_real_pandoc_banner() {
+        assert_eq!(extract_version_token("pandoc 3.1.11"), Some("3.1.11"));
+    }
+
+    #[test]
+    fn extracts_the_version_token_from_a_real_soffice_banner() {
+        assert_eq!(
+            extract_version_token("LibreOffice 7.6.4.1"),
+            Some("7.6.4.1")
+        );
+    }
+
+    /// No token on the line contains a digit at all: `version_of` must fall
+    /// back to "unknown" rather than picking some arbitrary non-version
+    /// word or panicking.
+    #[test]
+    fn no_digit_bearing_token_yields_none() {
+        assert_eq!(
+            extract_version_token("no digits anywhere on this line"),
+            None
+        );
     }
 }

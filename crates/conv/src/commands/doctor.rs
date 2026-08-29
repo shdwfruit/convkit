@@ -24,6 +24,26 @@ fn source_str(s: Source) -> &'static str {
     }
 }
 
+/// Width of the human-mode version column, in characters.
+const VERSION_COLUMN_WIDTH: usize = 10;
+
+/// Caps `s` at `width` displayed characters, appending an ellipsis when it
+/// had to cut something off. `{:<N}` pads a short string but never caps a
+/// long one, and `convkit_core::Resolver::resolve`'s version string is
+/// backend-controlled text with no length guarantee — `extract_version_token`
+/// keeps it short in practice, but this is the layer that makes the table
+/// *structurally* immune to whatever a backend's banner looks like, rather
+/// than merely usually short.
+fn truncate_column(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    let mut truncated: String = s.chars().take(keep).collect();
+    truncated.push('…');
+    truncated
+}
+
 /// Reports every backend's install state. Always exits 0 — a missing tool is
 /// this command's whole reason to exist, not a failure of the command
 /// itself — and never runs an install command: it only ever prints one, via
@@ -61,7 +81,7 @@ pub fn run(cli: &Cli) -> i32 {
                 Ok(r) => println!(
                     "{:<9} {:<10} {:<28} ({})",
                     b.exe_name(),
-                    r.version,
+                    truncate_column(&r.version, VERSION_COLUMN_WIDTH),
                     r.path.display(),
                     source_str(r.source).to_uppercase(),
                 ),
@@ -78,4 +98,36 @@ pub fn run(cli: &Cli) -> i32 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_strings_pass_through_unchanged() {
+        assert_eq!(truncate_column("9.0", 10), "9.0");
+        assert_eq!(truncate_column("", 10), "");
+    }
+
+    #[test]
+    fn a_string_exactly_at_width_is_not_truncated() {
+        assert_eq!(truncate_column("1234567890", 10), "1234567890");
+    }
+
+    /// This is the exact defect the coordinator reported: `version_of` (once
+    /// fixed to use the right flag) returned ffmpeg's whole ~90-character
+    /// banner line, which `{:<10}` pads but never caps, blowing out every
+    /// column after it.
+    #[test]
+    fn a_long_real_ffmpeg_version_token_is_capped_at_the_column_width() {
+        let long = "9.0-full_build-www.gyan.dev";
+        let out = truncate_column(long, 10);
+        assert_eq!(out.chars().count(), 10, "{out:?}");
+        assert!(out.ends_with('…'), "{out:?}");
+        assert!(
+            long.starts_with(&out[..out.len() - '…'.len_utf8()]),
+            "{out:?}"
+        );
+    }
 }
