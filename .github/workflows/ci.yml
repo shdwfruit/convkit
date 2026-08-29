@@ -89,10 +89,41 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Debian/Ubuntu split libheif's HEVC decoder out of the base
+      # `imagemagick` -> libheif1 dependency chain and into its own plugin
+      # package (a patent-licensing decision upstream, not a packaging
+      # oversight): on `ubuntu-latest` (24.04/noble, amd64), `libheif1`'s
+      # own Depends excludes `libheif-plugin-libde265` specifically on
+      # amd64/i386 architectures, so `apt-get install imagemagick` alone
+      # gives ImageMagick a HEIF *container* reader with no HEVC *decoder*
+      # behind it -- it recognises a `.heic` file and then fails decoding
+      # it with "Unsupported codec". Installing the plugin explicitly is
+      # the fix; see README.md's Backends section for the user-facing
+      # version of this.
       - name: Install backends
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick libreoffice pandoc
+          sudo apt-get install -y ffmpeg imagemagick libheif-plugin-libde265 libreoffice pandoc
+
+      # Isolates "the environment can decode HEIC" from "our recipe is
+      # correct": this drives the system ImageMagick binary directly, with
+      # no convkit code involved, so a failure here always means the apt
+      # step above didn't actually give ImageMagick a working HEVC decoder
+      # -- never a convkit bug -- and fails loudly right here instead of
+      # surfacing later as a confusing red property test.
+      - name: Verify system ImageMagick can decode HEIC (HEVC delegate present)
+        run: |
+          if command -v magick >/dev/null 2>&1; then
+            im_convert=(magick convert)
+          else
+            im_convert=(convert)
+          fi
+          out="$(mktemp --suffix=.jpg)"
+          if ! "${im_convert[@]}" tests/fixtures/photo.heic "$out"; then
+            echo "::error::ImageMagick could not decode tests/fixtures/photo.heic -- HEIC container support is present but the HEVC decoder is missing. On Debian/Ubuntu this means the libheif HEVC decoder plugin isn't installed (see the 'Install backends' step and README.md's Backends section)." >&2
+            exit 1
+          fi
+          echo "HEIC decode OK: $(stat -c%s "$out") bytes written to $out"
 
       - name: cargo build --workspace
         run: cargo build --workspace

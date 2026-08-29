@@ -168,6 +168,15 @@ kept at arm's length as a subprocess (see Licensing below):
 | `magick` (ImageMagick) | image conversions, HEIC/HEIF read, images → PDF | **No.** ImageMagick's official builds ship a portable Windows binary only as `.7z`, a Linux binary only as an AppImage, and no standalone macOS binary at all — none of those clear the "plain zip/tar.gz, verified" bar `conv install` holds every managed backend to. Install it with your package manager. |
 | `soffice` (LibreOffice) | Office documents ⇄ PDF | **No, ever.** LibreOffice has no relocatable binary at all, on any platform. This is a permanent policy, not a gap. |
 
+On Debian/Ubuntu, plain `apt-get install imagemagick` gives you ImageMagick 6
+*without* an HEVC decoder, so converting an iPhone HEIC photo fails with
+`convert: Unsupported feature: Unsupported codec` even though ImageMagick is
+installed and every other conversion works fine — install
+`libheif-plugin-libde265` alongside it to fix that. This is a Debian/Ubuntu
+packaging decision (HEVC decoding is split into its own plugin package there),
+not a convkit limitation — macOS Homebrew and Windows builds of ImageMagick
+include HEVC decoding already.
+
 `conv install` never touches the network without being asked, downloads only
 from a pinned release tag (never a `releases/latest` alias, which is
 rate-limited per-IP and shared by everyone behind one NAT), and verifies a
