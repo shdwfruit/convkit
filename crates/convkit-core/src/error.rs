@@ -58,7 +58,12 @@ pub struct ConvError {
 
 impl ConvError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        ConvError { code, message: message.into(), backend: None, remediation: None }
+        ConvError {
+            code,
+            message: message.into(),
+            backend: None,
+            remediation: None,
+        }
     }
 
     pub fn unsupported_pair(from: Format, to: Format) -> Self {
@@ -75,7 +80,9 @@ impl ConvError {
     pub fn unknown_format(ext: &str) -> Self {
         let msg = match Format::suggest(ext) {
             Some(f) => format!("unknown format {ext:?} — did you mean {:?}?", f.ext()),
-            None => format!("unknown format {ext:?}; run `conv capabilities` to list known formats"),
+            None => {
+                format!("unknown format {ext:?}; run `conv capabilities` to list known formats")
+            }
         };
         ConvError::new(ErrorCode::UnknownFormat, msg)
     }

@@ -76,11 +76,15 @@ impl Backend {
     /// The command we print for the user to run. We never run it ourselves.
     pub fn manual_hint(&self, pm: PackageManager) -> &'static str {
         match (self, pm) {
-            (Backend::Ffmpeg | Backend::Ffprobe, PackageManager::Winget) => "winget install Gyan.FFmpeg",
+            (Backend::Ffmpeg | Backend::Ffprobe, PackageManager::Winget) => {
+                "winget install Gyan.FFmpeg"
+            }
             (Backend::Ffmpeg | Backend::Ffprobe, PackageManager::Scoop) => "scoop install ffmpeg",
             (Backend::Ffmpeg | Backend::Ffprobe, PackageManager::Choco) => "choco install ffmpeg",
             (Backend::Ffmpeg | Backend::Ffprobe, PackageManager::Brew) => "brew install ffmpeg",
-            (Backend::Ffmpeg | Backend::Ffprobe, PackageManager::Apt) => "sudo apt-get install ffmpeg",
+            (Backend::Ffmpeg | Backend::Ffprobe, PackageManager::Apt) => {
+                "sudo apt-get install ffmpeg"
+            }
             (Backend::Ffmpeg | Backend::Ffprobe, PackageManager::Dnf) => "sudo dnf install ffmpeg",
             (Backend::Ffmpeg | Backend::Ffprobe, PackageManager::Pacman) => "sudo pacman -S ffmpeg",
 
@@ -92,7 +96,9 @@ impl Backend {
             (Backend::Magick, PackageManager::Dnf) => "sudo dnf install ImageMagick",
             (Backend::Magick, PackageManager::Pacman) => "sudo pacman -S imagemagick",
 
-            (Backend::Soffice, PackageManager::Winget) => "winget install TheDocumentFoundation.LibreOffice",
+            (Backend::Soffice, PackageManager::Winget) => {
+                "winget install TheDocumentFoundation.LibreOffice"
+            }
             (Backend::Soffice, PackageManager::Scoop) => "scoop install libreoffice",
             (Backend::Soffice, PackageManager::Choco) => "choco install libreoffice-fresh",
             (Backend::Soffice, PackageManager::Brew) => "brew install --cask libreoffice",
@@ -109,6 +115,23 @@ impl Backend {
             (Backend::Pandoc, PackageManager::Pacman) => "sudo pacman -S pandoc",
         }
     }
+
+    /// Fallback remediation used when no supported package manager can be
+    /// detected on PATH. Points at the official download page so `manual`
+    /// is never left empty — an undetected package manager must never mean
+    /// zero guidance.
+    fn download_hint(&self) -> &'static str {
+        match self {
+            Backend::Ffmpeg | Backend::Ffprobe => {
+                "install ffmpeg from https://ffmpeg.org/download.html"
+            }
+            Backend::Magick => {
+                "install ImageMagick from https://imagemagick.org/script/download.php"
+            }
+            Backend::Soffice => "install LibreOffice from https://www.libreoffice.org/download/",
+            Backend::Pandoc => "install pandoc from https://github.com/jgm/pandoc/releases",
+        }
+    }
 }
 
 impl ConvError {
@@ -116,12 +139,51 @@ impl ConvError {
         let managed = backend
             .is_managed()
             .then(|| format!("conv install {}", backend.exe_name()));
-        let manual = PackageManager::detect().map(|pm| backend.manual_hint(pm).to_string());
+        // `manual` is always `Some`: fall back to the official download page
+        // when no package manager is detected, so this remediation is never
+        // empty.
+        let manual = PackageManager::detect()
+            .map(|pm| backend.manual_hint(pm).to_string())
+            .unwrap_or_else(|| backend.download_hint().to_string());
         ConvError {
             code: ErrorCode::BackendMissing,
             message: format!("{} not found", backend.exe_name()),
             backend: Some(backend),
-            remediation: Some(Remediation { managed, manual }),
+            remediation: Some(Remediation {
+                managed,
+                manual: Some(manual),
+            }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_missing_never_leaves_remediation_empty() {
+        // Soffice is never managed, and this must hold regardless of
+        // whether a package manager happens to be installed on the machine
+        // running this test.
+        let e = ConvError::backend_missing(Backend::Soffice);
+        let remediation = e
+            .remediation
+            .expect("backend_missing always sets remediation");
+        assert_eq!(remediation.managed, None, "soffice is never managed");
+        assert!(
+            remediation.manual.is_some(),
+            "manual must always be Some, even with no package manager detected"
+        );
+    }
+
+    #[test]
+    fn backend_missing_offers_managed_install_for_managed_backends() {
+        let e = ConvError::backend_missing(Backend::Pandoc);
+        let remediation = e
+            .remediation
+            .expect("backend_missing always sets remediation");
+        assert_eq!(remediation.managed, Some("conv install pandoc".to_string()));
+        assert!(remediation.manual.is_some());
     }
 }

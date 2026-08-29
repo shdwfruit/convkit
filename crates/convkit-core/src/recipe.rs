@@ -51,6 +51,16 @@ pub struct Recipe {
 impl Step {
     /// Render this step's argv. Paths are rendered lossily via `to_string_lossy`
     /// for display and snapshotting; `exec` passes real `OsStr` values.
+    ///
+    /// # Preconditions
+    ///
+    /// `inputs` must be non-empty whenever this step's `args` contain
+    /// `Arg::Input` or `Arg::Inputs` — `Arg::Input` indexes `inputs[0]`
+    /// unchecked and will panic on an empty slice. This function does not
+    /// validate that; it stays a pure formatter with no `Result` to thread
+    /// through. The validation boundary is `plan::build` (Task 7), the
+    /// public entry point every caller goes through, which rejects empty
+    /// inputs with a typed `ConvError` before any `Step` is ever rendered.
     pub fn render(&self, inputs: &[&Path], output: &Path) -> Vec<String> {
         let mut out = Vec::with_capacity(self.args.len());
         for arg in self.args {
@@ -111,7 +121,10 @@ mod tests {
             output: OutputMode::OutDir,
             intermediate_ext: None,
         };
-        assert_eq!(step.render(&[Path::new("in.docx")], Path::new("out.pdf")), vec!["."]);
+        assert_eq!(
+            step.render(&[Path::new("in.docx")], Path::new("out.pdf")),
+            vec!["."]
+        );
     }
 
     #[test]
