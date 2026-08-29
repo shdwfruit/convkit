@@ -97,19 +97,5 @@ jobs:
       - name: cargo build --workspace
         run: cargo build --workspace
 
-      # One of the four ignored property tests,
-      # `heic_to_jpg_preserves_orientation_and_stays_reasonably_sized`, has
-      # no fixture to run against: it needs a real HEIC photo
-      # (tests/fixtures/photo.heic), and HEIC encoders are scarce enough
-      # that none could be produced for this repo (see
-      # docs/defaults-calibration.md, "Fixtures", and §3). The test itself
-      # is written and `#[ignore]`-gated like the other three -- it is not
-      # missing -- it just cannot pass anywhere until someone commits that
-      # fixture. Skipping it here by name (rather than letting the whole
-      # job go red, or blanket `continue-on-error`-ing the job) keeps this
-      # job an honest, actionable signal: every other ignored test must
-      # pass for real, on real backends, or CI fails.
       - name: cargo test --workspace -- --ignored (real backends)
-        run: |
-          echo "::notice::Skipping heic_to_jpg_preserves_orientation_and_stays_reasonably_sized -- no committed HEIC fixture (tests/fixtures/photo.heic). This is a known, documented gap (see docs/defaults-calibration.md), not a bug: no HEIC encoder was available to produce one. Commit a real photo under 200 KB at that path to enable the test."
-          cargo test --workspace -- --ignored --skip heic_to_jpg_preserves_orientation_and_stays_reasonably_sized
+        run: cargo test --workspace -- --ignored

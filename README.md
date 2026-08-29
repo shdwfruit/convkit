@@ -318,11 +318,12 @@ $ cargo test --workspace
 That's 133 tests plus 4 more gated behind `#[ignore]` (real conversions
 against real backends — run them with `cargo test --workspace -- --ignored`
 once ffmpeg/ImageMagick/LibreOffice/pandoc are on `PATH`; CI's `integration`
-job does exactly this on Ubuntu). One of the four,
-`heic_to_jpg_preserves_orientation_and_stays_reasonably_sized`, needs a real
-HEIC photo committed at `tests/fixtures/photo.heic` that this repo doesn't
-have yet — see `docs/defaults-calibration.md` for why, and its own panic
-message for how to add one.
+job runs all four of these against real backends on Ubuntu, unconditionally).
+One of the four, `heic_to_jpg_preserves_orientation_and_stays_reasonably_sized`,
+runs against a real iPhone HEIC photo committed at
+`tests/fixtures/photo.heic` (4032x3024, 1.58 MB — see
+`docs/defaults-calibration.md` for why it's that large and what EXIF it
+does and doesn't carry).
 
 `convkit-core` (the library crate: planning, resolution, execution) never
 writes to stdout or stderr itself — all user-facing output belongs to the

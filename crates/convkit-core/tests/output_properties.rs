@@ -310,14 +310,19 @@ fn heic_to_jpg_preserves_orientation_and_stays_reasonably_sized() {
     let heic = fixtures_dir().join("photo.heic");
     assert!(
         heic.is_file(),
-        "missing fixture tests/fixtures/photo.heic -- HEIC encoders are scarce \
-         and this repo will not fabricate a fake one. This machine's ffmpeg 9.0.x \
-         build has no HEIC/HEIF muxer or demuxer at all (`ffmpeg -muxers` / \
-         `-demuxers` confirm it), so it cannot be generated here either. Copy a \
-         real photo off a recent iPhone (Camera defaults to HEIC under \
-         Settings > Camera > Formats > High Efficiency) onto this machine, save \
-         it as tests/fixtures/photo.heic (keep it under 200 KB -- a resized or \
-         re-encoded HEIC is fine), commit it, and re-run with --ignored."
+        "missing fixture tests/fixtures/photo.heic -- a real one (1.58 MB) is \
+         normally committed at this path, so if you're seeing this, it has been \
+         removed or you're on a shallow/sparse checkout. HEIC encoders are \
+         scarce -- this repo will not fabricate a fake one -- and no HEIC \
+         encoder is available in any toolchain used here either (ImageMagick's \
+         HEIC support is read-only, `magick -list format` reports `HEIC` as \
+         `r--`, and no ffmpeg build available has a HEIC muxer), which is why \
+         the committed fixture is a full-size 1.58 MB real photo rather than a \
+         shrunk one. Copy a real photo off a recent iPhone (Camera defaults to \
+         HEIC under Settings > Camera > Formats > High Efficiency) onto this \
+         machine, save it as tests/fixtures/photo.heic, commit it, and re-run \
+         with --ignored. Smaller is preferred if you can produce it with a \
+         real HEIC encoder, but 1.58 MB is the honest floor without one."
     );
     let out = convert_fixture("photo.heic", "jpg");
     let (w, h) = imagemagick_dimensions(&out);

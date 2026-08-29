@@ -266,14 +266,23 @@ raster-to-lossy recipe every `*->jpg`/`webp`/`avif` pair uses -- `magick
 <in> -auto-orient -quality 92 <out>`. HEIC->JPG is not a special case; it
 goes through the same code path already confirmed for other formats.
 
-**Fixture:** a real iPhone HEIC photo (4032x3024, 1.58 MB), supplied and
-measured directly by the repo owner on a machine with ImageMagick
-7.1.2-29 installed -- not on this calibration machine, and **the photo
-itself is not committed to this repository.** It is a personal file
-(iPhone model and capture-date EXIF, 1.58 MB) that does not belong in git
-history. `tests/fixtures/photo.heic` remains something a contributor
-supplies locally; see "Fixtures" below, which this measurement does not
-change.
+**Fixture:** a real iPhone HEIC photo (4032x3024, 1,623,213 B / 1.58 MB),
+supplied and measured directly by the repo owner on a machine with
+ImageMagick 7.1.2-29 installed -- not on this calibration machine. **The
+photo is committed to this repository** at `tests/fixtures/photo.heic`,
+after the size and EXIF tradeoffs below were raised with, and confirmed
+twice by, the repo owner.
+
+**Provenance and cost, stated honestly:** this fixture is 1.58 MB, roughly
+40x the size of the next-largest fixture here (`clip.mp4`, 56 KB) and well
+over the ~200 KB budget every other fixture in this repo respects (see
+"Fixtures" below). It is committed at full size deliberately, not by
+oversight: as the next paragraph confirms directly, ImageMagick's HEIC
+support is read-only and no available ffmpeg build has a HEIC muxer, so
+there is no encoder anywhere in this project's toolchain that could shrink
+this file or re-save it with EXIF stripped. Its EXIF (IFD0, parsed
+directly) carries device strings (`Apple`, `iPhone`) and a capture date
+(`2025:12:27`), but **no GPS** -- there is no GPS IFD pointer in the file.
 
 **Command:**
 
@@ -305,18 +314,29 @@ reliably grows the file. This is the same "quality, not size" point §2's
 GIF verdict already makes, from the other direction.
 
 **ImageMagick's HEIC support is read-only**, which is why no smaller HEIC
-fixture could be generated locally even now that ImageMagick 7.1.2-29 is
-installed on a development machine: `magick -list format` reports `HEIC`
-as `r--` (read only, no write/encode support). `magick` can decode a HEIC
-into some other format, but cannot produce one -- consistent with the
-earlier finding in "Fixtures" below that ffmpeg's own builds have no HEIC
-encoder or muxer either. Producing a fixture still requires a real
-HEIC-producing camera.
+fixture could be generated even now that ImageMagick 7.1.2-29 is installed
+on a development machine: `magick -list format` reports `HEIC` as `r--`
+(read only, no write/encode support). `magick` can decode a HEIC into some
+other format, but cannot produce one -- consistent with the earlier
+finding in "Fixtures" below that ffmpeg's own builds have no HEIC encoder
+or muxer either. With no HEIC encoder anywhere in this project's
+toolchain, the committed fixture above is the real, full-size photo as
+supplied -- not a shrunk or re-saved copy.
 
-`heic_to_jpg_preserves_orientation_and_stays_reasonably_sized` (§7) stays
-`#[ignore]`-gated and its missing-fixture message is unchanged and still
-accurate for this repository's own checkout -- the measurement above was
-taken against a fixture supplied out of band, not one committed here.
+`heic_to_jpg_preserves_orientation_and_stays_reasonably_sized` (§7) is no
+longer gated on a missing fixture: `tests/fixtures/photo.heic` is
+committed, and the test passes for real against it:
+
+```
+$ cargo test -p convkit-core --test output_properties -- --ignored heic
+test heic_to_jpg_preserves_orientation_and_stays_reasonably_sized ... ok
+```
+
+(run with ImageMagick on `PATH`). It stays `#[ignore]`-gated for the same
+reason the other three property tests do -- it needs a real backend on
+`PATH` -- not because the fixture is missing. This measurement is now
+backed by that test rather than only the one-off manual run above, and
+CI's `integration` job runs it unconditionally alongside the other three.
 
 ---
 
@@ -502,6 +522,14 @@ this task's real-backend measurements would close.
 
 ## 7. Property test suite: what actually ran
 
+**Historical record, from before `tests/fixtures/photo.heic` was
+committed.** The transcript immediately below is unchanged from the
+original Task 15/16 calibration run, taken on a machine with only ffmpeg
+on `PATH` and no committed HEIC fixture -- that is why the HEIC test fails
+on a missing-fixture panic here, not a backend-missing one. See "Update:
+fixture now committed" after the bullets below for the current, passing
+result.
+
 `cargo test --workspace -- --ignored`, literal output
 (`crates/convkit-core/tests/output_properties.rs`):
 
@@ -543,13 +571,47 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
 - **`docx_to_pdf_produces_a_real_pdf` -- errors with a clear
   `backend_missing: soffice` message**, naming the exact install command.
 - **`heic_to_jpg_preserves_orientation_and_stays_reasonably_sized` --
-  fails on the missing fixture itself**, with a message explaining why
-  (`tests/fixtures/photo.heic` was never generated -- see "Fixtures"
-  below) and how to fix it (copy a real photo off an iPhone).
+  at the time of this transcript, failed on the missing fixture itself**,
+  with a message explaining why (`tests/fixtures/photo.heic` had not been
+  generated or committed -- see "Fixtures" below) and how to fix it (copy
+  a real photo off an iPhone). That gap is now closed; see the update
+  immediately below.
 
 The default, non-`--ignored` run stays green with all four `#[ignore]`d:
 `cargo test --workspace` is 133 passed, 0 failed, 4 ignored -- unchanged
 from the Task 15 baseline plus the four new ignored tests.
+
+**Update: fixture now committed.** `tests/fixtures/photo.heic` (1.58 MB,
+see "Fixtures" below and §3's provenance note) is committed to this
+repository. Re-running the same command with ImageMagick reachable now
+passes the HEIC test for real, alongside the GIF test that only needed
+`magick` on `PATH` all along:
+
+```
+$ PATH="/c/Program Files/ImageMagick-7.1.2-Q16-HDRI:$PATH" cargo test --workspace -- --ignored
+running 4 tests
+test docx_to_pdf_produces_a_real_pdf ... FAILED
+test gif_output_uses_more_than_a_trivial_palette ... ok
+test mkv_to_mp4_with_compatible_codecs_is_a_stream_copy ... ok
+test heic_to_jpg_preserves_orientation_and_stays_reasonably_sized ... ok
+
+failures:
+
+---- docx_to_pdf_produces_a_real_pdf stdout ----
+thread 'docx_to_pdf_produces_a_real_pdf' panicked at crates\convkit-core\tests\output_properties.rs:70:9:
+backend_missing: soffice not found -- winget install TheDocumentFoundation.LibreOffice
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out
+```
+
+Three of four pass for real: HEIC (against the committed fixture), GIF,
+and MKV-remux. `docx_to_pdf_produces_a_real_pdf` still fails with a clear
+`backend_missing: soffice` message -- LibreOffice is genuinely not
+installed on this development machine, which is correct, expected
+behaviour, not a bug. CI's `integration` job installs `soffice` via `apt`
+and runs all four of these unconditionally against real backends on
+Ubuntu -- no skip, no special-casing, no `::notice::` for the HEIC test
+any more.
 
 ---
 
@@ -560,13 +622,13 @@ from the Task 15 baseline plus the four new ignored tests.
 | `tests/fixtures/clip.mp4` | the brief's exact `ffmpeg -f lavfi` command (top of this doc) | 56,325 B |
 | `tests/fixtures/sample.md` | hand-written | 726 B |
 | `tests/fixtures/sample.docx` | `pandoc tests/fixtures/sample.md --standalone -o tests/fixtures/sample.docx` | 11,357 B |
-| `tests/fixtures/photo.heic` | **not generated -- see below** | -- |
+| `tests/fixtures/photo.heic` | supplied directly by the repo owner: a real iPhone photo, committed as-is (see below for why) | 1,623,213 B |
 
-**HEIC fixture: genuinely could not be produced on this machine, and was
-not faked.** This machine's ffmpeg 9.0.x builds (both the managed
-9.0.1-essentials one convkit itself resolves to, and the PATH 9.0-full
-one) have no HEIC/HEIF encoder, muxer, or demuxer at all -- confirmed
-directly against both:
+**HEIC fixture: could not be produced on any available machine, so a real
+photo was supplied and committed instead, at full size.** This machine's
+ffmpeg 9.0.x builds (both the managed 9.0.1-essentials one convkit itself
+resolves to, and the PATH 9.0-full one) have no HEIC/HEIF encoder, muxer,
+or demuxer at all -- confirmed directly against both:
 
 ```
 $ ffmpeg -muxers 2>&1 | grep -i hei      # no output
@@ -576,18 +638,27 @@ $ ffmpeg -i sample.png -c:v libx265 sample.heic
 extension for the filename or specify the format manually.
 ```
 
-`magick` (which could otherwise convert a PNG to HEIC on some builds) is
-also not installed here. Per the task instructions, I did not fabricate a
-fake HEIC file. `heic_to_jpg_preserves_orientation_and_stays_reasonably_sized`
-is written and in place, `#[ignore]`-gated like the others, and fails with
-an explicit, actionable message when the fixture is missing (see §7) --
-including how to obtain one (copy a real photo off a recent iPhone,
-`Settings > Camera > Formats > High Efficiency`) and where to commit it.
-**Gap for the controller / a future task: someone with an iPhone (or any
-HEIC-producing camera) needs to drop a photo under 200 KB at
-`tests/fixtures/photo.heic` and commit it** before this test can run
-anywhere, including Task 16's CI matrix. (Confirmed with the controller:
-deferred, not to be attempted by this task.)
+ImageMagick, once installed on a development machine, can *read* HEIC but
+not write it (`magick -list format` reports `HEIC` as `r--`), so it
+couldn't produce a smaller or re-saved fixture either -- there is no HEIC
+encoder anywhere in this project's available toolchain. Per the task
+instructions, no fake HEIC file was fabricated to work around that. The
+only way to get a real fixture was a real HEIC-producing camera: the repo
+owner supplied one directly, a real iPhone photo (4032x3024, 1,623,213 B /
+1.58 MB), and it is now committed at `tests/fixtures/photo.heic` at full
+size, after the size and EXIF tradeoffs were raised with and confirmed
+twice by the repo owner. That is roughly 40x the size of `clip.mp4` and
+well over the ~200 KB budget every other fixture above respects -- a
+deliberate exception, not an oversight, since no encoder could shrink it.
+Its EXIF (IFD0, parsed directly) carries device strings (`Apple`,
+`iPhone`) and a capture date (`2025:12:27`), but no GPS IFD pointer -- no
+location data.
+
+`heic_to_jpg_preserves_orientation_and_stays_reasonably_sized` is written
+and in place, `#[ignore]`-gated like the others, and now passes for real
+against this fixture (see §7's "Update: fixture now committed"). CI's
+`integration` job runs it unconditionally alongside the other three
+property tests -- no skip, no special-casing.
 
 ## Colour-counting tool
 
