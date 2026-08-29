@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
@@ -368,5 +370,163 @@ fn install_magick_reports_no_managed_build_on_every_platform() {
     assert!(
         !stderr.to_ascii_lowercase().contains("downloading"),
         "{stderr}"
+    );
+}
+
+// --- Part 1: install-and-retry prompt for a missing backend ----------------
+//
+// `magick` is the reliably-missing backend used below: this project's own
+// bare CI runner has no conversion backends installed at all, and `magick`
+// specifically is also absent on the machine this task was developed
+// against (ImageMagick is installed but not linked onto PATH) — unlike
+// `ffmpeg`/`pandoc`/`typst`, which a prior `conv install` had already
+// provisioned as managed backends on that same machine, making them
+// unsuitable for a deterministic "still missing" test here. `magick` also
+// happens to never be offerable (`manifest::has_managed_build` is `false`
+// for it on every platform — no verified manifest entry exists), so these
+// prove "no prompt, no hang" via that gate; the Windows-only test further
+// down proves the same guarantee for a genuinely offerable backend, via the
+// TTY gate specifically.
+//
+// Every test here adds an explicit `.timeout(...)` on top of assert_cmd's
+// own default (stdin is always a pipe, never a real TTY, so
+// `install_prompt::is_interactive_session()` should never even try to
+// read) — a hard backstop so a regression here fails loudly instead of
+// hanging the suite.
+
+fn write_unreadable_png(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("a.png"),
+        b"not a real png, but never read by magick",
+    )
+    .unwrap();
+}
+
+#[test]
+fn piped_stdin_never_prompts_and_reports_the_structured_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write_unreadable_png(dir.path());
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let output = assert.get_output();
+    assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("magick"), "{stderr}");
+    assert!(
+        !stderr.contains("Install it now"),
+        "must never prompt when stdin is piped: {stderr}"
+    );
+}
+
+/// Acceptance check 4: `--json` on a missing-backend case is unchanged and
+/// exits 3 with no prompt.
+#[test]
+fn json_mode_never_prompts_on_a_missing_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    write_unreadable_png(dir.path());
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "--json"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let output = assert.get_output();
+    let stdout_text = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout_text.contains("Install it now"), "{stdout_text}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Install it now"), "{stderr}");
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["results"][0]["error"]["code"], "backend_missing");
+}
+
+#[test]
+fn no_install_flag_never_prompts_even_though_it_would_otherwise_be_offerable() {
+    let dir = tempfile::tempdir().unwrap();
+    write_unreadable_png(dir.path());
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(!stderr.contains("Install it now"), "{stderr}");
+    assert!(
+        !stderr.to_ascii_lowercase().contains("downloading"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn quiet_flag_never_prompts_either() {
+    let dir = tempfile::tempdir().unwrap();
+    write_unreadable_png(dir.path());
+
+    conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "--quiet"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3)
+        .stderr(contains("Install it now").not());
+}
+
+#[test]
+fn yes_and_no_install_together_is_a_usage_error() {
+    conv()
+        .args(["in.mp4", "out.gif", "--yes", "--no-install"])
+        .assert()
+        .code(2)
+        .stderr(contains("cannot be used with"));
+}
+
+/// The strongest version of the non-interactive guarantee: even a backend
+/// that genuinely *is* offerable (`manifest::has_managed_build` is `true`
+/// for `ffmpeg` on this platform) must never prompt when stdin is piped —
+/// proving the TTY gate itself, not just the "never offerable at all" gate
+/// every test above exercises via `magick`.
+///
+/// `ffmpeg` is already provisioned as a managed backend on the machine this
+/// was developed against (a prior `conv install ffmpeg` put it in the real,
+/// shared `%LOCALAPPDATA%\convkit\bin`), so a plain `--ffmpeg-path
+/// <nonexistent>` alone doesn't make it unresolvable — `Resolver::resolve`
+/// falls through an unusable override to the next candidate, and Managed
+/// still finds the real one. This redirects `LOCALAPPDATA` to an empty
+/// temp directory and narrows `PATH` to just `System32`, for this child
+/// process only — never touching the real managed install, or anything
+/// else on the host — so `ffmpeg` genuinely can't be found for this one
+/// invocation regardless of what's actually installed.
+#[cfg(windows)]
+#[test]
+fn piped_stdin_never_prompts_even_for_a_genuinely_offerable_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake_local_app_data = dir.path().join("fake-local-app-data");
+    std::fs::create_dir_all(&fake_local_app_data).unwrap();
+    std::fs::write(dir.path().join("in.mp4"), b"not a real mp4").unwrap();
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .env("LOCALAPPDATA", &fake_local_app_data)
+        .env("PATH", r"C:\Windows\System32")
+        .args(["in.mp4", "out.gif"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let output = assert.get_output();
+    assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ffmpeg not found"), "{stderr}");
+    assert!(
+        !stderr.contains("Install it now"),
+        "must never prompt when stdin is piped, even for an offerable backend: {stderr}"
     );
 }

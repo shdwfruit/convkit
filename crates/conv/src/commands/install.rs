@@ -20,16 +20,45 @@ fn parse_backend(name: &str) -> Option<Backend> {
 
 /// Downloads and verifies a managed backend, placing it at
 /// `Resolver::managed_path(backend)` so it's found ahead of `PATH` on the
-/// next run.
+/// next run. Shared by the `install` subcommand's own `run` below and by
+/// `commands/convert.rs`'s install-and-retry prompt (Part 1) — both must go
+/// through this exact function, never a re-implementation, so both callers
+/// get identical behaviour (the same progress line, checksum verification,
+/// and atomic install) and `convkit-core` stays the only thing that ever
+/// touches the network.
 ///
+/// Callers are expected to have already checked `manifest::has_managed_build`
+/// (`run` does, via `backend.is_managed()` plus the lookup below; the Part 1
+/// prompt gates on `manifest::has_managed_build` directly before ever
+/// offering to call this), but this re-derives the asset itself and fails
+/// the same way `run` always did if that invariant is somehow violated,
+/// rather than assuming it holds.
+pub(crate) fn install_backend(
+    cli: &Cli,
+    backend: Backend,
+) -> Result<std::path::PathBuf, ConvError> {
+    let asset = manifest::lookup(backend).ok_or_else(|| ConvError::no_managed_build(backend))?;
+
+    if !cli.quiet && !cli.json {
+        // Progress goes to stderr, matching the batch progress bar
+        // (`indicatif::ProgressBar` also draws there) — stdout is reserved
+        // for the final machine-parseable result (or, in `--json` mode, the
+        // whole envelope), the same split `render`'s other commands keep.
+        eprintln!("downloading {} ...", asset.url);
+    }
+
+    let dest = Resolver::managed_path(backend);
+    install::fetch_and_install(asset, &dest)
+}
+
 /// Refuses two kinds of request before touching the network: a backend name
 /// this CLI doesn't recognise at all, and a backend where
 /// `Backend::is_managed()` is false (today, only `soffice` — LibreOffice has
-/// no relocatable binary). A recognised, managed backend with no verified
-/// manifest entry for the running platform is *also* refused before any
-/// network call, for the same reason: `manifest::lookup` returning `None`
-/// means this hasn't been verified to work, and a download that later fails
-/// its checksum is a worse failure mode than refusing up front.
+/// no relocatable binary). `install_backend` itself refuses a third kind —
+/// a recognised, managed backend with no verified manifest entry for the
+/// running platform — for the same reason: `manifest::lookup` returning
+/// `None` means this hasn't been verified to work, and a download that
+/// later fails its checksum is a worse failure mode than refusing up front.
 pub fn run(cli: &Cli, backend_name: &str) -> i32 {
     let backend = match parse_backend(backend_name) {
         Some(b) => b,
@@ -52,25 +81,7 @@ pub fn run(cli: &Cli, backend_name: &str) -> i32 {
         return e.code.exit_code();
     }
 
-    let asset = match manifest::lookup(backend) {
-        Some(a) => a,
-        None => {
-            let e = ConvError::no_managed_build(backend);
-            render::print_error(cli.json, &e);
-            return e.code.exit_code();
-        }
-    };
-
-    if !cli.quiet && !cli.json {
-        // Progress goes to stderr, matching the batch progress bar
-        // (`indicatif::ProgressBar` also draws there) — stdout is reserved
-        // for the final machine-parseable result (or, in `--json` mode, the
-        // whole envelope), the same split `render`'s other commands keep.
-        eprintln!("downloading {} ...", asset.url);
-    }
-
-    let dest = Resolver::managed_path(backend);
-    match install::fetch_and_install(asset, &dest) {
+    match install_backend(cli, backend) {
         Ok(path) => {
             if cli.json {
                 let envelope = json!({ "ok": true, "backend": backend, "path": path });

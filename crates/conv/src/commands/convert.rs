@@ -1,11 +1,14 @@
 use convkit_core::{
-    plan, probe, registry, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe, Resolver,
+    plan, probe, registry, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe, Outcome,
+    Resolver,
 };
 use serde_json::json;
 
 use crate::batch;
 use crate::cli::Cli;
+use crate::commands::install;
 use crate::input;
+use crate::install_prompt;
 use crate::render;
 
 pub fn run(cli: &Cli) -> i32 {
@@ -21,9 +24,83 @@ pub fn run(cli: &Cli) -> i32 {
         return dry_run(&jobs, cli);
     }
 
-    let (results, code) = batch::run(jobs, cli);
+    // Kept alongside `results` so a retry below can re-run exactly the jobs
+    // that failed on a missing backend — `JobResult` alone has nothing to
+    // hand back to `batch::run`, only what came out of it.
+    let original_jobs = jobs.clone();
+    let (mut results, mut code) = batch::run(jobs, cli);
+
+    // --- Part 1: offer to install a missing backend, then retry once -----
+    //
+    // `missing_backend` only returns a backend when every `backend_missing`
+    // failure in this batch names the *same* one — a mixed batch (one job
+    // missing ffmpeg, another missing magick) gets no prompt at all, since
+    // installing one would silently leave the other's failure unexplained.
+    // `install_prompt::should_install` is what actually enforces every hard
+    // gate (no managed build, `--json`/`--quiet`, `--no-install`, a
+    // non-interactive session) before ever asking a question.
+    if let Some(backend) = missing_backend(&results) {
+        if install_prompt::should_install(cli, backend) {
+            match install::install_backend(cli, backend) {
+                Ok(_) => {
+                    let retry_indices: Vec<usize> = results
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| failed_on_missing_backend(&r.result, backend))
+                        .map(|(i, _)| i)
+                        .collect();
+                    let retry_jobs: Vec<input::Job> = retry_indices
+                        .iter()
+                        .map(|&i| original_jobs[i].clone())
+                        .collect();
+                    let (retry_results, _) = batch::run(retry_jobs, cli);
+                    for (idx, new_result) in retry_indices.into_iter().zip(retry_results) {
+                        results[idx] = new_result;
+                    }
+                    code = batch::exit_code(&results);
+                }
+                Err(e) => {
+                    // The install itself failed (network, checksum, ...).
+                    // "On no ... exit with today's error ... unchanged"
+                    // extends naturally to "the install didn't work
+                    // either": report that failure too, but leave
+                    // `results`/`code` exactly as the original
+                    // `backend_missing` failure already reported them.
+                    render::print_error(cli.json, &e);
+                }
+            }
+        }
+    }
+
     print_results(&results, cli);
     code
+}
+
+/// The single backend to offer installing, given this batch's results —
+/// `None` when nothing failed with `backend_missing` at all, or when more
+/// than one distinct backend is implicated (see `run`'s own doc comment for
+/// why a mixed batch gets no prompt).
+fn missing_backend(results: &[batch::JobResult]) -> Option<Backend> {
+    let mut found: Option<Backend> = None;
+    for r in results {
+        let Err(e) = &r.result else { continue };
+        if e.code != ErrorCode::BackendMissing {
+            continue;
+        }
+        let Some(b) = e.backend else { continue };
+        match found {
+            None => found = Some(b),
+            Some(f) if f == b => {}
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
+/// Whether this job's own result is precisely "failed because `backend` was
+/// missing" — the set of jobs a successful install is worth retrying.
+fn failed_on_missing_backend(result: &Result<Outcome, ConvError>, backend: Backend) -> bool {
+    matches!(result, Err(e) if e.code == ErrorCode::BackendMissing && e.backend == Some(backend))
 }
 
 /// Probes the input when, and only when, this pair might be satisfiable by a
@@ -337,5 +414,83 @@ mod tests {
             "out.gif",
         );
         assert!(available_for(&r, &j).is_none());
+    }
+
+    // --- Part 1: missing_backend / failed_on_missing_backend ----------------
+
+    fn ok_job_result() -> batch::JobResult {
+        batch::JobResult {
+            input: PathBuf::from("in.mp4"),
+            output: PathBuf::from("out.gif"),
+            result: Ok(Outcome {
+                output: PathBuf::from("out.gif"),
+                bytes: 1,
+                warnings: vec![],
+                backends: vec![],
+                remuxed: false,
+            }),
+        }
+    }
+
+    fn missing_result(backend: Backend) -> batch::JobResult {
+        batch::JobResult {
+            input: PathBuf::from("in.mp4"),
+            output: PathBuf::from("out.gif"),
+            result: Err(ConvError::backend_missing(backend)),
+        }
+    }
+
+    fn other_failure_result() -> batch::JobResult {
+        batch::JobResult {
+            input: PathBuf::from("in.mp4"),
+            output: PathBuf::from("out.gif"),
+            result: Err(ConvError::new(ErrorCode::OutputExists, "exists")),
+        }
+    }
+
+    #[test]
+    fn missing_backend_finds_the_sole_backend_missing_failure() {
+        let results = vec![ok_job_result(), missing_result(Backend::Ffmpeg)];
+        assert_eq!(missing_backend(&results), Some(Backend::Ffmpeg));
+    }
+
+    #[test]
+    fn missing_backend_is_none_when_nothing_failed_that_way() {
+        let results = vec![ok_job_result(), other_failure_result()];
+        assert_eq!(missing_backend(&results), None);
+    }
+
+    /// A mixed batch — two different backends both missing — must offer no
+    /// prompt at all, since installing one would silently leave the other's
+    /// failure unexplained.
+    #[test]
+    fn missing_backend_is_none_when_two_different_backends_are_missing() {
+        let results = vec![
+            missing_result(Backend::Ffmpeg),
+            missing_result(Backend::Magick),
+        ];
+        assert_eq!(missing_backend(&results), None);
+    }
+
+    #[test]
+    fn missing_backend_tolerates_repeats_of_the_same_backend() {
+        let results = vec![
+            missing_result(Backend::Ffmpeg),
+            missing_result(Backend::Ffmpeg),
+        ];
+        assert_eq!(missing_backend(&results), Some(Backend::Ffmpeg));
+    }
+
+    #[test]
+    fn failed_on_missing_backend_matches_only_the_named_backend() {
+        let r = missing_result(Backend::Ffmpeg);
+        assert!(failed_on_missing_backend(&r.result, Backend::Ffmpeg));
+        assert!(!failed_on_missing_backend(&r.result, Backend::Magick));
+    }
+
+    #[test]
+    fn failed_on_missing_backend_is_false_for_a_different_error_code() {
+        let r = other_failure_result();
+        assert!(!failed_on_missing_backend(&r.result, Backend::Ffmpeg));
     }
 }

@@ -467,6 +467,8 @@ mod tests {
             json: false,
             overwrite: false,
             quiet: true,
+            yes: false,
+            no_install: false,
             outdir,
             jobs: None,
             ffmpeg_path: None,

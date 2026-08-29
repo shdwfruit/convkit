@@ -34,6 +34,19 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub quiet: bool,
 
+    /// Assume yes when prompted to install a missing backend — for a script
+    /// that wants the install-then-retry behaviour without a TTY to answer
+    /// the interactive prompt. Contradicts `--no-install`, which asks the
+    /// opposite question ("never install"): passing both is a usage error.
+    #[arg(long, global = true, conflicts_with = "no_install")]
+    pub yes: bool,
+
+    /// Never offer to install a missing backend — always fail with the
+    /// structured `backend_missing` error, even in an interactive session
+    /// that could otherwise be prompted.
+    #[arg(long, global = true)]
+    pub no_install: bool,
+
     /// Write outputs into this directory.
     #[arg(short = 'o', long, global = true)]
     pub outdir: Option<PathBuf>,

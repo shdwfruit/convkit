@@ -43,12 +43,26 @@ fn single_job_spinner(cli: &Cli, job_count: usize) -> Option<indicatif::Progress
     Some(pb)
 }
 
+/// The batch exit-code rule: 0 if every job succeeded, the underlying
+/// error's own code if every job failed (so a batch that failed only
+/// because a backend is missing still exits 3), or `BatchPartialFailure`
+/// (4) on a mixed result. Factored out of `run` so `commands/convert.rs`'s
+/// install-and-retry prompt (Part 1) can recompute this after splicing
+/// retried results back into an already-reported batch, without
+/// reimplementing the same rule a second time.
+pub fn exit_code(results: &[JobResult]) -> i32 {
+    let failures = results.iter().filter(|r| r.result.is_err()).count();
+    match (failures, results.len()) {
+        (0, _) => 0,
+        (f, n) if f == n => results[0].result.as_ref().unwrap_err().code.exit_code(),
+        _ => ErrorCode::BatchPartialFailure.exit_code(),
+    }
+}
+
 /// Runs every job, in parallel, on a shared `Resolver` (built once so its
 /// per-backend resolution cache is shared across the whole batch rather than
 /// re-probed per job). Returns each job's result alongside the process exit
-/// code: 0 if every job succeeded, the underlying error's code if every job
-/// failed (so a batch that failed only because a backend is missing still
-/// exits 3), or `BatchPartialFailure` (4) on a mixed result.
+/// code (see `exit_code`).
 pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32) {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(cli.jobs.unwrap_or_else(num_cpus_or_one))
@@ -126,11 +140,6 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32) {
         pb.finish_and_clear();
     }
 
-    let failures = results.iter().filter(|r| r.result.is_err()).count();
-    let code = match (failures, results.len()) {
-        (0, _) => 0,
-        (f, n) if f == n => results[0].result.as_ref().unwrap_err().code.exit_code(),
-        _ => ErrorCode::BatchPartialFailure.exit_code(),
-    };
+    let code = exit_code(&results);
     (results, code)
 }

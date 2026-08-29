@@ -116,7 +116,10 @@ soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --co
 Other flags: `-o/--outdir`, `-j/--jobs` (batch parallelism, defaults to the
 core count), `-y/--overwrite` (refused by default — a batch collision skips
 that one file and reports it rather than aborting the run), `-q/--quiet`,
-`--json`, `--dry-run`, and one `--<backend>-path` override per backend.
+`--json`, `--dry-run`, `--yes`/`--no-install` (see [Installing a missing
+backend on the
+fly](#installing-a-missing-backend-on-the-fly) below), and one
+`--<backend>-path` override per backend.
 
 **`conv doctor`** reports what's installed and how to fix what isn't:
 
@@ -181,6 +184,52 @@ include HEVC decoding already.
 from a pinned release tag (never a `releases/latest` alias, which is
 rate-limited per-IP and shared by everyone behind one NAT), and verifies a
 SHA-256 checksum before anything is written to disk.
+
+### Installing a missing backend on the fly
+
+A conversion that fails because a backend is missing used to mean: read the
+error, run `conv install <backend>` yourself, then re-run the original
+command. When the backend is one convkit can actually provision, and the
+session is interactive, `conv` now offers to close that loop for you:
+
+```console
+$ conv clip.mkv clip.mp4
+ffmpeg is required for this conversion and isn't installed.
+Install it now? [y/N] y
+downloading https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip ...
+clip.mp4 (4200 KB) [stream copy]
+```
+
+Answering anything other than `y`/`yes` — or the prompt never appearing at
+all — leaves today's behaviour exactly as it was: the structured
+`backend_missing` error, unchanged, exit code `3`. The prompt only appears
+when *every one* of these hold:
+
+- The backend actually has a managed build for this platform
+  (`soffice`/LibreOffice never qualifies — it has no relocatable binary and
+  can never be auto-installed, prompt or no prompt — and neither does
+  `magick`/ImageMagick, which is `conv install`-eligible in principle but has
+  no verified manifest entry on any platform today).
+- The session is interactive: stdin and stderr are both real terminals,
+  checked properly (not guessed) — piped stdin, a CI runner, and anything
+  else non-interactive always gets the plain structured error instead, with
+  no hang.
+- Neither `--json` nor `--quiet` was passed.
+
+Two flags cover the cases a live prompt can't: `--yes` assumes yes without
+ever touching stdin (for a script that wants the install-then-retry
+behaviour anyway), and `--no-install` refuses to prompt or install under any
+circumstance, always failing with the plain error. Passing both together is
+a usage error. This still keeps convkit's offline-by-default promise —
+"the network is touched only by an explicit `conv install`" — because a
+`y` at this prompt *is* that explicit consent; nothing is ever downloaded
+silently.
+
+`convkit-core` itself never prompts or prints anything — this whole flow
+lives in the `conv` binary, which catches the structured error, asks the
+question, and retries. `--json` output is completely unaffected: a
+missing-backend conversion under `--json` reports exactly the same envelope
+it always has (see below), and exits `3`, with no prompt ever offered.
 
 ## Machine-readable output (`--json`)
 
