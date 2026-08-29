@@ -1,9 +1,17 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use crate::error::{ConvError, Result};
 use crate::Backend;
+
+/// Uniquifies the soffice version-probe's isolated profile directory across
+/// however many probes happen to run inside one process (in practice at
+/// most one per distinct `Resolver`, thanks to the cache below, but this
+/// costs nothing and removes any doubt).
+static VERSION_PROBE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -25,6 +33,11 @@ pub struct ResolvedBackend {
 #[derive(Debug, Default)]
 pub struct Resolver {
     overrides: HashMap<Backend, PathBuf>,
+    /// Successful resolutions, keyed by backend. `Mutex` rather than
+    /// `RefCell` because a `Resolver` is expected to be shared across
+    /// threads in Task 12's rayon batch mode — plain interior mutability
+    /// would make `Resolver` `!Sync` and fail to compile there.
+    cache: Mutex<HashMap<Backend, ResolvedBackend>>,
 }
 
 impl Resolver {
@@ -100,18 +113,29 @@ impl Resolver {
         out
     }
 
+    /// Resolves a backend, caching the result so each backend is probed —
+    /// meaning: its candidates walked and, on a hit, its `--version` spawned
+    /// — at most once per `Resolver` (in practice, once per process, since
+    /// one `Resolver` is expected to live for a whole `conv` invocation).
+    /// Only successes are cached; a missing backend is cheap to re-check
+    /// (no subprocess involved) and re-checking costs nothing.
     pub fn resolve(&self, backend: Backend) -> Result<ResolvedBackend> {
+        if let Some(cached) = self.cache.lock().unwrap().get(&backend) {
+            return Ok(cached.clone());
+        }
         for (path, source) in self.candidates(backend) {
             if !path.is_file() {
                 continue;
             }
             let version = Self::version_of(backend, &path).unwrap_or_else(|| "unknown".into());
-            return Ok(ResolvedBackend {
+            let resolved = ResolvedBackend {
                 backend,
                 path,
                 version,
                 source,
-            });
+            };
+            self.cache.lock().unwrap().insert(backend, resolved.clone());
+            return Ok(resolved);
         }
         Err(ConvError::backend_missing(backend))
     }
@@ -119,25 +143,38 @@ impl Resolver {
     /// First line of `<exe> --version`, trimmed. Never fails the resolve —
     /// an unreadable version is reported as "unknown".
     ///
-    /// Runs with `current_dir` pinned to the system temp directory rather
-    /// than inheriting the caller's cwd. A version probe should be a pure
-    /// query, but nothing stops some executable from writing a side-effect
-    /// file relative to its cwd on `--version` — Task 9's exec test stubs
-    /// do exactly that (they write to whatever their last argv element is,
-    /// and `--version`/`-version` is trivially that), which without this
-    /// left a stray `-version` file in `crates/convkit-core/` on every test
-    /// run. Pinning the directory makes that class of leak impossible for
-    /// any backend, real or stubbed.
+    /// For `soffice` specifically, this is itself a soffice invocation, so
+    /// it gets its own isolated `-env:UserInstallation` profile just like a
+    /// real conversion does — the constraint that every soffice invocation
+    /// gets its own profile has no carve-out for version probes, and without
+    /// this a probe could collide with an already-running LibreOffice. The
+    /// probe's profile directory is removed afterward on a best-effort
+    /// basis; nothing downstream depends on it surviving.
     fn version_of(backend: Backend, path: &Path) -> Option<String> {
         let flag = match backend {
             Backend::Magick => "-version",
             _ => "--version",
         };
-        let out = Command::new(path)
-            .arg(flag)
-            .current_dir(std::env::temp_dir())
-            .output()
-            .ok()?;
+        let mut cmd = Command::new(path);
+        cmd.arg(flag);
+
+        let profile = (backend == Backend::Soffice).then(|| {
+            std::env::temp_dir().join(format!(
+                "convkit-lo-version-probe-{}-{}",
+                std::process::id(),
+                VERSION_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ))
+        });
+        if let Some(profile) = &profile {
+            if let Ok(url) = crate::exec::user_installation_url(profile) {
+                cmd.arg(format!("-env:UserInstallation={url}"));
+            }
+        }
+
+        let out = cmd.output().ok()?;
+        if let Some(profile) = &profile {
+            let _ = std::fs::remove_dir_all(profile);
+        }
         let text = String::from_utf8_lossy(&out.stdout);
         text.lines().next().map(|l| l.trim().to_string())
     }
