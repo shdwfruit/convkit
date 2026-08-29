@@ -19,6 +19,13 @@ pub enum ErrorCode {
     OutputExists,
     /// Batch finished, but at least one item failed.
     BatchPartialFailure,
+    /// The command line itself is malformed — wrong shape, colliding
+    /// outputs, and the like — as opposed to `UnsupportedPair`, which means
+    /// the invocation was well-formed but no recipe exists for that pair.
+    /// Kept distinct so a `--json` consumer can tell "no backend supports
+    /// this conversion" apart from "your invocation doesn't parse"; the
+    /// spec fixes exit codes, not error codes, so both still exit 2.
+    InvalidInvocation,
 }
 
 impl ErrorCode {
@@ -29,7 +36,8 @@ impl ErrorCode {
             ErrorCode::UnsupportedPair
             | ErrorCode::UnknownFormat
             | ErrorCode::InputNotFound
-            | ErrorCode::OutputExists => 2,
+            | ErrorCode::OutputExists
+            | ErrorCode::InvalidInvocation => 2,
             ErrorCode::BackendMissing => 3,
             ErrorCode::BatchPartialFailure => 4,
         }
@@ -109,6 +117,7 @@ mod tests {
         assert_eq!(ErrorCode::OutputExists.exit_code(), 2);
         assert_eq!(ErrorCode::BackendMissing.exit_code(), 3);
         assert_eq!(ErrorCode::BatchPartialFailure.exit_code(), 4);
+        assert_eq!(ErrorCode::InvalidInvocation.exit_code(), 2);
     }
 
     #[test]

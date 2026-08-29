@@ -1,4 +1,4 @@
-use convkit_core::{plan, ConvError};
+use convkit_core::{plan, ConvError, ErrorCode};
 use serde_json::json;
 
 use crate::batch;
@@ -16,20 +16,11 @@ pub fn run(cli: &Cli) -> i32 {
     };
 
     if cli.dry_run {
-        return match dry_run_output(&jobs, cli) {
-            Ok(text) => {
-                print!("{text}");
-                0
-            }
-            Err(e) => {
-                print_error(cli, &e);
-                e.code.exit_code()
-            }
-        };
+        return dry_run(&jobs, cli);
     }
 
     let (results, code) = batch::run(jobs, cli);
-    print!("{}", render_results(&results, cli));
+    print_results(&results, cli);
     code
 }
 
@@ -46,43 +37,76 @@ fn print_error(cli: &Cli, e: &ConvError) {
 }
 
 /// Builds a plan per job (never probing — `--dry-run` always shows the
-/// conservative transcode) and renders them. A single job keeps the exact
-/// envelope shape single-file conversion has always used (`"plan": {...}`);
-/// two or more jobs switch to a `"plans"` array so existing tooling that
-/// reads the single-job shape is unaffected.
-fn dry_run_output(jobs: &[input::Job], cli: &Cli) -> Result<String, ConvError> {
-    let mut plans = Vec::with_capacity(jobs.len());
-    for job in jobs {
-        plans.push(plan::build(
-            job.from,
-            job.to,
-            &job.inputs,
-            &job.output,
-            None,
-        )?);
-    }
-    Ok(if cli.json {
-        let value = if let [only] = plans.as_slice() {
-            render::plan_json(only)
-        } else {
-            json!({ "ok": true, "dry_run": true, "plans": plans })
+/// conservative transcode) and reports every one of them, never aborting
+/// early on the first failure.
+///
+/// A single job replicates the exact legacy single-conversion shape and
+/// error routing — a build failure is a top-level error, on stderr, with
+/// that error's own exit code — which also happens to be exactly what the
+/// multi-job rule below produces for a batch of one, so the preview and the
+/// real run it previews always agree on both shape and exit code.
+///
+/// Two or more jobs never abort early: every job gets its own plan attempt,
+/// with the same per-job stdout/stderr split and exit-code aggregation
+/// `batch::run` uses for a real execution, so a bad job among several
+/// others doesn't erase the preview for the rest.
+fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
+    if let [only] = jobs {
+        return match plan::build(only.from, only.to, &only.inputs, &only.output, None) {
+            Ok(p) => {
+                let text = if cli.json {
+                    format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&render::plan_json(&p)).unwrap()
+                    )
+                } else {
+                    render::plan_human(&p)
+                };
+                print!("{text}");
+                0
+            }
+            Err(e) => {
+                print_error(cli, &e);
+                e.code.exit_code()
+            }
         };
-        format!("{}\n", serde_json::to_string_pretty(&value).unwrap())
-    } else {
-        plans
+    }
+
+    let results: Vec<_> = jobs
+        .iter()
+        .map(|job| plan::build(job.from, job.to, &job.inputs, &job.output, None))
+        .collect();
+
+    if cli.json {
+        let arr: Vec<serde_json::Value> = results
             .iter()
-            .map(render::plan_human)
-            .collect::<Vec<_>>()
-            .join("")
-    })
+            .map(|r| match r {
+                Ok(p) => json!({ "ok": true, "plan": p }),
+                Err(e) => json!({ "ok": false, "error": e }),
+            })
+            .collect();
+        let ok = results.iter().all(|r| r.is_ok());
+        let envelope = json!({ "ok": ok, "dry_run": true, "plans": arr });
+        println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+    } else {
+        for r in &results {
+            match r {
+                Ok(p) => print!("{}", render::plan_human(p)),
+                Err(e) => eprint!("{}", render::error_human(e)),
+            }
+        }
+    }
+
+    exit_code_for(&results)
 }
 
-/// Reports every job's outcome. Unlike a top-level error, a per-job failure
-/// does not abort the run — other jobs may have succeeded — so both
-/// successes and failures land in the same report (stdout in human mode,
-/// one JSON array in `--json` mode); the process exit code, not which
-/// stream a line landed on, is what signals overall pass/fail here.
-fn render_results(results: &[batch::JobResult], cli: &Cli) -> String {
+/// Reports every job's outcome: successes to stdout, per-job failures to
+/// stderr — a batch that partly fails must still let a script watching only
+/// stderr (`2>errors.log`) see the trouble, and let a script piping only
+/// stdout see nothing else. `--json` is unchanged: one array, one write, on
+/// stdout, carrying both outcomes and errors — a machine consumer reads the
+/// exit code for pass/fail, not which stream a line landed on.
+fn print_results(results: &[batch::JobResult], cli: &Cli) {
     if cli.json {
         let arr: Vec<serde_json::Value> = results
             .iter()
@@ -95,18 +119,36 @@ fn render_results(results: &[batch::JobResult], cli: &Cli) -> String {
                 Err(e) => json!({ "ok": false, "input": r.input, "output": r.output, "error": e }),
             })
             .collect();
-        format!(
-            "{}\n",
+        println!(
+            "{}",
             serde_json::to_string_pretty(&serde_json::Value::Array(arr)).unwrap()
-        )
+        );
     } else {
-        results
-            .iter()
-            .map(|r| match &r.result {
-                Ok(o) => render::outcome_human(o),
-                Err(e) => format!("{}: {}", r.output.display(), render::error_human(e)),
-            })
-            .collect::<Vec<_>>()
-            .join("")
+        let mut out = String::new();
+        let mut err = String::new();
+        for r in results {
+            match &r.result {
+                Ok(o) => out.push_str(&render::outcome_human(o)),
+                Err(e) => err.push_str(&render::error_human(e)),
+            }
+        }
+        print!("{out}");
+        eprint!("{err}");
+    }
+}
+
+/// The batch exit-code rule, shared in spirit with `batch::run`: 0 if every
+/// job succeeded, the first failure's own error code if every job failed
+/// (so an all-unsupported-pair dry-run still exits 2, not a generic 4), or
+/// `BatchPartialFailure` (4) on a genuinely mixed result.
+fn exit_code_for<T>(results: &[Result<T, ConvError>]) -> i32 {
+    let failures = results.iter().filter(|r| r.is_err()).count();
+    match (failures, results.len()) {
+        (0, _) => 0,
+        (f, n) if f == n => match &results[0] {
+            Err(e) => e.code.exit_code(),
+            Ok(_) => unreachable!("f == n == results.len() means every result is Err"),
+        },
+        _ => ErrorCode::BatchPartialFailure.exit_code(),
     }
 }
