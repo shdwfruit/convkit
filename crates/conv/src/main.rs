@@ -1,5 +1,7 @@
+mod batch;
 mod cli;
 mod commands;
+mod input;
 mod render;
 
 use clap::Parser;
