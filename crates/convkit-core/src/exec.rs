@@ -185,9 +185,26 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         if step.backend == Backend::Soffice {
             let profile = scratch.join(format!("lo-profile-{i}"));
             let url = user_installation_url(&profile)?;
+            // `plan::build` already inserted `plan::USER_INSTALLATION_
+            // PLACEHOLDER` as this step's first argv element specifically
+            // so `--dry-run` shows this flag at all (I1) — it just can't
+            // know the real per-run scratch profile path at plan time.
+            // Substitute the real, isolated URL in for that placeholder
+            // here, rather than prepending a second copy, so the argv this
+            // process actually receives and the argv `--dry-run` printed
+            // differ only in this one token's value, never in count or
+            // order.
+            debug_assert_eq!(
+                step.argv.first().map(String::as_str),
+                Some(plan::USER_INSTALLATION_PLACEHOLDER),
+                "plan::build must always emit the placeholder as a Soffice \
+                 step's first argv element"
+            );
             cmd.arg(format!("-env:UserInstallation={url}"));
+            cmd.args(step.argv.iter().skip(1));
+        } else {
+            cmd.args(&step.argv);
         }
-        cmd.args(&step.argv);
 
         let out = cmd.output().map_err(|e| {
             ConvError::new(
@@ -495,6 +512,78 @@ mod tests {
         p
     }
 
+    /// Like `outdir_stub_that_writes_pdf`, but also records every argv
+    /// token it received, one per line and in order, to `record_path` — so
+    /// a test can inspect exactly what this process was invoked with,
+    /// including the token at position 0 that `exec::run` is supposed to
+    /// substitute the real `-env:UserInstallation=<url>` into (I1).
+    fn outdir_stub_that_records_argv_and_writes_pdf(dir: &Path, record_path: &Path) -> PathBuf {
+        let record = record_path.display();
+        let (name, body) = if cfg!(windows) {
+            (
+                "outdir_record_stub.bat",
+                format!(
+                    "@echo off\r\n\
+                     if not \"%~2\"==\"\" goto notversion\r\n\
+                     if \"%~1\"==\"--version\" exit /b 0\r\n\
+                     if \"%~1\"==\"-version\" exit /b 0\r\n\
+                     :notversion\r\n\
+                     set \"outdir=\"\r\n\
+                     type nul > \"{record}\"\r\n\
+                     :loop\r\n\
+                     if \"%~1\"==\"\" goto done\r\n\
+                     echo %~1>>\"{record}\"\r\n\
+                     if \"%~1\"==\"--outdir\" goto capture_outdir\r\n\
+                     set \"last=%~1\"\r\n\
+                     shift\r\n\
+                     goto loop\r\n\
+                     :capture_outdir\r\n\
+                     shift\r\n\
+                     echo %~1>>\"{record}\"\r\n\
+                     set \"outdir=%~1\"\r\n\
+                     shift\r\n\
+                     goto loop\r\n\
+                     :done\r\n\
+                     for %%F in (\"%last%\") do set \"stem=%%~nF\"\r\n\
+                     <nul set /p \"=x\" >\"%outdir%\\%stem%.pdf\"\r\n\
+                     exit /b 0\r\n"
+                ),
+            )
+        } else {
+            (
+                "outdir_record_stub.sh",
+                format!(
+                    "#!/bin/sh\n\
+                     if [ \"$#\" = \"1\" ] && {{ [ \"$1\" = \"--version\" ] || [ \"$1\" = \"-version\" ]; }}; then\n\
+                     \x20   exit 0\n\
+                     fi\n\
+                     outdir=\"\"\n\
+                     last=\"\"\n\
+                     prev=\"\"\n\
+                     : > \"{record}\"\n\
+                     for a in \"$@\"; do\n\
+                     \x20   echo \"$a\" >> \"{record}\"\n\
+                     \x20   if [ \"$prev\" = \"--outdir\" ]; then outdir=\"$a\"; fi\n\
+                     \x20   last=\"$a\"\n\
+                     \x20   prev=\"$a\"\n\
+                     done\n\
+                     stem=$(basename \"$last\")\n\
+                     stem=\"${{stem%.*}}\"\n\
+                     printf x > \"$outdir/$stem.pdf\"\n"
+                ),
+            )
+        };
+        let p = dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
     /// Every `.convkit-<pid>-<n>` scratch directory (if any) currently
     /// sitting directly inside `dir`.
     fn scratch_dirs_in(dir: &Path) -> Vec<String> {
@@ -766,5 +855,42 @@ mod tests {
 
         let found = locate_outdir_result(OsStr::new("report"), "pdf", dir.path()).unwrap();
         assert_eq!(found, dir.path().join("report.pdf"));
+    }
+
+    /// I1: the process actually invoked must receive the real, per-run,
+    /// percent-encoded `-env:UserInstallation=file://...` URL as its first
+    /// argument — never the literal placeholder text `plan::build` prints
+    /// for `--dry-run` — proving `run()`'s substitution (not a second,
+    /// separately-prepended flag) is what reaches the backend.
+    #[test]
+    fn the_real_soffice_invocation_substitutes_the_real_url_for_the_dry_run_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("argv-record.txt");
+        let stub = outdir_stub_that_records_argv_and_writes_pdf(dir.path(), &record);
+        let mut r = Resolver::new();
+        r.with_override(Backend::Soffice, stub);
+
+        let input = dir.path().join("report.docx");
+        std::fs::write(&input, b"docx-bytes").unwrap();
+        let req = Request {
+            from: Format::Docx,
+            to: Format::Pdf,
+            inputs: vec![input],
+            output: dir.path().join("out.pdf"),
+        };
+
+        run(&req, &r, &mut |_| {}).unwrap();
+
+        let recorded = std::fs::read_to_string(&record).unwrap();
+        let first_token = recorded.lines().next().unwrap();
+        assert!(
+            first_token.starts_with("-env:UserInstallation=file://"),
+            "{first_token:?}"
+        );
+        assert_ne!(
+            first_token,
+            crate::plan::USER_INSTALLATION_PLACEHOLDER,
+            "the real process must never see the dry-run placeholder text"
+        );
     }
 }

@@ -110,7 +110,7 @@ renders that to PDF, as two backend invocations behind one command:
 ```console
 $ conv sample.md .pdf --dry-run
 pandoc sample.md --standalone -o sample.convkit-step0.docx
-soffice --headless --norestore --convert-to pdf --outdir . sample.convkit-step0.docx
+soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . sample.convkit-step0.docx
 ```
 
 Other flags: `-o/--outdir`, `-j/--jobs` (batch parallelism, defaults to the

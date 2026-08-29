@@ -1,6 +1,6 @@
 ---
 source: crates/convkit-core/tests/recipes.rs
-expression: "lines.join(\"\\n\")"
+expression: "lines.join(\"\n\")"
 ---
 avi -> flac: ffmpeg -i in.avi -vn -c:a flac -y out.flac
 avi -> gif: ffmpeg -i in.avi -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
@@ -21,7 +21,7 @@ bmp -> pdf: magick in.bmp -auto-orient out.pdf
 bmp -> png: magick in.bmp -auto-orient out.png
 bmp -> tiff: magick in.bmp -auto-orient out.tiff
 bmp -> webp: magick in.bmp -auto-orient -quality 92 out.webp
-docx -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.docx
+docx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.docx
 flac -> m4a: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
 flac -> mp3: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
 flac -> wav: ffmpeg -i in.flac -vn -c:a pcm_s16le -y out.wav
@@ -52,7 +52,7 @@ m4a -> wav: ffmpeg -i in.m4a -vn -c:a pcm_s16le -y out.wav
 md -> docx: pandoc in.md --standalone -o out.docx
 md -> html: pandoc in.md --standalone -o out.html
 md -> pdf: pandoc in.md --standalone -o out.convkit-step0.docx
-md -> pdf: soffice --headless --norestore --convert-to pdf --outdir . out.convkit-step0.docx
+md -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . out.convkit-step0.docx
 mkv -> flac: ffmpeg -i in.mkv -vn -c:a flac -y out.flac
 mkv -> gif: ffmpeg -i in.mkv -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
 mkv -> m4a: ffmpeg -i in.mkv -vn -c:a aac -b:a 192k -y out.m4a
@@ -76,16 +76,16 @@ mp4 -> m4a: ffmpeg -i in.mp4 -vn -c:a aac -b:a 192k -y out.m4a
 mp4 -> mp3: ffmpeg -i in.mp4 -vn -c:a libmp3lame -q:a 2 -y out.mp3
 mp4 -> wav: ffmpeg -i in.mp4 -vn -c:a pcm_s16le -y out.wav
 mp4 -> webm: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -y out.webm
-ods -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.ods
-odt -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.odt
-pdf -> docx: soffice --headless --norestore --infilter=writer_pdf_import --convert-to docx:MS Word 2007 XML --outdir . in.pdf
+ods -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.ods
+odt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.odt
+pdf -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=writer_pdf_import --convert-to docx:MS Word 2007 XML --outdir . in.pdf
 png -> avif: magick in.png -auto-orient -quality 92 out.avif
 png -> bmp: magick in.png -auto-orient out.bmp
 png -> jpg: magick in.png -auto-orient -quality 92 out.jpg
 png -> pdf: magick in.png -auto-orient out.pdf
 png -> tiff: magick in.png -auto-orient out.tiff
 png -> webp: magick in.png -auto-orient -quality 92 out.webp
-pptx -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.pptx
+pptx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.pptx
 svg -> jpg: magick -density 384 -background white in.svg -alpha remove -alpha off -flatten -quality 92 out.jpg
 svg -> png: magick -density 384 -background none in.svg out.png
 tiff -> avif: magick in.tiff -auto-orient -quality 92 out.avif
@@ -109,4 +109,4 @@ webp -> jpg: magick in.webp -auto-orient -quality 92 out.jpg
 webp -> pdf: magick in.webp -auto-orient out.pdf
 webp -> png: magick in.webp -auto-orient out.png
 webp -> tiff: magick in.webp -auto-orient out.tiff
-xlsx -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.xlsx
+xlsx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.xlsx
