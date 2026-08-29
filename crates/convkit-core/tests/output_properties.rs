@@ -134,6 +134,96 @@ fn remux_fixture_to(name: &str, container_ext: &str) -> PathBuf {
     out
 }
 
+// --- Invocation choice ---------------------------------------------------
+
+/// Chooses how to invoke ImageMagick's `identify` given `resolved` -- the
+/// binary `Resolver::resolve(Backend::Magick)` actually resolved -- pinned
+/// to the real, current platform. See `identify_command_for`'s docs for the
+/// full IM6/IM7 rationale.
+fn identify_command(resolved: &Path) -> (PathBuf, Vec<String>) {
+    identify_command_for(resolved, cfg!(windows))
+}
+
+/// The logic behind `identify_command`. ImageMagick 7 ships one unified
+/// `magick` binary and treats companion tools (`identify`, `mogrify`,
+/// `compare`, `-list`, ...) as subcommands: `magick identify ...`.
+/// ImageMagick 6 -- what `Resolver`'s `convert` fallback resolves to on a
+/// machine whose package manager still ships IM6, e.g. Ubuntu's
+/// `apt-get install imagemagick` -- has no such subcommand: `identify` is
+/// its own binary, sitting beside `convert` in the same directory. Running
+/// `<IM6 convert> identify ...` doesn't fail to find the subcommand; it
+/// happily tries to *convert a file named `identify`*, which is the bug
+/// this function exists to prevent (this file only ever needs `identify`,
+/// not `mogrify`/`compare`/`-list`, but the same choice would apply to
+/// those).
+///
+/// Decided purely from `resolved`'s file name: `magick` (IM7) means invoke
+/// `<resolved> identify ...`; anything else (IM6's `convert`) means invoke
+/// the sibling `identify` binary in `resolved`'s own directory, with no
+/// subcommand -- the resolved path's parent directory, not `PATH`, per how
+/// the rest of this project treats resolved backends (see `cli.rs`'s
+/// `ffmpeg_path`-derived `ffprobe` sibling lookup).
+///
+/// Takes `is_windows` as an explicit argument rather than reading
+/// `cfg!(windows)` itself -- mirroring `resolve.rs`'s
+/// `magick_convert_fallback_applies` -- so the executable-extension choice
+/// below is testable for *both* platforms' convention on every host in
+/// CI's `cargo test --workspace` matrix (ubuntu-latest, macos-latest,
+/// windows-latest), including windows-latest, where `cfg!(windows)` is
+/// always `true` and could otherwise never exercise the non-Windows branch.
+///
+/// The file name is located by hand -- the last `/` or `\`, whichever is
+/// later in the string -- rather than through `std::path::Path`'s
+/// component parser, whose separator handling is host-specific (`\` is not
+/// a path separator on non-Windows). Every real `resolved` path is native
+/// to the host that produced it, so this makes no difference there; it's
+/// what lets this function's own unit tests exercise both a Windows-style
+/// and a Unix-style path deterministically regardless of which OS is
+/// actually running the test.
+fn identify_command_for(resolved: &Path, is_windows: bool) -> (PathBuf, Vec<String>) {
+    let raw = resolved.to_string_lossy().into_owned();
+    let split = raw.rfind(['/', '\\']);
+    let dir = match split {
+        Some(idx) => &raw[..=idx],
+        None => "",
+    };
+    let file_name = match split {
+        Some(idx) => &raw[idx + 1..],
+        None => raw.as_str(),
+    };
+    let stem = file_name.strip_suffix(".exe").unwrap_or(file_name);
+
+    if stem == "magick" {
+        (resolved.to_path_buf(), vec!["identify".to_string()])
+    } else {
+        let sibling = if is_windows {
+            "identify.exe"
+        } else {
+            "identify"
+        };
+        (PathBuf::from(format!("{dir}{sibling}")), Vec::new())
+    }
+}
+
+/// Runs `identify_command(magick)` with `args` appended, panicking with the
+/// captured stderr on a non-zero exit. Shared by `imagemagick_unique_colors`
+/// and `imagemagick_dimensions`, whose only difference is the `-format`
+/// string.
+fn run_identify(magick: &Path, args: &[&str]) -> String {
+    let (bin, mut full_args) = identify_command(magick);
+    full_args.extend(args.iter().map(|s| s.to_string()));
+    let out = Command::new(&bin)
+        .args(&full_args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run identify ({}): {e}", bin.display()));
+    assert!(
+        out.status.success(),
+        "identify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 // --- Inspection helpers ----------------------------------------------------
 
 fn ffprobe_video_codec(path: &Path) -> String {
@@ -147,49 +237,33 @@ fn ffprobe_video_codec(path: &Path) -> String {
         .unwrap_or_else(|| panic!("no video stream in {}", path.display()))
 }
 
-/// `magick identify -format "%k" <file>[0]`. The `[0]` restricts
-/// ImageMagick to the first frame: without it, a multi-frame file (an
-/// animated GIF, or a burst-mode HEIC) makes `identify` emit one `%k` per
-/// frame concatenated with no separator, which is not a single count.
+/// `identify -format "%k" <file>[0]` (see `identify_command` for how the
+/// binary and any subcommand are chosen). The `[0]` restricts ImageMagick
+/// to the first frame: without it, a multi-frame file (an animated GIF, or
+/// a burst-mode HEIC) makes `identify` emit one `%k` per frame concatenated
+/// with no separator, which is not a single count.
 fn imagemagick_unique_colors(path: &Path) -> u64 {
     let resolver = Resolver::new();
     require_backend(&resolver, Backend::Magick);
     let magick = resolver.resolve(Backend::Magick).unwrap().path;
 
     let first_frame = format!("{}[0]", path.display());
-    let out = Command::new(&magick)
-        .args(["identify", "-format", "%k", &first_frame])
-        .output()
-        .unwrap_or_else(|e| panic!("failed to run magick identify: {e}"));
-    assert!(
-        out.status.success(),
-        "magick identify failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = run_identify(&magick, &["-format", "%k", &first_frame]);
     text.trim()
         .parse()
         .unwrap_or_else(|_| panic!("could not parse unique-colour count from {text:?}"))
 }
 
-/// `magick identify -format "%w %h" <file>[0]`; see
-/// `imagemagick_unique_colors` for why `[0]` matters.
+/// `identify -format "%w %h" <file>[0]`; see `imagemagick_unique_colors`
+/// for why `[0]` matters and `identify_command` for how the binary and any
+/// subcommand are chosen.
 fn imagemagick_dimensions(path: &Path) -> (u32, u32) {
     let resolver = Resolver::new();
     require_backend(&resolver, Backend::Magick);
     let magick = resolver.resolve(Backend::Magick).unwrap().path;
 
     let first_frame = format!("{}[0]", path.display());
-    let out = Command::new(&magick)
-        .args(["identify", "-format", "%w %h", &first_frame])
-        .output()
-        .unwrap_or_else(|e| panic!("failed to run magick identify: {e}"));
-    assert!(
-        out.status.success(),
-        "magick identify failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = run_identify(&magick, &["-format", "%w %h", &first_frame]);
     let mut it = text.split_whitespace();
     let w: u32 = it
         .next()
@@ -266,4 +340,87 @@ fn docx_to_pdf_produces_a_real_pdf() {
         .read_exact(&mut header)
         .unwrap();
     assert_eq!(&header, b"%PDF-");
+}
+
+// --- Unit tests: identify_command ------------------------------------------
+//
+// Not `#[ignore]`d and not gated on any installed backend: this covers the
+// IM6/IM7 invocation-choice logic itself as a pure function of a path
+// string, so it runs (and can fail for real) on every machine, including
+// this one, which only has ImageMagick 7 -- the same reason the property
+// tests above exist for the recipes themselves, applied to a test helper.
+mod tests {
+    use super::*;
+
+    #[test]
+    fn magick_windows_style_path_is_a_subcommand_on_both_platforms() {
+        let resolved = Path::new(r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe");
+        for is_windows in [true, false] {
+            let (bin, args) = identify_command_for(resolved, is_windows);
+            assert_eq!(bin, resolved, "is_windows={is_windows}");
+            assert_eq!(
+                args,
+                vec!["identify".to_string()],
+                "is_windows={is_windows}"
+            );
+        }
+    }
+
+    #[test]
+    fn magick_unix_style_path_is_a_subcommand_on_both_platforms() {
+        let resolved = Path::new("/usr/local/bin/magick");
+        for is_windows in [true, false] {
+            let (bin, args) = identify_command_for(resolved, is_windows);
+            assert_eq!(bin, resolved, "is_windows={is_windows}");
+            assert_eq!(
+                args,
+                vec!["identify".to_string()],
+                "is_windows={is_windows}"
+            );
+        }
+    }
+
+    #[test]
+    fn convert_windows_style_path_uses_a_sibling_identify_binary() {
+        let resolved = Path::new(r"C:\Program Files\ImageMagick-6.9-Q16\convert.exe");
+
+        let (bin, args) = identify_command_for(resolved, true);
+        assert_eq!(
+            bin,
+            Path::new(r"C:\Program Files\ImageMagick-6.9-Q16\identify.exe")
+        );
+        assert!(args.is_empty());
+
+        let (bin, args) = identify_command_for(resolved, false);
+        assert_eq!(
+            bin,
+            Path::new(r"C:\Program Files\ImageMagick-6.9-Q16\identify")
+        );
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn convert_unix_style_path_uses_a_sibling_identify_binary() {
+        let resolved = Path::new("/usr/bin/convert");
+
+        let (bin, args) = identify_command_for(resolved, true);
+        assert_eq!(bin, Path::new("/usr/bin/identify.exe"));
+        assert!(args.is_empty());
+
+        let (bin, args) = identify_command_for(resolved, false);
+        assert_eq!(bin, Path::new("/usr/bin/identify"));
+        assert!(args.is_empty());
+    }
+
+    /// `identify_command` (no explicit `is_windows`) must agree with
+    /// `identify_command_for` pinned to the real, current platform -- this
+    /// is what every real call site actually uses.
+    #[test]
+    fn identify_command_matches_the_real_platform() {
+        let resolved = Path::new("/usr/bin/convert");
+        assert_eq!(
+            identify_command(resolved),
+            identify_command_for(resolved, cfg!(windows))
+        );
+    }
 }
