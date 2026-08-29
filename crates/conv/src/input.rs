@@ -139,15 +139,22 @@ pub fn jobs_from(
 /// are skipped), then delegates to `jobs_from`. Glob expansion is already
 /// done by `wild` in `main.rs` before this ever runs — this never globs.
 ///
-/// Candidates that already sit inside `-o`'s directory are skipped: without
-/// this, `conv ./photos --to jpg -o photos` would pick its own previous
-/// output back up as fresh input on a repeat run and re-encode it,
-/// degrading quality on every pass.
+/// A file whose format already matches `--to` is skipped during this
+/// expansion, regardless of whether `-o` is set: without this, `conv
+/// ./photos --to jpg` (outputs beside their inputs) or `conv ./photos --to
+/// jpg -o photos` (outputs into the same directory) would pick its own
+/// previous output back up as fresh input on a repeat run and re-encode it,
+/// degrading quality on every pass. The registry has no self-pairs, so a
+/// same-format conversion could never have succeeded anyway — nothing is
+/// lost by skipping it here instead of letting it fail downstream.
+///
+/// This only applies to files *we* chose by expanding a directory. A file
+/// the user named explicitly — typed, or produced by a shell/`wild` glob
+/// such as `*.jpg --to jpg` — is honoured as given and left to fail with an
+/// honest unsupported-pair error; we only get to skip files we discovered
+/// ourselves.
 pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
-    let outdir_canon = cli
-        .outdir
-        .as_deref()
-        .and_then(|d| std::fs::canonicalize(d).ok());
+    let target_format = cli.to.as_deref().and_then(Format::from_ext);
 
     let mut expanded: Vec<PathBuf> = Vec::with_capacity(cli.paths.len());
     for path in &cli.paths {
@@ -163,13 +170,11 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
                 if !p.is_file() {
                     continue;
                 }
-                if Format::from_path(&p).is_none() {
+                let Some(fmt) = Format::from_path(&p) else {
                     continue;
-                }
-                if let Some(outdir) = cli.outdir.as_deref() {
-                    if is_under_outdir(&p, outdir, outdir_canon.as_deref()) {
-                        continue;
-                    }
+                };
+                if Some(fmt) == target_format {
+                    continue;
                 }
                 expanded.push(p);
             }
@@ -178,24 +183,6 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
         }
     }
     jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())
-}
-
-/// True when `candidate` (an existing file found while expanding a
-/// directory positional) sits inside `outdir`. `outdir_canon` is `outdir`
-/// canonicalized once by the caller, so this doesn't repeat that syscall
-/// per candidate; canonicalizing `outdir` can fail when it doesn't exist
-/// yet (`conv` creates it as needed), in which case this falls back to a
-/// lexical `starts_with` rather than erroring — and a not-yet-existing
-/// directory can't already contain any file `read_dir` just found anyway,
-/// so the fallback is only ever exercised in practice by paranoia, not by
-/// the bug this guards against.
-fn is_under_outdir(candidate: &Path, outdir: &Path, outdir_canon: Option<&Path>) -> bool {
-    match outdir_canon {
-        Some(o) => std::fs::canonicalize(candidate)
-            .map(|c| c.starts_with(o))
-            .unwrap_or_else(|_| candidate.starts_with(outdir)),
-        None => candidate.starts_with(outdir),
-    }
 }
 
 #[cfg(test)]
@@ -295,7 +282,9 @@ mod tests {
         assert_eq!(jobs[0].inputs, v(&["a.mp4"]));
     }
 
-    // --- Controller review round 3: -o must not re-ingest its own output --
+    // --- Controller review round 4: skip already-converted files by
+    // format, not by location, so re-running a batch stays idempotent
+    // without disabling in-place conversion ------------------------------
 
     fn cli_for(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
         Cli {
@@ -315,19 +304,33 @@ mod tests {
         }
     }
 
-    /// `conv ./photos --to jpg -o photos` writes `.jpg` files into `photos`
-    /// itself; a repeat run must not treat `photos/a.jpg` — which IS a prior
-    /// run's own output, since `-o` and the scanned directory are the same
-    /// directory — as fresh input and re-encode it. Directory expansion is
-    /// non-recursive, so this "candidate resolves under outdir" geometry can
-    /// only arise when `-o` names the exact directory being scanned; in that
-    /// geometry there is no way to tell a fresh source file (`a.heic`) apart
-    /// from a previous run's output (`a.jpg`) once both live flat in the
-    /// same directory, so the guard conservatively excludes every candidate
-    /// there rather than guessing — the semantics table's own example
-    /// already recommends a distinct `-o` directory for exactly this reason.
+    /// `conv <dir> --to jpg`, no `-o`: outputs land beside their inputs, so
+    /// a repeat run has exactly the same re-ingestion problem `-o` does.
+    /// The guard is not tied to `-o` at all — it must skip `a.jpg` here too.
     #[test]
-    fn scanning_a_directory_that_is_also_its_own_outdir_yields_no_jobs() {
+    fn directory_expansion_skips_files_already_in_the_target_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let photos = dir.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        std::fs::write(photos.join("a.heic"), b"fresh input").unwrap();
+        std::fs::write(photos.join("a.jpg"), b"already converted").unwrap();
+
+        let cli = cli_for(vec![photos.clone()], Some("jpg"), None);
+
+        let jobs = plan_jobs(&cli).unwrap();
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        assert_eq!(jobs[0].inputs, vec![photos.join("a.heic")]);
+    }
+
+    /// Updated from fix round 3: `conv ./photos --to jpg -o photos` must
+    /// still convert the fresh `a.heic` — unlike the location-based guard
+    /// this replaces, which excluded everything in the scanned directory
+    /// whenever `-o` named that same directory. The extension-based skip
+    /// only removes `a.jpg` (already the target format, and presumably a
+    /// prior run's own output), leaving `a.heic` to become one job whose
+    /// output lands in `photos` per `-o`.
+    #[test]
+    fn outdir_matching_the_scanned_directory_still_converts_fresh_input() {
         let dir = tempfile::tempdir().unwrap();
         let photos = dir.path().join("photos");
         std::fs::create_dir(&photos).unwrap();
@@ -337,53 +340,22 @@ mod tests {
         let cli = cli_for(vec![photos.clone()], Some("jpg"), Some(photos.clone()));
 
         let jobs = plan_jobs(&cli).unwrap();
-        assert_eq!(
-            jobs.len(),
-            0,
-            "outdir == the scanned directory must exclude every candidate, \
-             not just the one that looks like stale output: {jobs:?}"
-        );
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        assert_eq!(jobs[0].inputs, vec![photos.join("a.heic")]);
+        assert_eq!(jobs[0].output, photos.join("a.jpg"));
     }
 
-    /// The common, recommended shape (`-o` a directory distinct from the one
-    /// being scanned) must be completely unaffected by the guard above: a
-    /// non-recursive scan never produces a candidate that resolves under an
-    /// unrelated directory, so every fresh file is still picked up.
+    /// An explicitly named file — not discovered by expanding a directory —
+    /// is honoured as given even when its format already matches `--to`:
+    /// the skip only applies to files `plan_jobs` chose itself. This mirrors
+    /// what a `*.jpg --to jpg` shell/`wild` glob would hand `conv`: a flat
+    /// list of already-expanded paths, indistinguishable from paths the
+    /// user typed by hand.
     #[test]
-    fn a_separate_outdir_does_not_exclude_anything_being_scanned() {
-        let dir = tempfile::tempdir().unwrap();
-        let photos = dir.path().join("photos");
-        let out = dir.path().join("out");
-        std::fs::create_dir(&photos).unwrap();
-        std::fs::create_dir(&out).unwrap();
-        std::fs::write(photos.join("a.heic"), b"fresh input").unwrap();
-
-        let cli = cli_for(vec![photos.clone()], Some("jpg"), Some(out));
-
-        let jobs = plan_jobs(&cli).unwrap();
+    fn an_explicitly_named_file_already_in_the_target_format_is_not_skipped() {
+        let jobs = jobs_from(&v(&["a.jpg"]), Some("jpg"), None).unwrap();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].inputs, vec![photos.join("a.heic")]);
-    }
-
-    /// The guard must not error when `-o` names a directory that doesn't
-    /// exist yet — `conv` creates it as needed — so `canonicalize` failing
-    /// on the outdir must fall back to a lexical comparison rather than
-    /// propagating an error.
-    #[test]
-    fn directory_expansion_tolerates_an_outdir_that_does_not_exist_yet() {
-        let dir = tempfile::tempdir().unwrap();
-        let photos = dir.path().join("photos");
-        std::fs::create_dir(&photos).unwrap();
-        std::fs::write(photos.join("a.heic"), b"fresh input").unwrap();
-
-        let cli = cli_for(
-            vec![photos.clone()],
-            Some("jpg"),
-            Some(dir.path().join("does-not-exist-yet")),
-        );
-
-        let jobs = plan_jobs(&cli).unwrap();
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].inputs, vec![photos.join("a.heic")]);
+        assert_eq!(jobs[0].inputs, v(&["a.jpg"]));
+        assert_eq!(jobs[0].output, PathBuf::from("a.jpg"));
     }
 }
