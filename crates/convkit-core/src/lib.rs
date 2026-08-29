@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod error;
+pub mod exec;
 pub mod format;
 pub mod plan;
 pub mod probe;
@@ -9,6 +10,7 @@ pub mod resolve;
 
 pub use backend::{Backend, PackageManager};
 pub use error::{ConvError, ErrorCode, Remediation, Result};
+pub use exec::{Event, Outcome, Request};
 pub use format::{Format, Kind};
 pub use plan::build as build_plan;
 pub use plan::{ConversionPlan, PlannedStep};

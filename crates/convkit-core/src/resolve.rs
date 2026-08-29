@@ -118,12 +118,26 @@ impl Resolver {
 
     /// First line of `<exe> --version`, trimmed. Never fails the resolve —
     /// an unreadable version is reported as "unknown".
+    ///
+    /// Runs with `current_dir` pinned to the system temp directory rather
+    /// than inheriting the caller's cwd. A version probe should be a pure
+    /// query, but nothing stops some executable from writing a side-effect
+    /// file relative to its cwd on `--version` — Task 9's exec test stubs
+    /// do exactly that (they write to whatever their last argv element is,
+    /// and `--version`/`-version` is trivially that), which without this
+    /// left a stray `-version` file in `crates/convkit-core/` on every test
+    /// run. Pinning the directory makes that class of leak impossible for
+    /// any backend, real or stubbed.
     fn version_of(backend: Backend, path: &Path) -> Option<String> {
         let flag = match backend {
             Backend::Magick => "-version",
             _ => "--version",
         };
-        let out = Command::new(path).arg(flag).output().ok()?;
+        let out = Command::new(path)
+            .arg(flag)
+            .current_dir(std::env::temp_dir())
+            .output()
+            .ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         text.lines().next().map(|l| l.trim().to_string())
     }
