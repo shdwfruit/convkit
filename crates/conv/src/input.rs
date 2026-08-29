@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use convkit_core::{ConvError, ErrorCode, Format, Kind};
+use convkit_core::{ConvError, ErrorCode, Format, Kind, Remediation};
 
 use crate::cli::Cli;
 
@@ -29,8 +29,16 @@ fn is_bare_extension_shorthand(rest: &str) -> bool {
 /// Resolves the `IN OUT` and `IN .ext` positional forms.
 fn resolve_pair(paths: &[PathBuf]) -> Result<(PathBuf, PathBuf), ConvError> {
     let [input, target] = paths else {
+        // I3: this is "the invocation doesn't parse," not "no recipe exists
+        // for a well-formed pair" — `UnsupportedPair` means the latter, and
+        // is otherwise reserved for `plan::build`/`registry::lookup`
+        // failing on a pair both formats are known. A bare `conv` with no
+        // arguments used to report `code: "unsupported_pair"` here, which
+        // is the wrong half of spec §9's machine-readable `code` for a
+        // `--json` consumer to branch on, even though the exit code (2)
+        // happened to coincide either way.
         return Err(ConvError::new(
-            ErrorCode::UnsupportedPair,
+            ErrorCode::InvalidInvocation,
             "expected an input and an output, e.g. `conv in.mp4 out.gif`",
         ));
     };
@@ -71,9 +79,12 @@ pub fn jobs_from(
             let base = input.with_extension(to_fmt.ext());
             let output = match outdir {
                 Some(dir) => {
+                    // I3: a path with no file name at all (e.g. `.` or `/`)
+                    // is a malformed invocation, not an unsupported format
+                    // pair — the formats here are perfectly well known.
                     let name = base.file_name().ok_or_else(|| {
                         ConvError::new(
-                            ErrorCode::UnsupportedPair,
+                            ErrorCode::InvalidInvocation,
                             format!("input has no file name: {}", input.display()),
                         )
                     })?;
@@ -154,14 +165,41 @@ pub fn jobs_from(
 /// honest unsupported-pair error; we only get to skip files we discovered
 /// ourselves.
 pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
+    // `-o/--outdir` is a request to write there, not a precondition that it
+    // already exists — `exec::run` refuses outright when its scratch
+    // directory's parent is missing, and until this fix nothing ever
+    // created it, so the exact invocation spec §8 and the README publish
+    // (`conv ./photos --to jpg -o ./out`) failed on a fresh `./out`. A
+    // failure to create it is a usage problem (the path is unwritable, or a
+    // component collides with an existing file), not a conversion failure,
+    // hence `InvalidInvocation` (exit 2) rather than letting it surface
+    // later as an exec-time `ConversionFailed` (exit 1) once per job.
+    if let Some(dir) = &cli.outdir {
+        std::fs::create_dir_all(dir).map_err(|e| ConvError {
+            code: ErrorCode::InvalidInvocation,
+            message: format!("cannot create output directory {}: {e}", dir.display()),
+            backend: None,
+            remediation: Some(Remediation {
+                managed: None,
+                manual: Some(format!(
+                    "create it yourself and check permissions, e.g. `mkdir -p {}`",
+                    dir.display()
+                )),
+            }),
+        })?;
+    }
+
     let target_format = cli.to.as_deref().and_then(Format::from_ext);
 
     let mut expanded: Vec<PathBuf> = Vec::with_capacity(cli.paths.len());
     for path in &cli.paths {
         if path.is_dir() {
+            // I3: an unreadable directory is a filesystem/usage problem, not
+            // an unsupported format pair — no formats have even been looked
+            // at yet at this point.
             let entries = std::fs::read_dir(path).map_err(|e| {
                 ConvError::new(
-                    ErrorCode::UnsupportedPair,
+                    ErrorCode::InvalidInvocation,
                     format!("cannot read directory {}: {e}", path.display()),
                 )
             })?;
@@ -195,6 +233,18 @@ mod tests {
 
     fn v(p: &[&str]) -> Vec<PathBuf> {
         p.iter().map(PathBuf::from).collect()
+    }
+
+    // --- I3: `UnsupportedPair` is reserved for a well-formed pair with no
+    // recipe; these three conditions are malformed invocations instead ----
+
+    /// A bare `conv` with no arguments used to report `code:
+    /// "unsupported_pair"`, even though no pair — supported or otherwise —
+    /// was ever named.
+    #[test]
+    fn a_missing_input_and_output_is_an_invalid_invocation_not_an_unsupported_pair() {
+        let e = resolve_pair(&[]).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
     }
 
     #[test]
@@ -343,6 +393,67 @@ mod tests {
         assert_eq!(jobs.len(), 1, "{jobs:?}");
         assert_eq!(jobs[0].inputs, vec![photos.join("a.heic")]);
         assert_eq!(jobs[0].output, photos.join("a.jpg"));
+    }
+
+    // --- C2: -o/--outdir must be created, not merely assumed to exist -----
+
+    /// The exact bug: spec §8's and the README's own headline example,
+    /// `conv ./photos --to jpg -o ./out`, failed outright with "output
+    /// directory does not exist" because nothing ever created `-o`'s
+    /// target. `plan_jobs` must create it.
+    #[test]
+    fn plan_jobs_creates_the_outdir_when_it_does_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.heic");
+        std::fs::write(&input, b"x").unwrap();
+        let outdir = dir.path().join("out");
+        assert!(!outdir.exists());
+
+        let cli = cli_for(vec![input], Some("jpg"), Some(outdir.clone()));
+        let jobs = plan_jobs(&cli).unwrap();
+
+        assert!(outdir.is_dir(), "plan_jobs must create the outdir");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].output, outdir.join("a.jpg"));
+    }
+
+    /// An already-existing `-o` directory is untouched (idempotent) — a
+    /// second run into the same `-o` must not error just because the
+    /// directory is already there.
+    #[test]
+    fn plan_jobs_tolerates_an_outdir_that_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.heic");
+        std::fs::write(&input, b"x").unwrap();
+        let outdir = dir.path().join("out");
+        std::fs::create_dir(&outdir).unwrap();
+
+        let cli = cli_for(vec![input], Some("jpg"), Some(outdir.clone()));
+        assert!(plan_jobs(&cli).is_ok());
+    }
+
+    /// When the outdir genuinely cannot be created (here: a path component
+    /// collides with an existing plain file), this is a usage problem —
+    /// `InvalidInvocation` (exit 2) — not a `ConversionFailed` (exit 1)
+    /// surfacing once per job deep inside `exec::run`, and it must carry a
+    /// remediation like every other failure (spec §9).
+    #[test]
+    fn plan_jobs_reports_invalid_invocation_when_the_outdir_cannot_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocking_file = dir.path().join("blocking");
+        std::fs::write(&blocking_file, b"in the way").unwrap();
+        let outdir = blocking_file.join("out"); // parent is a file, not a dir
+
+        let input = dir.path().join("a.heic");
+        std::fs::write(&input, b"x").unwrap();
+
+        let cli = cli_for(vec![input], Some("jpg"), Some(outdir));
+        let e = plan_jobs(&cli).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(
+            e.remediation.is_some(),
+            "every failure carries a remediation"
+        );
     }
 
     /// An explicitly named file — not discovered by expanding a directory —
