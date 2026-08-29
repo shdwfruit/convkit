@@ -386,7 +386,14 @@ mod tests {
         if let Err(e) = r.resolve(Backend::Pandoc) {
             assert_eq!(e.code, crate::ErrorCode::BackendMissing);
             let rem = e.remediation.expect("must carry remediation");
-            assert_eq!(rem.managed.as_deref(), Some("conv install pandoc"));
+            if crate::manifest::has_managed_build(Backend::Pandoc) {
+                assert_eq!(rem.managed.as_deref(), Some("conv install pandoc"));
+            } else {
+                // No manifest row for this platform (e.g. linux/arm64) --
+                // no managed install can genuinely be offered.
+                assert_eq!(rem.managed, None);
+                assert!(rem.manual.is_some());
+            }
         }
     }
 

@@ -48,19 +48,23 @@ jobs:
       # enforced in CI, not just by convention. Test code is excluded
       # because assertions inside `#[cfg(test)]` blocks are allowed to
       # print for debugging and never ship in the built library: every file
-      # in this crate places its `#[cfg(test)] mod tests { ... }` block as
-      # the last top-level item, so each file is truncated at that marker
-      # before being grepped -- scoping by *position in the file*, not (as
-      # a previous version of this check tried and failed to do) by
-      # grepping for the literal text "mod tests" on the matched line
-      # itself, which a `println!`/`eprintln!`/etc. call's own text almost
-      # never contains, so that version never actually filtered anything.
+      # in this crate declares its test module as exactly `mod tests` at
+      # column 0 as the last top-level item, so each file is truncated at
+      # that marker before being grepped -- scoping by *position in the
+      # file*, not (as a previous version of this check tried and failed to
+      # do) by grepping for the literal text "mod tests" on the matched
+      # line itself, which a `println!`/`eprintln!`/etc. call's own text
+      # almost never contains, so that version never actually filtered
+      # anything. Truncating at `#[cfg(test)]` instead would be wrong too:
+      # registry.rs has a `#[cfg(test)] use ...;` item attribute above its
+      # non-test body, which would truncate the file before the body it's
+      # meant to guard even starts.
       - name: core must not print
         shell: bash
         run: |
           fail=0
           while IFS= read -r -d '' f; do
-            hit=$(sed -n '/^#\[cfg(test)\]/q;p' "$f" \
+            hit=$(sed -n '/^mod tests/q;p' "$f" \
                   | grep -nE '\b(println!|eprintln!|dbg!|print!|eprint!)')
             if [ -n "$hit" ]; then
               echo "$f:"

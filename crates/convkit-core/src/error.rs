@@ -211,7 +211,13 @@ mod tests {
         let remediation = e
             .remediation
             .expect("backend_missing always sets remediation");
-        assert_eq!(remediation.managed, Some("conv install pandoc".to_string()));
+        if crate::manifest::has_managed_build(Backend::Pandoc) {
+            assert_eq!(remediation.managed, Some("conv install pandoc".to_string()));
+        } else {
+            // No manifest row for this platform (e.g. linux/arm64) -- a
+            // managed install genuinely isn't offered here.
+            assert_eq!(remediation.managed, None);
+        }
         assert!(remediation.manual.is_some());
     }
 
