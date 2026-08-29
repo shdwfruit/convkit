@@ -59,6 +59,71 @@ fn format_of(p: &Path) -> Result<Format, ConvError> {
     Format::from_ext(ext).ok_or_else(|| ConvError::unknown_format(ext))
 }
 
+/// Natural-order comparison: a run of digits compares by numeric value, not
+/// by its first character, so `p2` sorts before `p10` — plain lexicographic
+/// `str` ordering does not (`'1' < '2'`, so `"p10" < "p2"`). Falls back to
+/// ordinary character-by-character comparison outside of digit runs. This
+/// is the ordering `plan_jobs` sorts a directory's expanded entries into
+/// (I4); lexicographic would be the minimum bar, but natural order is what
+/// actually matches how someone names a folder of scanned pages.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let mut ac = a.chars().peekable();
+    let mut bc = b.chars().peekable();
+    loop {
+        return match (ac.peek().copied(), bc.peek().copied()) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (Some(ca), Some(cb)) if ca.is_ascii_digit() && cb.is_ascii_digit() => {
+                let mut da = String::new();
+                while let Some(&c) = ac.peek() {
+                    if !c.is_ascii_digit() {
+                        break;
+                    }
+                    da.push(c);
+                    ac.next();
+                }
+                let mut db = String::new();
+                while let Some(&c) = bc.peek() {
+                    if !c.is_ascii_digit() {
+                        break;
+                    }
+                    db.push(c);
+                    bc.next();
+                }
+                // Compare by numeric value (length first, since both are
+                // digit-only strings with no leading-zero normalisation
+                // yet — a longer run is always numerically larger once
+                // leading zeros are stripped), falling back to the raw
+                // digit strings only to break a tie between numerically
+                // equal runs with a different count of leading zeros
+                // (e.g. "07" vs "7").
+                let ta = da.trim_start_matches('0');
+                let tb = db.trim_start_matches('0');
+                match ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb)) {
+                    Ordering::Equal => {
+                        if da == db {
+                            continue;
+                        }
+                        da.cmp(&db)
+                    }
+                    ord => ord,
+                }
+            }
+            (Some(ca), Some(cb)) => {
+                if ca == cb {
+                    ac.next();
+                    bc.next();
+                    continue;
+                }
+                ca.cmp(&cb)
+            }
+        };
+    }
+}
+
 /// Implements the batch semantics table: `--to` fans one job out per input;
 /// two bare positionals are the classic pair (delegated to `resolve_pair`,
 /// which also handles the `.ext` shorthand); three or more positionals whose
@@ -203,6 +268,16 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
                     format!("cannot read directory {}: {e}", path.display()),
                 )
             })?;
+            // I4: `read_dir`'s order is arbitrary — hash order on ext4, not
+            // stable even between runs on the same machine — so merging a
+            // directory of scans into one PDF (the image→PDF recipe joins
+            // every input, in the order given) silently shuffled pages.
+            // Sort this directory's own entries into natural order (`p2`
+            // before `p10`) before appending them; the relative order
+            // between multiple directory/file positionals the user typed
+            // is preserved, since each directory's block is sorted and
+            // appended independently.
+            let mut dir_entries: Vec<PathBuf> = Vec::new();
             for entry in entries.flatten() {
                 let p = entry.path();
                 if !p.is_file() {
@@ -214,8 +289,15 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
                 if Some(fmt) == target_format {
                     continue;
                 }
-                expanded.push(p);
+                dir_entries.push(p);
             }
+            dir_entries.sort_by(|a, b| {
+                natural_cmp(
+                    &a.file_name().unwrap_or_default().to_string_lossy(),
+                    &b.file_name().unwrap_or_default().to_string_lossy(),
+                )
+            });
+            expanded.extend(dir_entries);
         } else {
             expanded.push(path.clone());
         }
@@ -306,6 +388,47 @@ mod tests {
             e.code,
             ErrorCode::InvalidInvocation,
             "a basename collision is a malformed invocation, not an unsupported pair"
+        );
+    }
+
+    // --- I4: directory-expanded entries sort into natural order ------------
+
+    #[test]
+    fn natural_cmp_orders_numeric_runs_by_value_not_first_digit() {
+        let mut v = vec!["p3", "p1", "p2", "p10"];
+        v.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(v, vec!["p1", "p2", "p3", "p10"]);
+    }
+
+    /// The exact bug: a directory of scanned pages `p3 p1 p2 p10` merged via
+    /// image→PDF used to hand `magick` the inputs in `read_dir`'s arbitrary
+    /// order (hash order on ext4 — not even stable between machines),
+    /// silently shuffling pages. Directory expansion must sort into natural
+    /// order before the merge job is built.
+    #[test]
+    fn plan_jobs_expands_a_directory_of_scans_in_natural_page_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let scans = dir.path().join("scans");
+        std::fs::create_dir(&scans).unwrap();
+        // Written in an order that would already be wrong under both
+        // filesystem-arbitrary order and plain lexicographic order
+        // (`"p10" < "p2"` lexicographically).
+        for name in ["p3.png", "p1.png", "p2.png", "p10.png"] {
+            std::fs::write(scans.join(name), b"x").unwrap();
+        }
+
+        let cli = cli_for(vec![scans.clone(), dir.path().join("out.pdf")], None, None);
+        let jobs = plan_jobs(&cli).unwrap();
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].inputs,
+            vec![
+                scans.join("p1.png"),
+                scans.join("p2.png"),
+                scans.join("p3.png"),
+                scans.join("p10.png"),
+            ]
         );
     }
 
