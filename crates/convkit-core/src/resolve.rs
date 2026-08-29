@@ -341,29 +341,77 @@ mod tests {
         }
     }
 
+    /// I6: `with_override` points at a file that's guaranteed not to exist,
+    /// and `with_managed_dir` redirects the `Managed` candidate to an empty
+    /// tempdir this test owns — but `candidates()` still walks
+    /// `CONVKIT_PANDOC` and `which("pandoc")` after those two, and *both*
+    /// genuinely depend on this machine: a contributor with pandoc
+    /// installed (an entirely ordinary state) would make `resolve()`
+    /// actually succeed here, and the old version of this test asserted
+    /// `.unwrap_err()` unconditionally — "clone the repo, `cargo test`, get
+    /// a red suite" for anyone in that position. The parts that are
+    /// deterministic regardless of the host — the override and the
+    /// isolated managed dir both being genuinely absent — are asserted
+    /// unconditionally via `candidates()`'s shape; the parts that depend on
+    /// the host (whether `resolve()` ultimately finds a real pandoc) are
+    /// only asserted on when they resolve the way this machine's CI
+    /// environment normally does, so this never fails just because pandoc
+    /// happens to be on `PATH`.
     #[test]
     fn a_missing_backend_produces_a_remediable_error() {
-        // An empty temp dir stands in for the real managed dir: this
-        // machine may genuinely have a managed pandoc installed (Task 14's
-        // `conv install pandoc` writes to the real, global
-        // `Resolver::managed_dir()`), and this test must fail regardless of
-        // that, not because of it.
         let empty_managed_dir = tempfile::tempdir().unwrap();
         let mut r = Resolver::new();
         r.with_managed_dir(empty_managed_dir.path().to_path_buf());
-        r.with_override(Backend::Pandoc, PathBuf::from("/definitely/not/here"));
-        let e = r.resolve(Backend::Pandoc).unwrap_err();
-        assert_eq!(e.code, crate::ErrorCode::BackendMissing);
-        let rem = e.remediation.expect("must carry remediation");
-        assert_eq!(rem.managed.as_deref(), Some("conv install pandoc"));
+        let bogus = PathBuf::from("/definitely/not/here");
+        r.with_override(Backend::Pandoc, bogus.clone());
+
+        let candidates = r.candidates(Backend::Pandoc);
+        assert_eq!(
+            candidates[0],
+            (bogus.clone(), Source::Override),
+            "the override must be the first candidate"
+        );
+        assert!(!bogus.is_file(), "the override path must not exist");
+        let managed = candidates
+            .iter()
+            .find(|(_, s)| *s == Source::Managed)
+            .expect("every backend has a Managed candidate");
+        assert!(
+            managed.0.starts_with(empty_managed_dir.path()),
+            "the Managed candidate must use the isolated tempdir, not the \
+             real machine-global managed dir"
+        );
+        assert!(!managed.0.is_file(), "the isolated managed dir is empty");
+
+        if let Err(e) = r.resolve(Backend::Pandoc) {
+            assert_eq!(e.code, crate::ErrorCode::BackendMissing);
+            let rem = e.remediation.expect("must carry remediation");
+            assert_eq!(rem.managed.as_deref(), Some("conv install pandoc"));
+        }
     }
 
+    /// I6: the old version of this test did not even call
+    /// `with_managed_dir`, and `well_known(Soffice)` returns the standard
+    /// Program Files / `/Applications` paths — so it failed outright for
+    /// anyone with a real LibreOffice installed there, an entirely ordinary
+    /// state for a contributor to this project. What actually guarantees
+    /// LibreOffice is never offered as a managed install is
+    /// `Backend::is_managed()` being `false` for it — a static predicate
+    /// `ConvError::backend_missing` reads before it ever looks at
+    /// `candidates()` — asserted directly and unconditionally here; the
+    /// `resolve()`-based check below is only asserted on when this
+    /// particular machine genuinely has no soffice anywhere, exactly like
+    /// the pandoc test above.
     #[test]
     fn libreoffice_is_never_offered_as_a_managed_install() {
+        assert!(!Backend::Soffice.is_managed());
+
         let mut r = Resolver::new();
+        r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
         r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
-        let e = r.resolve(Backend::Soffice).unwrap_err();
-        assert_eq!(e.remediation.unwrap().managed, None);
+        if let Err(e) = r.resolve(Backend::Soffice) {
+            assert_eq!(e.remediation.unwrap().managed, None);
+        }
     }
 
     // --- Controller review round 3: version_of used the wrong flag and
