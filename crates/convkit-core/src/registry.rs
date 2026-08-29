@@ -51,6 +51,12 @@ const IMG_LOSSLESS: Recipe = Recipe {
     warnings: &[],
 };
 
+/// `-background white` plus `-alpha remove -alpha off` composites onto a
+/// white canvas and then drops the alpha channel outright before `-flatten`.
+/// JPEG cannot store transparency; the previous `-background none` composited
+/// onto a transparent canvas, and the JPEG coder then discarded that alpha
+/// and left the underlying black RGB behind, so every SVG-to-JPEG conversion
+/// silently rendered on a black field.
 const SVG_TO_LOSSY: Recipe = Recipe {
     steps: &[step!(
         Backend::Magick,
@@ -58,15 +64,19 @@ const SVG_TO_LOSSY: Recipe = Recipe {
             Arg::Lit("-density"),
             Arg::Lit(SVG_DENSITY),
             Arg::Lit("-background"),
-            Arg::Lit("none"),
+            Arg::Lit("white"),
             Arg::Input,
+            Arg::Lit("-alpha"),
+            Arg::Lit("remove"),
+            Arg::Lit("-alpha"),
+            Arg::Lit("off"),
             Arg::Lit("-flatten"),
             Arg::Lit("-quality"),
             Arg::Lit(IMAGE_QUALITY),
             Arg::Output,
         ]
     )],
-    warnings: &[],
+    warnings: &["Transparency is flattened onto a white background; JPEG has no alpha channel."],
 };
 
 const SVG_TO_LOSSLESS: Recipe = Recipe {
@@ -153,22 +163,40 @@ fn insert_image_family(t: &mut Table) {
 /// distance; see spec §7.4.
 const CRF: &str = "20";
 const AUDIO_BITRATE: &str = "160k";
-/// GIF frame rate and maximum width. Capped, never upscaled.
-///
-/// Documents the value baked directly into `GIF_FILTER` below: `concat!` only
-/// accepts literals, not paths to other consts, so this cannot be spliced in
-/// programmatically. Kept for the reader; not referenced by code.
-#[allow(dead_code)]
-const GIF_FPS: &str = "15";
+
+/// GIF frame rate and maximum width, each spelled once and spliced into
+/// `GIF_FILTER` via `concat!`. `concat!` requires every argument to expand to
+/// a literal token; a zero-arg macro satisfies that, a path to a `const` item
+/// does not — hence macros here instead of `const GIF_FPS`/`GIF_MAX_W`.
+/// Capped, never upscaled.
+macro_rules! gif_fps {
+    () => {
+        "15"
+    };
+}
+macro_rules! gif_max_w {
+    () => {
+        "640"
+    };
+}
 
 /// Escaped comma is required: ffmpeg's filter parser splits unescaped commas
 /// into separate filters. No shell is involved, so the backslash is literal.
 const GIF_FILTER: &str = concat!(
-    r"fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];",
+    "fps=",
+    gif_fps!(),
+    ",scale=w=min(",
+    gif_max_w!(),
+    r"\,iw):h=-2:flags=lanczos,split[a][b];",
     "[a]palettegen=stats_mode=diff[p];",
     "[b][p]paletteuse=dither=bayer:bayer_scale=3"
 );
 
+/// `-sn` disables default subtitle-stream selection. Without it, `mkv → mp4`
+/// — the flagship pair in this table — fails outright on a source carrying a
+/// bitmap subtitle track (PGS), since ffmpeg tries to encode it to the MP4
+/// default `mov_text` and cannot. With no explicit `-map`, any audio track
+/// beyond the first is also silently dropped, hence the warning.
 const VIDEO_TO_MP4: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
@@ -187,15 +215,20 @@ const VIDEO_TO_MP4: Recipe = Recipe {
             Arg::Lit("aac"),
             Arg::Lit("-b:a"),
             Arg::Lit(AUDIO_BITRATE),
+            Arg::Lit("-sn"),
             Arg::Lit("-movflags"),
             Arg::Lit("+faststart"),
             Arg::Lit("-y"),
             Arg::Output,
         ]
     )],
-    warnings: &[],
+    warnings: &["Subtitle tracks and any audio tracks beyond the first are dropped."],
 };
 
+/// `-row-mt 1` enables libvpx's row-based multithreading and `-threads 0`
+/// lets it use every core. libvpx does not enable row multithreading by
+/// default and otherwise encodes single-threaded, so a 1080p VP9 encode runs
+/// at low single-digit fps without these.
 const VIDEO_TO_WEBM: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
@@ -208,6 +241,10 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
             Arg::Lit("32"),
             Arg::Lit("-b:v"),
             Arg::Lit("0"),
+            Arg::Lit("-row-mt"),
+            Arg::Lit("1"),
+            Arg::Lit("-threads"),
+            Arg::Lit("0"),
             Arg::Lit("-c:a"),
             Arg::Lit("libopus"),
             Arg::Lit("-b:a"),
@@ -219,9 +256,13 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
     warnings: &[],
 };
 
-/// Stream-copy remux. Selected dynamically by `plan::build` when the source
-/// codecs are already legal in the target container. See Task 7.
-pub const REMUX: Recipe = Recipe {
+/// Stream-copy remux to MP4. Selected dynamically by `plan::build` when the
+/// source codecs are already legal in the target container. See Task 7.
+/// `-sn` matters here exactly as it does on `VIDEO_TO_MP4`: `-c copy` still
+/// triggers default stream selection, which happily copies a PGS subtitle
+/// track that the mp4 muxer cannot carry, and ffmpeg then dies with "Could
+/// not find tag for codec".
+pub const REMUX_MP4: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
         [
@@ -229,8 +270,30 @@ pub const REMUX: Recipe = Recipe {
             Arg::Input,
             Arg::Lit("-c"),
             Arg::Lit("copy"),
+            Arg::Lit("-sn"),
             Arg::Lit("-movflags"),
             Arg::Lit("+faststart"),
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+/// Stream-copy remux to WebM. `-movflags` is a private AVOption of the
+/// mov/mp4 muxer: passed to the webm muxer it trips `assert_avoptions` and
+/// ffmpeg exits 1 with "Option movflags not found". This recipe exists
+/// specifically so a WebM target never gets that flag; it does not share
+/// argv with `REMUX_MP4`.
+pub const REMUX_WEBM: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-c"),
+            Arg::Lit("copy"),
+            Arg::Lit("-sn"),
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -252,7 +315,11 @@ const TO_GIF: Recipe = Recipe {
             Arg::Output,
         ]
     )],
-    warnings: &[],
+    warnings: &[
+        "The whole filtered stream is buffered in memory for palette generation, \
+         so very long inputs are slow and memory-hungry rather than being \
+         silently truncated.",
+    ],
 };
 
 const GIF_TO_MP4: Recipe = Recipe {
@@ -275,11 +342,22 @@ const GIF_TO_MP4: Recipe = Recipe {
             Arg::Output,
         ]
     )],
-    warnings: &[],
+    warnings: &[
+        "A looping GIF becomes a single play in MP4; there is no container-level \
+         loop flag to carry it over.",
+    ],
 };
 
+/// `drop_video` is for a video source, or for a target that cannot carry a
+/// video stream at all: `-vn` strips it outright. `keep_art` is for an audio
+/// source converting to a target that *can* carry one: plain `ffmpeg -i
+/// in.flac out.mp3` keeps an attached-picture cover art stream, and `-vn`
+/// was throwing it away on every audio-to-audio pair — the single most
+/// common audio conversion — making our default strictly worse than the
+/// naive command. `-map 0:v?` is optional so a source with no picture stream
+/// doesn't fail.
 macro_rules! audio_recipe {
-    ([$($codec:expr),* $(,)?]) => {
+    (drop_video, [$($codec:expr),* $(,)?]) => {
         Recipe {
             steps: &[step!(
                 Backend::Ffmpeg,
@@ -293,22 +371,84 @@ macro_rules! audio_recipe {
             warnings: &[],
         }
     };
+    (keep_art, [$($codec:expr),* $(,)?]) => {
+        Recipe {
+            steps: &[step!(
+                Backend::Ffmpeg,
+                [
+                    Arg::Lit("-i"), Arg::Input,
+                    Arg::Lit("-map"), Arg::Lit("0:a"),
+                    Arg::Lit("-map"), Arg::Lit("0:v?"),
+                    Arg::Lit("-c:v"), Arg::Lit("copy"),
+                    $($codec,)*
+                    Arg::Lit("-y"), Arg::Output,
+                ]
+            )],
+            warnings: &[],
+        }
+    };
 }
 
-const TO_MP3: Recipe = audio_recipe!([
-    Arg::Lit("-c:a"),
-    Arg::Lit("libmp3lame"),
-    Arg::Lit("-q:a"),
-    Arg::Lit("2")
-]);
-const TO_M4A: Recipe = audio_recipe!([
-    Arg::Lit("-c:a"),
-    Arg::Lit("aac"),
-    Arg::Lit("-b:a"),
-    Arg::Lit("192k")
-]);
-const TO_WAV: Recipe = audio_recipe!([Arg::Lit("-c:a"), Arg::Lit("pcm_s16le")]);
-const TO_FLAC: Recipe = audio_recipe!([Arg::Lit("-c:a"), Arg::Lit("flac")]);
+const TO_MP3: Recipe = audio_recipe!(
+    drop_video,
+    [
+        Arg::Lit("-c:a"),
+        Arg::Lit("libmp3lame"),
+        Arg::Lit("-q:a"),
+        Arg::Lit("2")
+    ]
+);
+const TO_M4A: Recipe = audio_recipe!(
+    drop_video,
+    [
+        Arg::Lit("-c:a"),
+        Arg::Lit("aac"),
+        Arg::Lit("-b:a"),
+        Arg::Lit("192k")
+    ]
+);
+const TO_FLAC: Recipe = audio_recipe!(drop_video, [Arg::Lit("-c:a"), Arg::Lit("flac")]);
+
+/// WAV cannot carry an attached-picture stream at all, so unlike the other
+/// audio targets this always strips it with `-vn` — leaving the stream in
+/// fails rather than degrading gracefully, in either direction. `pcm_s16le`
+/// is also 16-bit only, which loses precision from a 24-bit source; that is
+/// the one thing this recipe cannot route around, hence the warning.
+const TO_WAV: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-vn"),
+            Arg::Lit("-c:a"),
+            Arg::Lit("pcm_s16le"),
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &["A 24-bit source is downconverted to 16-bit PCM by pcm_s16le."],
+};
+
+const TO_MP3_KEEP_ART: Recipe = audio_recipe!(
+    keep_art,
+    [
+        Arg::Lit("-c:a"),
+        Arg::Lit("libmp3lame"),
+        Arg::Lit("-q:a"),
+        Arg::Lit("2")
+    ]
+);
+const TO_M4A_KEEP_ART: Recipe = audio_recipe!(
+    keep_art,
+    [
+        Arg::Lit("-c:a"),
+        Arg::Lit("aac"),
+        Arg::Lit("-b:a"),
+        Arg::Lit("192k")
+    ]
+);
+const TO_FLAC_KEEP_ART: Recipe = audio_recipe!(keep_art, [Arg::Lit("-c:a"), Arg::Lit("flac")]);
 
 pub const MP4_COMPATIBLE_VIDEO: &[&str] = &["h264", "hevc", "mpeg4", "av1"];
 pub const MP4_COMPATIBLE_AUDIO: &[&str] = &["aac", "mp3", "ac3", "alac"];
@@ -322,11 +462,24 @@ const VIDEO: &[Format] = &[
     Format::Webm,
     Format::Avi,
 ];
+
+/// Audio targets reached from a *video* source: the video stream (and any
+/// embedded art on the video container) is always dropped with `-vn`.
 const AUDIO_TARGETS: &[(Format, Recipe)] = &[
     (Format::Mp3, TO_MP3),
     (Format::M4a, TO_M4A),
     (Format::Wav, TO_WAV),
     (Format::Flac, TO_FLAC),
+];
+
+/// Same target formats, but for an *audio* source: mp3/m4a/flac preserve an
+/// attached-picture cover art stream instead of stripping it with `-vn`. WAV
+/// still can't carry one, so it reuses `TO_WAV` unchanged in both tables.
+const AUDIO_TARGETS_KEEP_ART: &[(Format, Recipe)] = &[
+    (Format::Mp3, TO_MP3_KEEP_ART),
+    (Format::M4a, TO_M4A_KEEP_ART),
+    (Format::Wav, TO_WAV),
+    (Format::Flac, TO_FLAC_KEEP_ART),
 ];
 
 fn insert_media_family(t: &mut Table) {
@@ -343,9 +496,10 @@ fn insert_media_family(t: &mut Table) {
         }
     }
 
-    // Audio sources transcode between audio targets.
+    // Audio sources transcode between audio targets, preserving an
+    // attached-picture cover art stream where the target can carry one.
     for &from in &[Format::Mp3, Format::M4a, Format::Wav, Format::Flac] {
-        for &(to, recipe) in AUDIO_TARGETS {
+        for &(to, recipe) in AUDIO_TARGETS_KEEP_ART {
             if from != to {
                 t.insert((from, to), recipe);
             }
@@ -357,7 +511,9 @@ fn insert_media_family(t: &mut Table) {
 
 // --- Document family ---------------------------------------------------------
 
-/// LibreOffice writes into a directory and names the file itself.
+/// LibreOffice writes into a directory and names the file itself. The second
+/// arm adds `--infilter` for a source format whose default reader isn't the
+/// one we need (see `PDF_TO_DOCX`).
 macro_rules! soffice_step {
     ($filter:expr) => {
         Step {
@@ -375,6 +531,23 @@ macro_rules! soffice_step {
             intermediate_ext: None,
         }
     };
+    ($filter:expr, infilter: $infilter:expr) => {
+        Step {
+            backend: Backend::Soffice,
+            args: &[
+                Arg::Lit("--headless"),
+                Arg::Lit("--norestore"),
+                Arg::Lit($infilter),
+                Arg::Lit("--convert-to"),
+                Arg::Lit($filter),
+                Arg::Lit("--outdir"),
+                Arg::OutDir,
+                Arg::Input,
+            ],
+            output: OutputMode::OutDir,
+            intermediate_ext: None,
+        }
+    };
 }
 
 const OFFICE_TO_PDF: Recipe = Recipe {
@@ -382,46 +555,40 @@ const OFFICE_TO_PDF: Recipe = Recipe {
     warnings: &[],
 };
 
-/// The bare `docx` filter yields a LibreOffice Draw document. The explicit
-/// filter name is required to get real Word output.
+/// The bare `docx` filter yields a LibreOffice Draw document; the explicit
+/// export filter name is required to get real Word output. That alone still
+/// isn't enough, though: LibreOffice's default PDF import is
+/// `draw_pdf_import`, so without `--infilter=writer_pdf_import` forcing the
+/// Writer importer, the source is read as a Draw model before the export
+/// filter ever sees it. Flagged for empirical verification against a real
+/// LibreOffice in Task 15.
 const PDF_TO_DOCX: Recipe = Recipe {
-    steps: &[soffice_step!("docx:MS Word 2007 XML")],
+    steps: &[soffice_step!(
+        "docx:MS Word 2007 XML",
+        infilter: "--infilter=writer_pdf_import"
+    )],
     warnings: &[
         "PDF stores positioned glyphs, not paragraphs, so the result is a set of \
          text boxes rather than a flowing document. Expect to reflow it by hand.",
     ],
 };
 
-const MD_TO_DOCX: Recipe = Recipe {
-    steps: &[step!(
-        Backend::Pandoc,
-        [
-            Arg::Input,
-            Arg::Lit("--standalone"),
-            Arg::Lit("-o"),
-            Arg::Output
-        ]
-    )],
-    warnings: &[],
-};
-
-const MD_TO_HTML: Recipe = Recipe {
-    steps: &[step!(
-        Backend::Pandoc,
-        [
-            Arg::Input,
-            Arg::Lit("--standalone"),
-            Arg::Lit("-o"),
-            Arg::Output
-        ]
-    )],
-    warnings: &[],
-};
-
-/// Two hardcoded steps, not a routing graph: pandoc emits .docx, LibreOffice
-/// renders it. This avoids a ~400MB LaTeX toolchain entirely.
-const MD_TO_PDF: Recipe = Recipe {
-    steps: &[
+/// Mirrors `soffice_step!`: the plain pandoc invocation shared by
+/// `MD_TO_DOCX` and `MD_TO_HTML`, plus a variant that tags an intermediate
+/// file's extension for a multi-step recipe like `MD_TO_PDF`.
+macro_rules! pandoc_step {
+    () => {
+        step!(
+            Backend::Pandoc,
+            [
+                Arg::Input,
+                Arg::Lit("--standalone"),
+                Arg::Lit("-o"),
+                Arg::Output
+            ]
+        )
+    };
+    (intermediate_ext: $ext:expr) => {
         Step {
             backend: Backend::Pandoc,
             args: &[
@@ -431,10 +598,25 @@ const MD_TO_PDF: Recipe = Recipe {
                 Arg::Output,
             ],
             output: OutputMode::Path,
-            intermediate_ext: Some("docx"),
-        },
-        soffice_step!("pdf"),
-    ],
+            intermediate_ext: Some($ext),
+        }
+    };
+}
+
+const MD_TO_DOCX: Recipe = Recipe {
+    steps: &[pandoc_step!()],
+    warnings: &[],
+};
+
+const MD_TO_HTML: Recipe = Recipe {
+    steps: &[pandoc_step!()],
+    warnings: &[],
+};
+
+/// Two hardcoded steps, not a routing graph: pandoc emits .docx, LibreOffice
+/// renders it. This avoids a ~400MB LaTeX toolchain entirely.
+const MD_TO_PDF: Recipe = Recipe {
+    steps: &[pandoc_step!(intermediate_ext: "docx"), soffice_step!("pdf")],
     warnings: &[],
 };
 
@@ -502,12 +684,46 @@ mod tests {
     }
 
     #[test]
-    fn svg_rasterises_at_high_density_with_transparent_background() {
+    fn svg_to_png_is_lossless_with_transparent_background() {
         let r = lookup(Format::Svg, Format::Png).unwrap();
         let argv = r.steps[0].render(&[Path::new("in.svg")], Path::new("out.png"));
-        assert_eq!(argv[0], "-density");
-        assert_eq!(argv[1], "384");
-        assert!(argv.contains(&"none".to_string()));
+        assert_eq!(
+            argv,
+            vec![
+                "-density",
+                "384",
+                "-background",
+                "none",
+                "in.svg",
+                "out.png"
+            ]
+        );
+    }
+
+    #[test]
+    fn svg_to_jpg_flattens_transparency_onto_white() {
+        let r = lookup(Format::Svg, Format::Jpg).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.svg")], Path::new("out.jpg"));
+        assert_eq!(
+            argv,
+            vec![
+                "-density",
+                "384",
+                "-background",
+                "white",
+                "in.svg",
+                "-alpha",
+                "remove",
+                "-alpha",
+                "off",
+                "-flatten",
+                "-quality",
+                "92",
+                "out.jpg",
+            ]
+        );
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("white"), "{:?}", r.warnings);
     }
 
     #[test]
@@ -552,6 +768,7 @@ mod tests {
             vf.contains(r"min(640\,iw)"),
             "comma must stay escaped: {vf}"
         );
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
     }
 
     #[test]
@@ -561,13 +778,70 @@ mod tests {
         assert!(argv.windows(2).any(|w| w == ["-crf", "20"]), "{argv:?}");
         assert!(argv.windows(2).any(|w| w == ["-b:a", "160k"]), "{argv:?}");
         assert!(argv.contains(&"+faststart".to_string()), "{argv:?}");
+        assert!(argv.contains(&"-sn".to_string()), "{argv:?}");
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn video_to_webm_enables_row_multithreading() {
+        let r = lookup(Format::Mkv, Format::Webm).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.mkv")], Path::new("out.webm"));
+        assert!(argv.windows(2).any(|w| w == ["-row-mt", "1"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-threads", "0"]), "{argv:?}");
     }
 
     #[test]
     fn audio_extraction_drops_the_video_stream() {
         let r = lookup(Format::Mp4, Format::Mp3).unwrap();
         let argv = r.steps[0].render(&[Path::new("in.mp4")], Path::new("out.mp3"));
+        assert_eq!(
+            argv,
+            vec![
+                "-i",
+                "in.mp4",
+                "-vn",
+                "-c:a",
+                "libmp3lame",
+                "-q:a",
+                "2",
+                "-y",
+                "out.mp3"
+            ]
+        );
+    }
+
+    #[test]
+    fn audio_to_audio_preserves_embedded_cover_art() {
+        let r = lookup(Format::Flac, Format::Mp3).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.flac")], Path::new("out.mp3"));
+        assert_eq!(
+            argv,
+            vec![
+                "-i",
+                "in.flac",
+                "-map",
+                "0:a",
+                "-map",
+                "0:v?",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "libmp3lame",
+                "-q:a",
+                "2",
+                "-y",
+                "out.mp3",
+            ]
+        );
+    }
+
+    #[test]
+    fn audio_to_wav_still_drops_video_and_warns_about_bit_depth() {
+        let r = lookup(Format::Flac, Format::Wav).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.flac")], Path::new("out.wav"));
         assert!(argv.contains(&"-vn".to_string()), "{argv:?}");
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("16-bit"), "{:?}", r.warnings);
     }
 
     #[test]
@@ -577,12 +851,36 @@ mod tests {
         let joined = argv.join(" ");
         assert!(joined.contains("trunc(iw/2)*2"), "{joined}");
         assert!(joined.contains("yuv420p"), "{joined}");
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("loop"), "{:?}", r.warnings);
     }
 
     #[test]
-    fn remux_copies_streams_instead_of_re_encoding() {
-        let argv = REMUX.steps[0].render(&[Path::new("in.mkv")], Path::new("out.mp4"));
-        assert!(argv.windows(2).any(|w| w == ["-c", "copy"]), "{argv:?}");
+    fn remux_mp4_keeps_faststart_and_drops_subtitle_selection() {
+        let argv = REMUX_MP4.steps[0].render(&[Path::new("in.mkv")], Path::new("out.mp4"));
+        assert_eq!(
+            argv,
+            vec![
+                "-i",
+                "in.mkv",
+                "-c",
+                "copy",
+                "-sn",
+                "-movflags",
+                "+faststart",
+                "-y",
+                "out.mp4"
+            ]
+        );
+    }
+
+    #[test]
+    fn remux_webm_omits_the_mp4_only_movflags_option() {
+        let argv = REMUX_WEBM.steps[0].render(&[Path::new("in.mkv")], Path::new("out.webm"));
+        assert_eq!(
+            argv,
+            vec!["-i", "in.mkv", "-c", "copy", "-sn", "-y", "out.webm"]
+        );
     }
 
     #[test]
@@ -606,6 +904,10 @@ mod tests {
             argv.contains(&"docx:MS Word 2007 XML".to_string()),
             "the bare `docx` filter produces a Draw document: {argv:?}"
         );
+        assert!(
+            argv.contains(&"--infilter=writer_pdf_import".to_string()),
+            "default PDF import is draw_pdf_import, not Writer: {argv:?}"
+        );
         assert_eq!(r.warnings.len(), 1);
         assert!(r.warnings[0].contains("text boxes"), "{:?}", r.warnings);
     }
@@ -625,5 +927,33 @@ mod tests {
         let r = lookup(Format::Md, Format::Html).unwrap();
         let argv = r.steps[0].render(&[Path::new("in.md")], Path::new("out.html"));
         assert!(argv.contains(&"--standalone".to_string()), "{argv:?}");
+    }
+
+    #[test]
+    fn no_recipe_targets_heic_or_heif() {
+        for (from, to) in all_pairs() {
+            assert!(
+                !matches!(to, Format::Heic | Format::Heif),
+                "{from:?}->{to:?} targets a read-only, encode-unsupported format"
+            );
+        }
+    }
+
+    #[test]
+    fn no_recipe_sets_user_installation() {
+        for (from, to) in all_pairs() {
+            let r = lookup(from, to).unwrap();
+            for step in r.steps {
+                for arg in step.args {
+                    if let Arg::Lit(s) = arg {
+                        assert!(
+                            !s.contains("UserInstallation"),
+                            "{from:?}->{to:?} recipe sets -env:UserInstallation; \
+                             exec injects this for every Soffice call already"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
