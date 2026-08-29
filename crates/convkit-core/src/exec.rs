@@ -45,6 +45,17 @@ pub struct Outcome {
     pub warnings: Vec<String>,
     pub backends: Vec<(Backend, String)>,
     pub remuxed: bool,
+    /// Wall-clock time this conversion took, in whole milliseconds. Always
+    /// `0` coming out of `exec::run` itself: per the same split that keeps
+    /// `convkit-core` free of printing and prompting (Part 1's invariant),
+    /// timing-for-display is a presentation concern too, so it is measured
+    /// by the caller -- the `conv` binary's `batch::run`, which wraps this
+    /// call in an `Instant` and overwrites this field on the `Outcome` it
+    /// gets back -- never by `exec::run` itself. Left as a plain field
+    /// (rather than, say, an `Option`) so a direct `convkit-core` consumer
+    /// that never sets it still gets a well-formed, honestly-zero value
+    /// instead of an absent one.
+    pub elapsed_ms: u64,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -325,6 +336,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         warnings: built.warnings,
         backends,
         remuxed,
+        elapsed_ms: 0,
     })
 }
 

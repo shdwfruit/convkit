@@ -103,6 +103,51 @@ raw command line) because neither `cmd.exe` nor PowerShell expands globs for
 a native executable — without this, batch mode would simply not work on
 Windows.
 
+A single conversion's output is deliberately compact — success, size, elapsed
+time, and always the absolute path the result actually landed at, since that
+last part is the one thing an ambiguous output path (`conv video.mp4
+out.gif`, no directory in sight) can't answer on its own:
+
+```console
+$ conv clip.mp4 clip.gif
+✓ clip.gif · 527 KB · 0.2s
+  C:\Users\Rick Xie\Videos\clip.gif
+  note  long inputs buffer entirely in memory for palette generation
+```
+
+A lossless remux says so, since that's the good outcome worth calling out:
+
+```console
+$ conv clip.mkv clip.mp4
+✓ clip.mp4 · 4.2 MB · 0.1s · stream copy, no re-encode
+  C:\Users\Rick Xie\Videos\clip.mp4
+```
+
+A batch gets one summary line instead of a wall of per-job success lines —
+per-job *failures* still print in full, on stderr:
+
+```console
+$ conv ./photos --to jpg -o ./out
+✓ 12 converted · 1 skipped · 0 failed · 8.3s
+  C:\Users\Rick Xie\Photos\out
+```
+
+And a failure never looks like a success:
+
+```console
+$ conv report.pptx report.pdf
+✗ report.pptx → pdf
+  soffice not found
+  try  winget install TheDocumentFoundation.LibreOffice
+```
+
+Colour and the `✓`/`✗` glyphs appear only on a real terminal; piped or
+redirected output (`conv ... | tee log`, a CI job) degrades to plain ASCII
+with no escape codes — `OK`/`FAIL` in place of the glyphs, `-` in place of
+`·`. `-q/--quiet` silences success output entirely (a batch summary
+included) but never a failure. `--json` is unaffected by any of this — see
+[Machine-readable output](#machine-readable-output---json) below.
+
 Multi-step recipes are automatic and invisible. `md → pdf`, for instance,
 needs no LaTeX toolchain — pandoc renders to `.docx`, then LibreOffice
 renders that to PDF, as two backend invocations behind one command:
@@ -197,7 +242,8 @@ $ conv clip.mkv clip.mp4
 ffmpeg is required for this conversion and isn't installed.
 Install it now? [y/N] y
 downloading https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip ...
-clip.mp4 (4200 KB) [stream copy]
+✓ clip.mp4 · 4.2 MB · 0.1s · stream copy, no re-encode
+  C:\Users\Rick Xie\Videos\clip.mp4
 ```
 
 Answering anything other than `y`/`yes` — or the prompt never appearing at
@@ -268,6 +314,7 @@ $ conv clip.mp4 clip.gif --json
         }
       ],
       "bytes": 539921,
+      "elapsed_ms": 202,
       "input": "clip.mp4",
       "ok": true,
       "output": "clip.gif",
@@ -279,6 +326,8 @@ $ conv clip.mp4 clip.gif --json
   ]
 }
 ```
+
+`elapsed_ms` is the only field this tool's human-readable output redesign added to the JSON contract — purely additive, and always present on a successful job; the rest of the shape (`ok` plus a plural key, on every document, every command) is unchanged.
 
 And a real one against a machine with no ffmpeg anywhere on `PATH`, no
 managed install, and no package manager detected either (exit code 3) — a

@@ -231,6 +231,7 @@ dependencies = [
 name = "convkit"
 version = "0.1.0"
 dependencies = [
+ "anstyle",
  "assert_cmd",
  "clap",
  "convkit-core",

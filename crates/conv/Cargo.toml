@@ -30,6 +30,10 @@ serde.workspace = true
 serde_json.workspace = true
 rayon = "1"
 indicatif = "0.17"
+# Already in the dependency tree transitively via clap's own colour support
+# -- used directly here (Part 2) for the same ANSI styling machinery, gated
+# on `std::io::IsTerminal`, rather than adding a new styling dependency.
+anstyle = "1"
 
 [dev-dependencies]
 assert_cmd = "2"

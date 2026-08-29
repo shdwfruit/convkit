@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use convkit_core::{
     plan, probe, registry, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe, Outcome,
     Resolver,
@@ -28,7 +30,7 @@ pub fn run(cli: &Cli) -> i32 {
     // that failed on a missing backend — `JobResult` alone has nothing to
     // hand back to `batch::run`, only what came out of it.
     let original_jobs = jobs.clone();
-    let (mut results, mut code) = batch::run(jobs, cli);
+    let (mut results, mut code, mut elapsed) = batch::run(jobs, cli);
 
     // --- Part 1: offer to install a missing backend, then retry once -----
     //
@@ -41,6 +43,7 @@ pub fn run(cli: &Cli) -> i32 {
     // non-interactive session) before ever asking a question.
     if let Some(backend) = missing_backend(&results) {
         if install_prompt::should_install(cli, backend) {
+            let redo_start = Instant::now();
             match install::install_backend(cli, backend) {
                 Ok(_) => {
                     let retry_indices: Vec<usize> = results
@@ -53,11 +56,17 @@ pub fn run(cli: &Cli) -> i32 {
                         .iter()
                         .map(|&i| original_jobs[i].clone())
                         .collect();
-                    let (retry_results, _) = batch::run(retry_jobs, cli);
+                    let (retry_results, _, _) = batch::run(retry_jobs, cli);
                     for (idx, new_result) in retry_indices.into_iter().zip(retry_results) {
                         results[idx] = new_result;
                     }
                     code = batch::exit_code(&results);
+                    // Counts the install download plus the retry itself,
+                    // deliberately excluding the time spent waiting on the
+                    // user's own y/n keypress — that's think time, not
+                    // work, and would make "did it hang?" unanswerable in
+                    // the one place this number matters most.
+                    elapsed += redo_start.elapsed();
                 }
                 Err(e) => {
                     // The install itself failed (network, checksum, ...).
@@ -67,12 +76,13 @@ pub fn run(cli: &Cli) -> i32 {
                     // `results`/`code` exactly as the original
                     // `backend_missing` failure already reported them.
                     render::print_error(cli.json, &e);
+                    elapsed += redo_start.elapsed();
                 }
             }
         }
     }
 
-    print_results(&results, cli);
+    print_results(&results, cli, elapsed);
     code
 }
 
@@ -202,8 +212,19 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
 /// consumer reads the exit code for pass/fail, not which stream a line
 /// landed on. I2: the envelope is now always `{"ok": ..., "results": [...]}`
 /// — never a bare array with no `ok` field, which used to be this command's
-/// own, fourth, incompatible `--json` success shape.
-fn print_results(results: &[batch::JobResult], cli: &Cli) {
+/// own, fourth, incompatible `--json` success shape. Part 2 adds one
+/// additive key to a successful job's own object (`elapsed_ms`, via
+/// `render::outcome_json`) but otherwise leaves this whole branch untouched
+/// — `--json` output is unaffected by Part 2's human-mode redesign.
+///
+/// Human mode (Part 2): a single job gets its own compact result
+/// (`render::conversion_success_human`/`conversion_failure_human`); more
+/// than one gets a batch summary line instead of a wall of per-job success
+/// lines, with every per-job failure line still printed in full — "keep
+/// per-job failure lines, drop per-job success spam." `--quiet` silences
+/// every success line (single or batch summary) but never a failure line —
+/// "silences everything except errors."
+fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
     if cli.json {
         let arr: Vec<serde_json::Value> = results
             .iter()
@@ -219,17 +240,47 @@ fn print_results(results: &[batch::JobResult], cli: &Cli) {
         let ok = results.iter().all(|r| r.result.is_ok());
         let envelope = json!({ "ok": ok, "results": arr });
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
-    } else {
-        let mut out = String::new();
-        let mut err = String::new();
-        for r in results {
-            match &r.result {
-                Ok(o) => out.push_str(&render::outcome_human(o)),
-                Err(e) => err.push_str(&render::error_human(e)),
+        return;
+    }
+
+    let styled_out = render::stdout_styled();
+    let styled_err = render::stderr_styled();
+
+    if let [r] = results {
+        match &r.result {
+            Ok(o) => {
+                if !cli.quiet {
+                    print!("{}", render::conversion_success_human(o, styled_out));
+                }
+            }
+            Err(e) => {
+                eprint!(
+                    "{}",
+                    render::conversion_failure_human(&r.input, r.to.ext(), e, styled_err)
+                );
             }
         }
-        print!("{out}");
-        eprint!("{err}");
+        return;
+    }
+
+    let mut err = String::new();
+    for r in results {
+        if let Err(e) = &r.result {
+            err.push_str(&render::conversion_failure_human(
+                &r.input,
+                r.to.ext(),
+                e,
+                styled_err,
+            ));
+        }
+    }
+    eprint!("{err}");
+
+    if !cli.quiet {
+        print!(
+            "{}",
+            render::batch_summary_human(results, elapsed, styled_out)
+        );
     }
 }
 
@@ -422,12 +473,14 @@ mod tests {
         batch::JobResult {
             input: PathBuf::from("in.mp4"),
             output: PathBuf::from("out.gif"),
+            to: convkit_core::Format::Gif,
             result: Ok(Outcome {
                 output: PathBuf::from("out.gif"),
                 bytes: 1,
                 warnings: vec![],
                 backends: vec![],
                 remuxed: false,
+                elapsed_ms: 1,
             }),
         }
     }
@@ -436,6 +489,7 @@ mod tests {
         batch::JobResult {
             input: PathBuf::from("in.mp4"),
             output: PathBuf::from("out.gif"),
+            to: convkit_core::Format::Gif,
             result: Err(ConvError::backend_missing(backend)),
         }
     }
@@ -444,6 +498,7 @@ mod tests {
         batch::JobResult {
             input: PathBuf::from("in.mp4"),
             output: PathBuf::from("out.gif"),
+            to: convkit_core::Format::Gif,
             result: Err(ConvError::new(ErrorCode::OutputExists, "exists")),
         }
     }

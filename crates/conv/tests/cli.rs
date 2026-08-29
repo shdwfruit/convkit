@@ -530,3 +530,140 @@ fn piped_stdin_never_prompts_even_for_a_genuinely_offerable_backend() {
         "must never prompt when stdin is piped, even for an offerable backend: {stderr}"
     );
 }
+
+// --- Part 2: informative success/failure/batch output -----------------------
+
+/// Writes a script standing in for `magick`: on a bare version probe
+/// (`Resolver::resolve`'s own check) it no-ops and exits 0; otherwise it
+/// writes one byte to whatever its last argument names. Lets these tests
+/// exercise the real success-rendering path without depending on whether a
+/// real ImageMagick happens to be on this machine's PATH.
+fn write_magick_stub(dir: &std::path::Path) -> std::path::PathBuf {
+    let (name, body) = if cfg!(windows) {
+        (
+            "magick_stub.bat",
+            "@echo off\r\n\
+             if not \"%~2\"==\"\" goto notversion\r\n\
+             if \"%~1\"==\"--version\" exit /b 0\r\n\
+             if \"%~1\"==\"-version\" exit /b 0\r\n\
+             :notversion\r\n\
+             :loop\r\n\
+             if \"%~1\"==\"\" goto done\r\n\
+             set \"last=%~1\"\r\n\
+             shift\r\n\
+             goto loop\r\n\
+             :done\r\n\
+             <nul set /p \"=x\" >\"%last%\"\r\n\
+             exit /b 0\r\n",
+        )
+    } else {
+        (
+            "magick_stub.sh",
+            "#!/bin/sh\n\
+             if [ \"$#\" = \"1\" ] && { [ \"$1\" = \"--version\" ] || [ \"$1\" = \"-version\" ]; }; then\n\
+             \x20   exit 0\n\
+             fi\n\
+             for a in \"$@\"; do last=\"$a\"; done\n\
+             printf x > \"$last\"\n",
+        )
+    };
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    p
+}
+
+/// Acceptance check 1's shape, proven with a stub so it never depends on a
+/// real ImageMagick: success prints a result line with a size and elapsed
+/// time, then — always, per the owner's own complaint — the absolute,
+/// resolved output path on its own line.
+#[test]
+fn successful_conversion_prints_result_line_and_the_absolute_output_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = write_magick_stub(dir.path());
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "--magick-path"])
+        .arg(&stub)
+        .assert()
+        .success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.stderr, b"", "{:?}", output.stderr);
+    // assert_cmd always gives the child a piped (non-tty) stdout, so this
+    // also proves the acceptance check's "piped through cat" case: plain
+    // ASCII, no escape codes.
+    assert!(!stdout.contains('\u{1b}'), "{stdout}");
+    assert!(stdout.starts_with("OK "), "{stdout}");
+    let abs = std::path::absolute(dir.path().join("a.jpg")).unwrap();
+    assert!(stdout.contains(&abs.display().to_string()), "{stdout}");
+}
+
+#[test]
+fn quiet_suppresses_success_output_entirely() {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = write_magick_stub(dir.path());
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "--quiet", "--magick-path"])
+        .arg(&stub)
+        .assert()
+        .success();
+    let output = assert.get_output();
+    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, b"");
+}
+
+/// `--json` success is unaffected by Part 2's human-mode redesign except
+/// for the additive `elapsed_ms` key.
+#[test]
+fn json_success_is_unchanged_except_for_the_additive_elapsed_ms_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = write_magick_stub(dir.path());
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "--json", "--magick-path"])
+        .arg(&stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["results"][0]["ok"], true);
+    assert!(v["results"][0]["elapsed_ms"].is_number(), "{v}");
+}
+
+/// Acceptance check 3's shape: a real, unstubbed failing conversion (no
+/// ImageMagick on this machine's PATH — see this module's own doc comment
+/// on why `magick` is the reliable choice) must not look like a success.
+#[test]
+fn failing_conversion_prints_a_fail_header_message_and_one_remediation_line() {
+    let dir = tempfile::tempdir().unwrap();
+    write_unreadable_png(dir.path());
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let output = assert.get_output();
+    assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains('\u{1b}'), "{stderr}");
+    assert!(stderr.starts_with("FAIL "), "{stderr}");
+    assert!(stderr.contains("a.png"), "{stderr}");
+    assert!(stderr.contains("jpg"), "{stderr}");
+    assert!(stderr.contains("magick not found"), "{stderr}");
+    assert!(stderr.contains("try"), "{stderr}");
+}
