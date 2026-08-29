@@ -12,7 +12,9 @@ fn main() {
     let cli = cli::Cli::parse_from(wild::args_os());
     let code = match &cli.command {
         None => commands::convert::run(&cli),
-        Some(_) => {
+        Some(cli::Command::Doctor) => commands::doctor::run(&cli),
+        Some(cli::Command::Capabilities) => commands::capabilities::run(&cli),
+        Some(cli::Command::Install { .. }) => {
             eprintln!("error: subcommand not implemented yet");
             2
         }

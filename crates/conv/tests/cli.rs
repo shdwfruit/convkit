@@ -65,3 +65,38 @@ fn json_error_envelope_lands_on_stderr_for_an_unsupported_pair() {
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "unsupported_pair");
 }
+
+#[test]
+fn capabilities_json_lists_pairs_with_their_backends() {
+    let out = conv().args(["capabilities", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let pairs = v["pairs"].as_array().unwrap();
+    assert!(
+        pairs.len() > 30,
+        "expected the full table, got {}",
+        pairs.len()
+    );
+    let gif = pairs
+        .iter()
+        .find(|p| p["from"] == "mp4" && p["to"] == "gif")
+        .unwrap();
+    assert_eq!(gif["backends"][0], "ffmpeg");
+}
+
+#[test]
+fn doctor_reports_every_backend_and_never_exits_nonzero_for_missing_ones() {
+    conv().arg("doctor").assert().success();
+}
+
+#[test]
+fn doctor_json_marks_libreoffice_as_manual_install_only() {
+    let out = conv().args(["doctor", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let lo = v["backends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["backend"] == "soffice")
+        .unwrap();
+    assert_eq!(lo["managed_install"], false);
+}
