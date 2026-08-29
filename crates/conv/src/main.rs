@@ -14,10 +14,7 @@ fn main() {
         None => commands::convert::run(&cli),
         Some(cli::Command::Doctor) => commands::doctor::run(&cli),
         Some(cli::Command::Capabilities) => commands::capabilities::run(&cli),
-        Some(cli::Command::Install { .. }) => {
-            eprintln!("error: subcommand not implemented yet");
-            2
-        }
+        Some(cli::Command::Install { backend }) => commands::install::run(&cli, backend),
     };
     std::process::exit(code);
 }

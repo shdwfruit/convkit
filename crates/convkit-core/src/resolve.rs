@@ -33,6 +33,17 @@ pub struct ResolvedBackend {
 #[derive(Debug, Default)]
 pub struct Resolver {
     overrides: HashMap<Backend, PathBuf>,
+    /// Test-only escape hatch from the real, machine-global
+    /// `Resolver::managed_dir()`. Production code never sets this — see
+    /// `candidates`'s use of `managed_dir_for` — so behaviour outside tests
+    /// is unchanged. It exists because `%LOCALAPPDATA%\convkit\bin` (or its
+    /// XDG equivalent) is real, shared, and — since Task 14 shipped `conv
+    /// install` — can genuinely contain a real installed binary on whatever
+    /// machine the test suite happens to run on; a test asserting "this
+    /// backend resolves to nothing" needs a managed dir it can guarantee is
+    /// empty, not the real one.
+    #[cfg(test)]
+    managed_dir_override: Option<PathBuf>,
     /// Successful resolutions, keyed by backend. `Mutex` rather than
     /// `RefCell` because a `Resolver` is expected to be shared across
     /// threads in Task 12's rayon batch mode — plain interior mutability
@@ -49,6 +60,15 @@ impl Resolver {
         self.overrides.insert(backend, path);
     }
 
+    /// Redirects the `Source::Managed` candidate to `dir` instead of the
+    /// real `Resolver::managed_dir()`, so a test can assert "not found
+    /// anywhere" without depending on this machine's real managed-install
+    /// directory happening to be empty.
+    #[cfg(test)]
+    pub(crate) fn with_managed_dir(&mut self, dir: PathBuf) {
+        self.managed_dir_override = Some(dir);
+    }
+
     /// Where `conv install` places managed binaries.
     pub fn managed_dir() -> PathBuf {
         #[cfg(windows)]
@@ -61,6 +81,16 @@ impl Resolver {
         base.unwrap_or_else(std::env::temp_dir)
             .join("convkit")
             .join("bin")
+    }
+
+    /// `managed_dir_override` when a test has set one, otherwise the real
+    /// `managed_dir()`. The only thing `candidates` should call.
+    fn managed_dir_for(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some(dir) = &self.managed_dir_override {
+            return dir.clone();
+        }
+        Self::managed_dir()
     }
 
     /// Environment variable consulted for this backend, e.g. `CONVKIT_FFMPEG`.
@@ -96,7 +126,7 @@ impl Resolver {
         if let Some(p) = std::env::var_os(Self::env_var(backend)) {
             out.push((PathBuf::from(p), Source::Env));
         }
-        let managed = Self::managed_dir().join(if cfg!(windows) {
+        let managed = self.managed_dir_for().join(if cfg!(windows) {
             format!("{exe}.exe")
         } else {
             exe.to_string()
@@ -264,7 +294,14 @@ mod tests {
 
     #[test]
     fn a_missing_backend_produces_a_remediable_error() {
+        // An empty temp dir stands in for the real managed dir: this
+        // machine may genuinely have a managed pandoc installed (Task 14's
+        // `conv install pandoc` writes to the real, global
+        // `Resolver::managed_dir()`), and this test must fail regardless of
+        // that, not because of it.
+        let empty_managed_dir = tempfile::tempdir().unwrap();
         let mut r = Resolver::new();
+        r.with_managed_dir(empty_managed_dir.path().to_path_buf());
         r.with_override(Backend::Pandoc, PathBuf::from("/definitely/not/here"));
         let e = r.resolve(Backend::Pandoc).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::BackendMissing);

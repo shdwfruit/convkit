@@ -2,6 +2,8 @@ pub mod backend;
 pub mod error;
 pub mod exec;
 pub mod format;
+pub mod install;
+pub mod manifest;
 pub mod plan;
 pub mod probe;
 pub mod recipe;

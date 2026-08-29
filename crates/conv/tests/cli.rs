@@ -162,3 +162,83 @@ fn dry_run_exits_with_the_underlying_code_when_every_job_fails() {
         .assert()
         .code(2);
 }
+
+// --- Task 14: `conv install` --------------------------------------------
+//
+// Only the no-network refusal paths are covered here — a real download is
+// exercised by the task's end-to-end acceptance check, not by a test that
+// would make `cargo test --workspace` depend on network access.
+
+/// LibreOffice has no relocatable binary, so `conv install soffice` must
+/// refuse outright — never print a "downloading" line, never attempt a
+/// fetch — and point at the manual install command instead.
+#[test]
+fn install_soffice_refuses_without_attempting_a_download() {
+    let assert = conv().args(["install", "soffice"]).assert().code(3);
+    let output = assert.get_output();
+    assert_eq!(
+        output.stdout,
+        b"",
+        "must not print anything on stdout, especially not a download line: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.to_ascii_lowercase().contains("downloading"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("soffice"), "{stderr}");
+    assert!(
+        stderr.contains("or:"),
+        "must still offer a manual hint: {stderr}"
+    );
+    assert!(
+        !stderr.contains("try:"),
+        "must not offer `conv install soffice` as its own fix: {stderr}"
+    );
+}
+
+/// The `--json` form of the same refusal: still no network attempt, and the
+/// error envelope's `remediation.managed` is `null`.
+#[test]
+fn install_soffice_json_refusal_has_no_managed_remediation() {
+    let assert = conv()
+        .args(["install", "soffice", "--json"])
+        .assert()
+        .code(3);
+    let v: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stderr).expect("stderr must be valid JSON");
+    assert_eq!(v["ok"], false);
+    assert!(v["error"]["remediation"]["managed"].is_null());
+    assert!(v["error"]["remediation"]["manual"].is_string());
+}
+
+/// A backend name this CLI doesn't recognise at all is a malformed
+/// invocation (exit 2), distinct from a recognised-but-refused backend
+/// (exit 3).
+#[test]
+fn install_rejects_an_unrecognised_backend_name() {
+    conv()
+        .args(["install", "not-a-real-backend"])
+        .assert()
+        .code(2)
+        .stderr(contains("unknown backend"));
+}
+
+/// `magick` is `is_managed()` (unlike `soffice`), but this task's manifest
+/// verifies no ImageMagick asset on any platform (every official release is
+/// `.7z` on Windows, an AppImage on Linux, or has no portable macOS build at
+/// all) — so on every platform this test runs on, `conv install magick`
+/// must report the missing-manifest-entry refusal, not attempt a download.
+#[test]
+fn install_magick_reports_no_managed_build_on_every_platform() {
+    let assert = conv().args(["install", "magick"]).assert().code(3);
+    let output = assert.get_output();
+    assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no managed build"), "{stderr}");
+    assert!(
+        !stderr.to_ascii_lowercase().contains("downloading"),
+        "{stderr}"
+    );
+}

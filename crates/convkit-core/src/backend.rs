@@ -135,23 +135,68 @@ impl Backend {
 }
 
 impl ConvError {
+    /// The manual-install command for `backend`: the right command for a
+    /// detected package manager, or the official download page when none is
+    /// detected — so this is never empty, regardless of what's on PATH.
+    fn manual_hint_always_some(backend: Backend) -> String {
+        PackageManager::detect()
+            .map(|pm| backend.manual_hint(pm).to_string())
+            .unwrap_or_else(|| backend.download_hint().to_string())
+    }
+
     pub fn backend_missing(backend: Backend) -> ConvError {
         let managed = backend
             .is_managed()
             .then(|| format!("conv install {}", backend.exe_name()));
-        // `manual` is always `Some`: fall back to the official download page
-        // when no package manager is detected, so this remediation is never
-        // empty.
-        let manual = PackageManager::detect()
-            .map(|pm| backend.manual_hint(pm).to_string())
-            .unwrap_or_else(|| backend.download_hint().to_string());
         ConvError {
             code: ErrorCode::BackendMissing,
             message: format!("{} not found", backend.exe_name()),
             backend: Some(backend),
             remediation: Some(Remediation {
                 managed,
-                manual: Some(manual),
+                manual: Some(Self::manual_hint_always_some(backend)),
+            }),
+        }
+    }
+
+    /// `conv install <backend>` refuses outright, for a backend where
+    /// `is_managed()` is false. LibreOffice — today the only case — has no
+    /// relocatable binary, so this is a permanent policy refusal, not a
+    /// temporary gap: `remediation.managed` is left `None` on purpose,
+    /// since offering `conv install <x>` as the fix for `conv install <x>`
+    /// refusing would be circular.
+    pub fn not_installable(backend: Backend) -> ConvError {
+        ConvError {
+            code: ErrorCode::BackendMissing,
+            message: format!(
+                "{} has no relocatable build; it can't be installed by conv",
+                backend.exe_name()
+            ),
+            backend: Some(backend),
+            remediation: Some(Remediation {
+                managed: None,
+                manual: Some(Self::manual_hint_always_some(backend)),
+            }),
+        }
+    }
+
+    /// `backend.is_managed()` is true, but `manifest::lookup` has no
+    /// verified asset for the platform this process is running on.
+    /// Deliberately distinct from an unverified manifest entry: per Task
+    /// 14's controller ruling, a missing entry must fail immediately with
+    /// this remediation, not after a download, with a checksum error the
+    /// user cannot act on.
+    pub fn no_managed_build(backend: Backend) -> ConvError {
+        ConvError {
+            code: ErrorCode::BackendMissing,
+            message: format!(
+                "no managed build of {} is available for this platform",
+                backend.exe_name()
+            ),
+            backend: Some(backend),
+            remediation: Some(Remediation {
+                managed: None,
+                manual: Some(Self::manual_hint_always_some(backend)),
             }),
         }
     }
@@ -184,6 +229,28 @@ mod tests {
             .remediation
             .expect("backend_missing always sets remediation");
         assert_eq!(remediation.managed, Some("conv install pandoc".to_string()));
+        assert!(remediation.manual.is_some());
+    }
+
+    #[test]
+    fn not_installable_never_offers_a_managed_install() {
+        let e = ConvError::not_installable(Backend::Soffice);
+        assert_eq!(e.code, ErrorCode::BackendMissing);
+        let remediation = e.remediation.expect("must carry remediation");
+        assert_eq!(remediation.managed, None);
+        assert!(remediation.manual.is_some());
+    }
+
+    #[test]
+    fn no_managed_build_never_offers_a_managed_install_either() {
+        let e = ConvError::no_managed_build(Backend::Pandoc);
+        assert_eq!(e.code, ErrorCode::BackendMissing);
+        let remediation = e.remediation.expect("must carry remediation");
+        assert_eq!(
+            remediation.managed, None,
+            "offering `conv install pandoc` as the fix for `conv install pandoc` \
+             finding no manifest entry would be circular"
+        );
         assert!(remediation.manual.is_some());
     }
 }
