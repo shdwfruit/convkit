@@ -14,6 +14,16 @@ pub struct Request {
     pub to: Format,
     pub inputs: Vec<PathBuf>,
     pub output: PathBuf,
+    /// I5: refuse-by-default is a product invariant (spec §8), and it must
+    /// hold for every caller of `convkit-core`, not just the `conv` binary.
+    /// `batch.rs` already checks this before ever building a `Request`, but
+    /// that check lived *only* in the binary — `exec::run`'s own final
+    /// `std::fs::rename` would silently clobber an existing destination on
+    /// both Unix and Windows if a caller skipped it, and the planned v1.1
+    /// `conv mcp` frontend consumes `convkit-core` directly and would have
+    /// inherited that silent overwrite. `false` refuses; `true` permits it,
+    /// matching `-y/--overwrite`.
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +131,19 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                 format!("input not found: {}", input.display()),
             ));
         }
+    }
+
+    // I5: enforced here, not only by the CLI's own fast-path check in
+    // `batch.rs`, so refuse-by-default (spec §8) holds for every caller of
+    // this crate — including a future `conv mcp` frontend that would
+    // otherwise inherit a silent overwrite. Checked early, before any work
+    // (probing, a scratch directory, an actual conversion) is done, so a
+    // refusal is cheap rather than discarding a completed transcode.
+    if req.output.exists() && !req.overwrite {
+        return Err(ConvError::new(
+            ErrorCode::OutputExists,
+            format!("{} exists; pass -y to overwrite", req.output.display()),
+        ));
     }
 
     // Probe only when a stream copy is even possible for this pair.
@@ -609,6 +632,7 @@ mod tests {
             to: Format::Jpg,
             inputs: vec![input],
             output: dir.path().join("out.jpg"),
+            overwrite: false,
         };
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::ConversionFailed);
@@ -630,12 +654,78 @@ mod tests {
             to: Format::Jpg,
             inputs: vec![input],
             output: output.clone(),
+            overwrite: false,
         };
 
         let outcome = run(&req, &r, &mut |_| {}).unwrap();
         assert!(output.is_file(), "output must exist after rename");
         assert_eq!(outcome.bytes, 1);
         assert_eq!(outcome.output, output);
+    }
+
+    // --- I5: overwrite refusal must be enforced by core itself, not only
+    // by the CLI's own fast-path check in batch.rs -------------------------
+
+    /// The exact gap: `batch.rs`'s check is bypassed entirely here — this
+    /// calls `exec::run` directly, the way a future `conv mcp` frontend
+    /// consuming `convkit-core` directly would — and `run` must still
+    /// refuse to clobber a pre-existing output when `Request::overwrite` is
+    /// `false`, before ever touching the backend or the real destination
+    /// file.
+    #[test]
+    fn run_refuses_to_clobber_an_existing_output_when_overwrite_is_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_creates_its_output(dir.path());
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub);
+
+        let input = dir.path().join("a.png");
+        std::fs::write(&input, b"fresh input").unwrap();
+        let output = dir.path().join("out.jpg");
+        std::fs::write(&output, b"pre-existing output, must survive").unwrap();
+
+        let req = Request {
+            from: Format::Png,
+            to: Format::Jpg,
+            inputs: vec![input],
+            output: output.clone(),
+            overwrite: false,
+        };
+
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::OutputExists);
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"pre-existing output, must survive",
+            "the pre-existing output must be left untouched"
+        );
+    }
+
+    /// The counterpart: `Request::overwrite: true` must still let a real
+    /// run replace an existing output — this isn't a blanket refusal, only
+    /// a default one.
+    #[test]
+    fn run_permits_clobbering_an_existing_output_when_overwrite_is_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_creates_its_output(dir.path());
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub);
+
+        let input = dir.path().join("a.png");
+        std::fs::write(&input, b"fresh input").unwrap();
+        let output = dir.path().join("out.jpg");
+        std::fs::write(&output, b"stale output").unwrap();
+
+        let req = Request {
+            from: Format::Png,
+            to: Format::Jpg,
+            inputs: vec![input],
+            output: output.clone(),
+            overwrite: true,
+        };
+
+        run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), b"x");
     }
 
     #[test]
@@ -651,6 +741,7 @@ mod tests {
             to: Format::Jpg,
             inputs: vec![input],
             output: dir.path().join("out.jpg"),
+            overwrite: false,
         };
         run(&req, &r, &mut |_| {}).unwrap();
 
@@ -700,6 +791,7 @@ mod tests {
             to: Format::Pdf,
             inputs: vec![input],
             output: output.clone(),
+            overwrite: false,
         };
 
         let outcome = run(&req, &r, &mut |_| {}).unwrap();
@@ -744,6 +836,7 @@ mod tests {
             to: Format::Pdf,
             inputs: vec![input],
             output: dir.path().join("out.pdf"),
+            overwrite: false,
         };
 
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
@@ -877,6 +970,7 @@ mod tests {
             to: Format::Pdf,
             inputs: vec![input],
             output: dir.path().join("out.pdf"),
+            overwrite: false,
         };
 
         run(&req, &r, &mut |_| {}).unwrap();

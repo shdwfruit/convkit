@@ -40,6 +40,10 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32) {
     let results: Vec<JobResult> = pool.install(|| {
         jobs.into_par_iter()
             .map(|job| {
+                // I5: `exec::run` now enforces this same refusal itself
+                // (`Request::overwrite`), so this is a fast path — skipping
+                // backend resolution and a scratch directory entirely for
+                // the common case — not the only place it's checked.
                 let result = if job.output.exists() && !cli.overwrite {
                     Err(ConvError::new(
                         ErrorCode::OutputExists,
@@ -51,6 +55,7 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32) {
                         to: job.to,
                         inputs: job.inputs.clone(),
                         output: job.output.clone(),
+                        overwrite: cli.overwrite,
                     };
                     exec::run(&req, &resolver, &mut |_| {})
                 };

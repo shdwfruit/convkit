@@ -97,6 +97,7 @@ fn convert_path(input: &Path, to_ext: &str) -> (PathBuf, exec::Outcome) {
         to,
         inputs: vec![input.to_path_buf()],
         output: output.clone(),
+        overwrite: false,
     };
     let outcome = exec::run(&req, &resolver, &mut |_| {})
         .unwrap_or_else(|e| panic!("{} -> {to_ext} failed: {e}", input.display()));
