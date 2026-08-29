@@ -17,15 +17,6 @@ fn parse_backend(name: &str) -> Option<Backend> {
     }
 }
 
-fn print_error(cli: &Cli, e: &ConvError) {
-    if cli.json {
-        let envelope = json!({ "ok": false, "error": e });
-        eprintln!("{}", serde_json::to_string_pretty(&envelope).unwrap());
-    } else {
-        eprint!("{}", render::error_human(e));
-    }
-}
-
 /// Downloads and verifies a managed backend, placing it at
 /// `Resolver::managed_path(backend)` so it's found ahead of `PATH` on the
 /// next run.
@@ -49,14 +40,14 @@ pub fn run(cli: &Cli, backend_name: &str) -> i32 {
                      ffmpeg, ffprobe, magick, pandoc, soffice"
                 ),
             );
-            print_error(cli, &e);
+            render::print_error(cli.json, &e);
             return e.code.exit_code();
         }
     };
 
     if !backend.is_managed() {
         let e = ConvError::not_installable(backend);
-        print_error(cli, &e);
+        render::print_error(cli.json, &e);
         return e.code.exit_code();
     }
 
@@ -64,7 +55,7 @@ pub fn run(cli: &Cli, backend_name: &str) -> i32 {
         Some(a) => a,
         None => {
             let e = ConvError::no_managed_build(backend);
-            print_error(cli, &e);
+            render::print_error(cli.json, &e);
             return e.code.exit_code();
         }
     };
@@ -89,7 +80,7 @@ pub fn run(cli: &Cli, backend_name: &str) -> i32 {
             0
         }
         Err(e) => {
-            print_error(cli, &e);
+            render::print_error(cli.json, &e);
             e.code.exit_code()
         }
     }

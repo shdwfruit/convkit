@@ -49,8 +49,25 @@ pub fn error_human(e: &ConvError) -> String {
     s
 }
 
-pub fn plan_json(plan: &ConversionPlan) -> serde_json::Value {
-    json!({ "ok": true, "dry_run": true, "plan": plan })
+/// The `{"ok": false, "error": ...}` envelope every top-level (pre-job)
+/// `--json` failure uses. Factored out (I2) so `commands/convert.rs` and
+/// `commands/install.rs` share one definition of this shape instead of each
+/// hand-rolling the identical `json!({ "ok": false, "error": e })`.
+pub fn error_json(e: &ConvError) -> serde_json::Value {
+    json!({ "ok": false, "error": e })
+}
+
+/// Reports a top-level failure — one that happened before any job could
+/// even be attempted (a malformed invocation, a backend genuinely missing,
+/// an install refusal) — to stderr, in whichever of human or `--json` shape
+/// `json` selects. Shared by every command that can fail this way, so the
+/// envelope shape can't drift between them (I2).
+pub fn print_error(json: bool, e: &ConvError) {
+    if json {
+        eprintln!("{}", serde_json::to_string_pretty(&error_json(e)).unwrap());
+    } else {
+        eprint!("{}", error_human(e));
+    }
 }
 
 pub fn outcome_json(o: &Outcome) -> serde_json::Value {

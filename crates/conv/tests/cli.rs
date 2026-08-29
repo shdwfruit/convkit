@@ -42,6 +42,11 @@ fn dot_extension_form_derives_the_output_name() {
         .stdout(contains("photo.jpg"));
 }
 
+/// I2: `--dry-run --json` always uses the plural `"plans"` array, even for
+/// a single job — one of the `--json` contract's four previously
+/// incompatible success shapes (a lone job used to get its own singular
+/// `"plan"` key instead), so a consumer no longer has to branch on job
+/// count to find the plan.
 #[test]
 fn json_dry_run_reports_ok_and_the_first_step_program() {
     let assert = conv()
@@ -51,19 +56,51 @@ fn json_dry_run_reports_ok_and_the_first_step_program() {
     let v: serde_json::Value =
         serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be valid JSON");
     assert_eq!(v["ok"], true);
-    assert_eq!(v["plan"]["steps"][0]["program"], "ffmpeg");
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["plans"][0]["ok"], true);
+    assert_eq!(v["plans"][0]["plan"]["steps"][0]["program"], "ffmpeg");
 }
 
+/// I2: a per-job plan-build failure (the job itself was well-formed —
+/// `in.pdf out.mp4` parses fine — but no recipe exists for the pair) is
+/// reported the same way a batch of many jobs already reported one bad job
+/// among them: inside the `"plans"` array on stdout, `ok: false`, never on
+/// stderr. This is the counterpart to the next test, which covers the
+/// genuine "no job could even be built" case that still belongs on stderr.
 #[test]
-fn json_error_envelope_lands_on_stderr_for_an_unsupported_pair() {
+fn json_dry_run_reports_a_per_job_plan_failure_inside_the_plans_array_not_stderr() {
     let assert = conv()
         .args(["in.pdf", "out.mp4", "--dry-run", "--json"])
         .assert()
         .code(2);
+    let output = assert.get_output();
+    assert_eq!(
+        output.stderr,
+        b"",
+        "a per-job failure belongs in the stdout array, not stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["plans"][0]["ok"], false);
+    assert_eq!(v["plans"][0]["error"]["code"], "unsupported_pair");
+}
+
+/// The genuine top-level case — no job exists at all, because the
+/// invocation itself doesn't parse (here: no positionals given at all) —
+/// still gets its own top-level `{"ok": false, "error": ...}` document on
+/// stderr, per the README's documented contract ("only an error caught
+/// before any job exists at all ... is its own top-level document on
+/// stderr instead").
+#[test]
+fn json_error_envelope_lands_on_stderr_when_no_job_could_be_built_at_all() {
+    let assert = conv().args(["--dry-run", "--json"]).assert().code(2);
     let v: serde_json::Value =
         serde_json::from_slice(&assert.get_output().stderr).expect("stderr must be valid JSON");
     assert_eq!(v["ok"], false);
-    assert_eq!(v["error"]["code"], "unsupported_pair");
+    assert_eq!(v["error"]["code"], "invalid_invocation");
 }
 
 #[test]
@@ -99,6 +136,27 @@ fn doctor_json_marks_libreoffice_as_manual_install_only() {
         .find(|b| b["backend"] == "soffice")
         .unwrap();
     assert_eq!(lo["managed_install"], false);
+}
+
+/// C1: `magick` is `is_managed() == true` (a managed install is
+/// architecturally possible in principle) but has zero verified manifest
+/// entries on any platform — so `doctor --json`'s `managed_install` field
+/// must report `false` for it too, the same as `soffice`, regardless of
+/// whether this machine happens to have a real ImageMagick installed
+/// (`found` may be `true` or `false`; `managed_install` must be `false`
+/// either way, since it answers "would `conv install magick` work here",
+/// not "is magick currently found").
+#[test]
+fn doctor_json_marks_imagemagick_as_manual_install_only() {
+    let out = conv().args(["doctor", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let magick = v["backends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["backend"] == "magick")
+        .unwrap();
+    assert_eq!(magick["managed_install"], false);
 }
 
 // --- Controller review round 3 -------------------------------------------
