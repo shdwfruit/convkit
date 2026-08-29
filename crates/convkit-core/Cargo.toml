@@ -11,6 +11,7 @@ description = "Conversion planning and execution engine for convkit"
 serde.workspace = true
 thiserror.workspace = true
 strsim = "0.11"
+which = "8"
 
 [dev-dependencies]
 serde_json.workspace = true

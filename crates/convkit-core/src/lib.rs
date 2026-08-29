@@ -1,8 +1,9 @@
+pub mod backend;
 pub mod error;
 pub mod format;
+pub mod recipe;
 
+pub use backend::{Backend, PackageManager};
 pub use error::{ConvError, ErrorCode, Remediation, Result};
 pub use format::{Format, Kind};
-
-// TODO(task-3): replaced by the real `Backend` enum in `backend.rs`.
-pub type Backend = String;
+pub use recipe::{Arg, OutputMode, Recipe, Step};
