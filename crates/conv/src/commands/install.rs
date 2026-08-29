@@ -26,8 +26,9 @@ fn print_error(cli: &Cli, e: &ConvError) {
     }
 }
 
-/// Downloads and verifies a managed backend, placing it under
-/// `Resolver::managed_dir()` so it's found ahead of `PATH` on the next run.
+/// Downloads and verifies a managed backend, placing it at
+/// `Resolver::managed_path(backend)` so it's found ahead of `PATH` on the
+/// next run.
 ///
 /// Refuses two kinds of request before touching the network: a backend name
 /// this CLI doesn't recognise at all, and a backend where
@@ -69,11 +70,15 @@ pub fn run(cli: &Cli, backend_name: &str) -> i32 {
     };
 
     if !cli.quiet && !cli.json {
-        println!("downloading {} ...", asset.url);
+        // Progress goes to stderr, matching the batch progress bar
+        // (`indicatif::ProgressBar` also draws there) — stdout is reserved
+        // for the final machine-parseable result (or, in `--json` mode, the
+        // whole envelope), the same split `render`'s other commands keep.
+        eprintln!("downloading {} ...", asset.url);
     }
 
-    let dest_dir = Resolver::managed_dir();
-    match install::fetch_and_install(asset, &dest_dir) {
+    let dest = Resolver::managed_path(backend);
+    match install::fetch_and_install(asset, &dest) {
         Ok(path) => {
             if cli.json {
                 let envelope = json!({ "ok": true, "backend": backend, "path": path });

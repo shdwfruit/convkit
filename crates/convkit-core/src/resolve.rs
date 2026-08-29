@@ -93,6 +93,30 @@ impl Resolver {
         Self::managed_dir()
     }
 
+    /// The platform-specific filename `Source::Managed` looks for —
+    /// `<exe>.exe` on Windows, bare `<exe>` elsewhere. Factored out so
+    /// `managed_path` and `candidates` share one spelling of this rule
+    /// rather than each independently writing `if cfg!(windows) { ... }`
+    /// (see Task 14 review finding 5: two independent copies is exactly the
+    /// kind of thing that silently drifts).
+    fn managed_filename(backend: Backend) -> String {
+        let exe = backend.exe_name();
+        if cfg!(windows) {
+            format!("{exe}.exe")
+        } else {
+            exe.to_string()
+        }
+    }
+
+    /// The exact file `Source::Managed` resolves `backend` to — and
+    /// therefore the single source of truth for where `conv install` must
+    /// write. Always the real, global `managed_dir()`; test isolation for
+    /// *resolving* is `with_managed_dir`, but `conv install` itself always
+    /// writes to the one real managed directory regardless of that.
+    pub fn managed_path(backend: Backend) -> PathBuf {
+        Self::managed_dir().join(Self::managed_filename(backend))
+    }
+
     /// Environment variable consulted for this backend, e.g. `CONVKIT_FFMPEG`.
     fn env_var(backend: Backend) -> String {
         format!("CONVKIT_{}", backend.exe_name().to_ascii_uppercase())
@@ -126,11 +150,7 @@ impl Resolver {
         if let Some(p) = std::env::var_os(Self::env_var(backend)) {
             out.push((PathBuf::from(p), Source::Env));
         }
-        let managed = self.managed_dir_for().join(if cfg!(windows) {
-            format!("{exe}.exe")
-        } else {
-            exe.to_string()
-        });
+        let managed = self.managed_dir_for().join(Self::managed_filename(backend));
         out.push((managed, Source::Managed));
         if let Ok(p) = which::which(exe) {
             out.push((p, Source::Path));
@@ -259,6 +279,35 @@ mod tests {
         let got = r.candidates(Backend::Ffmpeg);
         assert_eq!(got[0].0, fake);
         assert_eq!(got[0].1, Source::Override);
+    }
+
+    /// Review finding 5: `conv install` writes to `Resolver::managed_path`,
+    /// and `resolve()` looks for the backend at the `Source::Managed`
+    /// candidate `candidates()` produces — these must always agree on the
+    /// filename, or `conv install` could report success while `doctor`
+    /// reports the backend still missing, with nothing failing to say so.
+    #[test]
+    fn managed_path_matches_the_managed_candidate_filename() {
+        let r = Resolver::new();
+        for backend in [
+            Backend::Ffmpeg,
+            Backend::Ffprobe,
+            Backend::Magick,
+            Backend::Pandoc,
+            Backend::Soffice,
+        ] {
+            let managed_candidate = r
+                .candidates(backend)
+                .into_iter()
+                .find(|(_, source)| *source == Source::Managed)
+                .expect("every backend has a Managed candidate")
+                .0;
+            assert_eq!(
+                managed_candidate.file_name(),
+                Resolver::managed_path(backend).file_name(),
+                "{backend:?}: managed_path and the Managed candidate disagree on filename"
+            );
+        }
     }
 
     #[test]

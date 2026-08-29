@@ -24,9 +24,13 @@
 use crate::Backend;
 
 /// How the downloaded bytes are packaged, and therefore how
-/// `install::fetch_and_install` gets the executable out of them.
+/// `install::fetch_and_install` gets the executable out of them. Named
+/// `Packaging` rather than `Format` specifically to avoid colliding with
+/// (and being confused for) the crate-root `Format` type, which is the
+/// unrelated media-format enum (`Mp4`, `Jpg`, `Pdf`, ...) the rest of the
+/// crate uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
+pub enum Packaging {
     /// A zip archive; `archive_member` is the executable's path inside it.
     Zip,
     /// A gzip-compressed tarball; `archive_member` is the executable's path
@@ -48,8 +52,8 @@ pub struct Asset {
     pub url: &'static str,
     /// Lowercase hex SHA-256 of the exact bytes at `url`, 64 characters.
     pub sha256: &'static str,
-    pub format: Format,
-    /// Path of the executable inside the archive; empty for `Format::Raw`.
+    pub packaging: Packaging,
+    /// Path of the executable inside the archive; empty for `Packaging::Raw`.
     pub archive_member: &'static str,
 }
 
@@ -68,7 +72,7 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip",
         sha256: "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9",
-        format: Format::Zip,
+        packaging: Packaging::Zip,
         archive_member: "ffmpeg-9.0.1-essentials_build/bin/ffmpeg.exe",
     },
     Asset {
@@ -77,7 +81,7 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip",
         sha256: "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9",
-        format: Format::Zip,
+        packaging: Packaging::Zip,
         archive_member: "ffmpeg-9.0.1-essentials_build/bin/ffprobe.exe",
     },
     // --- ffmpeg / ffprobe: Linux x64, macOS x64, macOS arm64 -----------
@@ -91,7 +95,7 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-x64",
         sha256: "e7e7fb30477f717e6f55f9180a70386c62677ef8a4d4d1a5d948f4098aa3eb99",
-        format: Format::Raw,
+        packaging: Packaging::Raw,
         archive_member: "",
     },
     Asset {
@@ -100,7 +104,7 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-linux-x64",
         sha256: "4f231a1960d83e403d08f7971e271707bec278a9ae18e21b8b5b03186668450d",
-        format: Format::Raw,
+        packaging: Packaging::Raw,
         archive_member: "",
     },
     Asset {
@@ -109,7 +113,7 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64",
         sha256: "ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894",
-        format: Format::Raw,
+        packaging: Packaging::Raw,
         archive_member: "",
     },
     Asset {
@@ -118,7 +122,7 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-x64",
         sha256: "fa3add0ce901f7241abe0dfc0155d958fc834aca3f8ce61f87cc712ae669c1e0",
-        format: Format::Raw,
+        packaging: Packaging::Raw,
         archive_member: "",
     },
     Asset {
@@ -127,7 +131,7 @@ pub static ALL: &[Asset] = &[
         arch: "arm64",
         url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64",
         sha256: "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584",
-        format: Format::Raw,
+        packaging: Packaging::Raw,
         archive_member: "",
     },
     Asset {
@@ -136,7 +140,7 @@ pub static ALL: &[Asset] = &[
         arch: "arm64",
         url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-arm64",
         sha256: "bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3cab091f9cab90b64",
-        format: Format::Raw,
+        packaging: Packaging::Raw,
         archive_member: "",
     },
     // --- pandoc: all four platforms -------------------------------------
@@ -147,7 +151,7 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-windows-x86_64.zip",
         sha256: "2ab72baf2399450e148ddf7a2a8689806c42e1bba71862b57e220fd9b8456d3d",
-        format: Format::Zip,
+        packaging: Packaging::Zip,
         archive_member: "pandoc-3.11/pandoc.exe",
     },
     Asset {
@@ -156,7 +160,7 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-linux-amd64.tar.gz",
         sha256: "37edb3bbcf722f921a009941bf5874e2e0c09263226c9b4a2d980788cb062ab6",
-        format: Format::TarGz,
+        packaging: Packaging::TarGz,
         archive_member: "pandoc-3.11/bin/pandoc",
     },
     Asset {
@@ -165,7 +169,7 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-x86_64-macOS.zip",
         sha256: "3b1c1b57f160112c821d02f23d946ede8b7f57a6ccf4632a25a512d334a9291f",
-        format: Format::Zip,
+        packaging: Packaging::Zip,
         archive_member: "pandoc-3.11-x86_64/bin/pandoc",
     },
     Asset {
@@ -174,7 +178,7 @@ pub static ALL: &[Asset] = &[
         arch: "arm64",
         url: "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-arm64-macOS.zip",
         sha256: "15806bedf9517bfead72e88fe6a6696635c3691efbb6e152173440e9c5bb50b4",
-        format: Format::Zip,
+        packaging: Packaging::Zip,
         archive_member: "pandoc-3.11-arm64/bin/pandoc",
     },
 ];
@@ -237,6 +241,11 @@ mod tests {
     fn every_manifest_url_is_pinned_not_latest() {
         for a in ALL {
             assert!(
+                a.url.starts_with("https://"),
+                "{} is not an https:// URL",
+                a.url
+            );
+            assert!(
                 !a.url.contains("releases/latest"),
                 "{} uses an unpinned URL",
                 a.url
@@ -260,14 +269,14 @@ mod tests {
     #[test]
     fn every_archive_entry_names_a_member_and_every_raw_entry_does_not() {
         for a in ALL {
-            match a.format {
-                Format::Raw => assert!(
+            match a.packaging {
+                Packaging::Raw => assert!(
                     a.archive_member.is_empty(),
                     "{} is Raw but names archive_member {:?}",
                     a.url,
                     a.archive_member
                 ),
-                Format::Zip | Format::TarGz => assert!(
+                Packaging::Zip | Packaging::TarGz => assert!(
                     !a.archive_member.is_empty(),
                     "{} is an archive with no archive_member",
                     a.url
@@ -293,10 +302,17 @@ mod tests {
 
     #[test]
     fn lookup_finds_the_entry_for_the_running_platform_when_one_exists() {
-        // ffmpeg and pandoc are verified for windows-x64, linux-x64,
-        // macos-x64, and macos-arm64 — every platform this manifest covers
-        // at all — so on any CI runner or dev machine this must resolve.
-        if current_os() == "windows" || current_os() == "linux" || current_os() == "macos" {
+        // ffmpeg and pandoc are verified for exactly these four (os, arch)
+        // pairs — not, say, linux-arm64, a standard CI runner class that
+        // this manifest simply doesn't cover yet. Review finding 4: the
+        // original version of this test guarded on `current_os()` alone,
+        // which on aarch64 Linux would wrongly assert an entry exists where
+        // none does and fail.
+        let covered = matches!(
+            (current_os(), current_arch()),
+            ("windows", "x64") | ("linux", "x64") | ("macos", "x64") | ("macos", "arm64")
+        );
+        if covered {
             let found = lookup(Backend::Pandoc);
             assert!(
                 found.is_some(),
