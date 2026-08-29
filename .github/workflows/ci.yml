@@ -45,16 +45,32 @@ jobs:
       # JSON, doctor/capabilities tables) belongs to the `conv` binary crate.
       # A print statement sneaking into core would either duplicate output
       # under `--json` or corrupt a machine consumer's stdout, so this is
-      # enforced in CI, not just by convention. `mod tests` is excluded
+      # enforced in CI, not just by convention. Test code is excluded
       # because assertions inside `#[cfg(test)]` blocks are allowed to
-      # print for debugging and never ship in the built library.
+      # print for debugging and never ship in the built library: every file
+      # in this crate places its `#[cfg(test)] mod tests { ... }` block as
+      # the last top-level item, so each file is truncated at that marker
+      # before being grepped -- scoping by *position in the file*, not (as
+      # a previous version of this check tried and failed to do) by
+      # grepping for the literal text "mod tests" on the matched line
+      # itself, which a `println!`/`eprintln!`/etc. call's own text almost
+      # never contains, so that version never actually filtered anything.
       - name: core must not print
         shell: bash
         run: |
-          if grep -rnE '\b(println!|eprintln!|dbg!|print!|eprint!)' \
-               crates/convkit-core/src --include='*.rs' \
-               | grep -v 'mod tests' ; then
-            echo "convkit-core must never write to stdout/stderr"; exit 1
+          fail=0
+          while IFS= read -r -d '' f; do
+            hit=$(sed -n '/^#\[cfg(test)\]/q;p' "$f" \
+                  | grep -nE '\b(println!|eprintln!|dbg!|print!|eprint!)')
+            if [ -n "$hit" ]; then
+              echo "$f:"
+              echo "$hit"
+              fail=1
+            fi
+          done < <(find crates/convkit-core/src -name '*.rs' -print0)
+          if [ "$fail" -eq 1 ]; then
+            echo "convkit-core must never write to stdout/stderr"
+            exit 1
           fi
 
   # Ubuntu only: installs every real backend via apt, then runs the

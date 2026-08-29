@@ -260,7 +260,19 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
 
         if !out.status.success() || !is_non_empty(&produced) {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().join("; ");
+            // `.rev().take(3)` alone selects the *last* three lines but
+            // leaves them in reverse (bottom-up) order; `.rev()` again
+            // after `.take(3)` restores the original top-down reading
+            // order without changing which three lines were picked.
+            let tail: String = stderr
+                .lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("; ");
             return Err(ConvError {
                 code: ErrorCode::ConversionFailed,
                 message: if is_non_empty(&produced) {
@@ -369,11 +381,12 @@ fn percent_encode_path(s: &str) -> String {
 /// Two failure modes a naive `format!("file://{}", path.display())` has on
 /// Windows: wrong slash count and backslash separators
 /// (`file://C:\Users\...`, which LibreOffice rejects or silently ignores),
-/// and an unescaped space (this machine's own home directory is
-/// `C:\Users\Rick Xie` — a raw space in the URL is equally malformed and
-/// equally silently ignored, losing exactly the profile isolation this flag
-/// exists to provide). Both are Windows-only failures Linux CI never
-/// catches, on the one backend that can never be auto-installed.
+/// and an unescaped space — a genuinely common case, since a Windows
+/// username with a space in it (e.g. `C:\Users\Test User`) is entirely
+/// ordinary, and a raw space in the URL is equally malformed and equally
+/// silently ignored, losing exactly the profile isolation this flag exists
+/// to provide. Both are Windows-only failures Linux CI never catches, on
+/// the one backend that can never be auto-installed.
 ///
 /// `pub(crate)` because `resolve.rs`'s soffice version probe needs the same
 /// well-formed-URL logic — it is itself a soffice invocation and gets the
@@ -464,6 +477,42 @@ mod tests {
             std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
             p
         };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// Writes a script that prints four numbered lines to stderr, in order,
+    /// and exits non-zero without writing any output file — for testing
+    /// that the failure message's stderr tail reads top-down, not
+    /// bottom-up (the minor stderr-order fix).
+    fn stub_that_fails_with_ordered_multiline_stderr(dir: &Path) -> PathBuf {
+        let (name, body) = if cfg!(windows) {
+            (
+                "multiline_stderr.bat",
+                "@echo off\r\n\
+                 echo line-one 1>&2\r\n\
+                 echo line-two 1>&2\r\n\
+                 echo line-three 1>&2\r\n\
+                 echo line-four 1>&2\r\n\
+                 exit /b 1\r\n",
+            )
+        } else {
+            (
+                "multiline_stderr.sh",
+                "#!/bin/sh\n\
+                 echo line-one >&2\n\
+                 echo line-two >&2\n\
+                 echo line-three >&2\n\
+                 echo line-four >&2\n\
+                 exit 1\n",
+            )
+        };
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -616,6 +665,51 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(".convkit-"))
             .collect()
+    }
+
+    /// Minor fix: the stderr tail must read top-down (natural reading
+    /// order), not bottom-up. `.lines().rev().take(3)` alone correctly
+    /// selects the *last* three lines but leaves them reversed; a second
+    /// `.rev()` after `.take(3)` was missing.
+    #[test]
+    fn the_stderr_tail_reads_in_natural_top_to_bottom_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_fails_with_ordered_multiline_stderr(dir.path());
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub);
+
+        let input = dir.path().join("a.png");
+        std::fs::write(&input, b"x").unwrap();
+        let req = Request {
+            from: Format::Png,
+            to: Format::Jpg,
+            inputs: vec![input],
+            output: dir.path().join("out.jpg"),
+            overwrite: false,
+        };
+
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        // The stub writes four lines; only the last three are kept, and
+        // they must appear in the order they were written: two, three, four.
+        let two_at = e.message.find("line-two").unwrap_or_else(|| {
+            panic!("stderr tail missing line-two: {}", e.message);
+        });
+        let three_at = e.message.find("line-three").unwrap_or_else(|| {
+            panic!("stderr tail missing line-three: {}", e.message);
+        });
+        let four_at = e.message.find("line-four").unwrap_or_else(|| {
+            panic!("stderr tail missing line-four: {}", e.message);
+        });
+        assert!(
+            two_at < three_at && three_at < four_at,
+            "stderr tail is out of order: {}",
+            e.message
+        );
+        assert!(
+            !e.message.contains("line-one"),
+            "only the last three lines should be kept: {}",
+            e.message
+        );
     }
 
     #[test]
@@ -909,17 +1003,20 @@ mod tests {
         assert_eq!(url, "file:///tmp/convkit-lo-profile-0");
     }
 
-    /// IMPORTANT 2: a raw space is just as malformed as a backslash, and
-    /// this machine's own home directory (`C:\Users\Rick Xie`) has one — so
-    /// this uses that exact name rather than a synthetic example.
+    /// IMPORTANT 2: a raw space is just as malformed as a backslash, and a
+    /// Windows username with a space in it (e.g. `C:\Users\Test User`) is
+    /// entirely ordinary — this is a synthetic path, not this machine's own
+    /// account name, since this repo publishes under the handle
+    /// `shdwfruit` and a contributor's real name has no reason to appear in
+    /// library source; a synthetic space proves the same regression.
     #[cfg(windows)]
     #[test]
     fn user_installation_url_percent_encodes_a_space_in_the_path() {
-        let profile = PathBuf::from(r"C:\Users\Rick Xie\AppData\Local\Temp\convkit-lo-profile-0");
+        let profile = PathBuf::from(r"C:\Users\Test User\AppData\Local\Temp\convkit-lo-profile-0");
         let url = user_installation_url(&profile).unwrap();
         assert_eq!(
             url,
-            "file:///C:/Users/Rick%20Xie/AppData/Local/Temp/convkit-lo-profile-0"
+            "file:///C:/Users/Test%20User/AppData/Local/Temp/convkit-lo-profile-0"
         );
         assert!(!url.contains(' '), "{url}");
     }
@@ -927,9 +1024,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn user_installation_url_percent_encodes_a_space_in_the_path() {
-        let profile = PathBuf::from("/tmp/rick xie/convkit-lo-profile-0");
+        let profile = PathBuf::from("/tmp/test user/convkit-lo-profile-0");
         let url = user_installation_url(&profile).unwrap();
-        assert_eq!(url, "file:///tmp/rick%20xie/convkit-lo-profile-0");
+        assert_eq!(url, "file:///tmp/test%20user/convkit-lo-profile-0");
         assert!(!url.contains(' '), "{url}");
     }
 

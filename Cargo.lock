@@ -250,7 +250,6 @@ dependencies = [
  "strsim",
  "tar",
  "tempfile",
- "thiserror",
  "ureq",
  "which",
  "zip",

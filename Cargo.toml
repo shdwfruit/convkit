@@ -14,7 +14,6 @@ homepage = "https://github.com/shdwfruit/convkit"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
 
 # The profile that 'dist' will build with
 [profile.dist]
