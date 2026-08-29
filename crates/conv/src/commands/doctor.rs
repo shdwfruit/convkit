@@ -1,4 +1,4 @@
-use convkit_core::{Backend, Source};
+use convkit_core::{manifest, Backend, Source};
 use serde_json::json;
 
 use crate::cli::Cli;
@@ -63,12 +63,17 @@ pub fn run(cli: &Cli) -> i32 {
                     "path": r.path,
                     "version": r.version,
                     "source": source_str(r.source),
-                    "managed_install": b.is_managed(),
+                    // `has_managed_build`, not the raw `is_managed()` policy
+                    // bit: whether `conv install <b>` would actually
+                    // succeed on this platform (C1) — `magick` is
+                    // `is_managed() == true` but has no verified manifest
+                    // entry anywhere, so it must report `false` here too.
+                    "managed_install": manifest::has_managed_build(b),
                 }),
                 Err(e) => json!({
                     "backend": b,
                     "found": false,
-                    "managed_install": b.is_managed(),
+                    "managed_install": manifest::has_managed_build(b),
                     "remediation": e.remediation,
                 }),
             })

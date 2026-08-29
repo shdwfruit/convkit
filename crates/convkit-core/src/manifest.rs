@@ -220,6 +220,37 @@ pub fn lookup(backend: Backend) -> Option<&'static Asset> {
         .find(|a| a.backend == backend && a.os == os && a.arch == arch)
 }
 
+/// True when `conv install <backend>` can actually provision this backend
+/// on the platform this process is running on right now.
+///
+/// `Backend::is_managed()` alone is not enough to answer that: it is a
+/// static, platform-independent policy predicate (false only for
+/// `Soffice`, which has no relocatable binary on *any* platform, ever).
+/// `Backend::Magick` is `is_managed() == true` — a managed install is
+/// architecturally possible in principle — but this manifest verifies zero
+/// platforms for it (see the module docs above: every official release is
+/// a `.7z`, an AppImage, or has no standalone build at all), and
+/// `ffmpeg`/`pandoc` are only verified for four of the platform/arch pairs
+/// this project ships binaries for — there is no `linux`/`arm64` row, for
+/// instance, even though `dist-workspace.toml` builds that target.
+/// `is_managed() == true` with no manifest entry therefore means "not
+/// verified on this platform," which is exactly the gap this predicate
+/// closes.
+///
+/// This is what any user-facing "can `conv install` fix this" surface must
+/// call — `ConvError::backend_missing`'s remediation and `doctor`'s
+/// `managed_install` field — so it never promises an install that will
+/// immediately refuse. `Backend::is_managed()` itself stays the right
+/// check for `commands/install.rs`, which needs the coarser, static
+/// distinction between "no relocatable build, permanent policy"
+/// (`ConvError::not_installable`) and "not verified on this platform yet"
+/// (`ConvError::no_managed_build`) — collapsing the two predicates here
+/// would erase that distinction and start telling users ffmpeg has no
+/// relocatable build at all, which is false.
+pub fn has_managed_build(backend: Backend) -> bool {
+    backend.is_managed() && lookup(backend).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +328,34 @@ mod tests {
                     a.arch
                 );
             }
+        }
+    }
+
+    #[test]
+    fn has_managed_build_is_false_for_magick_on_every_platform() {
+        // Deterministic regardless of which platform this test runs on:
+        // `magick` has zero manifest rows anywhere (see the module docs),
+        // even though `Backend::is_managed()` is true for it.
+        assert!(Backend::Magick.is_managed());
+        assert!(!has_managed_build(Backend::Magick));
+    }
+
+    #[test]
+    fn has_managed_build_is_false_for_soffice() {
+        // is_managed() alone already rules this out, but has_managed_build
+        // must agree.
+        assert!(!Backend::Soffice.is_managed());
+        assert!(!has_managed_build(Backend::Soffice));
+    }
+
+    #[test]
+    fn has_managed_build_agrees_with_lookup_on_a_covered_platform() {
+        let covered = matches!(
+            (current_os(), current_arch()),
+            ("windows", "x64") | ("linux", "x64") | ("macos", "x64") | ("macos", "arm64")
+        );
+        if covered {
+            assert!(has_managed_build(Backend::Pandoc));
         }
     }
 

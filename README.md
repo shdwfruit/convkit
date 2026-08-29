@@ -124,16 +124,13 @@ that one file and reports it rather than aborting the run), `-q/--quiet`,
 $ conv doctor
 ffmpeg    9.0.1-ess… C:\Users\...\AppData\Local\convkit\bin\ffmpeg.exe (MANAGED)
 ffprobe   9.0.1-ess… C:\Users\...\AppData\Local\convkit\bin\ffprobe.exe (MANAGED)
-magick    missing    conv install magick  |  winget install ImageMagick.ImageMagick
+magick    missing    manual install only  |  winget install ImageMagick.ImageMagick
 pandoc    3.11       C:\Users\...\AppData\Local\convkit\bin\pandoc.exe (MANAGED)
 soffice   missing    manual install only  |  winget install TheDocumentFoundation.LibreOffice
 ```
 
-(`doctor` prints `conv install magick` as one candidate remediation because
-it doesn't distinguish "is this backend ever manageable" from "is there a
-verified download for *this* backend" — running it actually refuses, for the
-reason in the table below. `winget`/`scoop`/`choco`/`brew`/`apt`/`dnf`/`pacman`
-are all detected; whichever is on `PATH` is what gets suggested.)
+(`winget`/`scoop`/`choco`/`brew`/`apt`/`dnf`/`pacman` are all detected;
+whichever is on `PATH` is what gets suggested.)
 
 **`conv capabilities`** lists every registered conversion pair and which
 backend(s) drive it — 107 pairs across 27 formats as of this writing:
