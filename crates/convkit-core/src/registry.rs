@@ -355,11 +355,112 @@ fn insert_media_family(t: &mut Table) {
     t.insert((Format::Gif, Format::Mp4), GIF_TO_MP4);
 }
 
+// --- Document family ---------------------------------------------------------
+
+/// LibreOffice writes into a directory and names the file itself.
+macro_rules! soffice_step {
+    ($filter:expr) => {
+        Step {
+            backend: Backend::Soffice,
+            args: &[
+                Arg::Lit("--headless"),
+                Arg::Lit("--norestore"),
+                Arg::Lit("--convert-to"),
+                Arg::Lit($filter),
+                Arg::Lit("--outdir"),
+                Arg::OutDir,
+                Arg::Input,
+            ],
+            output: OutputMode::OutDir,
+            intermediate_ext: None,
+        }
+    };
+}
+
+const OFFICE_TO_PDF: Recipe = Recipe {
+    steps: &[soffice_step!("pdf")],
+    warnings: &[],
+};
+
+/// The bare `docx` filter yields a LibreOffice Draw document. The explicit
+/// filter name is required to get real Word output.
+const PDF_TO_DOCX: Recipe = Recipe {
+    steps: &[soffice_step!("docx:MS Word 2007 XML")],
+    warnings: &[
+        "PDF stores positioned glyphs, not paragraphs, so the result is a set of \
+         text boxes rather than a flowing document. Expect to reflow it by hand.",
+    ],
+};
+
+const MD_TO_DOCX: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Pandoc,
+        [
+            Arg::Input,
+            Arg::Lit("--standalone"),
+            Arg::Lit("-o"),
+            Arg::Output
+        ]
+    )],
+    warnings: &[],
+};
+
+const MD_TO_HTML: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Pandoc,
+        [
+            Arg::Input,
+            Arg::Lit("--standalone"),
+            Arg::Lit("-o"),
+            Arg::Output
+        ]
+    )],
+    warnings: &[],
+};
+
+/// Two hardcoded steps, not a routing graph: pandoc emits .docx, LibreOffice
+/// renders it. This avoids a ~400MB LaTeX toolchain entirely.
+const MD_TO_PDF: Recipe = Recipe {
+    steps: &[
+        Step {
+            backend: Backend::Pandoc,
+            args: &[
+                Arg::Input,
+                Arg::Lit("--standalone"),
+                Arg::Lit("-o"),
+                Arg::Output,
+            ],
+            output: OutputMode::Path,
+            intermediate_ext: Some("docx"),
+        },
+        soffice_step!("pdf"),
+    ],
+    warnings: &[],
+};
+
+const OFFICE_SOURCES: &[Format] = &[
+    Format::Docx,
+    Format::Xlsx,
+    Format::Pptx,
+    Format::Odt,
+    Format::Ods,
+];
+
+fn insert_document_family(t: &mut Table) {
+    for &from in OFFICE_SOURCES {
+        t.insert((from, Format::Pdf), OFFICE_TO_PDF);
+    }
+    t.insert((Format::Pdf, Format::Docx), PDF_TO_DOCX);
+    t.insert((Format::Md, Format::Docx), MD_TO_DOCX);
+    t.insert((Format::Md, Format::Html), MD_TO_HTML);
+    t.insert((Format::Md, Format::Pdf), MD_TO_PDF);
+}
+
 static TABLE: LazyLock<Table> = LazyLock::new(|| {
     let mut t = Table::new();
     insert_image_family(&mut t);
     insert_media_family(&mut t);
-    // Task 6 adds insert_document_family(&mut t);
+    insert_document_family(&mut t);
     t
 });
 
@@ -482,5 +583,47 @@ mod tests {
     fn remux_copies_streams_instead_of_re_encoding() {
         let argv = REMUX.steps[0].render(&[Path::new("in.mkv")], Path::new("out.mp4"));
         assert!(argv.windows(2).any(|w| w == ["-c", "copy"]), "{argv:?}");
+    }
+
+    #[test]
+    fn office_to_pdf_uses_outdir_mode() {
+        let r = lookup(Format::Docx, Format::Pdf).unwrap();
+        assert_eq!(r.steps[0].output, OutputMode::OutDir);
+        let argv = r.steps[0].render(&[Path::new("a/in.docx")], Path::new("b/out.pdf"));
+        assert!(argv.contains(&"--headless".to_string()), "{argv:?}");
+        assert!(
+            argv.windows(2).any(|w| w == ["--convert-to", "pdf"]),
+            "{argv:?}"
+        );
+        assert!(argv.windows(2).any(|w| w == ["--outdir", "b"]), "{argv:?}");
+    }
+
+    #[test]
+    fn pdf_to_docx_names_the_word_filter_and_warns_about_fidelity() {
+        let r = lookup(Format::Pdf, Format::Docx).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.pdf")], Path::new("out.docx"));
+        assert!(
+            argv.contains(&"docx:MS Word 2007 XML".to_string()),
+            "the bare `docx` filter produces a Draw document: {argv:?}"
+        );
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("text boxes"), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn md_to_pdf_is_two_steps_via_docx_and_never_touches_latex() {
+        let r = lookup(Format::Md, Format::Pdf).unwrap();
+        assert_eq!(r.steps.len(), 2);
+        assert_eq!(r.steps[0].backend, Backend::Pandoc);
+        assert_eq!(r.steps[0].intermediate_ext, Some("docx"));
+        assert_eq!(r.steps[1].backend, Backend::Soffice);
+        assert_eq!(r.steps[1].output, OutputMode::OutDir);
+    }
+
+    #[test]
+    fn md_to_html_is_standalone() {
+        let r = lookup(Format::Md, Format::Html).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.md")], Path::new("out.html"));
+        assert!(argv.contains(&"--standalone".to_string()), "{argv:?}");
     }
 }
