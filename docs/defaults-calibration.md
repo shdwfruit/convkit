@@ -112,7 +112,7 @@ Remux argv timed: `ffmpeg -y -i clip60_1080.mkv -c copy -sn -movflags +faststart
 Transcode argv timed: `ffmpeg -y -i clip60_1080.mkv -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart out.mp4`
 
 ```
-remux (5 runs):      137, 154, 144, 120, 109 ms   (avg 132)
+remux (5 runs):      137, 154, 144, 120, 109 ms   (avg 133)
 transcode (5 runs): 9526, 9531, 9531, 9480, 9529 ms  (avg 9,519)
 ```
 
@@ -130,14 +130,14 @@ from an old copy and wonders why it doesn't match.)*
 |---|---|---|---|---|
 | 2s, 640x360 (committed fixture) | 64 ms | 210 ms | 7 | **3.3x** |
 | 30s, 1280x720 | 90 ms | 2,359 ms | 5 | **26.2x** |
-| 60s, 1920x1080 | 132 ms | 9,519 ms | 5 | **72.1x** |
+| 60s, 1920x1080 | 133 ms | 9,519 ms | 5 | **71.7x** |
 
 **Verdict: the spec's "~100x" claim is CONTRADICTED for the committed
 fixture and for realistic short clips generally.** On the actual 2-second
 fixture, remuxing is **3.3x** faster, not 100x -- the ~60ms floor is
 almost entirely fixed ffmpeg process-startup and demux overhead, not work
 that scales away. The multiplier climbs steeply with clip length and
-resolution (3.3x -> 26.2x -> 72.1x as size grows), which is exactly what
+resolution (3.3x -> 26.2x -> 71.7x as size grows), which is exactly what
 you'd expect: transcode cost scales with total pixels, remux cost does
 not. Extrapolating that trend, 100x is plausible on a multi-minute or 4K
 source, but that is not what most users convert most of the time, and it

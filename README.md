@@ -33,7 +33,7 @@ The other flagship default is auto-remux: converting `mkv → mp4` (or any
 compatible container pair) does a stream copy instead of a re-encode when
 the source codecs already fit the target container, which is lossless *and*
 faster — measured at 3.3× on a 2-second, 640×360 clip, 26.2× at 30 seconds/
-720p, and 72.1× at 60 seconds/1080p (5–7 timed runs per size, argv and raw
+720p, and 71.7× at 60 seconds/1080p (5–7 timed runs per size, argv and raw
 samples included). The multiplier isn't a fixed constant; it climbs with
 clip length and resolution, because transcode cost scales with total pixels
 and a stream copy's cost doesn't. See
@@ -175,39 +175,51 @@ SHA-256 checksum before anything is written to disk.
 
 ## Machine-readable output (`--json`)
 
-Every command accepts `--json` and always writes exactly one JSON document.
-For `doctor`, `capabilities`, and `install`, that document goes to stdout on
+Every command accepts `--json` and always writes exactly one JSON document,
+and that document always has the same shape: an `"ok"` field, plus one
+command-specific plural key — `"results"` for a conversion, `"plans"` for
+`--dry-run`, `"backends"` for `doctor`, `"pairs"` for `capabilities` — even
+when there's only one item in it. Older versions of this tool had four
+different shapes here (a bare, `ok`-less array for a real conversion; a
+singular `"plan"` key for a one-job `--dry-run` but a plural `"plans"` for a
+multi-job one); a consumer no longer has to branch on job count or command
+to find the data.
+
+For `doctor`, `capabilities`, and `install`, the document goes to stdout on
 success and to stderr on failure. For a conversion it's slightly different
 by design: every job in a batch — success *or* failure — is reported inside
-one JSON array on stdout, so a batch that's half missing a backend still
-gets one document a script can parse start to finish; only an error caught
-before any job exists at all (an unrecognised `--to`, a malformed
-invocation) is its own top-level document on stderr instead. Either way,
-the exit code is what tells you pass/fail, never which stream the JSON
-landed on.
+the one `"results"` array on stdout, so a batch that's half missing a
+backend still gets one document a script can parse start to finish; only an
+error caught before any job exists at all (an unrecognised `--to`, a
+malformed invocation) is its own top-level document on stderr instead.
+Either way, the exit code is what tells you pass/fail, never which stream
+the JSON landed on.
 
-A real conversion (`ok: true`, one array element):
+A real conversion (`ok: true`, one `results` element):
 
 ```console
 $ conv clip.mp4 clip.gif --json
-[
-  {
-    "backends": [
-      {
-        "backend": "ffmpeg",
-        "version": "9.0.1-essentials_build-www.gyan.dev"
-      }
-    ],
-    "bytes": 539921,
-    "input": "clip.mp4",
-    "ok": true,
-    "output": "clip.gif",
-    "remuxed": false,
-    "warnings": [
-      "The whole filtered stream is buffered in memory for palette generation, so very long inputs are slow and memory-hungry rather than being silently truncated."
-    ]
-  }
-]
+{
+  "ok": true,
+  "results": [
+    {
+      "backends": [
+        {
+          "backend": "ffmpeg",
+          "version": "9.0.1-essentials_build-www.gyan.dev"
+        }
+      ],
+      "bytes": 539921,
+      "input": "clip.mp4",
+      "ok": true,
+      "output": "clip.gif",
+      "remuxed": false,
+      "warnings": [
+        "The whole filtered stream is buffered in memory for palette generation, so very long inputs are slow and memory-hungry rather than being silently truncated."
+      ]
+    }
+  ]
+}
 ```
 
 And a real one against a machine with no ffmpeg anywhere on `PATH`, no
@@ -217,22 +229,25 @@ instead of guessing:
 
 ```console
 $ conv clip.mp4 clip.gif --json
-[
-  {
-    "error": {
-      "backend": "ffmpeg",
-      "code": "backend_missing",
-      "message": "ffmpeg not found",
-      "remediation": {
-        "managed": "conv install ffmpeg",
-        "manual": "install ffmpeg from https://ffmpeg.org/download.html"
-      }
-    },
-    "input": "clip.mp4",
-    "ok": false,
-    "output": "clip.gif"
-  }
-]
+{
+  "ok": false,
+  "results": [
+    {
+      "error": {
+        "backend": "ffmpeg",
+        "code": "backend_missing",
+        "message": "ffmpeg not found",
+        "remediation": {
+          "managed": "conv install ffmpeg",
+          "manual": "install ffmpeg from https://ffmpeg.org/download.html"
+        }
+      },
+      "input": "clip.mp4",
+      "ok": false,
+      "output": "clip.gif"
+    }
+  ]
+}
 ```
 
 `remediation.manual` is the exact package-manager command when one is
@@ -241,7 +256,8 @@ ImageMagick.ImageMagick`, `brew install ffmpeg`, and so on across seven
 supported package managers), falling back to the tool's official download
 page, as above, only when none is.
 
-`--dry-run --json` emits the same plan shown by plain `--dry-run`,
+`--dry-run --json` emits the same plan(s) shown by plain `--dry-run`, always
+under a `"plans"` array (`{"ok": ..., "dry_run": true, "plans": [...]}`),
 structured instead of rendered as shell text; `conv doctor --json` and `conv
 capabilities --json` mirror their human output the same way.
 
