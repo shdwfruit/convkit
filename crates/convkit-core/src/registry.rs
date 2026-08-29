@@ -147,10 +147,218 @@ fn insert_image_family(t: &mut Table) {
     }
 }
 
+// --- Media family ------------------------------------------------------------
+
+/// Constant-quality anchor for H.264. Visually transparent at normal viewing
+/// distance; see spec §7.4.
+const CRF: &str = "20";
+const AUDIO_BITRATE: &str = "160k";
+/// GIF frame rate and maximum width. Capped, never upscaled.
+///
+/// Documents the value baked directly into `GIF_FILTER` below: `concat!` only
+/// accepts literals, not paths to other consts, so this cannot be spliced in
+/// programmatically. Kept for the reader; not referenced by code.
+#[allow(dead_code)]
+const GIF_FPS: &str = "15";
+
+/// Escaped comma is required: ffmpeg's filter parser splits unescaped commas
+/// into separate filters. No shell is involved, so the backslash is literal.
+const GIF_FILTER: &str = concat!(
+    r"fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];",
+    "[a]palettegen=stats_mode=diff[p];",
+    "[b][p]paletteuse=dither=bayer:bayer_scale=3"
+);
+
+const VIDEO_TO_MP4: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-c:v"),
+            Arg::Lit("libx264"),
+            Arg::Lit("-crf"),
+            Arg::Lit(CRF),
+            Arg::Lit("-preset"),
+            Arg::Lit("medium"),
+            Arg::Lit("-pix_fmt"),
+            Arg::Lit("yuv420p"),
+            Arg::Lit("-c:a"),
+            Arg::Lit("aac"),
+            Arg::Lit("-b:a"),
+            Arg::Lit(AUDIO_BITRATE),
+            Arg::Lit("-movflags"),
+            Arg::Lit("+faststart"),
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+const VIDEO_TO_WEBM: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-c:v"),
+            Arg::Lit("libvpx-vp9"),
+            Arg::Lit("-crf"),
+            Arg::Lit("32"),
+            Arg::Lit("-b:v"),
+            Arg::Lit("0"),
+            Arg::Lit("-c:a"),
+            Arg::Lit("libopus"),
+            Arg::Lit("-b:a"),
+            Arg::Lit("128k"),
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+/// Stream-copy remux. Selected dynamically by `plan::build` when the source
+/// codecs are already legal in the target container. See Task 7.
+pub const REMUX: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-c"),
+            Arg::Lit("copy"),
+            Arg::Lit("-movflags"),
+            Arg::Lit("+faststart"),
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+const TO_GIF: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-vf"),
+            Arg::Lit(GIF_FILTER),
+            Arg::Lit("-loop"),
+            Arg::Lit("0"),
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+const GIF_TO_MP4: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-vf"),
+            Arg::Lit("scale=trunc(iw/2)*2:trunc(ih/2)*2"),
+            Arg::Lit("-c:v"),
+            Arg::Lit("libx264"),
+            Arg::Lit("-crf"),
+            Arg::Lit(CRF),
+            Arg::Lit("-pix_fmt"),
+            Arg::Lit("yuv420p"),
+            Arg::Lit("-movflags"),
+            Arg::Lit("+faststart"),
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+macro_rules! audio_recipe {
+    ([$($codec:expr),* $(,)?]) => {
+        Recipe {
+            steps: &[step!(
+                Backend::Ffmpeg,
+                [
+                    Arg::Lit("-i"), Arg::Input,
+                    Arg::Lit("-vn"),
+                    $($codec,)*
+                    Arg::Lit("-y"), Arg::Output,
+                ]
+            )],
+            warnings: &[],
+        }
+    };
+}
+
+const TO_MP3: Recipe = audio_recipe!([
+    Arg::Lit("-c:a"),
+    Arg::Lit("libmp3lame"),
+    Arg::Lit("-q:a"),
+    Arg::Lit("2")
+]);
+const TO_M4A: Recipe = audio_recipe!([
+    Arg::Lit("-c:a"),
+    Arg::Lit("aac"),
+    Arg::Lit("-b:a"),
+    Arg::Lit("192k")
+]);
+const TO_WAV: Recipe = audio_recipe!([Arg::Lit("-c:a"), Arg::Lit("pcm_s16le")]);
+const TO_FLAC: Recipe = audio_recipe!([Arg::Lit("-c:a"), Arg::Lit("flac")]);
+
+pub const MP4_COMPATIBLE_VIDEO: &[&str] = &["h264", "hevc", "mpeg4", "av1"];
+pub const MP4_COMPATIBLE_AUDIO: &[&str] = &["aac", "mp3", "ac3", "alac"];
+pub const WEBM_COMPATIBLE_VIDEO: &[&str] = &["vp8", "vp9", "av1"];
+pub const WEBM_COMPATIBLE_AUDIO: &[&str] = &["opus", "vorbis"];
+
+const VIDEO: &[Format] = &[
+    Format::Mp4,
+    Format::Mov,
+    Format::Mkv,
+    Format::Webm,
+    Format::Avi,
+];
+const AUDIO_TARGETS: &[(Format, Recipe)] = &[
+    (Format::Mp3, TO_MP3),
+    (Format::M4a, TO_M4A),
+    (Format::Wav, TO_WAV),
+    (Format::Flac, TO_FLAC),
+];
+
+fn insert_media_family(t: &mut Table) {
+    for &from in VIDEO {
+        if from != Format::Mp4 {
+            t.insert((from, Format::Mp4), VIDEO_TO_MP4);
+        }
+        if from != Format::Webm {
+            t.insert((from, Format::Webm), VIDEO_TO_WEBM);
+        }
+        t.insert((from, Format::Gif), TO_GIF);
+        for &(to, recipe) in AUDIO_TARGETS {
+            t.insert((from, to), recipe);
+        }
+    }
+
+    // Audio sources transcode between audio targets.
+    for &from in &[Format::Mp3, Format::M4a, Format::Wav, Format::Flac] {
+        for &(to, recipe) in AUDIO_TARGETS {
+            if from != to {
+                t.insert((from, to), recipe);
+            }
+        }
+    }
+
+    t.insert((Format::Gif, Format::Mp4), GIF_TO_MP4);
+}
+
 static TABLE: LazyLock<Table> = LazyLock::new(|| {
     let mut t = Table::new();
     insert_image_family(&mut t);
-    // Task 5 adds insert_media_family(&mut t);
+    insert_media_family(&mut t);
     // Task 6 adds insert_document_family(&mut t);
     t
 });
@@ -229,5 +437,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gif_uses_a_generated_palette_not_the_default_web_palette() {
+        let r = lookup(Format::Mp4, Format::Gif).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.mp4")], Path::new("out.gif"));
+        let vf = argv.join(" ");
+        assert!(vf.contains("palettegen=stats_mode=diff"), "{vf}");
+        assert!(vf.contains("paletteuse=dither=bayer"), "{vf}");
+        assert!(vf.contains("fps=15"), "{vf}");
+        assert!(
+            vf.contains(r"min(640\,iw)"),
+            "comma must stay escaped: {vf}"
+        );
+    }
+
+    #[test]
+    fn video_transcode_uses_the_spec_quality_anchors() {
+        let r = lookup(Format::Mkv, Format::Mp4).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.mkv")], Path::new("out.mp4"));
+        assert!(argv.windows(2).any(|w| w == ["-crf", "20"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-b:a", "160k"]), "{argv:?}");
+        assert!(argv.contains(&"+faststart".to_string()), "{argv:?}");
+    }
+
+    #[test]
+    fn audio_extraction_drops_the_video_stream() {
+        let r = lookup(Format::Mp4, Format::Mp3).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.mp4")], Path::new("out.mp3"));
+        assert!(argv.contains(&"-vn".to_string()), "{argv:?}");
+    }
+
+    #[test]
+    fn gif_to_mp4_forces_even_dimensions() {
+        let r = lookup(Format::Gif, Format::Mp4).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.gif")], Path::new("out.mp4"));
+        let joined = argv.join(" ");
+        assert!(joined.contains("trunc(iw/2)*2"), "{joined}");
+        assert!(joined.contains("yuv420p"), "{joined}");
+    }
+
+    #[test]
+    fn remux_copies_streams_instead_of_re_encoding() {
+        let argv = REMUX.steps[0].render(&[Path::new("in.mkv")], Path::new("out.mp4"));
+        assert!(argv.windows(2).any(|w| w == ["-c", "copy"]), "{argv:?}");
     }
 }
