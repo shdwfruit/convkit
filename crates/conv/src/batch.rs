@@ -21,6 +21,28 @@ fn num_cpus_or_one() -> usize {
         .unwrap_or(1)
 }
 
+/// A spinner labelled with whichever backend is currently running, shown
+/// only for a single-job run (I8) — `bar` below already covers the
+/// multi-job case, one tick per *completed* job, but that leaves a lone
+/// conversion with no progress indication at all. A `md -> pdf` (pandoc
+/// plus a LibreOffice cold start, several seconds) used to show nothing
+/// until it either finished or failed. Suppressed under `--quiet` and
+/// `--json`, exactly like `bar`.
+fn single_job_spinner(cli: &Cli, job_count: usize) -> Option<indicatif::ProgressBar> {
+    if cli.quiet || cli.json || job_count != 1 {
+        return None;
+    }
+    let pb = indicatif::ProgressBar::new_spinner();
+    pb.set_style(
+        indicatif::ProgressStyle::default_spinner()
+            .template("{spinner} {msg}")
+            .expect("static template is valid"),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    pb.set_message("starting…");
+    Some(pb)
+}
+
 /// Runs every job, in parallel, on a shared `Resolver` (built once so its
 /// per-backend resolution cache is shared across the whole batch rather than
 /// re-probed per job). Returns each job's result alongside the process exit
@@ -35,6 +57,7 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32) {
 
     let bar = (!cli.quiet && !cli.json && jobs.len() > 1)
         .then(|| indicatif::ProgressBar::new(jobs.len() as u64));
+    let spinner = single_job_spinner(cli, jobs.len());
     let resolver = cli.resolver();
 
     let results: Vec<JobResult> = pool.install(|| {
@@ -57,7 +80,33 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32) {
                         output: job.output.clone(),
                         overwrite: cli.overwrite,
                     };
-                    exec::run(&req, &resolver, &mut |_| {})
+                    // I8: the `Event` channel used to be threaded all the
+                    // way through with a no-op consumer everywhere —
+                    // `exec::run`'s signature promised progress reporting
+                    // that nothing ever rendered. This is the one real
+                    // consumer: labels `spinner` with the currently
+                    // running backend (and which step, for a multi-step
+                    // recipe like `md -> pdf`) as each one starts.
+                    let mut on_event = |e: exec::Event| {
+                        let Some(pb) = &spinner else { return };
+                        if let exec::Event::StepStarted {
+                            backend,
+                            index,
+                            total,
+                        } = e
+                        {
+                            let name = backend.exe_name();
+                            if total > 1 {
+                                pb.set_message(format!(
+                                    "running {name} (step {}/{total})…",
+                                    index + 1
+                                ));
+                            } else {
+                                pb.set_message(format!("running {name}…"));
+                            }
+                        }
+                    };
+                    exec::run(&req, &resolver, &mut on_event)
                 };
                 if let Some(b) = &bar {
                     b.inc(1);
@@ -72,6 +121,9 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32) {
     });
     if let Some(b) = bar {
         b.finish_and_clear();
+    }
+    if let Some(pb) = spinner {
+        pb.finish_and_clear();
     }
 
     let failures = results.iter().filter(|r| r.result.is_err()).count();
