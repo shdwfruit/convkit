@@ -42,14 +42,21 @@ pub struct Cli {
     #[arg(short = 'j', long, global = true)]
     pub jobs: Option<usize>,
 
+    /// Use this ffmpeg binary instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     pub ffmpeg_path: Option<PathBuf>,
+    /// Use this ImageMagick binary instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     pub magick_path: Option<PathBuf>,
+    /// Use this pandoc binary instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     pub pandoc_path: Option<PathBuf>,
+    /// Use this soffice (LibreOffice) binary instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     pub soffice_path: Option<PathBuf>,
+    /// Use this typst binary instead of the resolved one.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub typst_path: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -73,6 +80,7 @@ impl Cli {
             (&self.magick_path, Backend::Magick),
             (&self.pandoc_path, Backend::Pandoc),
             (&self.soffice_path, Backend::Soffice),
+            (&self.typst_path, Backend::Typst),
         ] {
             if let Some(p) = path {
                 r.with_override(backend, p.clone());

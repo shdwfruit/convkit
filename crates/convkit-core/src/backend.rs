@@ -9,6 +9,10 @@ pub enum Backend {
     Magick,
     Soffice,
     Pandoc,
+    /// Typst, invoked as pandoc's `--pdf-engine`. Has a relocatable binary
+    /// on every platform this manifest covers, so — unlike `Soffice` — it is
+    /// managed.
+    Typst,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +66,7 @@ impl Backend {
             Backend::Magick => "magick",
             Backend::Soffice => "soffice",
             Backend::Pandoc => "pandoc",
+            Backend::Typst => "typst",
         }
     }
 
@@ -111,6 +116,21 @@ impl Backend {
             (Backend::Pandoc, PackageManager::Apt) => "sudo apt-get install pandoc",
             (Backend::Pandoc, PackageManager::Dnf) => "sudo dnf install pandoc",
             (Backend::Pandoc, PackageManager::Pacman) => "sudo pacman -S pandoc",
+
+            // Typst has native packages in winget, scoop, brew, cargo (its
+            // own crates.io release, `typst-cli`), and Arch's `extra` repo.
+            // Neither Debian/Ubuntu nor Fedora carry an official package as
+            // of this writing (verified against packages.debian.org and
+            // Fedora's own package search — only unofficial COPR/AUR-style
+            // repos have it), so those two fall back to the cargo install,
+            // same binary either way.
+            (Backend::Typst, PackageManager::Winget) => "winget install Typst.Typst",
+            (Backend::Typst, PackageManager::Scoop) => "scoop install typst",
+            (Backend::Typst, PackageManager::Choco) => "choco install typst",
+            (Backend::Typst, PackageManager::Brew) => "brew install typst",
+            (Backend::Typst, PackageManager::Apt) => "cargo install typst-cli",
+            (Backend::Typst, PackageManager::Dnf) => "cargo install typst-cli",
+            (Backend::Typst, PackageManager::Pacman) => "sudo pacman -S typst",
         }
     }
 
@@ -128,6 +148,7 @@ impl Backend {
             }
             Backend::Soffice => "install LibreOffice from https://www.libreoffice.org/download/",
             Backend::Pandoc => "install pandoc from https://github.com/jgm/pandoc/releases",
+            Backend::Typst => "install typst from https://github.com/typst/typst/releases",
         }
     }
 }

@@ -309,7 +309,7 @@ impl Resolver {
     fn version_of(backend: Backend, path: &Path) -> Option<String> {
         let flag = match backend {
             Backend::Ffmpeg | Backend::Ffprobe | Backend::Magick => "-version",
-            Backend::Pandoc | Backend::Soffice => "--version",
+            Backend::Pandoc | Backend::Soffice | Backend::Typst => "--version",
         };
         let first_line = Self::probe_first_line(backend, path, flag)?;
         extract_version_token(&first_line).map(str::to_string)
@@ -402,6 +402,7 @@ mod tests {
             Backend::Magick,
             Backend::Pandoc,
             Backend::Soffice,
+            Backend::Typst,
         ] {
             let managed_candidate = r
                 .candidates(backend)

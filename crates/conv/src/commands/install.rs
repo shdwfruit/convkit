@@ -13,6 +13,7 @@ fn parse_backend(name: &str) -> Option<Backend> {
         "magick" | "imagemagick" => Some(Backend::Magick),
         "soffice" | "libreoffice" => Some(Backend::Soffice),
         "pandoc" => Some(Backend::Pandoc),
+        "typst" => Some(Backend::Typst),
         _ => None,
     }
 }
@@ -37,7 +38,7 @@ pub fn run(cli: &Cli, backend_name: &str) -> i32 {
                 ErrorCode::InvalidInvocation,
                 format!(
                     "unknown backend {backend_name:?}; expected one of: \
-                     ffmpeg, ffprobe, magick, pandoc, soffice"
+                     ffmpeg, ffprobe, magick, pandoc, soffice, typst"
                 ),
             );
             render::print_error(cli.json, &e);
@@ -98,6 +99,7 @@ mod tests {
             ("magick", Backend::Magick),
             ("soffice", Backend::Soffice),
             ("pandoc", Backend::Pandoc),
+            ("typst", Backend::Typst),
         ] {
             assert_eq!(parse_backend(name), Some(backend));
         }

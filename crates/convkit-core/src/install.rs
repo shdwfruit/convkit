@@ -127,9 +127,15 @@ fn strip_leading_dot_slash(s: &str) -> &str {
     s.strip_prefix("./").unwrap_or(s)
 }
 
-fn extract_tar_gz(asset: &Asset, bytes: &[u8]) -> Result<Vec<u8>> {
-    let decoder = flate2::read::GzDecoder::new(bytes);
-    let mut archive = tar::Archive::new(decoder);
+/// Walks every entry of an already-opened tar `archive`, returning the bytes
+/// of the one entry whose (dot-slash-normalised) name matches
+/// `asset.archive_member` — capped the same as every other read in this
+/// module. Shared by `extract_tar_gz` and `extract_tar_xz`, which differ only
+/// in how they get from compressed bytes to a `Read` of the raw tar stream;
+/// this is where the archive-supplied name is compared, and it is compared
+/// only, never joined onto a filesystem path — the entry's *bytes* are what
+/// this returns, not a path anyone writes to.
+fn extract_tar_member<R: Read>(asset: &Asset, mut archive: tar::Archive<R>) -> Result<Vec<u8>> {
     let entries = archive.entries().map_err(|e| extract_err(asset, e))?;
     for entry in entries {
         let entry = entry.map_err(|e| extract_err(asset, e))?;
@@ -145,11 +151,73 @@ fn extract_tar_gz(asset: &Asset, bytes: &[u8]) -> Result<Vec<u8>> {
     ))
 }
 
+fn extract_tar_gz(asset: &Asset, bytes: &[u8]) -> Result<Vec<u8>> {
+    let decoder = flate2::read::GzDecoder::new(bytes);
+    extract_tar_member(asset, tar::Archive::new(decoder))
+}
+
+/// A `Write` sink capped at `cap` bytes, so decompressing a small `.xz`
+/// stream that expands into something enormous (accidentally, or a hostile
+/// endpoint) fails the moment it would exceed the cap rather than growing an
+/// unbounded `Vec` first. `lzma-rs` writes straight to whatever `Write` it's
+/// given, so this is the xz equivalent of `read_capped`'s `take(cap + 1)`
+/// trick for the other readers in this module.
+struct CappedWriter {
+    buf: Vec<u8>,
+    cap: u64,
+}
+
+impl CappedWriter {
+    fn new(cap: u64) -> Self {
+        CappedWriter {
+            buf: Vec::new(),
+            cap,
+        }
+    }
+}
+
+impl std::io::Write for CappedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let would_be = self.buf.len() as u64 + data.len() as u64;
+        if would_be > self.cap {
+            return Err(std::io::Error::other(format!(
+                "exceeds the {} byte cap",
+                self.cap
+            )));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Decodes a whole `.xz` stream into memory via `lzma-rs` — a pure-Rust
+/// decoder (`#![forbid(unsafe_code)]`, no C dependency), chosen specifically
+/// so this doesn't need `xz2`/`liblzma-sys`, which link a C library and would
+/// make the Windows build depend on a C toolchain the same way `.7z` support
+/// would. Output is capped at `MAX_DOWNLOAD_BYTES`, same as every other read
+/// in this module.
+fn decompress_xz_capped(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut input = Cursor::new(bytes);
+    let mut output = CappedWriter::new(MAX_DOWNLOAD_BYTES);
+    lzma_rs::xz_decompress(&mut input, &mut output).map_err(std::io::Error::other)?;
+    Ok(output.buf)
+}
+
+fn extract_tar_xz(asset: &Asset, bytes: &[u8]) -> Result<Vec<u8>> {
+    let tar_bytes = decompress_xz_capped(bytes).map_err(|e| extract_err(asset, e))?;
+    extract_tar_member(asset, tar::Archive::new(Cursor::new(tar_bytes)))
+}
+
 fn extract(asset: &Asset, bytes: &[u8]) -> Result<Vec<u8>> {
     match asset.packaging {
         Packaging::Raw => Ok(bytes.to_vec()),
         Packaging::Zip => extract_zip(asset, bytes),
         Packaging::TarGz => extract_tar_gz(asset, bytes),
+        Packaging::TarXz => extract_tar_xz(asset, bytes),
     }
 }
 
@@ -409,6 +477,101 @@ mod tests {
         };
         let out = extract(&asset, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
+    }
+
+    /// Builds a tiny in-memory `.tar.xz` with one member, by tarring it
+    /// in-memory and then compressing with `lzma_rs::xz_compress` — the
+    /// exact format `extract_tar_xz` decodes (in reverse), so this exercises
+    /// the real xz container without a network fetch and without shelling
+    /// out to an external `xz` binary.
+    fn make_test_tar_xz(member: &str, contents: &[u8]) -> Vec<u8> {
+        let tar_bytes = {
+            let mut buf = Vec::new();
+            let mut builder = tar::Builder::new(&mut buf);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, member, Cursor::new(contents))
+                .unwrap();
+            builder.into_inner().unwrap();
+            buf
+        };
+        let mut out = Vec::new();
+        lzma_rs::xz_compress(&mut Cursor::new(&tar_bytes[..]), &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn extract_tar_xz_finds_the_named_member() {
+        let bytes = make_test_tar_xz(
+            "typst-x86_64-unknown-linux-musl/typst",
+            b"pretend-exe-bytes",
+        );
+        let asset = Asset {
+            backend: crate::Backend::Typst,
+            os: "linux",
+            arch: "x64",
+            url: "https://example.invalid/tool.tar.xz",
+            sha256: "0",
+            packaging: Packaging::TarXz,
+            archive_member: "typst-x86_64-unknown-linux-musl/typst",
+        };
+        let out = extract(&asset, &bytes).unwrap();
+        assert_eq!(out, b"pretend-exe-bytes");
+    }
+
+    /// Same tolerance `extract_tar_gz` has: a tar entry name with a leading
+    /// `./` must still match a manifest `archive_member` that has none.
+    #[test]
+    fn extract_tar_xz_tolerates_a_leading_dot_slash_in_the_entry_name() {
+        let bytes = make_test_tar_xz("./pkg/bin/tool", b"pretend-exe-bytes");
+        let asset = Asset {
+            backend: crate::Backend::Typst,
+            os: "linux",
+            arch: "x64",
+            url: "https://example.invalid/tool.tar.xz",
+            sha256: "0",
+            packaging: Packaging::TarXz,
+            archive_member: "pkg/bin/tool",
+        };
+        let out = extract(&asset, &bytes).unwrap();
+        assert_eq!(out, b"pretend-exe-bytes");
+    }
+
+    #[test]
+    fn extract_tar_xz_reports_a_missing_member() {
+        let bytes = make_test_tar_xz("pkg/bin/tool", b"pretend-exe-bytes");
+        let asset = Asset {
+            backend: crate::Backend::Typst,
+            os: "linux",
+            arch: "x64",
+            url: "https://example.invalid/tool.tar.xz",
+            sha256: "0",
+            packaging: Packaging::TarXz,
+            archive_member: "pkg/bin/other-tool",
+        };
+        let e = extract(&asset, &bytes).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConversionFailed);
+    }
+
+    /// `CappedWriter` is the xz decompression path's equivalent of
+    /// `read_capped`'s `take(cap + 1)` trick: it must reject the exact write
+    /// that would push it over the cap, using a tiny local cap rather than
+    /// the real 512 MiB `MAX_DOWNLOAD_BYTES` so the test itself stays cheap.
+    #[test]
+    fn capped_writer_rejects_a_write_that_would_exceed_the_cap() {
+        let mut w = CappedWriter::new(4);
+        std::io::Write::write_all(&mut w, b"abcd").unwrap();
+        assert!(std::io::Write::write_all(&mut w, b"e").is_err());
+    }
+
+    #[test]
+    fn capped_writer_accepts_writes_up_to_and_including_the_cap() {
+        let mut w = CappedWriter::new(4);
+        assert!(std::io::Write::write_all(&mut w, b"abcd").is_ok());
+        assert_eq!(w.buf, b"abcd");
     }
 
     /// Exercises the exact `take(cap + 1)` pattern `read_capped` uses

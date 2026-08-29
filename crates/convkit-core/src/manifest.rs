@@ -36,6 +36,12 @@ pub enum Packaging {
     /// A gzip-compressed tarball; `archive_member` is the executable's path
     /// inside it.
     TarGz,
+    /// An xz-compressed tarball; `archive_member` is the executable's path
+    /// inside it. Decoded with `lzma-rs`, a pure-Rust xz/LZMA decoder — not
+    /// `xz2`/`liblzma-sys`, which link a C library and would reintroduce the
+    /// exact C-toolchain fragility on Windows that ruled out `.7z` in the
+    /// first place.
+    TarXz,
     /// The downloaded bytes are the executable, verbatim — no archive at
     /// all. `archive_member` is unused (empty) for these entries.
     Raw,
@@ -181,6 +187,51 @@ pub static ALL: &[Asset] = &[
         packaging: Packaging::Zip,
         archive_member: "pandoc-3.11-arm64/bin/pandoc",
     },
+    // --- typst: all four platforms --------------------------------------
+    // typst/typst release 0.15.1 — a real version tag, not "latest". Linux
+    // and macOS assets are `.tar.xz` (musl-static on Linux, so it runs
+    // regardless of the host glibc); see `Packaging::TarXz`'s docs for why
+    // that's decoded with `lzma-rs` rather than a C-linking crate. Every
+    // digest below was computed from an actual download, and the Windows
+    // digest independently matches the hash published in Scoop's own
+    // `typst.json` manifest (ScoopInstaller/Main), a second source agreeing
+    // with the one this manifest was built from.
+    Asset {
+        backend: Backend::Typst,
+        os: "windows",
+        arch: "x64",
+        url: "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-pc-windows-msvc.zip",
+        sha256: "19ce3551153c2fe7ee9fa2f95208310c8f4d3209fedb699e0333faf8913f6736",
+        packaging: Packaging::Zip,
+        archive_member: "typst-x86_64-pc-windows-msvc/typst.exe",
+    },
+    Asset {
+        backend: Backend::Typst,
+        os: "linux",
+        arch: "x64",
+        url: "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz",
+        sha256: "a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c",
+        packaging: Packaging::TarXz,
+        archive_member: "typst-x86_64-unknown-linux-musl/typst",
+    },
+    Asset {
+        backend: Backend::Typst,
+        os: "macos",
+        arch: "x64",
+        url: "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-apple-darwin.tar.xz",
+        sha256: "7f9fdd9584866245de9a79e0add8f9236fae6f40a8a45e2c4771ccc14db4e0fa",
+        packaging: Packaging::TarXz,
+        archive_member: "typst-x86_64-apple-darwin/typst",
+    },
+    Asset {
+        backend: Backend::Typst,
+        os: "macos",
+        arch: "arm64",
+        url: "https://github.com/typst/typst/releases/download/v0.15.1/typst-aarch64-apple-darwin.tar.xz",
+        sha256: "48f62ed034aa3a7978309579ac6ca00045e2ef0da73114e8af27cfd8e74dc05a",
+        packaging: Packaging::TarXz,
+        archive_member: "typst-aarch64-apple-darwin/typst",
+    },
 ];
 
 /// The running process's OS, in the vocabulary this manifest uses.
@@ -307,7 +358,7 @@ mod tests {
                     a.url,
                     a.archive_member
                 ),
-                Packaging::Zip | Packaging::TarGz => assert!(
+                Packaging::Zip | Packaging::TarGz | Packaging::TarXz => assert!(
                     !a.archive_member.is_empty(),
                     "{} is an archive with no archive_member",
                     a.url
@@ -356,6 +407,35 @@ mod tests {
         );
         if covered {
             assert!(has_managed_build(Backend::Pandoc));
+        }
+    }
+
+    /// Typst is verified for all four platforms this manifest covers —
+    /// unlike ffmpeg/pandoc, which have no `linux`/`arm64` row.
+    #[test]
+    fn typst_has_a_manifest_entry_for_every_platform_this_manifest_covers() {
+        for (os, arch) in [
+            ("windows", "x64"),
+            ("linux", "x64"),
+            ("macos", "x64"),
+            ("macos", "arm64"),
+        ] {
+            assert!(
+                ALL.iter()
+                    .any(|a| a.backend == Backend::Typst && a.os == os && a.arch == arch),
+                "missing a typst manifest entry for {os}-{arch}"
+            );
+        }
+    }
+
+    #[test]
+    fn has_managed_build_is_true_for_typst_on_a_covered_platform() {
+        let covered = matches!(
+            (current_os(), current_arch()),
+            ("windows", "x64") | ("linux", "x64") | ("macos", "x64") | ("macos", "arm64")
+        );
+        if covered {
+            assert!(has_managed_build(Backend::Typst));
         }
     }
 

@@ -473,6 +473,7 @@ mod tests {
             magick_path: None,
             pandoc_path: None,
             soffice_path: None,
+            typst_path: None,
             command: None,
         }
     }

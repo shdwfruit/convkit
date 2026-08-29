@@ -19,6 +19,10 @@ sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
+# Pure-Rust xz/LZMA decoder (`#![forbid(unsafe_code)]`, no C dependency) so
+# `Packaging::TarXz` doesn't need `xz2`/`liblzma-sys`, which link C and would
+# make the Windows build fragile.
+lzma-rs = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
