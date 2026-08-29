@@ -1,0 +1,29 @@
+[package]
+name = "convkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "One command for everyday file conversion, offline"
+readme = "../../README.md"
+keywords = ["convert", "ffmpeg", "pandoc", "imagemagick", "cli"]
+categories = ["command-line-utilities", "multimedia"]
+
+[[bin]]
+name = "conv"
+path = "src/main.rs"
+
+[dependencies]
+convkit-core = { path = "../convkit-core", version = "0.1.0" }
+clap = { version = "4", features = ["derive"] }
+wild = "2"
+serde.workspace = true
+serde_json.workspace = true
+rayon = "1"
+indicatif = "0.17"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+insta = { version = "1", features = ["yaml"] }

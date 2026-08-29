@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/convkit-core"]
+members = ["crates/convkit-core", "crates/conv"]
 resolver = "2"
 
 [workspace.package]
