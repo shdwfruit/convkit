@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::error::Result;
 use crate::probe::MediaProbe;
 use crate::{registry, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlannedStep {
     pub backend: Backend,
     /// Bare executable name, never a resolved path. Keeps plans machine-independent.
@@ -20,7 +22,7 @@ pub struct PlannedStep {
     pub intermediate_ext: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConversionPlan {
     pub from: Format,
     pub to: Format,

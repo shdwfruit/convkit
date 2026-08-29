@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use serde::Serialize;
+
 use crate::Backend;
 
 /// A single argument slot in a backend invocation.
@@ -19,7 +21,8 @@ pub enum Arg {
 }
 
 /// How a step names its result, which determines what `exec` must do afterwards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     /// The step writes exactly the path given to it.
     Path,

@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use serde::Serialize;
+
 use crate::error::{ConvError, ErrorCode, Result};
 use crate::{plan, probe, registry, Backend, Format, OutputMode, Resolver};
 
@@ -26,7 +28,7 @@ pub enum Event {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
     pub output: PathBuf,
     pub bytes: u64,

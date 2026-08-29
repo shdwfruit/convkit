@@ -54,7 +54,14 @@ fn execute(cli: &Cli) -> Result<String, ConvError> {
 
     if cli.dry_run {
         let p = plan::build(from, to, &[input], &output, None)?;
-        return Ok(render::plan_human(&p));
+        return Ok(if cli.json {
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&render::plan_json(&p)).unwrap()
+            )
+        } else {
+            render::plan_human(&p)
+        });
     }
 
     if output.exists() && !cli.overwrite {
@@ -71,5 +78,12 @@ fn execute(cli: &Cli) -> Result<String, ConvError> {
         output,
     };
     let outcome = exec::run(&req, &cli.resolver(), &mut |_| {})?;
-    Ok(render::outcome_human(&outcome))
+    Ok(if cli.json {
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&render::outcome_json(&outcome)).unwrap()
+        )
+    } else {
+        render::outcome_human(&outcome)
+    })
 }

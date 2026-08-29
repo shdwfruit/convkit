@@ -1,0 +1,112 @@
+---
+source: crates/convkit-core/tests/recipes.rs
+expression: "lines.join(\"\\n\")"
+---
+avi -> flac: ffmpeg -i in.avi -vn -c:a flac -y out.flac
+avi -> gif: ffmpeg -i in.avi -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+avi -> m4a: ffmpeg -i in.avi -vn -c:a aac -b:a 192k -y out.m4a
+avi -> mp3: ffmpeg -i in.avi -vn -c:a libmp3lame -q:a 2 -y out.mp3
+avi -> mp4: ffmpeg -i in.avi -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mp4
+avi -> wav: ffmpeg -i in.avi -vn -c:a pcm_s16le -y out.wav
+avi -> webm: ffmpeg -i in.avi -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -y out.webm
+avif -> bmp: magick in.avif -auto-orient out.bmp
+avif -> jpg: magick in.avif -auto-orient -quality 92 out.jpg
+avif -> pdf: magick in.avif -auto-orient out.pdf
+avif -> png: magick in.avif -auto-orient out.png
+avif -> tiff: magick in.avif -auto-orient out.tiff
+avif -> webp: magick in.avif -auto-orient -quality 92 out.webp
+bmp -> avif: magick in.bmp -auto-orient -quality 92 out.avif
+bmp -> jpg: magick in.bmp -auto-orient -quality 92 out.jpg
+bmp -> pdf: magick in.bmp -auto-orient out.pdf
+bmp -> png: magick in.bmp -auto-orient out.png
+bmp -> tiff: magick in.bmp -auto-orient out.tiff
+bmp -> webp: magick in.bmp -auto-orient -quality 92 out.webp
+docx -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.docx
+flac -> m4a: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
+flac -> mp3: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
+flac -> wav: ffmpeg -i in.flac -vn -c:a pcm_s16le -y out.wav
+gif -> mp4: ffmpeg -i in.gif -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -pix_fmt yuv420p -movflags +faststart -y out.mp4
+heic -> avif: magick in.heic -auto-orient -quality 92 out.avif
+heic -> bmp: magick in.heic -auto-orient out.bmp
+heic -> jpg: magick in.heic -auto-orient -quality 92 out.jpg
+heic -> pdf: magick in.heic -auto-orient out.pdf
+heic -> png: magick in.heic -auto-orient out.png
+heic -> tiff: magick in.heic -auto-orient out.tiff
+heic -> webp: magick in.heic -auto-orient -quality 92 out.webp
+heif -> avif: magick in.heif -auto-orient -quality 92 out.avif
+heif -> bmp: magick in.heif -auto-orient out.bmp
+heif -> jpg: magick in.heif -auto-orient -quality 92 out.jpg
+heif -> pdf: magick in.heif -auto-orient out.pdf
+heif -> png: magick in.heif -auto-orient out.png
+heif -> tiff: magick in.heif -auto-orient out.tiff
+heif -> webp: magick in.heif -auto-orient -quality 92 out.webp
+jpg -> avif: magick in.jpg -auto-orient -quality 92 out.avif
+jpg -> bmp: magick in.jpg -auto-orient out.bmp
+jpg -> pdf: magick in.jpg -auto-orient out.pdf
+jpg -> png: magick in.jpg -auto-orient out.png
+jpg -> tiff: magick in.jpg -auto-orient out.tiff
+jpg -> webp: magick in.jpg -auto-orient -quality 92 out.webp
+m4a -> flac: ffmpeg -i in.m4a -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
+m4a -> mp3: ffmpeg -i in.m4a -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
+m4a -> wav: ffmpeg -i in.m4a -vn -c:a pcm_s16le -y out.wav
+md -> docx: pandoc in.md --standalone -o out.docx
+md -> html: pandoc in.md --standalone -o out.html
+md -> pdf: pandoc in.md --standalone -o out.convkit-step0.docx
+md -> pdf: soffice --headless --norestore --convert-to pdf --outdir . out.convkit-step0.docx
+mkv -> flac: ffmpeg -i in.mkv -vn -c:a flac -y out.flac
+mkv -> gif: ffmpeg -i in.mkv -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+mkv -> m4a: ffmpeg -i in.mkv -vn -c:a aac -b:a 192k -y out.m4a
+mkv -> mp3: ffmpeg -i in.mkv -vn -c:a libmp3lame -q:a 2 -y out.mp3
+mkv -> mp4: ffmpeg -i in.mkv -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mp4
+mkv -> wav: ffmpeg -i in.mkv -vn -c:a pcm_s16le -y out.wav
+mkv -> webm: ffmpeg -i in.mkv -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -y out.webm
+mov -> flac: ffmpeg -i in.mov -vn -c:a flac -y out.flac
+mov -> gif: ffmpeg -i in.mov -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+mov -> m4a: ffmpeg -i in.mov -vn -c:a aac -b:a 192k -y out.m4a
+mov -> mp3: ffmpeg -i in.mov -vn -c:a libmp3lame -q:a 2 -y out.mp3
+mov -> mp4: ffmpeg -i in.mov -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mp4
+mov -> wav: ffmpeg -i in.mov -vn -c:a pcm_s16le -y out.wav
+mov -> webm: ffmpeg -i in.mov -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -y out.webm
+mp3 -> flac: ffmpeg -i in.mp3 -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
+mp3 -> m4a: ffmpeg -i in.mp3 -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
+mp3 -> wav: ffmpeg -i in.mp3 -vn -c:a pcm_s16le -y out.wav
+mp4 -> flac: ffmpeg -i in.mp4 -vn -c:a flac -y out.flac
+mp4 -> gif: ffmpeg -i in.mp4 -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+mp4 -> m4a: ffmpeg -i in.mp4 -vn -c:a aac -b:a 192k -y out.m4a
+mp4 -> mp3: ffmpeg -i in.mp4 -vn -c:a libmp3lame -q:a 2 -y out.mp3
+mp4 -> wav: ffmpeg -i in.mp4 -vn -c:a pcm_s16le -y out.wav
+mp4 -> webm: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -y out.webm
+ods -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.ods
+odt -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.odt
+pdf -> docx: soffice --headless --norestore --infilter=writer_pdf_import --convert-to docx:MS Word 2007 XML --outdir . in.pdf
+png -> avif: magick in.png -auto-orient -quality 92 out.avif
+png -> bmp: magick in.png -auto-orient out.bmp
+png -> jpg: magick in.png -auto-orient -quality 92 out.jpg
+png -> pdf: magick in.png -auto-orient out.pdf
+png -> tiff: magick in.png -auto-orient out.tiff
+png -> webp: magick in.png -auto-orient -quality 92 out.webp
+pptx -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.pptx
+svg -> jpg: magick -density 384 -background white in.svg -alpha remove -alpha off -flatten -quality 92 out.jpg
+svg -> png: magick -density 384 -background none in.svg out.png
+tiff -> avif: magick in.tiff -auto-orient -quality 92 out.avif
+tiff -> bmp: magick in.tiff -auto-orient out.bmp
+tiff -> jpg: magick in.tiff -auto-orient -quality 92 out.jpg
+tiff -> pdf: magick in.tiff -auto-orient out.pdf
+tiff -> png: magick in.tiff -auto-orient out.png
+tiff -> webp: magick in.tiff -auto-orient -quality 92 out.webp
+wav -> flac: ffmpeg -i in.wav -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
+wav -> m4a: ffmpeg -i in.wav -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
+wav -> mp3: ffmpeg -i in.wav -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
+webm -> flac: ffmpeg -i in.webm -vn -c:a flac -y out.flac
+webm -> gif: ffmpeg -i in.webm -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+webm -> m4a: ffmpeg -i in.webm -vn -c:a aac -b:a 192k -y out.m4a
+webm -> mp3: ffmpeg -i in.webm -vn -c:a libmp3lame -q:a 2 -y out.mp3
+webm -> mp4: ffmpeg -i in.webm -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mp4
+webm -> wav: ffmpeg -i in.webm -vn -c:a pcm_s16le -y out.wav
+webp -> avif: magick in.webp -auto-orient -quality 92 out.avif
+webp -> bmp: magick in.webp -auto-orient out.bmp
+webp -> jpg: magick in.webp -auto-orient -quality 92 out.jpg
+webp -> pdf: magick in.webp -auto-orient out.pdf
+webp -> png: magick in.webp -auto-orient out.png
+webp -> tiff: magick in.webp -auto-orient out.tiff
+xlsx -> pdf: soffice --headless --norestore --convert-to pdf --outdir . in.xlsx

@@ -1,4 +1,5 @@
 use convkit_core::{ConvError, ConversionPlan, Outcome};
+use serde_json::json;
 
 /// Shell-ish rendering for humans. Quoting is display-only — execution passes
 /// argv directly and never goes through a shell.
@@ -46,4 +47,21 @@ pub fn error_human(e: &ConvError) -> String {
         }
     }
     s
+}
+
+pub fn plan_json(plan: &ConversionPlan) -> serde_json::Value {
+    json!({ "ok": true, "dry_run": true, "plan": plan })
+}
+
+pub fn outcome_json(o: &Outcome) -> serde_json::Value {
+    json!({
+        "ok": true,
+        "output": o.output,
+        "bytes": o.bytes,
+        "remuxed": o.remuxed,
+        "warnings": o.warnings,
+        "backends": o.backends.iter()
+            .map(|(b, v)| json!({ "backend": b, "version": v }))
+            .collect::<Vec<_>>(),
+    })
 }
