@@ -228,8 +228,13 @@ Never silently default to a format.
 Each has a corresponding test.
 
 1. **Auto-remux.** When only the container changes and the codecs are already
-   compatible, use `-c copy`. Lossless, and roughly 100× faster than the
-   transcode a naive script performs. Probe first; transcode only when forced.
+   compatible, use `-c copy`. Lossless, and a stream copy instead of a
+   re-encode — measured at 3.3–26.2× faster on clips from 2 to 30 seconds and
+   up to 72.1× on a 1080p/60s clip, growing with clip length and resolution
+   rather than sitting at a fixed multiplier. See
+   `docs/defaults-calibration.md` §1 for the full measurement (5–7 timed runs
+   per clip size, argv and raw samples included). Probe first; transcode only
+   when forced.
 2. **GIF via generated palette.** `palettegen`/`paletteuse` with
    `stats_mode=diff`, 15fps, width capped at 640. Naive
    `ffmpeg -i in.mp4 out.gif` uses a fixed 256-colour web palette.

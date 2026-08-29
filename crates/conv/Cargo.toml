@@ -4,11 +4,19 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "One command for everyday file conversion, offline"
 readme = "../../README.md"
 keywords = ["convert", "ffmpeg", "pandoc", "imagemagick", "cli"]
 categories = ["command-line-utilities", "multimedia"]
+
+[package.metadata.wix]
+upgrade-guid = "E9BFE898-D5AA-4900-BB79-0448F6DCD057"
+path-guid = "73EF7E39-82E0-4608-BDA9-B46D2B83D699"
+license = false
+eula = false
 
 [[bin]]
 name = "conv"
