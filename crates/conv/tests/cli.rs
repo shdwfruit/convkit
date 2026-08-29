@@ -41,3 +41,27 @@ fn dot_extension_form_derives_the_output_name() {
         .success()
         .stdout(contains("photo.jpg"));
 }
+
+#[test]
+fn json_dry_run_reports_ok_and_the_first_step_program() {
+    let assert = conv()
+        .args(["in.mp4", "out.gif", "--dry-run", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["plan"]["steps"][0]["program"], "ffmpeg");
+}
+
+#[test]
+fn json_error_envelope_lands_on_stderr_for_an_unsupported_pair() {
+    let assert = conv()
+        .args(["in.pdf", "out.mp4", "--dry-run", "--json"])
+        .assert()
+        .code(2);
+    let v: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stderr).expect("stderr must be valid JSON");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "unsupported_pair");
+}

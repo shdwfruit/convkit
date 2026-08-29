@@ -5,6 +5,17 @@ use convkit_core::{exec, plan, ConvError, ErrorCode, Format};
 use crate::cli::Cli;
 use crate::render;
 
+/// True when the text after a leading `.` marks the bare-extension shorthand
+/// (`.jpg`) rather than an ordinary relative path that merely starts with a
+/// dot (`./out.gif`, `.\out.gif`, `..\out.gif`). Classifying on content, not
+/// just the leading `.`, is what keeps `conv in.mp4 ./out.gif` writing
+/// `out.gif` instead of misparsing the target as an unknown extension
+/// `"/out.gif"`. The one case this gives up is converting to a file
+/// literally named `.hidden`, where the user must write `./.hidden`.
+fn is_bare_extension_shorthand(rest: &str) -> bool {
+    !rest.contains('/') && !rest.contains('\\') && !rest.contains('.')
+}
+
 /// Resolves the `IN OUT` and `IN .ext` positional forms. Batch forms arrive in
 /// Task 12.
 pub fn resolve_pair(paths: &[PathBuf]) -> Result<(PathBuf, PathBuf), ConvError> {
@@ -15,11 +26,13 @@ pub fn resolve_pair(paths: &[PathBuf]) -> Result<(PathBuf, PathBuf), ConvError> 
         ));
     };
     let t = target.to_string_lossy();
-    if let Some(ext) = t.strip_prefix('.') {
-        if Format::from_ext(ext).is_none() {
-            return Err(ConvError::unknown_format(ext));
+    if let Some(rest) = t.strip_prefix('.') {
+        if is_bare_extension_shorthand(rest) {
+            if Format::from_ext(rest).is_none() {
+                return Err(ConvError::unknown_format(rest));
+            }
+            return Ok((input.clone(), input.with_extension(rest)));
         }
-        return Ok((input.clone(), input.with_extension(ext)));
     }
     Ok((input.clone(), target.clone()))
 }
@@ -86,4 +99,45 @@ fn execute(cli: &Cli) -> Result<String, ConvError> {
     } else {
         render::outcome_human(&outcome)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn bare_extension_shorthand_derives_the_output_name() {
+        let (input, output) = resolve_pair(&[p("photo.heic"), p(".jpg")]).unwrap();
+        assert_eq!(input, p("photo.heic"));
+        assert_eq!(output, p("photo.jpg"));
+    }
+
+    #[test]
+    fn bare_extension_shorthand_typo_still_suggests_a_correction() {
+        let e = resolve_pair(&[p("in.mp4"), p(".gff")]).unwrap_err();
+        assert_eq!(e.code, ErrorCode::UnknownFormat);
+        assert!(e.message.contains("did you mean"), "{}", e.message);
+    }
+
+    #[test]
+    fn dot_slash_relative_path_is_not_bare_extension_shorthand() {
+        let (_, output) = resolve_pair(&[p("in.mp4"), p("./out.gif")]).unwrap();
+        assert_eq!(output, p("./out.gif"));
+    }
+
+    #[test]
+    fn dot_backslash_relative_path_is_not_bare_extension_shorthand() {
+        let (_, output) = resolve_pair(&[p("in.mp4"), p(r".\out.gif")]).unwrap();
+        assert_eq!(output, p(r".\out.gif"));
+    }
+
+    #[test]
+    fn parent_relative_path_is_not_bare_extension_shorthand() {
+        let (_, output) = resolve_pair(&[p("in.mp4"), p(r"..\out.gif")]).unwrap();
+        assert_eq!(output, p(r"..\out.gif"));
+    }
 }
