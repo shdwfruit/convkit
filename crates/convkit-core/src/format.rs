@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::LazyLock;
 
 use serde::Serialize;
 
@@ -13,8 +14,10 @@ pub enum Kind {
     Document,
 }
 
-/// Every format convkit v1 knows about. Adding a variant here is not enough to
-/// make it convertible — `registry.rs` must also gain at least one recipe.
+/// Every format convkit v1 knows about. Adding a variant here requires a
+/// matching row in `TABLE` below (`ext()`/`kind()` panic otherwise), and even
+/// then that alone is not enough to make it convertible — `registry.rs` must
+/// also gain at least one recipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Format {
@@ -116,22 +119,21 @@ impl Format {
             .expect("every Format variant has a TABLE row")
     }
 
+    /// All known formats, derived from `TABLE` so this can never drift out of
+    /// sync with the enum's actual extension/kind mappings.
     pub fn all() -> &'static [Format] {
-        const ALL: &[Format] = &[
-            Format::Mp4, Format::Mov, Format::Mkv, Format::Webm, Format::Avi,
-            Format::Mp3, Format::M4a, Format::Wav, Format::Flac,
-            Format::Gif, Format::Heic, Format::Heif, Format::Jpg, Format::Png,
-            Format::Webp, Format::Avif, Format::Tiff, Format::Bmp, Format::Svg,
-            Format::Pdf, Format::Docx, Format::Xlsx, Format::Pptx, Format::Odt,
-            Format::Ods, Format::Html, Format::Md,
-        ];
-        ALL
+        static ALL: LazyLock<Vec<Format>> =
+            LazyLock::new(|| TABLE.iter().map(|(f, _, _)| *f).collect());
+        &ALL
     }
 
     /// Nearest known format for an unrecognised extension, for "did you mean".
     /// Returns `None` when nothing is close enough, so we never suggest nonsense.
     pub fn suggest(ext: &str) -> Option<Format> {
         let needle = ext.trim_start_matches('.').to_ascii_lowercase();
+        if needle.is_empty() {
+            return None;
+        }
         TABLE
             .iter()
             .flat_map(|(f, _, exts)| exts.iter().map(move |e| (*f, *e)))
@@ -166,6 +168,12 @@ mod tests {
         assert_eq!(Format::suggest("mp3v"), Some(Format::Mp3));
         assert_eq!(Format::suggest("docs"), Some(Format::Docx));
         assert_eq!(Format::suggest("zzzzzzzz"), None);
+    }
+
+    #[test]
+    fn suggest_returns_none_for_empty_needle() {
+        assert_eq!(Format::suggest(""), None);
+        assert_eq!(Format::suggest("."), None);
     }
 
     #[test]
