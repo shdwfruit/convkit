@@ -660,6 +660,36 @@ pub fn backends_for(from: Format, to: Format) -> Vec<Backend> {
         .unwrap_or_default()
 }
 
+/// True when the pair might be satisfiable by a stream copy, so the caller
+/// should run ffprobe before building a plan.
+pub fn needs_probe(from: Format, to: Format) -> bool {
+    let container_change = matches!(to, Format::Mp4 | Format::Webm)
+        && matches!(
+            from,
+            Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm | Format::Avi
+        );
+    container_change && from != to
+}
+
+/// Whether the probed codecs are legal in the target container.
+pub fn can_remux(to: Format, probe: &crate::MediaProbe) -> bool {
+    let (video_ok, audio_ok) = match to {
+        Format::Mp4 => (MP4_COMPATIBLE_VIDEO, MP4_COMPATIBLE_AUDIO),
+        Format::Webm => (WEBM_COMPATIBLE_VIDEO, WEBM_COMPATIBLE_AUDIO),
+        _ => return false,
+    };
+    let v = probe
+        .video_codec
+        .as_deref()
+        .is_some_and(|c| video_ok.contains(&c));
+    // A file with no audio stream remuxes fine.
+    let a = probe
+        .audio_codec
+        .as_deref()
+        .is_none_or(|c| audio_ok.contains(&c));
+    v && a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
