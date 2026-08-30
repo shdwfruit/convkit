@@ -763,31 +763,44 @@ fn failing_conversion_prints_a_fail_header_message_and_one_remediation_line() {
 // what this host actually has installed, so these are green in both the
 // clean CI environment and the project's own hostile one (real ImageMagick
 // and LibreOffice on `PATH`) — that host state only ever changes the
-// unmanaged rows, never whether a managed backend is missing.
+// unmanaged rows, never whether a managed backend is installed.
+//
+// Review finding F42 changed what "every backend absent" means: a managed
+// backend nobody has ever installed is `"not_installed"`, not `"missing"`,
+// and (unlike the old `"missing"`) never fails `--check` on its own -- see
+// `commands::update::ok`'s own docs. The tests below were rewritten around
+// that; the genuinely-failing case now needs an actually *outdated*
+// managed backend, exercised separately below.
 
 /// Acceptance check 1/2's shape, made host-independent: with every backend
-/// unresolvable, `--check` must name every managed backend as missing (not
-/// silently skip any), report the two unmanaged backends without ever
-/// running a package manager, and exit non-zero.
+/// unresolvable, `--check` must name every managed backend as not
+/// installed (not silently skip any), report the two unmanaged backends
+/// without ever running a package manager, and — since nothing here is
+/// genuinely broken, just never provisioned (review finding F42) — exit
+/// zero.
 #[test]
-fn update_check_reports_every_managed_backend_missing_in_an_isolated_environment() {
+fn update_check_reports_every_managed_backend_as_not_installed_in_an_isolated_environment() {
     let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
     let assert = cmd
         .args(["update", "--check"])
         .timeout(Duration::from_secs(10))
         .assert()
-        .code(3);
+        .code(0);
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     for name in ["ffmpeg", "ffprobe", "pandoc", "typst"] {
         assert!(stdout.contains(name), "{stdout}");
     }
-    assert!(stdout.contains("missing"), "{stdout}");
+    assert!(stdout.contains("not installed"), "{stdout}");
+    assert!(
+        stdout.contains("conv install"),
+        "must point at `conv install <backend>` for provisioning: {stdout}"
+    );
     assert!(stdout.contains("magick"), "{stdout}");
     assert!(stdout.contains("soffice"), "{stdout}");
     assert!(stdout.contains("unmanaged"), "{stdout}");
     assert!(
         !stdout.to_ascii_lowercase().contains("downloading"),
-        "--check must never attempt a download: {stdout}"
+        "a never-installed backend must never trigger a download: {stdout}"
     );
     assert!(
         stdout.contains("conv "),
@@ -795,13 +808,80 @@ fn update_check_reports_every_managed_backend_missing_in_an_isolated_environment
     );
 }
 
-/// Acceptance check 4's shape: `--json`'s envelope carries `ok`, the plural
-/// `backends` key, and an additive `conv` object — and, mirroring
-/// `doctor`/`install`'s own documented stdout/stderr split, a non-ok
-/// envelope (something outdated or missing) lands on stderr, not stdout.
+/// The `--json` shape of the same scenario: every managed backend reports
+/// `"not_installed"` (never the old `"missing"`), and the envelope is
+/// `ok: true` on stdout -- review finding F42's whole point is that this
+/// state is informational, not a failure.
 #[test]
-fn update_check_json_envelope_lands_on_stderr_when_something_is_missing() {
+fn update_check_json_reports_a_never_installed_backend_as_not_installed_and_ok() {
     let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .args(["update", "--check", "--json"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(0);
+    let output = assert.get_output();
+    assert_eq!(
+        output.stderr,
+        b"",
+        "an ok envelope must land on stdout, not stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["ok"], true);
+    let backends = v["backends"].as_array().expect("backends must be an array");
+    assert_eq!(backends.len(), 6, "{v}");
+    let ffmpeg = backends
+        .iter()
+        .find(|b| b["backend"] == "ffmpeg")
+        .expect("ffmpeg must be reported");
+    assert_eq!(ffmpeg["action"], "not_installed");
+    assert_eq!(ffmpeg["managed"], true);
+    let magick = backends
+        .iter()
+        .find(|b| b["backend"] == "magick")
+        .expect("magick must be reported");
+    assert_eq!(magick["action"], "unmanaged");
+    assert_eq!(magick["managed"], false);
+    assert!(magick["manual_hint"].is_string(), "{v}");
+    assert!(v["conv"]["version"].is_string(), "{v}");
+    assert!(v["conv"]["update_hint"].is_string(), "{v}");
+}
+
+/// Acceptance check 4's shape, now built on a genuinely *outdated* managed
+/// backend rather than merely a never-installed one: `--json`'s envelope
+/// carries `ok`, the plural `backends` key, and an additive `conv` object
+/// — and, mirroring `doctor`/`install`'s own documented stdout/stderr
+/// split, a non-ok envelope lands on stderr, not stdout. Unix-only:
+/// writing a real, executable stub directly at the exact filename
+/// `Source::Managed` expects (`Resolver::managed_filename`) only works
+/// cross-platform via `Source::Override`, which accepts any filename --
+/// see `resolve::tests::resolve_managed_only_finds_a_file_written_at_the_
+/// managed_path`'s own docs in `convkit-core` for the identical
+/// constraint (a `.exe`-named text file fails to spawn on Windows at all).
+#[cfg(unix)]
+#[test]
+fn update_check_json_envelope_lands_on_stderr_when_a_managed_backend_is_outdated() {
+    let (mut cmd, _empty_path, managed_dir) = command_with_no_backends();
+
+    // `Resolver::managed_dir()` joins `convkit/bin` onto `XDG_DATA_HOME`
+    // (`command_with_no_backends` points that env var at `managed_dir`
+    // directly) -- the stub must land at that exact real path, not at
+    // `managed_dir`'s own root.
+    let managed_bin_dir = managed_dir.path().join("convkit").join("bin");
+    std::fs::create_dir_all(&managed_bin_dir).unwrap();
+    let stub_path = managed_bin_dir.join("typst");
+    std::fs::write(
+        &stub_path,
+        "#!/bin/sh\necho \"typst 0.0.1-not-the-pinned-version\"\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     let assert = cmd
         .args(["update", "--check", "--json"])
         .timeout(Duration::from_secs(10))
@@ -819,12 +899,20 @@ fn update_check_json_envelope_lands_on_stderr_when_something_is_missing() {
     assert_eq!(v["ok"], false);
     let backends = v["backends"].as_array().expect("backends must be an array");
     assert_eq!(backends.len(), 6, "{v}");
+    let typst = backends
+        .iter()
+        .find(|b| b["backend"] == "typst")
+        .expect("typst must be reported");
+    assert_eq!(typst["action"], "outdated", "{v}");
+    assert_eq!(typst["managed"], true);
     let ffmpeg = backends
         .iter()
         .find(|b| b["backend"] == "ffmpeg")
         .expect("ffmpeg must be reported");
-    assert_eq!(ffmpeg["action"], "missing");
-    assert_eq!(ffmpeg["managed"], true);
+    assert_eq!(
+        ffmpeg["action"], "not_installed",
+        "a sibling backend that's simply absent must not also be flagged: {v}"
+    );
     let magick = backends
         .iter()
         .find(|b| b["backend"] == "magick")
@@ -846,13 +934,13 @@ fn update_no_install_behaves_like_check_and_never_downloads() {
         .args(["update", "--no-install"])
         .timeout(Duration::from_secs(10))
         .assert()
-        .code(3);
+        .code(0);
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(
         !stdout.to_ascii_lowercase().contains("downloading"),
         "{stdout}"
     );
-    assert!(stdout.contains("missing"), "{stdout}");
+    assert!(stdout.contains("not installed"), "{stdout}");
 }
 
 /// The top-level `conv --help` command list must mention `update` in a

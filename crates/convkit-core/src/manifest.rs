@@ -125,88 +125,154 @@ pub static ALL: &[Asset] = &[
         ],
         version: "9.0.1",
     },
-    // --- ffmpeg / ffprobe: Linux x64, macOS x64, macOS arm64 -----------
-    // eugeneware/ffmpeg-static release `b6.1.1` — a pinned tag, ffmpeg
-    // 6.1.1. Assets are raw statically-linked executables, not archives:
-    // downloaded and confirmed by `file(1)` to be real ELF/Mach-O binaries
-    // at the expected size, not gzip streams mislabeled by extension.
-    // Unlike the Windows zip above, upstream publishes ffmpeg and ffprobe
-    // here as two genuinely separate files at two separate URLs — there is
-    // no single shared download to provision both from, so these stay two
-    // one-member `Asset`s, same as before.
+    // --- ffmpeg / ffprobe: Linux x64, Linux arm64, macOS x64, macOS
+    // arm64 --------------------------------------------------------------
+    // Review finding F48: this manifest used to pin these six entries to
+    // eugeneware/ffmpeg-static release `b6.1.1` (ffmpeg 6.1.1, December
+    // 2023) while Windows (above) pinned 9.0.1 -- a three-major-version
+    // gap on the same tool. Re-pinned to ffmpeg.martin-riedl.de's "Release
+    // Build" channel instead: a per-version, timestamped download tree
+    // (`/download/<os>/<arch>/<unix-timestamp>_<version>/...`) that keeps
+    // every past release individually addressable forever once published --
+    // verified directly by requesting an older release's own URL
+    // (`.../linux/amd64/1785864736_9.0/ffmpeg.zip`, superseded by 9.0.1
+    // above) and confirming it still resolves, the same immutability
+    // guarantee a GitHub release tag gives every other entry in this file.
+    //
+    // BtbN/FFmpeg-Builds was also evaluated and rejected: its own embedded
+    // version banner carries ffmpeg upstream's raw git tag prefix
+    // (confirmed by extracting a real BtbN asset and inspecting the
+    // binary directly: `n9.0.1-11-ge47273f4d9-20260829`), which is not a
+    // prefix of a clean, digit-first `version` field the way
+    // `version_is_current`'s docs require -- every managed ffmpeg
+    // installed from that source would permanently misreport as
+    // "outdated" and be re-downloaded on every `conv update`.
+    //
+    // Every asset below was downloaded and its bytes hashed with
+    // `shasum -a 256` against the value martin-riedl.de itself publishes
+    // alongside each download (an independent second source agreeing with
+    // the one this manifest was built from, the same standard `typst`'s
+    // own entries below hold themselves to). Each is a single-entry zip
+    // (`unzip -l` confirms exactly one member, named bare
+    // `ffmpeg`/`ffprobe` with no enclosing directory) -- upstream ships
+    // ffmpeg and ffprobe here as two genuinely separate downloads, the
+    // same as the previous source, so these stay one-member `Asset`s
+    // rather than a bundle. Both macOS binaries, and (via the identical
+    // `--extra-version` banner string embedded in all four platforms'
+    // binaries, confirmed with `strings` on the two Linux ones this crate
+    // cannot execute directly) both Linux binaries, were confirmed to
+    // report a version banner reading `9.0.1-https://www.martin-riedl.de`
+    // -- a clean prefix of the pinned `"9.0.1"` below, immediately
+    // followed by `-`, exactly the shape `version_is_current` requires.
+    // This also happens to match Windows' own pin exactly, so every
+    // platform this manifest covers now agrees on the same ffmpeg
+    // release, not merely the same major version (see this file's own
+    // `every_ffmpeg_and_ffprobe_entry_pins_the_same_version_across_every_
+    // platform` and `ffmpeg_major_version_matches_across_every_platform`
+    // tests below).
+    //
+    // Linux arm64 is new coverage (review finding F232): `dist-workspace.
+    // toml` already builds `aarch64-unknown-linux-gnu`, but until now this
+    // manifest had no ffmpeg/ffprobe row for it at all -- martin-riedl.de
+    // publishes a "Release Build" for it too, at the same 9.0.1 version,
+    // so it costs nothing extra to add alongside the re-pin.
     Asset {
         os: "linux",
         arch: "x64",
-        url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-x64",
-        sha256: "e7e7fb30477f717e6f55f9180a70386c62677ef8a4d4d1a5d948f4098aa3eb99",
-        packaging: Packaging::Raw,
+        url: "https://ffmpeg.martin-riedl.de/download/linux/amd64/1787074600_9.0.1/ffmpeg.zip",
+        sha256: "18bec7d5c2ab3b24d277466b758394e109b0479133b98d155c5540ed3013fa74",
+        packaging: Packaging::Zip,
         members: &[ArchiveMember {
             backend: Backend::Ffmpeg,
-            archive_member: "",
+            archive_member: "ffmpeg",
         }],
-        version: "6.1.1",
+        version: "9.0.1",
     },
     Asset {
         os: "linux",
         arch: "x64",
-        url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-linux-x64",
-        sha256: "4f231a1960d83e403d08f7971e271707bec278a9ae18e21b8b5b03186668450d",
-        packaging: Packaging::Raw,
+        url: "https://ffmpeg.martin-riedl.de/download/linux/amd64/1787074600_9.0.1/ffprobe.zip",
+        sha256: "227c122cabb36444d7dee7f5c9c9db9e36e15ab7a9b43eb2196936fb177f9ad3",
+        packaging: Packaging::Zip,
         members: &[ArchiveMember {
             backend: Backend::Ffprobe,
-            archive_member: "",
+            archive_member: "ffprobe",
         }],
-        version: "6.1.1",
+        version: "9.0.1",
+    },
+    Asset {
+        os: "linux",
+        arch: "arm64",
+        url: "https://ffmpeg.martin-riedl.de/download/linux/arm64/1787072884_9.0.1/ffmpeg.zip",
+        sha256: "92cff3dec20d996bb5b8a918b156b64301338e7c28046053c82d0935cf7c6eb2",
+        packaging: Packaging::Zip,
+        members: &[ArchiveMember {
+            backend: Backend::Ffmpeg,
+            archive_member: "ffmpeg",
+        }],
+        version: "9.0.1",
+    },
+    Asset {
+        os: "linux",
+        arch: "arm64",
+        url: "https://ffmpeg.martin-riedl.de/download/linux/arm64/1787072884_9.0.1/ffprobe.zip",
+        sha256: "208379f31219f52333ed769e9159ca2964355b7c7c4420233bcca769b5edef62",
+        packaging: Packaging::Zip,
+        members: &[ArchiveMember {
+            backend: Backend::Ffprobe,
+            archive_member: "ffprobe",
+        }],
+        version: "9.0.1",
     },
     Asset {
         os: "macos",
         arch: "x64",
-        url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64",
-        sha256: "ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894",
-        packaging: Packaging::Raw,
+        url: "https://ffmpeg.martin-riedl.de/download/macos/amd64/1787081194_9.0.1/ffmpeg.zip",
+        sha256: "5bdead62ff504ab9b447cc72b212c4fb481e3f7de5877d427a51bee8136dda40",
+        packaging: Packaging::Zip,
         members: &[ArchiveMember {
             backend: Backend::Ffmpeg,
-            archive_member: "",
+            archive_member: "ffmpeg",
         }],
-        version: "6.1.1",
+        version: "9.0.1",
     },
     Asset {
         os: "macos",
         arch: "x64",
-        url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-x64",
-        sha256: "fa3add0ce901f7241abe0dfc0155d958fc834aca3f8ce61f87cc712ae669c1e0",
-        packaging: Packaging::Raw,
+        url: "https://ffmpeg.martin-riedl.de/download/macos/amd64/1787081194_9.0.1/ffprobe.zip",
+        sha256: "34511bbcf1988ad2886023bf5ace4f44cf62e6defeb3d194d6f7619e5b061f7f",
+        packaging: Packaging::Zip,
         members: &[ArchiveMember {
             backend: Backend::Ffprobe,
-            archive_member: "",
+            archive_member: "ffprobe",
         }],
-        version: "6.1.1",
+        version: "9.0.1",
     },
     Asset {
         os: "macos",
         arch: "arm64",
-        url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64",
-        sha256: "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584",
-        packaging: Packaging::Raw,
+        url: "https://ffmpeg.martin-riedl.de/download/macos/arm64/1787073674_9.0.1/ffmpeg.zip",
+        sha256: "8287a1b2229e05eb41859f073e18e6c52c60a778f2f5e6881070fe51b79407fe",
+        packaging: Packaging::Zip,
         members: &[ArchiveMember {
             backend: Backend::Ffmpeg,
-            archive_member: "",
+            archive_member: "ffmpeg",
         }],
-        version: "6.1.1",
+        version: "9.0.1",
     },
     Asset {
         os: "macos",
         arch: "arm64",
-        url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-arm64",
-        sha256: "bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3cab091f9cab90b64",
-        packaging: Packaging::Raw,
+        url: "https://ffmpeg.martin-riedl.de/download/macos/arm64/1787073674_9.0.1/ffprobe.zip",
+        sha256: "102a26b8940a053298d9929bfaae71e4b6ef65ba5f19a99a88c433108560741a",
+        packaging: Packaging::Zip,
         members: &[ArchiveMember {
             backend: Backend::Ffprobe,
-            archive_member: "",
+            archive_member: "ffprobe",
         }],
-        version: "6.1.1",
+        version: "9.0.1",
     },
-    // --- pandoc: all four platforms -------------------------------------
+    // --- pandoc: all five platforms --------------------------------------
     // jgm/pandoc release 3.11 — a real version tag, not "latest".
     Asset {
         os: "windows",
@@ -225,6 +291,23 @@ pub static ALL: &[Asset] = &[
         arch: "x64",
         url: "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-linux-amd64.tar.gz",
         sha256: "37edb3bbcf722f921a009941bf5874e2e0c09263226c9b4a2d980788cb062ab6",
+        packaging: Packaging::TarGz,
+        members: &[ArchiveMember {
+            backend: Backend::Pandoc,
+            archive_member: "pandoc-3.11/bin/pandoc",
+        }],
+        version: "3.11",
+    },
+    // Review finding F232: the same `3.11` release tag already pinned
+    // above also ships a `linux-arm64` tarball, at the exact same
+    // top-level archive layout (`pandoc-3.11/bin/pandoc`) as the x64 one --
+    // downloaded, hashed, and confirmed with `file(1)` to be a real
+    // statically-linked aarch64 ELF binary, not a mislabeled stream.
+    Asset {
+        os: "linux",
+        arch: "arm64",
+        url: "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-linux-arm64.tar.gz",
+        sha256: "56ed5566ec41d22ec9ee0704e6ac0b98ba102e92384efd5306173a22d314c79a",
         packaging: Packaging::TarGz,
         members: &[ArchiveMember {
             backend: Backend::Pandoc,
@@ -256,7 +339,7 @@ pub static ALL: &[Asset] = &[
         }],
         version: "3.11",
     },
-    // --- typst: all four platforms --------------------------------------
+    // --- typst: all five platforms ---------------------------------------
     // typst/typst release 0.15.1 — a real version tag, not "latest". Linux
     // and macOS assets are `.tar.xz` (musl-static on Linux, so it runs
     // regardless of the host glibc); see `Packaging::TarXz`'s docs for why
@@ -286,6 +369,23 @@ pub static ALL: &[Asset] = &[
         members: &[ArchiveMember {
             backend: Backend::Typst,
             archive_member: "typst-x86_64-unknown-linux-musl/typst",
+        }],
+        version: "0.15.1",
+    },
+    // Review finding F232: the same `v0.15.1` release tag already pinned
+    // above also ships `typst-aarch64-unknown-linux-musl.tar.xz` -- same
+    // musl-static rationale as the x64 Linux entry, downloaded, hashed,
+    // and confirmed with `file(1)` to be a real statically-linked aarch64
+    // ELF binary.
+    Asset {
+        os: "linux",
+        arch: "arm64",
+        url: "https://github.com/typst/typst/releases/download/v0.15.1/typst-aarch64-unknown-linux-musl.tar.xz",
+        sha256: "5aa8d74a3d906e60ea12a66ac2f37f8eef1b14cbad7182a745e393a10c23dcee",
+        packaging: Packaging::TarXz,
+        members: &[ArchiveMember {
+            backend: Backend::Typst,
+            archive_member: "typst-aarch64-unknown-linux-musl/typst",
         }],
         version: "0.15.1",
     },
@@ -593,7 +693,12 @@ mod tests {
     /// must report nothing extra.
     #[test]
     fn ffmpeg_and_ffprobe_are_not_bundled_off_windows() {
-        for (os, arch) in [("linux", "x64"), ("macos", "x64"), ("macos", "arm64")] {
+        for (os, arch) in [
+            ("linux", "x64"),
+            ("linux", "arm64"),
+            ("macos", "x64"),
+            ("macos", "arm64"),
+        ] {
             let asset = ALL
                 .iter()
                 .find(|a| {
@@ -620,7 +725,11 @@ mod tests {
     fn bundled_with_is_empty_for_a_single_member_asset() {
         let covered = matches!(
             (current_os(), current_arch()),
-            ("windows", "x64") | ("linux", "x64") | ("macos", "x64") | ("macos", "arm64")
+            ("windows", "x64")
+                | ("linux", "x64")
+                | ("linux", "arm64")
+                | ("macos", "x64")
+                | ("macos", "arm64")
         );
         if covered {
             assert!(bundled_with(Backend::Pandoc).is_empty());
@@ -656,20 +765,27 @@ mod tests {
     fn has_managed_build_agrees_with_lookup_on_a_covered_platform() {
         let covered = matches!(
             (current_os(), current_arch()),
-            ("windows", "x64") | ("linux", "x64") | ("macos", "x64") | ("macos", "arm64")
+            ("windows", "x64")
+                | ("linux", "x64")
+                | ("linux", "arm64")
+                | ("macos", "x64")
+                | ("macos", "arm64")
         );
         if covered {
             assert!(has_managed_build(Backend::Pandoc));
         }
     }
 
-    /// Typst is verified for all four platforms this manifest covers —
-    /// unlike ffmpeg/pandoc, which have no `linux`/`arm64` row.
+    /// Typst is verified for all five platforms this manifest covers.
+    /// Review finding F232 added the fifth, `linux`/`arm64`, to typst
+    /// (and, in the same fix, to ffmpeg and pandoc below) -- before it,
+    /// this manifest had no `linux`/`arm64` row for any of the three.
     #[test]
     fn typst_has_a_manifest_entry_for_every_platform_this_manifest_covers() {
         for (os, arch) in [
             ("windows", "x64"),
             ("linux", "x64"),
+            ("linux", "arm64"),
             ("macos", "x64"),
             ("macos", "arm64"),
         ] {
@@ -686,7 +802,11 @@ mod tests {
     fn has_managed_build_is_true_for_typst_on_a_covered_platform() {
         let covered = matches!(
             (current_os(), current_arch()),
-            ("windows", "x64") | ("linux", "x64") | ("macos", "x64") | ("macos", "arm64")
+            ("windows", "x64")
+                | ("linux", "x64")
+                | ("linux", "arm64")
+                | ("macos", "x64")
+                | ("macos", "arm64")
         );
         if covered {
             assert!(has_managed_build(Backend::Typst));
@@ -695,15 +815,21 @@ mod tests {
 
     #[test]
     fn lookup_finds_the_entry_for_the_running_platform_when_one_exists() {
-        // ffmpeg and pandoc are verified for exactly these four (os, arch)
-        // pairs — not, say, linux-arm64, a standard CI runner class that
-        // this manifest simply doesn't cover yet. Review finding 4: the
-        // original version of this test guarded on `current_os()` alone,
-        // which on aarch64 Linux would wrongly assert an entry exists where
-        // none does and fail.
+        // ffmpeg and pandoc are verified for exactly these five (os, arch)
+        // pairs (review finding F232 added `linux`/`arm64`, the fifth) --
+        // not, say, `windows`/`arm64`, a real gap `dist-workspace.toml`'s
+        // own comment calls out ("no Windows arm64 build yet") that this
+        // manifest simply doesn't cover. Review finding 4: the original
+        // version of this test guarded on `current_os()` alone, which on
+        // aarch64 Linux would wrongly assert an entry exists where none
+        // does (at the time) and fail.
         let covered = matches!(
             (current_os(), current_arch()),
-            ("windows", "x64") | ("linux", "x64") | ("macos", "x64") | ("macos", "arm64")
+            ("windows", "x64")
+                | ("linux", "x64")
+                | ("linux", "arm64")
+                | ("macos", "x64")
+                | ("macos", "arm64")
         );
         if covered {
             let found = lookup(Backend::Pandoc);
@@ -714,6 +840,89 @@ mod tests {
                 current_arch()
             );
         }
+    }
+
+    /// Review finding F232: linux-arm64 must have a real manifest entry
+    /// for every backend the fix added it to -- ffmpeg, ffprobe, pandoc,
+    /// and typst -- so `has_managed_build`/`conv install` can actually
+    /// provision this platform rather than silently falling back to the
+    /// manual-install hint. `magick` and `soffice` are deliberately
+    /// excluded: neither has a manifest entry on *any* platform (see the
+    /// module docs), and this fix doesn't change that.
+    #[test]
+    fn linux_arm64_now_has_manifest_entries_for_ffmpeg_ffprobe_pandoc_and_typst() {
+        for backend in [
+            Backend::Ffmpeg,
+            Backend::Ffprobe,
+            Backend::Pandoc,
+            Backend::Typst,
+        ] {
+            assert!(
+                ALL.iter().any(|a| a.os == "linux"
+                    && a.arch == "arm64"
+                    && a.members.iter().any(|m| m.backend == backend)),
+                "missing a linux-arm64 manifest entry for {backend:?} (review finding F232)"
+            );
+        }
+    }
+
+    // --- Review finding F48: every ffmpeg/ffprobe entry must pin the same
+    // (major) version -- this manifest used to pin Linux/macOS at ffmpeg
+    // 6.1.1 (December 2023) while Windows pinned 9.0.1, a three-major-
+    // version gap on the same tool. Both tests below are static over this
+    // file's own `ALL` data (no network involved), so neither needs
+    // `#[ignore]`. -------------------------------------------------------
+
+    /// The strong form of the invariant: re-pinning every non-Windows
+    /// entry to ffmpeg.martin-riedl.de's 9.0.1 release build happened to
+    /// land on the *exact* version Windows already pinned, so this checks
+    /// full equality, not just the major number -- a stronger guarantee
+    /// than the finding asked for, worth locking in so a future re-pin of
+    /// just one platform doesn't quietly reopen this gap.
+    #[test]
+    fn every_ffmpeg_and_ffprobe_entry_pins_the_same_version_across_every_platform() {
+        let versions: std::collections::HashSet<&str> = ALL
+            .iter()
+            .filter(|a| {
+                a.members
+                    .iter()
+                    .any(|m| matches!(m.backend, Backend::Ffmpeg | Backend::Ffprobe))
+            })
+            .map(|a| a.version)
+            .collect();
+        assert_eq!(
+            versions.len(),
+            1,
+            "every ffmpeg/ffprobe entry must pin the same version, found: {versions:?}"
+        );
+        assert_eq!(versions.into_iter().next(), Some("9.0.1"));
+    }
+
+    /// The weaker form, proven independently of the exact-match test
+    /// above: even if a future re-pin drifts one platform's *patch*
+    /// version ahead of the rest (say, 9.0.2 on one platform before the
+    /// others catch up), the *major* version must never diverge again the
+    /// way it did before this fix (six entries at ffmpeg 6, Windows at
+    /// ffmpeg 9).
+    #[test]
+    fn ffmpeg_major_version_matches_across_every_platform() {
+        fn major(version: &str) -> &str {
+            version.split('.').next().unwrap_or(version)
+        }
+        let majors: std::collections::HashSet<&str> = ALL
+            .iter()
+            .filter(|a| {
+                a.members
+                    .iter()
+                    .any(|m| matches!(m.backend, Backend::Ffmpeg | Backend::Ffprobe))
+            })
+            .map(|a| major(a.version))
+            .collect();
+        assert_eq!(
+            majors.len(),
+            1,
+            "ffmpeg/ffprobe major version must match across every platform, found: {majors:?}"
+        );
     }
 
     // --- `Asset::version` + `version_is_current`: the machinery `conv

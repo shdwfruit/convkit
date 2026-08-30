@@ -114,16 +114,24 @@ pub struct Resolver {
     /// `Cli::resolver()` never sets it, so production behaviour is
     /// unaffected.
     overrides_only: bool,
-    /// Test-only escape hatch from the real, machine-global
-    /// `Resolver::managed_dir()`. Production code never sets this — see
-    /// `candidates`'s use of `managed_dir_for` — so behaviour outside tests
-    /// is unchanged. It exists because `%LOCALAPPDATA%\convkit\bin` (or its
-    /// XDG equivalent) is real, shared, and — since Task 14 shipped `conv
-    /// install` — can genuinely contain a real installed binary on whatever
-    /// machine the test suite happens to run on; a test asserting "this
-    /// backend resolves to nothing" needs a managed dir it can guarantee is
-    /// empty, not the real one.
-    #[cfg(test)]
+    /// Escape hatch from the real, machine-global `Resolver::managed_dir()`.
+    /// Production code never sets this — see `candidates`'s use of
+    /// `managed_dir_for` — so behaviour outside tests is unchanged. It
+    /// exists because `%LOCALAPPDATA%\convkit\bin` (or its XDG equivalent)
+    /// is real, shared, and — since Task 14 shipped `conv install` — can
+    /// genuinely contain a real installed binary on whatever machine the
+    /// test suite happens to run on; a test asserting "this backend
+    /// resolves to nothing" (or "resolves to exactly this fixture") needs a
+    /// managed dir it can guarantee is empty (or fully controlled), not the
+    /// real one.
+    ///
+    /// A plain (always-compiled, not `#[cfg(test)]`) field, like
+    /// `overrides_only`/`well_known_disabled` above, and for the identical
+    /// reason: `conv`'s own `commands::update` tests need to isolate
+    /// `resolve_managed_only` (F41's fix) from this machine's real managed
+    /// dir too, and a `#[cfg(test)]` item in this crate is invisible when
+    /// `convkit-core` is compiled as an ordinary dependency for `conv`'s own
+    /// test build.
     managed_dir_override: Option<PathBuf>,
     /// Test-only override of where the ImageMagick-6 `convert` fallback
     /// (see `magick_convert_fallback`) looks for `convert`, in place of the
@@ -198,9 +206,15 @@ impl Resolver {
     /// Redirects the `Source::Managed` candidate to `dir` instead of the
     /// real `Resolver::managed_dir()`, so a test can assert "not found
     /// anywhere" without depending on this machine's real managed-install
-    /// directory happening to be empty.
-    #[cfg(test)]
-    pub(crate) fn with_managed_dir(&mut self, dir: PathBuf) {
+    /// directory happening to be empty. Also what `resolve_managed_only`
+    /// (F41's fix) reads, so a test can point it at a fixture managed dir
+    /// too. `pub`, not `pub(crate)`, and not `#[cfg(test)]` -- see
+    /// `managed_dir_override`'s own docs for why: `conv`'s own tests
+    /// (`commands::update`) need this seam and cannot reach a `cfg(test)`
+    /// item defined in this crate. Not called anywhere outside tests --
+    /// `conv`'s own `Cli::resolver()` never calls it -- so production
+    /// resolution is unaffected.
+    pub fn with_managed_dir(&mut self, dir: PathBuf) {
         self.managed_dir_override = Some(dir);
     }
 
@@ -289,9 +303,9 @@ impl Resolver {
     }
 
     /// `managed_dir_override` when a test has set one, otherwise the real
-    /// `managed_dir()`. The only thing `candidates` should call.
+    /// `managed_dir()`. The only thing `candidates`/`resolve_managed_only`
+    /// should call.
     fn managed_dir_for(&self) -> PathBuf {
-        #[cfg(test)]
         if let Some(dir) = &self.managed_dir_override {
             return dir.clone();
         }
@@ -487,6 +501,49 @@ impl Resolver {
             }
         }
         Err(ConvError::backend_missing(backend))
+    }
+
+    /// Probes only the `Source::Managed` candidate for `backend` -- the
+    /// exact file `conv install`/`conv update` itself would write to
+    /// (`managed_dir_for().join(managed_filename(backend))`) -- ignoring
+    /// `Override`, `Env`, `Path`, and `WellKnown` entirely, and never
+    /// touching the shared `resolve()` cache.
+    ///
+    /// This is what `conv update`'s classification must call instead of
+    /// the general `resolve()` (review finding F41): a copy resolved from
+    /// anywhere else in the chain -- a newer system ffmpeg from Homebrew on
+    /// `PATH`, an explicit `--ffmpeg-path`/`CONVKIT_FFMPEG` override -- is
+    /// not something convkit itself manages. Judging *that* copy against
+    /// the pin used to mean a newer, perfectly good system install was
+    /// labelled "outdated" and then silently shadowed by a downloaded,
+    /// older pinned build, which then outranks `PATH` on every later run
+    /// (`Source::Managed` beats `Source::Path`; see `candidates`'s
+    /// ordering) -- and with an override set, the override is what got
+    /// judged, so `--check` could never turn green at all.
+    ///
+    /// Returns `None` when no file exists at the managed location -- not
+    /// an error. Unlike `resolve()`, an absent managed copy is an entirely
+    /// unremarkable, common state (a backend simply never installed, or
+    /// intentionally left to a copy elsewhere), so this reports it the same
+    /// way `is_file()` would: as a plain boolean-shaped absence, not a
+    /// `ConvError` a caller has to unwrap past. `conv update`'s own
+    /// `classify_managed` is the one place this distinction matters (review
+    /// finding F42): "not installed" and "genuinely broken" are different
+    /// states with different exit codes, and only this method's caller
+    /// knows which one applies.
+    pub fn resolve_managed_only(&self, backend: Backend) -> Option<ResolvedBackend> {
+        let path = self.managed_dir_for().join(Self::managed_filename(backend));
+        if !path.is_file() {
+            return None;
+        }
+        let version = Self::version_of(backend, &path, self.probe_timeout())
+            .unwrap_or_else(|| "unknown".into());
+        Some(ResolvedBackend {
+            backend,
+            path,
+            version,
+            source: Source::Managed,
+        })
     }
 
     /// Resolves exactly `candidates`, recording which ones succeeded, so
@@ -753,6 +810,104 @@ mod tests {
                 "{backend:?}: managed_path and the Managed candidate disagree on filename"
             );
         }
+    }
+
+    // --- F41: `resolve_managed_only` probes *only* the managed slot -------
+
+    /// Writes a stub at `dir/name` (choosing the OS-appropriate script
+    /// extension itself) whose `-version`/`--version` banner echoes
+    /// exactly `name version` -- any filename is fine here, since this is
+    /// only ever used for `Source::Override`, which accepts one. Mirrors
+    /// the identically-named helper in `commands::update`'s own tests
+    /// (`conv`, a separate crate): the same tradeoff `stub_that_echoes_
+    /// first_arg` above already makes of duplicating a small stub-builder
+    /// rather than sharing it across the crate boundary.
+    fn stub_with_version(dir: &Path, name: &str, version: &str) -> PathBuf {
+        let (file_name, body): (String, String) = if cfg!(windows) {
+            (
+                format!("{name}.bat"),
+                format!("@echo off\r\necho {name} {version}\r\nexit /b 0\r\n"),
+            )
+        } else {
+            (
+                name.to_string(),
+                format!("#!/bin/sh\necho \"{name} {version}\"\n"),
+            )
+        };
+        let p = dir.join(file_name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn resolve_managed_only_returns_none_when_the_managed_dir_is_empty() {
+        let empty = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.with_managed_dir(empty.path().to_path_buf());
+        assert!(r.resolve_managed_only(Backend::Typst).is_none());
+    }
+
+    /// Unlike `Source::Override` (any filename accepted, see
+    /// `stub_with_version` above), the `Managed` candidate is a fixed,
+    /// platform-specific filename (`managed_filename`) -- `typst.exe` on
+    /// Windows, bare `typst` elsewhere. Unix-only: `CreateProcess` decides
+    /// how to run a file from its literal extension, and unlike `.bat`/
+    /// `.cmd` (delegated to `cmd.exe`), a `.exe` file is loaded as a native
+    /// PE image, so a plain-text stub named `typst.exe` fails to spawn at
+    /// all rather than running as a script. Fabricating a real minimal PE
+    /// binary from a test fixture is out of proportion to what this test
+    /// needs to prove; `resolve_managed_only_returns_none_when_the_managed_
+    /// dir_is_empty` above and `managed_path_matches_the_managed_candidate_
+    /// filename` already exercise this method's filename logic on every
+    /// platform, just not end-to-end through a real spawned version probe.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_managed_only_finds_a_file_written_at_the_managed_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(Resolver::managed_filename(Backend::Typst));
+        std::fs::write(&p, "#!/bin/sh\necho \"0.15.1\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut r = Resolver::new();
+        r.with_managed_dir(dir.path().to_path_buf());
+
+        let resolved = r
+            .resolve_managed_only(Backend::Typst)
+            .expect("a file at the managed path must resolve");
+        assert_eq!(resolved.source, Source::Managed);
+        assert_eq!(resolved.version, "0.15.1");
+    }
+
+    /// The mechanism finding F41 exists to fix: an override (standing in
+    /// for `--<backend>-path`/`CONVKIT_<BACKEND>`, or a real system PATH
+    /// install) must never be consulted by `resolve_managed_only`, even
+    /// though the *general* `resolve()` would find it immediately (Override
+    /// is the very first candidate in the chain). The managed dir here is
+    /// isolated and empty, so if this returned `Some` at all, it could only
+    /// be by way of the override -- exactly the leak this method exists to
+    /// close.
+    #[test]
+    fn resolve_managed_only_ignores_an_override_even_though_resolve_would_use_it() {
+        let empty_managed_dir = tempfile::tempdir().unwrap();
+        let external_dir = tempfile::tempdir().unwrap();
+        let stub = stub_with_version(external_dir.path(), "typst", "9.9.9");
+        let mut r = Resolver::new();
+        r.with_managed_dir(empty_managed_dir.path().to_path_buf());
+        r.with_override(Backend::Typst, stub.clone());
+
+        assert!(r.resolve_managed_only(Backend::Typst).is_none());
+        // Confirms the setup: the general chain *does* find it via the
+        // override, so the `None` above is `resolve_managed_only` actively
+        // ignoring it, not an accident of a broken stub.
+        let general = r.resolve(Backend::Typst).unwrap();
+        assert_eq!(general.source, Source::Override);
+        assert_eq!(general.path, stub);
     }
 
     #[test]
