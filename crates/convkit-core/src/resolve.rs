@@ -366,19 +366,61 @@ impl Resolver {
         }
     }
 
+    /// Completes a user-supplied soffice path that names the wrong launcher.
+    ///
+    /// `soffice.exe` is the obvious thing to type on Windows: it is what
+    /// Explorer shows, what tab-completion offers, and what everyone calls
+    /// LibreOffice. It is also the GUI-subsystem stub, which returns before
+    /// the conversion finishes and has no capturable stdout -- so an explicit
+    /// `--soffice-path .../soffice.exe` made `conv doctor` stall for the full
+    /// version-probe timeout and report `unknown`, and made office
+    /// conversions slow and intermittently fail with `soffice produced no
+    /// output` (F31). Discovery already prefers the console stub for exactly
+    /// this reason (see `well_known` and `which_backend`); only the two
+    /// sources a user names directly bypassed it.
+    ///
+    /// Redirecting to the sibling `.com` is not overriding the user's choice
+    /// -- the two stubs are the same program, and the choice being honoured
+    /// is *which LibreOffice installation*, which is unchanged. `doctor`
+    /// shows the resolved path, so the substitution is visible rather than
+    /// silent. When no `.com` sits beside the `.exe` there is nothing to
+    /// redirect to, and the path is left exactly as given: a refusal there
+    /// would reject an installation this code has never seen and cannot
+    /// judge.
+    fn console_soffice(path: &Path) -> Option<PathBuf> {
+        if !cfg!(windows) {
+            return None;
+        }
+        let names_the_gui_stub = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("soffice.exe"));
+        if !names_the_gui_stub {
+            return None;
+        }
+        let console = path.with_file_name("soffice.com");
+        console.is_file().then_some(console)
+    }
+
     /// Ordered candidates. Exposed for testing the documented precedence.
     pub fn candidates(&self, backend: Backend) -> Vec<(PathBuf, Source)> {
         let exe = backend.exe_name();
         let mut out = Vec::new();
 
         if let Some(p) = self.overrides.get(&backend) {
-            out.push((p.clone(), Source::Override));
+            // The only place a user-named path is adjusted rather than taken
+            // literally, and only to reach the same program through the stub
+            // that can actually be driven -- see `console_soffice`.
+            let p = Self::console_soffice(p).unwrap_or_else(|| p.clone());
+            out.push((p, Source::Override));
         }
         if self.overrides_only {
             return out;
         }
         if let Some(p) = std::env::var_os(Self::env_var(backend)) {
-            out.push((PathBuf::from(p), Source::Env));
+            let p = PathBuf::from(p);
+            let p = Self::console_soffice(&p).unwrap_or(p);
+            out.push((p, Source::Env));
         }
         let managed = self.managed_dir_for().join(Self::managed_filename(backend));
         out.push((managed, Source::Managed));
@@ -997,6 +1039,86 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         p
+    }
+
+    // --- soffice.exe as an explicit override (F31) ---------------------------
+
+    /// Both launcher stubs side by side, as every Windows LibreOffice
+    /// install has them.
+    fn libreoffice_program_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("soffice.exe"), b"gui stub").unwrap();
+        std::fs::write(dir.path().join("soffice.com"), b"console stub").unwrap();
+        dir
+    }
+
+    /// `soffice.exe` is what Explorer shows and what tab-completion offers,
+    /// so it is what a Windows user types -- and it is the GUI stub, which
+    /// returns before the conversion finishes. Discovery already prefers the
+    /// console stub; the two sources a user names directly did not, so an
+    /// explicit override stalled `doctor` for the whole probe timeout and
+    /// made office conversions intermittently produce nothing.
+    #[test]
+    #[cfg(windows)]
+    fn an_override_naming_the_gui_stub_resolves_to_the_console_one() {
+        let dir = libreoffice_program_dir();
+        let mut r = Resolver::new();
+        r.with_override(Backend::Soffice, dir.path().join("soffice.exe"));
+
+        let (path, source) = r.candidates(Backend::Soffice)[0].clone();
+        assert_eq!(source, Source::Override, "it is still the user's choice");
+        assert_eq!(
+            path.file_name().unwrap(),
+            "soffice.com",
+            "the same installation, reached through the stub that can be driven"
+        );
+    }
+
+    /// With nothing to redirect to, the path is left exactly as given:
+    /// refusing here would reject an installation this code has never seen.
+    #[test]
+    #[cfg(windows)]
+    fn an_override_with_no_console_stub_beside_it_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("soffice.exe");
+        std::fs::write(&exe, b"gui stub").unwrap();
+
+        assert_eq!(Resolver::console_soffice(&exe), None);
+    }
+
+    /// The redirect is soffice-specific and name-specific: it must not touch
+    /// a path that merely lives in the same directory.
+    #[test]
+    #[cfg(windows)]
+    fn only_a_path_actually_named_soffice_exe_is_redirected() {
+        let dir = libreoffice_program_dir();
+        assert_eq!(
+            Resolver::console_soffice(&dir.path().join("ffmpeg.exe")),
+            None
+        );
+        assert_eq!(
+            Resolver::console_soffice(&dir.path().join("soffice.com")),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn the_redirect_ignores_case_the_way_windows_does() {
+        let dir = libreoffice_program_dir();
+        let got = Resolver::console_soffice(&dir.path().join("SOFFICE.EXE"));
+        assert_eq!(got.unwrap().file_name().unwrap(), "soffice.com");
+    }
+
+    /// Off Windows there is no `.com` stub and nothing to correct; a path
+    /// ending in `soffice.exe` there is whatever the user says it is.
+    #[test]
+    #[cfg(not(windows))]
+    fn the_redirect_does_not_apply_off_windows() {
+        assert_eq!(
+            Resolver::console_soffice(Path::new("/opt/libreoffice/soffice.exe")),
+            None
+        );
     }
 
     /// `--version` isn't a real ffmpeg (or ffprobe, or ImageMagick `magick`)
