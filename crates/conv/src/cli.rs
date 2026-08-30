@@ -19,7 +19,11 @@ pub struct Cli {
     pub to: Option<String>,
 
     /// Print the backend command instead of running it.
-    #[arg(long, global = true)]
+    ///
+    /// Not `global`: this only means something for the implicit conversion
+    /// path (no subcommand), so it must not show up in `conv doctor --help`,
+    /// `conv install --help`, etc.
+    #[arg(long)]
     pub dry_run: bool,
 
     /// Emit machine-readable JSON.
@@ -27,7 +31,10 @@ pub struct Cli {
     pub json: bool,
 
     /// Overwrite existing outputs.
-    #[arg(short = 'y', long, global = true)]
+    ///
+    /// Not `global` -- see `dry_run`'s doc comment; the same reasoning
+    /// applies to every conversion-only flag below it.
+    #[arg(short = 'y', long)]
     pub overwrite: bool,
 
     /// Suppress progress output.
@@ -48,11 +55,15 @@ pub struct Cli {
     pub no_install: bool,
 
     /// Write outputs into this directory.
-    #[arg(short = 'o', long, global = true)]
+    ///
+    /// Not `global` -- see `dry_run`'s doc comment.
+    #[arg(short = 'o', long)]
     pub outdir: Option<PathBuf>,
 
     /// Parallel jobs in batch mode. Defaults to the core count.
-    #[arg(short = 'j', long, global = true)]
+    ///
+    /// Not `global` -- see `dry_run`'s doc comment.
+    #[arg(short = 'j', long)]
     pub jobs: Option<usize>,
 
     /// Use this ffmpeg binary instead of the resolved one.

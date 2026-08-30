@@ -871,6 +871,23 @@ mod tests {
         );
     }
 
+    /// Scoop is a Windows-only package manager, so its shim path is
+    /// necessarily backslash-separated -- and `Path::components()` only
+    /// treats `\` as a separator when the host itself is Windows (on Unix
+    /// it's an ordinary filename character, so this literal path collapses
+    /// into a single opaque component, `has_component` never sees a
+    /// `scoop` component, and detection silently falls through to
+    /// `Unknown`). Rather than contort `detect_install_method` to parse
+    /// both separators unconditionally -- production Scoop paths only ever
+    /// arrive from the real Windows filesystem, which already speaks
+    /// backslash -- this test is gated to the one platform where the input
+    /// it constructs is representative at all. See
+    /// `detects_a_cargo_bin_install` for the alternative this module uses
+    /// when a install method genuinely exists cross-platform: branch on
+    /// `cfg!(windows)` at runtime to build a platform-appropriate path,
+    /// rather than gating the whole test out. That doesn't apply here
+    /// because there is no non-Windows Scoop path to branch to.
+    #[cfg(windows)]
     #[test]
     fn detects_a_scoop_install() {
         let p = PathBuf::from(r"C:\Users\rick\scoop\shims\conv.exe");

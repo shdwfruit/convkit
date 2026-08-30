@@ -896,3 +896,95 @@ fn update_help_explains_the_pinned_not_latest_design_and_no_self_replace() {
         "must mention resolving by path (no shell restart needed): {stdout}"
     );
 }
+
+// --- CLI help papercut: conversion-only flags must not leak into every
+// subcommand's --help -------------------------------------------------------
+//
+// `--dry-run`, `-y/--overwrite`, `-o/--outdir`, and `-j/--jobs` only mean
+// something for the implicit conversion path (no subcommand) -- `conv
+// update --outdir` is meaningless. They used to be `global = true` in
+// `cli.rs`, which made clap attach them to every subcommand, including ones
+// (`doctor`, `install`, `capabilities`, `update`) that can never read them.
+// `--json`, `--quiet`, `--yes`/`--no-install`, and the per-backend
+// `--<x>-path` overrides genuinely do mean something on every subcommand
+// (several of them can install a missing backend), so those stay global.
+
+/// None of the four conversion-only flags should appear in `--help` for any
+/// subcommand that can never read them.
+#[test]
+fn subcommand_help_never_lists_conversion_only_flags() {
+    for subcommand in ["doctor", "install", "capabilities", "update"] {
+        let out = conv().args([subcommand, "--help"]).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for flag in ["--dry-run", "--overwrite", "--outdir", "--jobs"] {
+            assert!(
+                !stdout.contains(flag),
+                "`conv {subcommand} --help` must not list {flag}: {stdout}"
+            );
+        }
+        // Short forms too -- `-y`, `-o`, `-j` are single-letter and could
+        // otherwise false-negative past a substring check on the long form.
+        for short in ["-y,", "-o,", "-j,"] {
+            assert!(
+                !stdout.contains(short),
+                "`conv {subcommand} --help` must not list the {short} short flag: {stdout}"
+            );
+        }
+    }
+}
+
+/// The flags that genuinely apply everywhere (several subcommands can
+/// install a missing backend) must still be listed on every subcommand.
+#[test]
+fn subcommand_help_still_lists_the_genuinely_global_flags() {
+    for subcommand in ["doctor", "install", "capabilities", "update"] {
+        let out = conv().args([subcommand, "--help"]).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for flag in [
+            "--json",
+            "--quiet",
+            "--yes",
+            "--no-install",
+            "--ffmpeg-path",
+            "--magick-path",
+            "--pandoc-path",
+            "--soffice-path",
+            "--typst-path",
+        ] {
+            assert!(
+                stdout.contains(flag),
+                "`conv {subcommand} --help` must still list {flag}: {stdout}"
+            );
+        }
+    }
+}
+
+/// Not just cosmetic: a conversion-only flag placed *after* a subcommand
+/// name must be rejected as a usage error, not silently accepted.
+#[test]
+fn a_conversion_only_flag_after_a_subcommand_is_rejected() {
+    conv()
+        .args(["doctor", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("unexpected argument"));
+    conv()
+        .args(["update", "-o", "somewhere"])
+        .assert()
+        .code(2)
+        .stderr(contains("unexpected argument"));
+}
+
+/// The conversion path itself must still accept all four flags together --
+/// removing `global = true` must not have accidentally removed the fields.
+#[test]
+fn the_conversion_path_still_accepts_every_conversion_only_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.jpg"), b"not a real jpg").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["a.jpg", ".png", "--dry-run", "-y", "-o", "out", "-j", "2"])
+        .assert()
+        .success()
+        .stdout(contains("magick"));
+}
