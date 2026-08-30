@@ -297,14 +297,32 @@ magick photo.heic -auto-orient -quality 92 photo.jpg
 | dimensions | 4032x3024 | 4032x3024 |
 | orientation | TopLeft | TopLeft |
 | file size | 1.62321 MB | 2.64725 MB |
-| colorspace | not measured on the source | sRGB |
+| `magick identify`'s `Colorspace:` field | sRGB | sRGB |
+| embedded ICC profile (`icc:description`) | Display P3, 536 bytes | Display P3, 536 bytes |
 
-**Verdict: CONFIRMED.** Dimensions are unchanged (4032x3024 in and out),
-which is exactly what "no transposition" means for a source already
-tagged `TopLeft` (upright) -- `-auto-orient` correctly left it alone
-rather than rotating a photo that didn't need it, and the output carries
-the same `TopLeft` orientation rather than a stray rotation. Colour
-resolves to a concrete `sRGB` colorspace, and the output is a valid JPEG.
+**Correction (2026-08-30, see the WS5 addendum at the end of this file):**
+this section originally reported the photo's colour space as "sRGB," reading
+that straight off `magick identify -verbose`'s `Colorspace:` field. That
+field is ImageMagick's internal pixel-storage tag, not the image's actual
+colour gamut -- re-running `identify -verbose` against both files and
+grepping for `icc:description` shows both the HEIC source and the JPEG
+output carry Apple's **Display P3** ICC profile (536 bytes, byte-identical
+in and out), not sRGB. Display P3 is a wider gamut than sRGB; a viewer that
+ignores the embedded profile (rare, but not nonexistent) would render this
+image's colours as more saturated than intended. The good news this
+correction actually confirms: the profile survives the conversion completely
+unchanged, which is a *stronger* result for "preserve the ICC colour
+profile" (design spec §7.3) than the original, mislabelled "sRGB" verdict
+implied -- convkit isn't reinterpreting or discarding the source's colour
+information, it's carrying it through byte-for-byte.
+
+**Verdict: CONFIRMED, with the colour-space label above corrected.**
+Dimensions are unchanged (4032x3024 in and out), which is exactly what "no
+transposition" means for a source already tagged `TopLeft` (upright) --
+`-auto-orient` correctly left it alone rather than rotating a photo that
+didn't need it, and the output carries the same `TopLeft` orientation rather
+than a stray rotation. The embedded Display P3 profile survives unchanged,
+and the output is a valid JPEG.
 
 The JPEG output is **larger** than the HEIC source (2.65 MB vs. 1.62 MB,
 +63%) -- expected, and worth stating plainly rather than treating it as a
@@ -418,11 +436,23 @@ reconsider the anchor.
 
 ### JPEG quality 92 -- pending CI verification
 
-Needs `magick`, not installed on this machine. Not measured, and not
-spot-checked with a substitute tool either: ffmpeg's own JPEG quality
-scale (`-q:v`) is a different encoder on a different quality scale than
-ImageMagick's `-quality`, and a number from the wrong encoder would be
-more misleading than no number at all.
+Needs `magick`; not installed on this machine **at the time this section was
+originally written**. Not measured, and not spot-checked with a substitute
+tool either: ffmpeg's own JPEG quality scale (`-q:v`) is a different encoder
+on a different quality scale than ImageMagick's `-quality`, and a number from
+the wrong encoder would be more misleading than no number at all.
+
+**Note (2026-08-30):** §3 and §7 below record that ImageMagick 7.1.2-29 was
+subsequently installed on this same development machine, closing the gap
+that originally left this section unmeasured. That installation happened
+*after* this section was written, and nobody has gone back to run the
+JPEG-quality-92 comparison since -- so "ImageMagick unavailable" above and
+"ImageMagick available" in §3/§7 are both true, just at different points in
+this document's history, not a live contradiction about the current state of
+this machine. This section is left as originally measured (i.e., not
+measured) rather than quietly back-filled with a number nobody actually
+produced; closing it for real is still open work for Task 16/CI or a
+follow-up.
 
 ---
 
@@ -670,3 +700,44 @@ via an exhaustive 2 MiB bitset over the full 24-bit colour space. Full
 usage and method notes are in the file's own doc comment. Committed (not
 a deleted throwaway script) so the §2 findings are independently
 re-runnable and auditable, not just their output.
+
+---
+
+## Addendum (2026-08-30): default changes since this document was written
+
+This document's measurements were all taken on 2026-08-29, against the
+registry as it existed that day. A follow-up round of fixes (WS5, review
+findings F14/F104/F192/F209) changed four defaults afterward. This addendum
+records what changed and, deliberately, does not rewrite any of the sections
+above to pretend the original measurements already reflected them — the
+numbers above are still real measurements of the registry as it stood when
+they were taken.
+
+- **Raster → JPEG now flattens transparency onto white**, with a warning,
+  instead of silently compositing onto black. This was already true for the
+  `svg → jpg` path this document doesn't specifically measure; the fix
+  extended it to the whole raster family (`heic`/`png`/`webp`/`avif`/`tiff`/
+  `bmp` → `jpg`). Doesn't change anything §3 or §4 measured above, since
+  neither exercised a source with an alpha channel.
+- **Image → PDF now embeds JPEG-compressed pixels** at the same quality-92
+  anchor, instead of lossless Zip/Flate — a substantial size reduction for a
+  photographic source (a 13.6 MB test photo's PDF dropped roughly 8x in the
+  fix's own verification). This document has no image→PDF measurement of its
+  own to correct; §4's JPEG-quality-92 section is still about direct
+  raster→JPEG, not the PDF path.
+- **jpg/png/bmp targets now select the first frame explicitly** from a
+  multi-frame source (animated WebP, multi-page TIFF), rather than failing
+  outright on ImageMagick's `stem-0.ext`/`stem-1.ext` output naming.
+  `webp`/`avif`/`tiff` targets still keep every frame. Not exercised by any
+  fixture in this document, which uses single-frame sources throughout.
+- **video → GIF now probes the source's colour transfer** and tonemaps
+  PQ/HLG (HDR) sources to BT.709 before the palette chain, instead of writing
+  HDR code values straight into an SDR-assuming GIF. §2's GIF measurement
+  used `testsrc`, an ordinary SDR synthetic source, so this tonemap path
+  never engages for it — §2's colour-count and file-size figures are
+  unaffected.
+
+None of these four changes touch the CRF 20 / AAC 160k / JPEG-quality-92
+anchors §4 measured, or the auto-remux mechanism §1 measured — they're about
+alpha handling, frame selection, and HDR colour management, which is a
+different axis from the quality anchors themselves.

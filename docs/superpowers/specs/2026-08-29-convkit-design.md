@@ -1,8 +1,24 @@
 # convkit — Design
 
 **Date:** 2026-08-29
-**Status:** Approved, pending implementation plan
+**Status:** Historical — superseded by implementation; see [README.md](../../../README.md).
 **Binary:** `conv` · **Crate/package:** `convkit`
+
+This document is preserved as-written (planning rationale, prior art, and the
+non-goals list are still accurate and useful) but is **not** a current
+description of the codebase, and several of its specifics have since been
+overtaken by real implementation decisions: it lists `magick`/ImageMagick as
+"managed install offered" (§5.4) where no platform has ever had a verified,
+checksummed ImageMagick asset — see `crates/convkit-core/src/manifest.rs`'s
+own module docs for why every official release fails the "plain zip/tar.gz"
+bar this project holds managed installs to; its workspace-layout comment
+credits `format.rs` with "extension → Format, plus content sniffing" (§5.2)
+though format detection has only ever been extension-based, with no
+content-sniffing code anywhere in the crate; and its "approximately 40 pairs
+from 4 backends" (§6) is well out of date against the current, real count —
+run `conv capabilities` for that number, or see the README's own count as of
+its last update. Treat the README and the code as authoritative wherever they
+disagree with this document.
 
 ---
 
