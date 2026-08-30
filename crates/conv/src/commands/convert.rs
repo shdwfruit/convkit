@@ -424,27 +424,28 @@ mod tests {
 
     /// `available_for` must actually run `check_availability` for a pair
     /// that has a fallback recipe (docx -> pdf), reporting exactly which of
-    /// soffice/pandoc/typst are resolvable. Soffice is pointed at a
-    /// nonexistent override path *and* has `without_well_known()` called on
-    /// it — a public, always-available `Resolver` method (unlike
-    /// `with_managed_dir`, which stays `pub(crate)` to `convkit-core`) that
-    /// exists exactly for this: a plain nonexistent override falls through
-    /// to `WellKnown`, and on Windows/macOS that's the only candidate a
-    /// standard LibreOffice install is ever found through (its installer
-    /// doesn't add `program\`/`MacOS/` to `PATH`), so relying on "the real
-    /// host genuinely has no resolvable soffice" broke the instant this
-    /// project's own dev machine got a real, working LibreOffice install.
-    /// See `Resolver::without_well_known`'s docs.
+    /// soffice/pandoc/typst are resolvable. Soffice is deliberately left
+    /// un-overridden and `overrides_only()` is what makes it unresolvable —
+    /// a public, always-available `Resolver` method (unlike `with_managed_
+    /// dir`, which stays `pub(crate)` to `convkit-core`) that closes the
+    /// whole candidate chain but `Source::Override` in one call. A plain
+    /// nonexistent override alone isn't enough here: it still falls through
+    /// to `Source::Env` (a real `CONVKIT_SOFFICE`, e.g. this project's own
+    /// hostile-environment audit) and `Source::Path`/`Source::WellKnown` (a
+    /// real, installed LibreOffice — this project's own dev machine has one
+    /// at the standard Windows install location, which its installer never
+    /// adds to `PATH`), any of which would make this test's Soffice resolve
+    /// on a machine that has it, exactly the failure `overrides_only` exists
+    /// to close off. See `Resolver::overrides_only`'s docs.
     #[test]
     fn available_for_checks_availability_for_a_pair_with_a_fallback_recipe() {
         let dir = tempfile::tempdir().unwrap();
         let pandoc_stub = resolvable_stub(dir.path(), "pandoc_stub");
         let typst_stub = resolvable_stub(dir.path(), "typst_stub");
         let mut r = Resolver::new();
-        r.without_well_known();
+        r.overrides_only();
         r.with_override(Backend::Pandoc, pandoc_stub);
         r.with_override(Backend::Typst, typst_stub);
-        r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
 
         let j = job(
             convkit_core::Format::Docx,

@@ -1234,17 +1234,19 @@ mod tests {
     /// `-env:UserInstallation` mechanism.
     ///
     /// Soffice is deliberately left un-overridden here; what makes it
-    /// unresolvable is `without_well_known`, not host luck -- a plain
-    /// nonexistent override/env value falls through to `WellKnown`, and
-    /// `WellKnown` is the only candidate a standard LibreOffice install is
-    /// ever found through on Windows or macOS (its installer doesn't add
-    /// `program\`/`MacOS/` to `PATH`), so relying on "the real host
-    /// genuinely has no resolvable soffice" broke the instant this
-    /// project's own dev machine got a real, working LibreOffice install —
-    /// see `without_well_known`'s docs in `resolve.rs`. `with_managed_dir`
-    /// isolates the one remaining candidate that could otherwise leak a
-    /// real installed pandoc/typst in from this machine's own managed
-    /// install directory.
+    /// unresolvable is `overrides_only`, not host luck. Before
+    /// `overrides_only` existed, this used `with_managed_dir` +
+    /// `without_well_known` — but those two only close the `Managed` and
+    /// `WellKnown` links; a plain nonexistent override/env value falls
+    /// through to `Env` (`CONVKIT_SOFFICE`) and `Path`, both of which read
+    /// this process's own real, global environment, so a real `soffice`
+    /// named by `CONVKIT_SOFFICE` or sitting on `PATH` (the ordinary way
+    /// LibreOffice is found on Linux, and exactly the state of this
+    /// project's own dev machine) still resolved and won — see
+    /// `overrides_only`'s docs in `resolve.rs`. `overrides_only` closes
+    /// every link but `Override` in one call, so "soffice is absent" is a
+    /// property of this test, not of the host's `PATH`/environment at the
+    /// moment it happens to run.
     #[test]
     fn fallback_recipe_substitutes_the_real_typst_path_and_never_touches_soffice() {
         let dir = tempfile::tempdir().unwrap();
@@ -1259,8 +1261,7 @@ mod tests {
         let typst_stub = stub_that_writes_nothing(dir.path());
 
         let mut r = Resolver::new();
-        r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
-        r.without_well_known();
+        r.overrides_only();
         r.with_override(Backend::Pandoc, pandoc_stub);
         r.with_override(Backend::Typst, typst_stub.clone());
 
@@ -1312,21 +1313,25 @@ mod tests {
     /// confusing one naming typst (a backend the recipe it actually chose
     /// never even mentions). This is the end-to-end proof of the same rule
     /// `plan::tests::selection_falls_back_to_soffice_when_neither_route_is_
-    /// fully_available` checks at the pure planning layer. `with_managed_dir`
-    /// isolates the Managed candidate so a real pandoc/typst installed on
-    /// this machine (e.g. via `conv install`) can't leak in and change which
-    /// backends this test's `Resolver` sees as available. `without_well_known`
-    /// does the same for Soffice's `WellKnown` candidate -- otherwise the
-    /// override below would fall through to a real, working LibreOffice on
-    /// a machine that has one, making soffice resolve after all. See
-    /// `without_well_known`'s docs in `resolve.rs`.
+    /// fully_available` checks at the pure planning layer. `overrides_only`
+    /// closes every candidate link but `Override` -- not just `Managed` and
+    /// `WellKnown` -- so neither a real pandoc/typst installed on this
+    /// machine (e.g. via `conv install`) nor a real soffice/typst named by
+    /// `CONVKIT_SOFFICE`/`CONVKIT_TYPST` or sitting on `PATH` can leak in and
+    /// change what this test's `Resolver` sees as available. The bogus
+    /// `Typst`/`Soffice` overrides below still matter even under
+    /// `overrides_only`: `resolve()` only stops at the first candidate that
+    /// `is_file()`, so a present-but-nonexistent override is what actually
+    /// makes each backend resolve to nothing, exactly as it would with no
+    /// override at all -- they're kept here so the intent ("typst and
+    /// soffice are unavailable") reads the same as before. See
+    /// `overrides_only`'s docs in `resolve.rs`.
     #[test]
     fn only_pandoc_available_still_reports_backend_missing_naming_soffice() {
         let dir = tempfile::tempdir().unwrap();
         let pandoc_stub = stub_that_creates_its_output(dir.path());
         let mut r = Resolver::new();
-        r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
-        r.without_well_known();
+        r.overrides_only();
         r.with_override(Backend::Pandoc, pandoc_stub);
         r.with_override(Backend::Typst, PathBuf::from("/definitely/not/here"));
         r.with_override(

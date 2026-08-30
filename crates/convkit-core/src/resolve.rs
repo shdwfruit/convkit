@@ -94,6 +94,17 @@ pub struct Resolver {
     /// unresolvable. Defaults to `false`; `conv`'s own `Cli::resolver()`
     /// never sets it, so production behaviour is unaffected.
     well_known_disabled: bool,
+    /// Escape hatch that makes `candidates()` stop after `Source::Override`
+    /// entirely, for this `Resolver` -- see `overrides_only`'s docs. A plain
+    /// (always-compiled, not `#[cfg(test)]`) field for the same reason
+    /// `well_known_disabled` is: `#[cfg(test)]` items in this crate are
+    /// invisible outside it (cfg(test) only applies when *this* crate is the
+    /// one being tested, never when it's compiled as an ordinary dependency
+    /// for `conv`'s own tests), so a seam a dependent crate's tests must also
+    /// reach can't be gated that way. Defaults to `false`; `conv`'s own
+    /// `Cli::resolver()` never sets it, so production behaviour is
+    /// unaffected.
+    overrides_only: bool,
     /// Test-only escape hatch from the real, machine-global
     /// `Resolver::managed_dir()`. Production code never sets this — see
     /// `candidates`'s use of `managed_dir_for` — so behaviour outside tests
@@ -200,6 +211,44 @@ impl Resolver {
     #[cfg(test)]
     pub(crate) fn with_probe_timeout(&mut self, timeout: Duration) {
         self.probe_timeout_override = Some(timeout);
+    }
+
+    /// Makes `candidates()` consult `Source::Override` only, for every
+    /// backend, skipping `Env`, `Managed`, `Path`, and `WellKnown` entirely
+    /// -- closing the whole candidate chain in one call rather than the two
+    /// or three seams (`with_managed_dir`, `without_well_known`) a test
+    /// would otherwise have to combine, and closing it further than they
+    /// can reach at all: unlike those two, this also blocks `Source::Env`
+    /// (`CONVKIT_<BACKEND>`) and `Source::Path`, both of which read this
+    /// process's own real, global environment and neither of which any
+    /// per-instance flag or override *value* can suppress (an override
+    /// pointing at a nonexistent path, or none at all, still falls through
+    /// to them). A test asserting "this backend is absent" wants that as a
+    /// property of the test itself, not of whether the machine it happens
+    /// to run on has `CONVKIT_SOFFICE` set or a real backend on `PATH` --
+    /// exactly the gap that let `fallback_recipe_substitutes_the_real_
+    /// typst_path_and_never_touches_soffice` and `only_pandoc_available_
+    /// still_reports_backend_missing_naming_soffice` in `exec.rs` pass on
+    /// most machines and fail on the one that actually has LibreOffice on
+    /// `PATH`.
+    ///
+    /// A backend a test *does* want found still needs an explicit
+    /// `with_override` pointing at a real file -- this doesn't change how
+    /// `Source::Override` itself is looked up, only what `candidates()`
+    /// considers afterward.
+    ///
+    /// A plain (always-compiled, not `#[cfg(test)]`) method, like
+    /// `without_well_known` and for the identical reason: `conv`'s own
+    /// in-process unit tests (`commands::convert::tests` in particular)
+    /// construct a `Resolver` directly the same way `convkit-core`'s own
+    /// tests do, and a `#[cfg(test)]` item on this crate is invisible to
+    /// them -- `cfg(test)` only applies when `convkit-core` itself is the
+    /// crate under test, not when it's compiled as an ordinary dependency
+    /// for `conv`'s test build. Not called anywhere outside tests -- `conv`'s
+    /// own `Cli::resolver()` never calls it -- so production resolution is
+    /// unaffected.
+    pub fn overrides_only(&mut self) {
+        self.overrides_only = true;
     }
 
     /// `probe_timeout_override` when a test has set one, otherwise the real
@@ -311,6 +360,9 @@ impl Resolver {
 
         if let Some(p) = self.overrides.get(&backend) {
             out.push((p.clone(), Source::Override));
+        }
+        if self.overrides_only {
+            return out;
         }
         if let Some(p) = std::env::var_os(Self::env_var(backend)) {
             out.push((PathBuf::from(p), Source::Env));
@@ -1274,5 +1326,93 @@ mod tests {
         let resolved = r.resolve(Backend::Magick).unwrap();
         assert_eq!(resolved.path, magick_stub);
         assert_eq!(resolved.source, Source::Override);
+    }
+
+    // --- overrides_only: closes the whole candidate chain but Override ----
+
+    /// The basic shape: with no override set for a backend at all,
+    /// `overrides_only` must make `candidates()` return nothing for it --
+    /// not fall through to `Env`/`Managed`/`Path`/`WellKnown`.
+    #[test]
+    fn overrides_only_yields_no_candidates_for_a_backend_with_no_override() {
+        let mut r = Resolver::new();
+        r.overrides_only();
+        assert_eq!(r.candidates(Backend::Soffice), Vec::new());
+    }
+
+    /// The complement: with an override set, `overrides_only` still yields
+    /// exactly that one `Source::Override` candidate and nothing else.
+    #[test]
+    fn overrides_only_yields_exactly_the_override_candidate_when_one_is_set() {
+        let mut r = Resolver::new();
+        r.overrides_only();
+        let fake = PathBuf::from("/nowhere/custom-pandoc");
+        r.with_override(Backend::Pandoc, fake.clone());
+        assert_eq!(
+            r.candidates(Backend::Pandoc),
+            vec![(fake, Source::Override)]
+        );
+    }
+
+    /// The interaction the fix brief calls out by name: `overrides_only`
+    /// and `Source::Env` must not both apply. It is not enough for
+    /// `overrides_only` to happen to work when `CONVKIT_SOFFICE` is unset in
+    /// whatever environment the suite happens to run in -- a developer (or,
+    /// per the fix brief, this project's own dev machine) with
+    /// `CONVKIT_SOFFICE` genuinely exported must see it ignored too, or
+    /// `overrides_only` silently stops doing its job on exactly the
+    /// machines it exists to guard against.
+    ///
+    /// Proving this means a real `CONVKIT_SOFFICE` must be set while
+    /// `candidates()` runs. Mutating this process's own environment
+    /// directly would race every other test thread reading the same
+    /// variable -- precisely the hazard `without_well_known`'s and
+    /// `libreoffice_is_never_offered_as_a_managed_install`'s docs above
+    /// describe, and precisely why `cli.rs`'s own env-var-sensitive tests
+    /// use `assert_cmd` to spawn a genuinely separate child process instead
+    /// of mutating `std::env` in-process. There is no `assert_cmd` here --
+    /// this is a `convkit-core` unit test, not a `conv` integration test --
+    /// so this re-execs the compiled test binary itself as that separate
+    /// child process, the same isolation technique applied one level down:
+    /// `CONVKIT_SOFFICE` is set only in the child's own environment block,
+    /// never touching this (the parent) process's real environment, so no
+    /// sibling test running concurrently in this process can ever observe
+    /// it.
+    #[test]
+    fn overrides_only_ignores_the_convkit_env_var_even_with_no_override_set() {
+        const CHILD_MARKER: &str = "CONVKIT_TEST_OVERRIDES_ONLY_ENV_CHECK_CHILD";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            // Running as the re-exec'd child, with a real CONVKIT_SOFFICE
+            // set in *this* process's environment: `overrides_only` must
+            // still yield no candidates for Soffice, since no override was
+            // ever set for it.
+            let mut r = Resolver::new();
+            r.overrides_only();
+            let candidates = r.candidates(Backend::Soffice);
+            assert!(
+                candidates.is_empty(),
+                "overrides_only must ignore CONVKIT_SOFFICE when no override \
+                 is set for the backend: {candidates:?}"
+            );
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("test binary must have a path");
+        let output = Command::new(&exe)
+            .arg("resolve::tests::overrides_only_ignores_the_convkit_env_var_even_with_no_override_set")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .env("CONVKIT_SOFFICE", "/definitely/not/here/soffice")
+            .output()
+            .expect("failed to re-exec the test binary");
+
+        assert!(
+            output.status.success(),
+            "child process (real CONVKIT_SOFFICE set) failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
