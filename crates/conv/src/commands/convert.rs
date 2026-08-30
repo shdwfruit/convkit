@@ -429,14 +429,21 @@ mod tests {
     /// a public, always-available `Resolver` method (unlike `with_managed_
     /// dir`, which stays `pub(crate)` to `convkit-core`) that closes the
     /// whole candidate chain but `Source::Override` in one call. A plain
-    /// nonexistent override alone isn't enough here: it still falls through
-    /// to `Source::Env` (a real `CONVKIT_SOFFICE`, e.g. this project's own
-    /// hostile-environment audit) and `Source::Path`/`Source::WellKnown` (a
-    /// real, installed LibreOffice — this project's own dev machine has one
-    /// at the standard Windows install location, which its installer never
-    /// adds to `PATH`), any of which would make this test's Soffice resolve
-    /// on a machine that has it, exactly the failure `overrides_only` exists
-    /// to close off. See `Resolver::overrides_only`'s docs.
+    /// nonexistent override wouldn't serve this test's purpose even setting
+    /// `overrides_only` aside: since the override-authority fix (see
+    /// `resolve.rs`'s `Resolver::resolve` docs), a `Source::Override`
+    /// pointing at a path that doesn't exist is now a hard, immediate
+    /// `InvalidInvocation` error rather than a fall-through, so it would
+    /// make this test about a bad override value, not about soffice
+    /// genuinely being unavailable. Leaving Soffice with *no* override at
+    /// all under `overrides_only` is what makes `candidates()` empty for it
+    /// deterministically — on a machine with a real `CONVKIT_SOFFICE` set
+    /// (e.g. this project's own hostile-environment audit) or a real,
+    /// installed LibreOffice (this project's own dev machine has one at the
+    /// standard Windows install location, which its installer never adds to
+    /// `PATH`), only `overrides_only` closes every one of `Source::Env`/
+    /// `Source::Path`/`Source::WellKnown` off. See
+    /// `Resolver::overrides_only`'s docs.
     #[test]
     fn available_for_checks_availability_for_a_pair_with_a_fallback_recipe() {
         let dir = tempfile::tempdir().unwrap();

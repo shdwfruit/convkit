@@ -1336,14 +1336,20 @@ mod tests {
     /// `WellKnown` -- so neither a real pandoc/typst installed on this
     /// machine (e.g. via `conv install`) nor a real soffice/typst named by
     /// `CONVKIT_SOFFICE`/`CONVKIT_TYPST` or sitting on `PATH` can leak in and
-    /// change what this test's `Resolver` sees as available. The bogus
-    /// `Typst`/`Soffice` overrides below still matter even under
-    /// `overrides_only`: `resolve()` only stops at the first candidate that
-    /// `is_file()`, so a present-but-nonexistent override is what actually
-    /// makes each backend resolve to nothing, exactly as it would with no
-    /// override at all -- they're kept here so the intent ("typst and
-    /// soffice are unavailable") reads the same as before. See
-    /// `overrides_only`'s docs in `resolve.rs`.
+    /// change what this test's `Resolver` sees as available.
+    ///
+    /// Typst and Soffice deliberately get *no* override at all, rather than
+    /// a bogus one pointing at a nonexistent path as an earlier version of
+    /// this test used: since the override-authority fix, a present-but-
+    /// nonexistent `Source::Override` candidate is no longer silently
+    /// skipped the way an absent `Source::Managed`/`Path`/`WellKnown` one
+    /// is -- it's now a hard, immediate `InvalidInvocation` error (see
+    /// `resolve.rs`'s `Resolver::resolve` docs), which would make this test
+    /// about a bad `--typst-path` instead of about typst genuinely being
+    /// unavailable. Leaving both un-overridden under `overrides_only` still
+    /// makes `candidates()` empty for each (see `overrides_only`'s docs in
+    /// `resolve.rs`), so the intent ("typst and soffice are unavailable")
+    /// holds exactly as before, just without the now-misleading bogus paths.
     #[test]
     fn only_pandoc_available_still_reports_backend_missing_naming_soffice() {
         let dir = tempfile::tempdir().unwrap();
@@ -1351,11 +1357,6 @@ mod tests {
         let mut r = Resolver::new();
         r.overrides_only();
         r.with_override(Backend::Pandoc, pandoc_stub);
-        r.with_override(Backend::Typst, PathBuf::from("/definitely/not/here"));
-        r.with_override(
-            Backend::Soffice,
-            PathBuf::from("/definitely/not/here/either"),
-        );
 
         let input = dir.path().join("report.docx");
         std::fs::write(&input, b"docx-bytes").unwrap();
@@ -1387,6 +1388,18 @@ mod tests {
     /// `docx -> pdf` conversion can never reach this state: if `typst` were
     /// truly unresolvable, `plan::select` would never have chosen the
     /// pandoc+typst recipe that needs it in the first place.
+    ///
+    /// `overrides_only` with *no* override for Typst, not a bogus
+    /// `--typst-path` pointing at a nonexistent file as an earlier version
+    /// of this test used: since the override-authority fix, a
+    /// present-but-nonexistent `Source::Override` is a hard, immediate
+    /// `InvalidInvocation` error rather than a skipped candidate (see
+    /// `resolve.rs`'s `Resolver::resolve` docs), so a bogus override here
+    /// would prove the wrong thing entirely -- this test is about typst
+    /// genuinely being unresolvable, not about a bad flag value.
+    /// Deterministic on every host, unlike a plain un-overridden `Resolver`
+    /// would be (typst could genuinely be on `PATH` via a prior `conv
+    /// install typst`).
     #[test]
     fn substitute_backend_paths_reports_backend_missing_naming_the_absent_backend() {
         let argv = vec![
@@ -1397,8 +1410,7 @@ mod tests {
             "out.pdf".to_string(),
         ];
         let mut r = Resolver::new();
-        r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
-        r.with_override(Backend::Typst, PathBuf::from("/definitely/not/here"));
+        r.overrides_only();
 
         let e = substitute_backend_paths(&argv, &r).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::BackendMissing);

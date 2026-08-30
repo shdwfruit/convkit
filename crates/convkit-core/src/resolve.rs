@@ -86,13 +86,22 @@ pub struct Resolver {
     /// `Resolver` -- see `without_well_known`'s docs for why this exists
     /// and why it's a plain (always-compiled, not `#[cfg(test)]`) field:
     /// unlike every other candidate source, `WellKnown`'s fixed absolute
-    /// paths have no override *value* that can suppress them (`resolve()`
-    /// always falls through an override/env-var that doesn't point at a
-    /// real file to the next candidate, and `WellKnown` is the last one),
-    /// so on a host with a real backend genuinely installed at its
-    /// standard location, nothing else can make that backend deterministically
-    /// unresolvable. Defaults to `false`; `conv`'s own `Cli::resolver()`
-    /// never sets it, so production behaviour is unaffected.
+    /// paths have no override *value* that can suppress them. Since the
+    /// override-authority fix (see `resolve()`'s docs), an `Override`/`Env`
+    /// candidate that doesn't point at a real file is a hard, immediate
+    /// error rather than a fall-through, so a deliberately-bad
+    /// override/env value can no longer be used to "skip past" `WellKnown`
+    /// either -- it never even reaches it. `Managed` and `Path` still fall
+    /// through an absent candidate the same as always, but neither has a
+    /// value a caller can point at a guaranteed-empty location the way
+    /// `with_managed_dir`/a real, empty `PATH` do for the other two. So
+    /// `WellKnown` remains the one candidate with no override *value* at
+    /// all to suppress it: on a host with a real backend genuinely
+    /// installed at its standard location, this field (via
+    /// `without_well_known`) is the only thing that can make that backend
+    /// deterministically unresolvable. Defaults to `false`; `conv`'s own
+    /// `Cli::resolver()` never sets it, so production behaviour is
+    /// unaffected.
     well_known_disabled: bool,
     /// Escape hatch that makes `candidates()` stop after `Source::Override`
     /// entirely, for this `Resolver` -- see `overrides_only`'s docs. A plain
@@ -221,9 +230,13 @@ impl Resolver {
     /// can reach at all: unlike those two, this also blocks `Source::Env`
     /// (`CONVKIT_<BACKEND>`) and `Source::Path`, both of which read this
     /// process's own real, global environment and neither of which any
-    /// per-instance flag or override *value* can suppress (an override
-    /// pointing at a nonexistent path, or none at all, still falls through
-    /// to them). A test asserting "this backend is absent" wants that as a
+    /// per-instance flag can suppress. Since the override-authority fix
+    /// (see `resolve()`'s docs), an override pointing at a nonexistent path
+    /// is a hard, immediate `InvalidInvocation` error rather than a
+    /// fall-through -- so it's no longer even a candidate way to reach
+    /// `Env`/`Path` by mistake -- but with *no* override set at all,
+    /// `candidates()` still walks straight to them, exactly as it always
+    /// has. A test asserting "this backend is absent" wants that as a
     /// property of the test itself, not of whether the machine it happens
     /// to run on has `CONVKIT_SOFFICE` set or a real backend on `PATH` --
     /// exactly the gap that let `fallback_recipe_substitutes_the_real_
@@ -414,7 +427,38 @@ impl Resolver {
         }
         for (path, source) in self.candidates(backend) {
             if !path.is_file() {
-                continue;
+                match source {
+                    // `Source::Override` (an explicit `--<backend>-path`)
+                    // and `Source::Env` (`CONVKIT_<BACKEND>`) are the user
+                    // (or their environment) *asserting* "use exactly this
+                    // one" -- unlike every candidate after it, there is no
+                    // sense in which silently trying something else honours
+                    // that assertion, only in which it overrides it. A
+                    // path that doesn't exist there is a hard, immediate
+                    // error naming the flag/variable and the path given,
+                    // never a fall-through to the next candidate. This is
+                    // the fix for the live defect: `--ffprobe-path
+                    // /definitely/not/here` used to be skipped exactly like
+                    // a missing `Source::Managed` candidate, so probing
+                    // silently proceeded with a different, unrequested
+                    // ffprobe instead of failing loudly. See this fix's
+                    // report for the full reasoning, including why `Env`
+                    // errors rather than warns-and-continues.
+                    Source::Override => {
+                        let label = format!("--{}-path", backend.exe_name());
+                        return Err(ConvError::invalid_backend_override(backend, &label, &path));
+                    }
+                    Source::Env => {
+                        let label = Self::env_var(backend);
+                        return Err(ConvError::invalid_backend_override(backend, &label, &path));
+                    }
+                    // `Source::Managed`, `Source::Path`, and
+                    // `Source::WellKnown` are *discovery*, not assertion --
+                    // nobody named this exact path, so an absent candidate
+                    // here is unremarkable and falling through to the next
+                    // one is exactly right. Unchanged from before this fix.
+                    Source::Managed | Source::Path | Source::WellKnown => continue,
+                }
             }
             let version = Self::version_of(backend, &path, self.probe_timeout())
                 .unwrap_or_else(|| "unknown".into());
@@ -738,20 +782,23 @@ mod tests {
 
     /// I6: `with_override` points at a file that's guaranteed not to exist,
     /// and `with_managed_dir` redirects the `Managed` candidate to an empty
-    /// tempdir this test owns — but `candidates()` still walks
-    /// `CONVKIT_PANDOC` and `which("pandoc")` after those two, and *both*
-    /// genuinely depend on this machine: a contributor with pandoc
-    /// installed (an entirely ordinary state) would make `resolve()`
-    /// actually succeed here, and the old version of this test asserted
-    /// `.unwrap_err()` unconditionally — "clone the repo, `cargo test`, get
-    /// a red suite" for anyone in that position. The parts that are
-    /// deterministic regardless of the host — the override and the
-    /// isolated managed dir both being genuinely absent — are asserted
-    /// unconditionally via `candidates()`'s shape; the parts that depend on
-    /// the host (whether `resolve()` ultimately finds a real pandoc) are
-    /// only asserted on when they resolve the way this machine's CI
-    /// environment normally does, so this never fails just because pandoc
-    /// happens to be on `PATH`.
+    /// tempdir this test owns. That much still proves the `candidates()`
+    /// shape below deterministically. `resolve()` itself, though, is no
+    /// longer exercised through this same `Resolver`: since the
+    /// override-authority fix (a `Source::Override` path that doesn't exist
+    /// is now a hard, immediate `InvalidInvocation` error, never a
+    /// fall-through — see `Resolver::resolve`'s docs), the bogus override
+    /// above would make `resolve()` report *that*, not `backend_missing`,
+    /// without ever reaching `Env`/`Managed`/`Path`/`WellKnown` — not what
+    /// this test is about. The "a genuinely missing backend produces a
+    /// remediable `backend_missing` error" half below therefore uses a
+    /// second, `overrides_only()` resolver with *no* override set for
+    /// Pandoc at all: deterministic on every machine regardless of whether
+    /// pandoc happens to be on `PATH`/`CONVKIT_PANDOC`/installed via `conv
+    /// install`, closing the exact host-dependence the old version of this
+    /// test had to work around with a conditional `if let Err(e) = ...`
+    /// (an even older version asserted `.unwrap_err()` unconditionally and
+    /// broke on any contributor machine with pandoc genuinely installed).
     #[test]
     fn a_missing_backend_produces_a_remediable_error() {
         let empty_managed_dir = tempfile::tempdir().unwrap();
@@ -778,59 +825,55 @@ mod tests {
         );
         assert!(!managed.0.is_file(), "the isolated managed dir is empty");
 
-        if let Err(e) = r.resolve(Backend::Pandoc) {
-            assert_eq!(e.code, crate::ErrorCode::BackendMissing);
-            let rem = e.remediation.expect("must carry remediation");
-            if crate::manifest::has_managed_build(Backend::Pandoc) {
-                assert_eq!(rem.managed.as_deref(), Some("conv install pandoc"));
-            } else {
-                // No manifest row for this platform (e.g. linux/arm64) --
-                // no managed install can genuinely be offered.
-                assert_eq!(rem.managed, None);
-                assert!(rem.manual.is_some());
-            }
+        let mut genuinely_missing = Resolver::new();
+        genuinely_missing.overrides_only();
+        // No override set for Pandoc: candidates() is empty deterministically,
+        // regardless of this host's real PATH/CONVKIT_PANDOC/managed dir --
+        // see overrides_only's docs.
+        let e = genuinely_missing.resolve(Backend::Pandoc).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::BackendMissing);
+        let rem = e.remediation.expect("must carry remediation");
+        if crate::manifest::has_managed_build(Backend::Pandoc) {
+            assert_eq!(rem.managed.as_deref(), Some("conv install pandoc"));
+        } else {
+            // No manifest row for this platform (e.g. linux/arm64) -- no
+            // managed install can genuinely be offered.
+            assert_eq!(rem.managed, None);
+            assert!(rem.manual.is_some());
         }
     }
 
-    /// I6: the old version of this test did not even call
-    /// `with_managed_dir`, and `well_known(Soffice)` returns the standard
-    /// Program Files / `/Applications` paths — so it failed outright for
-    /// anyone with a real LibreOffice installed there, an entirely ordinary
-    /// state for a contributor to this project. What actually guarantees
-    /// LibreOffice is never offered as a managed install is
-    /// `Backend::is_managed()` being `false` for it — a static predicate
-    /// `ConvError::backend_missing` reads before it ever looks at
+    /// What actually guarantees LibreOffice is never offered as a managed
+    /// install is `Backend::is_managed()` being `false` for it — a static
+    /// predicate `ConvError::backend_missing` reads before it ever looks at
     /// `candidates()` — asserted directly and unconditionally here (the
     /// same, zero-I/O guarantee `error.rs`'s own
     /// `backend_missing_never_leaves_remediation_empty` proves
     /// independently, with no `Resolver` involved at all).
     ///
-    /// `without_well_known` (added once this project's own dev machine
-    /// genuinely got a real LibreOffice install) closes the `WellKnown`
-    /// candidate, but `resolve()`'s remaining two — `Source::Env`
-    /// (`CONVKIT_SOFFICE`) and `Source::Path` (a real `soffice` genuinely on
-    /// `PATH`, the ordinary way LibreOffice is found on Linux via `apt
-    /// install libreoffice`) — read this test's own real, global process
-    /// environment. An in-process unit test can't redirect either the way a
-    /// spawned child's can (see `cli.rs`'s `command_with_no_backends`,
-    /// which uses `env_clear()`): Rust tests run in parallel threads within
-    /// one process, so mutating `PATH`/`CONVKIT_SOFFICE` here would race
-    /// every other test thread. So the `resolve()`-based check below stays
-    /// best-effort — asserted only when this host genuinely doesn't resolve
-    /// a real `soffice` through either of those two candidates — the same
-    /// conditional shape `a_missing_backend_produces_a_remediable_error`
-    /// above already uses for the identical reason.
+    /// The `Resolver`-based half below used to point a bogus
+    /// `--soffice-path` override at a nonexistent file and rely on it
+    /// falling through to `Source::Env`/`Source::Path` — best-effort, since
+    /// an in-process unit test can't redirect this process's own real
+    /// `PATH`/`CONVKIT_SOFFICE` the way a spawned child's can (see `cli.rs`'s
+    /// `command_with_no_backends`, which uses `env_clear()`). Since the
+    /// override-authority fix (a `Source::Override` path that doesn't exist
+    /// is now a hard, immediate `InvalidInvocation` error, never a
+    /// fall-through), that bogus override no longer reaches
+    /// `backend_missing` at all — so this now uses `overrides_only()` with
+    /// *no* override for Soffice instead, which makes `candidates()` empty
+    /// deterministically (see `overrides_only`'s docs) and exercises the
+    /// genuine `backend_missing` path this test is actually about,
+    /// unconditionally rather than best-effort.
     #[test]
     fn libreoffice_is_never_offered_as_a_managed_install() {
         assert!(!Backend::Soffice.is_managed());
 
         let mut r = Resolver::new();
-        r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
-        r.without_well_known();
-        r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
-        if let Err(e) = r.resolve(Backend::Soffice) {
-            assert_eq!(e.remediation.unwrap().managed, None);
-        }
+        r.overrides_only();
+        let e = r.resolve(Backend::Soffice).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::BackendMissing);
+        assert_eq!(e.remediation.unwrap().managed, None);
     }
 
     // --- Controller review round 3: version_of used the wrong flag and
@@ -1251,43 +1294,30 @@ mod tests {
         }
     }
 
-    /// `without_well_known` makes this deterministic even on a host with a
-    /// real, working LibreOffice install: without it, the bogus
-    /// `Soffice` override would fall through to `WellKnown` and genuinely
-    /// resolve there, which is exactly what happened when LibreOffice
-    /// appeared on this project's own dev machine (see `resolve.rs`'s
-    /// `without_well_known` docs) -- Soffice is otherwise the only backend
-    /// with a real fallback location a plain nonexistent override can't
-    /// suppress.
-    ///
-    /// Two candidates `without_well_known` can't touch -- `Source::Env`
-    /// (`CONVKIT_SOFFICE`) and `Source::Path` (a real `soffice` on this
-    /// process's own real `PATH`, e.g. from `apt install libreoffice`) --
-    /// read this test's own real, global environment, which an in-process
-    /// unit test can't redirect the way `cli.rs`'s spawned-child tests do
-    /// (see `command_with_no_backends` there, which uses `env_clear()`).
-    /// So the `Soffice` half of this assertion is best-effort, conditioned
-    /// on `resolve()` itself agreeing soffice is missing here -- the same
-    /// shape `libreoffice_is_never_offered_as_a_managed_install` and
-    /// `a_missing_backend_produces_a_remediable_error` already use for the
-    /// identical reason. `Pandoc`'s half stays unconditional: its override
-    /// points at a real, existing stub file, so `resolve()` returns it from
-    /// the very first candidate it tries, before `Env`/`Managed`/`Path`/
-    /// `WellKnown` are ever consulted -- host state can't affect it.
+    /// This used to need `without_well_known` plus a best-effort conditional
+    /// on `resolve()` agreeing Soffice was missing, because a bogus
+    /// `--soffice-path`-equivalent override fell through to `Env`/`Path`/
+    /// `WellKnown` -- any of which could genuinely resolve on a host with a
+    /// real LibreOffice install (this project's own dev machine included).
+    /// Since the override-authority fix, that fall-through no longer
+    /// happens at all: a `Source::Override` path that doesn't exist is now
+    /// a hard, immediate `InvalidInvocation` error (see `Resolver::resolve`'s
+    /// docs), so `check_availability`'s `.is_ok()` filter marks Soffice
+    /// unavailable deterministically, on every host, with no
+    /// `without_well_known` needed. `Pandoc`'s override still points at a
+    /// real, existing stub file, so `resolve()` returns it from the very
+    /// first candidate it tries.
     #[test]
     fn check_availability_only_marks_backends_that_actually_resolve() {
         let dir = tempfile::tempdir().unwrap();
         let stub = stub_that_echoes_first_arg(dir.path());
         let mut r = Resolver::new();
-        r.without_well_known();
         r.with_override(Backend::Pandoc, stub);
         r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
 
         let available = r.check_availability(&[Backend::Pandoc, Backend::Soffice]);
         assert!(available.has(Backend::Pandoc));
-        if r.resolve(Backend::Soffice).is_err() {
-            assert!(!available.has(Backend::Soffice));
-        }
+        assert!(!available.has(Backend::Soffice));
     }
 
     #[test]

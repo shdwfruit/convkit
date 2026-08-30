@@ -280,25 +280,25 @@ fn install_soffice_json_refusal_has_no_managed_remediation() {
 // run that would actually stream-copy; the fix there was to have dry-run
 // probe (see `commands/convert.rs`'s `probed_for`). The same lesson applies
 // here: `--dry-run` must preview the pandoc+typst fallback command when
-// soffice is unavailable, not the (unusable) soffice one. `--soffice-path`
-// is pointed at a file guaranteed not to exist — the same per-backend
-// override mechanism `cli.rs`'s `Cli::resolver` already wires up for every
-// backend — but a plain nonexistent override alone isn't enough on its own:
-// `Resolver::resolve` skips a candidate whose path isn't a file and falls
-// through to the next one, and soffice has more fallback candidates than
-// any other backend (`Source::Env`'s `CONVKIT_SOFFICE`, a real `soffice` on
-// `PATH` — the ordinary way it's found on Linux via `apt install
-// libreoffice` — and, on Windows/macOS only, `Source::WellKnown`'s fixed
-// Program Files/`/Applications` locations, the only candidate a *standard*
-// LibreOffice install is ever found through there, since its installer
-// doesn't add `program\`/`MacOS/` to `PATH`). `command_with_no_backends`
-// (see its own docs above) closes every one of those for this one child
-// process without touching this test binary's own environment or any other
-// test running concurrently in this suite; pandoc and typst still resolve
-// regardless, since their `--pandoc-path`/`--typst-path` overrides point at
-// real, existing stub files and `Resolver::resolve` returns the very first
-// candidate that's a file, before ever consulting env/managed/PATH/
-// well-known for them.
+// soffice is unavailable, not the (unusable) soffice one. Soffice gets no
+// `--soffice-path` at all (an earlier version of this test pointed one at a
+// file guaranteed not to exist, relying on `Resolver::resolve` skipping a
+// candidate whose path isn't a file and falling through to the next one —
+// but since the override-authority fix, a present-but-nonexistent
+// `--soffice-path` is now a hard, immediate `InvalidInvocation` error
+// rather than a skipped candidate, see `resolve.rs`'s `Resolver::resolve`
+// docs, so that would now make this test about a bad flag value instead of
+// about soffice genuinely being unavailable). `command_with_no_backends`
+// (see its own docs above) closes every candidate `Resolver::candidates`
+// would otherwise try for a backend with no override — `Source::Env`'s
+// `CONVKIT_SOFFICE`, a real `soffice` on `PATH`, and, on Windows/macOS only,
+// `Source::WellKnown`'s fixed Program Files/`/Applications` locations — for
+// this one child process, without touching this test binary's own
+// environment or any other test running concurrently in this suite; pandoc
+// and typst still resolve regardless, since their `--pandoc-path`/
+// `--typst-path` overrides point at real, existing stub files and
+// `Resolver::resolve` returns the very first candidate that's a file,
+// before ever consulting env/managed/PATH/well-known for them.
 #[test]
 fn dry_run_previews_the_pandoc_typst_fallback_when_soffice_path_is_unresolvable() {
     let dir = tempfile::tempdir().unwrap();
@@ -310,7 +310,6 @@ fn dry_run_previews_the_pandoc_typst_fallback_when_soffice_path_is_unresolvable(
     std::fs::write(&pandoc_stub, b"stub").unwrap();
     let typst_stub = dir.path().join("typst_stub");
     std::fs::write(&typst_stub, b"stub").unwrap();
-    let missing_soffice = dir.path().join("definitely-does-not-exist");
 
     let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
     cmd.args(["in.docx", "out.pdf", "--dry-run"])
@@ -318,8 +317,6 @@ fn dry_run_previews_the_pandoc_typst_fallback_when_soffice_path_is_unresolvable(
         .arg(&pandoc_stub)
         .arg("--typst-path")
         .arg(&typst_stub)
-        .arg("--soffice-path")
-        .arg(&missing_soffice)
         .assert()
         .success()
         .stdout(contains("pandoc"))
@@ -576,17 +573,24 @@ fn yes_and_no_install_together_is_a_usage_error() {
 /// every test above exercises via `magick`.
 ///
 /// `ffmpeg` is a poor fit for `command_with_no_backends`'s usual well: a
-/// plain `--ffmpeg-path <nonexistent>` alone doesn't make it unresolvable
-/// on a machine where a prior `conv install ffmpeg` already provisioned it
-/// as a managed backend (`Resolver::resolve` falls through an unusable
-/// override to the next candidate, and `Source::Managed` still finds the
-/// real one) — this is exactly why `command_with_no_backends` also
-/// redirects the managed directory, not just `PATH`, and additionally
-/// clears every `CONVKIT_*` var via `env_clear()` (a `CONVKIT_FFMPEG` set
-/// in a developer's own shell would otherwise resolve here too, via
+/// plain `--ffmpeg-path <nonexistent>` doesn't exercise the scenario this
+/// test is actually about either way. Before the override-authority fix, it
+/// wouldn't have made ffmpeg unresolvable at all on a machine where a prior
+/// `conv install ffmpeg` already provisioned it as a managed backend
+/// (`Resolver::resolve` fell through an unusable override to the next
+/// candidate, and `Source::Managed` still found the real one). Since that
+/// fix (see `resolve.rs`'s `Resolver::resolve` docs), it would make ffmpeg
+/// fail even more readily — but with a hard, immediate `InvalidInvocation`
+/// (exit 2) naming the bad `--ffmpeg-path`, not the `backend_missing`
+/// (exit 3) this test needs to prove the TTY gate against. Either way, this
+/// is exactly why `command_with_no_backends` closes every *other* candidate
+/// instead: it redirects the managed directory, not just `PATH`, and clears
+/// every `CONVKIT_*` var via `env_clear()` (a `CONVKIT_FFMPEG` set in a
+/// developer's own shell would otherwise resolve here too, via
 /// `Source::Env`, ahead of both). No `--ffmpeg-path` override is passed at
 /// all: the whole point is that `ffmpeg` fails to resolve through every
-/// *other* candidate.
+/// candidate genuinely, the same `backend_missing` way a machine with no
+/// ffmpeg installed anywhere would see.
 #[cfg(windows)]
 #[test]
 fn piped_stdin_never_prompts_even_for_a_genuinely_offerable_backend() {

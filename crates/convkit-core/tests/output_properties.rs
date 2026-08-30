@@ -137,6 +137,73 @@ fn remux_fixture_to(name: &str, container_ext: &str) -> PathBuf {
     out
 }
 
+/// Builds an mp4 fixture with two AAC audio tracks and a `mov_text`
+/// subtitle stream -- mp4's only subtitle codec -- via a raw `ffmpeg`
+/// invocation, deliberately not through any convkit-core recipe. Same
+/// reasoning as `remux_fixture_to`: building this test's input via the
+/// feature the test exists to verify would turn a break in *that* feature
+/// into a confusing fixture-setup failure instead of the clear assertion
+/// this test is actually about. Exists purely for
+/// `mp4_to_mkv_with_no_probe_available_transcodes_and_preserves_every_stream`.
+fn build_multi_stream_mp4_fixture(resolver: &Resolver) -> PathBuf {
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+
+    let srt = scratch_output("fixture.srt");
+    std::fs::write(&srt, "1\n00:00:00,000 --> 00:00:01,000\nhello\n").unwrap();
+
+    let out = scratch_output("multi_stream_src.mp4");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=1"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=880:duration=1"])
+        .arg("-i")
+        .arg(&srt)
+        .args([
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "2:a",
+            "-map",
+            "3:s",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-c:s",
+            "mov_text",
+            "-shortest",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "building the multi-stream mp4 fixture failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    out
+}
+
+/// `ffprobe -show_streams` as parsed JSON, one `Value` per stream, in
+/// stream-index order. Shared by the override-authority verification test
+/// below for probing both its source fixture and its transcoded output.
+fn probe_streams_json(ffprobe: &Path, path: &Path) -> Vec<serde_json::Value> {
+    let out = Command::new(ffprobe)
+        .args(["-v", "quiet", "-print_format", "json", "-show_streams"])
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffprobe: {e}"));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("ffprobe produced invalid JSON: {e}"));
+    v["streams"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("no streams in ffprobe output for {}", path.display()))
+}
+
 // --- Invocation choice ---------------------------------------------------
 
 /// Chooses how to invoke ImageMagick's `identify` given `resolved` -- the
@@ -348,6 +415,118 @@ fn docx_to_pdf_produces_a_real_pdf() {
         .read_exact(&mut header)
         .unwrap();
     assert_eq!(&header, b"%PDF-");
+}
+
+/// Override-authority fix verification (see the fix's own report). The
+/// coordinator's own attempt to prove this could never force ffprobe
+/// genuinely unavailable: a plain `--ffprobe-path <nonexistent>` used to
+/// fall through to a real ffprobe found elsewhere (the exact defect the fix
+/// closes), so probing silently succeeded and the *remux* path ran instead
+/// of the transcode path this test is actually about.
+/// `Resolver::overrides_only()` with an override supplied for ffmpeg but
+/// *none* for ffprobe closes that gap: `candidates()` is empty for ffprobe
+/// deterministically (see `overrides_only`'s docs in `resolve.rs`), so
+/// probing is genuinely unavailable while ffmpeg still resolves normally.
+///
+/// Proves the whole point end to end: `mp4 -> mkv` on the no-probe
+/// transcode path (`video_to_mkv_recipe_for` in `registry.rs` picks
+/// `VIDEO_TO_MKV_SRT_SUBS` for an mp4 source purely from the container
+/// type, with no probe involved at all) must carry every stream through --
+/// video, both audio tracks, and the subtitle -- not just the first of
+/// each the way the mp4-*target* recipes do. Video and audio must also
+/// show clear evidence of a genuine re-encode, not a stream copy dressed up
+/// as one: `pix_fmt` changes from the source's `yuv444p` to the recipe's
+/// forced `yuv420p`, and every re-encoded stream picks up ffmpeg's own
+/// per-stream `ENCODER` tag when writing to Matroska -- something the
+/// source's own *audio* streams do not carry at all (only its
+/// already-once-encoded video stream does), so its appearance on the
+/// transcoded audio streams is itself proof they passed through an encoder
+/// here, not a demuxer/muxer copy.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn mp4_to_mkv_with_no_probe_available_transcodes_and_preserves_every_stream() {
+    let real = Resolver::new();
+    require_backend(&real, Backend::Ffmpeg);
+    require_backend(&real, Backend::Ffprobe);
+    let ffmpeg = real.resolve(Backend::Ffmpeg).unwrap().path;
+    let ffprobe = real.resolve(Backend::Ffprobe).unwrap().path;
+
+    let src = build_multi_stream_mp4_fixture(&real);
+
+    // Force the no-probe path: ffmpeg via an explicit override, no override
+    // at all for ffprobe -- overrides_only makes candidates() empty for it,
+    // so resolve(Ffprobe) genuinely fails and exec::run's `.ok()` on that
+    // result falls back to `probed: None`, the same as a machine with no
+    // ffprobe installed at all.
+    let mut forced = Resolver::new();
+    forced.overrides_only();
+    forced.with_override(Backend::Ffmpeg, ffmpeg.clone());
+    assert!(
+        forced.resolve(Backend::Ffprobe).is_err(),
+        "ffprobe must be genuinely unresolvable through this Resolver"
+    );
+
+    let out = scratch_output("transcoded.mkv");
+    let req = exec::Request {
+        from: Format::Mp4,
+        to: Format::Mkv,
+        inputs: vec![src.clone()],
+        output: out.clone(),
+        overwrite: false,
+    };
+    let outcome = exec::run(&req, &forced, &mut |_| {})
+        .unwrap_or_else(|e| panic!("mp4 -> mkv transcode failed: {e}"));
+    assert!(
+        !outcome.remuxed,
+        "with no probe available, this must transcode, not remux"
+    );
+
+    // Probe both the source and the transcoded output with the real,
+    // unrestricted resolver's ffprobe -- proving what's actually in the
+    // files, not just what the recipe intended.
+    let src_streams = probe_streams_json(&ffprobe, &src);
+    let out_streams = probe_streams_json(&ffprobe, &out);
+
+    let codec_names: Vec<&str> = out_streams
+        .iter()
+        .map(|s| s["codec_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codec_names,
+        vec!["h264", "aac", "aac", "subrip"],
+        "every stream must survive the transcode, in order: {out_streams:#?}"
+    );
+
+    // Video: pix_fmt changed from the source's yuv444p to the recipe's
+    // forced yuv420p -- only possible via a genuine re-encode.
+    assert_eq!(src_streams[0]["pix_fmt"], "yuv444p", "{src_streams:#?}");
+    assert_eq!(out_streams[0]["pix_fmt"], "yuv420p", "{out_streams:#?}");
+    let video_encoder = out_streams[0]["tags"]["ENCODER"].as_str().unwrap_or("");
+    assert!(
+        video_encoder.contains("libx264"),
+        "video stream must carry a libx264 ENCODER tag: {video_encoder:?}"
+    );
+
+    // Audio: the source's own audio streams carry no ENCODER tag at all
+    // (only its once-already-encoded video stream does); its appearance on
+    // both transcoded audio streams is itself the proof they passed
+    // through ffmpeg's aac encoder here, not a stream copy.
+    assert!(
+        src_streams[1]["tags"].get("ENCODER").is_none(),
+        "sanity check on the fixture: {src_streams:#?}"
+    );
+    for i in [1, 2] {
+        let encoder = out_streams[i]["tags"]["ENCODER"].as_str().unwrap_or("");
+        assert!(
+            encoder.contains("aac"),
+            "audio stream {i} must carry an aac ENCODER tag: {encoder:?}"
+        );
+    }
+
+    // Subtitle: mov_text (the source) became subrip (the recipe's forced
+    // -c:s srt) -- text re-encoded to a different text codec, matroska's
+    // own well-supported one, not the mov_text matroska has no codec for.
+    assert_eq!(src_streams[3]["codec_name"], "mov_text", "{src_streams:#?}");
 }
 
 // --- Unit tests: identify_command ------------------------------------------

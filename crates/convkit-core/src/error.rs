@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::Serialize;
 
 use crate::{manifest, Backend, Format, PackageManager};
@@ -166,6 +168,34 @@ impl ConvError {
                 managed: None,
                 manual: Some(manual_hint_for(backend)),
             }),
+        }
+    }
+
+    /// An explicit `--<backend>-path` override or `CONVKIT_<BACKEND>`
+    /// environment variable named a path that turns out not to be a real
+    /// file. Deliberately distinct from `backend_missing`: the user (or
+    /// their environment) *asserted* "use exactly this one," so silently
+    /// substituting a different candidate -- the bug this fix exists to
+    /// close, see `resolve.rs`'s `Resolver::resolve` -- would override that
+    /// assertion instead of honouring it. `InvalidInvocation` (exit 2), not
+    /// `BackendMissing` (exit 3): the backend may well be installed
+    /// somewhere else on this machine, and a managed/PATH/well-known lookup
+    /// might have found it -- the problem is specifically that this flag or
+    /// variable points at the wrong place, which is a bad invocation, not
+    /// an absent backend. `label` is the exact flag or variable name the
+    /// caller resolved this candidate through (e.g. `--ffmpeg-path` or
+    /// `CONVKIT_FFMPEG`), computed by `resolve.rs` (which alone knows
+    /// whether this came from `Source::Override` or `Source::Env`) so this
+    /// function stays a plain, source-agnostic formatter.
+    pub fn invalid_backend_override(backend: Backend, label: &str, path: &Path) -> ConvError {
+        ConvError {
+            code: ErrorCode::InvalidInvocation,
+            message: format!(
+                "{label} names {}, but that file doesn't exist",
+                path.display()
+            ),
+            backend: Some(backend),
+            remediation: None,
         }
     }
 
