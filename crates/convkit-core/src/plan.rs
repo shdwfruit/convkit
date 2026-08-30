@@ -81,13 +81,11 @@ pub fn build(
     // supported at all); these only change *how* an already-supported pair
     // runs when a probe is in hand.
     if let Some(p) = probe {
-        if registry::lookup(from, to).is_some() {
-            let dynamic = if registry::needs_probe(from, to) {
-                media::stream_mapped_invocation(to, p, &inputs[0], output)
-            } else {
-                None
-            }
-            .or_else(|| media::audio_copy_invocation(from, to, p, &inputs[0], output));
+        if registry::lookup(from, to).is_some() && registry::needs_probe(from, to) {
+            // Both constructors self-gate on target shape (compat tables /
+            // copyable codecs), so this is a plain preference chain.
+            let dynamic = media::stream_mapped_invocation(to, p, &inputs[0], output)
+                .or_else(|| media::audio_copy_invocation(from, to, p, &inputs[0], output));
             if let Some(m) = dynamic {
                 return Ok(ConversionPlan {
                     from,
@@ -190,13 +188,9 @@ fn select(
     probe: Option<&MediaProbe>,
     available: Option<&AvailableBackends>,
 ) -> Option<Recipe> {
-    if to == Format::Gif {
-        if let Some(p) = probe {
-            // Only when the pair is registered at all — the probe never
-            // makes an unsupported pair supported.
-            if registry::lookup(from, to).is_some() {
-                return Some(registry::gif_recipe_for(p));
-            }
+    if let Some(p) = probe {
+        if let Some(r) = registry::probe_selected(from, to, p) {
+            return Some(r);
         }
     }
 
@@ -239,9 +233,8 @@ mod tests {
     fn compatible_codecs_select_the_remux_recipe() {
         let probe = MediaProbe {
             video_codec: Some("h264".into()),
-            audio_codec: Some("aac".into()),
-            subtitle_codec: None,
-            ..MediaProbe::default()
+            audio_codecs: vec!["aac".into()],
+                        ..MediaProbe::default()
         };
         let plan = build(
             Format::Mkv,
@@ -273,9 +266,8 @@ mod tests {
     fn incompatible_codecs_fall_back_to_transcoding() {
         let probe = MediaProbe {
             video_codec: Some("vp9".into()),
-            audio_codec: Some("opus".into()),
-            subtitle_codec: None,
-            ..MediaProbe::default()
+            audio_codecs: vec!["opus".into()],
+                        ..MediaProbe::default()
         };
         let plan = build(
             Format::Mkv,
@@ -357,17 +349,15 @@ mod tests {
 
     // --- Controller amendments beyond the brief -----------------------------
 
-    /// `registry::REMUX` was split into `REMUX_MP4`/`REMUX_WEBM` because
     /// `-movflags +faststart` is an mp4-muxer-only option that makes ffmpeg
-    /// exit 1 on a WebM output. `select` must pick the WebM variant for a
-    /// WebM target, and that variant's argv must never carry `-movflags`.
+    /// exit 1 on a WebM output, so the stream-mapped webm invocation must
+    /// never carry it.
     #[test]
     fn mkv_to_webm_with_compatible_codecs_selects_the_webm_remux_variant() {
         let probe = MediaProbe {
             video_codec: Some("vp9".into()),
-            audio_codec: Some("opus".into()),
-            subtitle_codec: None,
-            ..MediaProbe::default()
+            audio_codecs: vec!["opus".into()],
+                        ..MediaProbe::default()
         };
         let plan = build(
             Format::Mkv,
@@ -391,16 +381,15 @@ mod tests {
         );
     }
 
-    /// mov/mkv as conversion targets (mov and mkv were sources only before
-    /// this): `mp4 -> mov` with compatible codecs must select `REMUX_MOV`,
-    /// the mp4-muxer-family remux that carries `-movflags +faststart`.
+    /// mov/mkv as conversion targets: `mp4 -> mov` with compatible codecs
+    /// must produce an mp4-muxer-family stream copy carrying
+    /// `-movflags +faststart`.
     #[test]
     fn mp4_to_mov_with_compatible_codecs_selects_the_mov_remux_variant() {
         let probe = MediaProbe {
             video_codec: Some("h264".into()),
-            audio_codec: Some("aac".into()),
-            subtitle_codec: None,
-            ..MediaProbe::default()
+            audio_codecs: vec!["aac".into()],
+                        ..MediaProbe::default()
         };
         let plan = build(
             Format::Mp4,
@@ -424,17 +413,15 @@ mod tests {
         );
     }
 
-    /// `mp4 -> mkv` with compatible codecs must select `REMUX_MKV`: a
-    /// `-map 0 -c copy` stream copy with no `-movflags` at all (matroska is
-    /// not part of the mov/mp4 muxer family, the exact class of bug the
-    /// `REMUX_MP4`/`REMUX_WEBM` split exists to prevent from reappearing).
+    /// `mp4 -> mkv` with compatible codecs must produce a keep-everything
+    /// stream copy with no `-movflags` at all (matroska is not part of the
+    /// mov/mp4 muxer family).
     #[test]
     fn mp4_to_mkv_with_compatible_codecs_selects_the_mkv_remux_variant_with_no_movflags() {
         let probe = MediaProbe {
             video_codec: Some("h264".into()),
-            audio_codec: Some("aac".into()),
-            subtitle_codec: None,
-            ..MediaProbe::default()
+            audio_codecs: vec!["aac".into()],
+                        ..MediaProbe::default()
         };
         let plan = build(
             Format::Mp4,
@@ -468,20 +455,17 @@ mod tests {
         );
     }
 
-    /// The gap `mkv_remux_for` exists to close, exercised through the full
-    /// `build` entry point rather than just the registry helper directly:
-    /// a real `mp4` source's *only* possible subtitle codec is `mov_text`,
-    /// and matroska has no codec ID for it, so a plain `REMUX_MKV` would
-    /// make `mp4 -> mkv` fail outright on any source that carries a
-    /// subtitle track at all. `select` must route to `REMUX_MKV_SRT_SUBS`
-    /// instead, keeping video/audio as a stream copy and only re-encoding
-    /// the subtitle.
+    /// A real `mp4` source's *only* possible subtitle codec is `mov_text`,
+    /// and matroska has no codec ID for it, so a plain keep-everything copy
+    /// would make `mp4 -> mkv` fail outright on any source carrying a
+    /// subtitle track. The stream-mapped invocation must keep video/audio
+    /// as a copy and re-encode only the subtitle to SRT.
     #[test]
     fn mp4_to_mkv_with_a_mov_text_subtitle_reencodes_only_the_subtitle_stream() {
         let probe = MediaProbe {
             video_codec: Some("h264".into()),
-            audio_codec: Some("aac".into()),
-            subtitle_codec: Some("mov_text".into()),
+            audio_codecs: vec!["aac".into()],
+            subtitle_codecs: vec!["mov_text".into()],
             ..MediaProbe::default()
         };
         let plan = build(

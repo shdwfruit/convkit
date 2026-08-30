@@ -71,6 +71,13 @@ pub fn exit_code(results: &[JobResult]) -> i32 {
 /// docs for why): this is the "did it hang?" answer Part 2 exists to give,
 /// and it has to wrap the whole parallel batch, not sum each job's own
 /// elapsed time, since jobs overlap.
+/// # Invariant
+///
+/// Callers must hand this distinct output paths: the rayon fan-out below
+/// lets two jobs targeting one file race their renames, so uniqueness is
+/// enforced at planning time (`jobs_from`'s collision check — today the
+/// only production source of a multi-job batch). A new multi-job source
+/// must run the same check.
 pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
     let batch_start = Instant::now();
     let pool = rayon::ThreadPoolBuilder::new()

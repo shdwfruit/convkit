@@ -64,16 +64,6 @@ fn is_text_subtitle(codec: &str) -> bool {
     TEXT_SUBTITLES.contains(&codec)
 }
 
-fn compat_tables(to: Format) -> Option<(&'static [&'static str], &'static [&'static str])> {
-    match to {
-        Format::Mp4 => Some((registry::MP4_COMPATIBLE_VIDEO, registry::MP4_COMPATIBLE_AUDIO)),
-        Format::Mov => Some((registry::MOV_COMPATIBLE_VIDEO, registry::MOV_COMPATIBLE_AUDIO)),
-        Format::Mkv => Some((registry::MKV_COMPATIBLE_VIDEO, registry::MKV_COMPATIBLE_AUDIO)),
-        Format::Webm => Some((registry::WEBM_COMPATIBLE_VIDEO, registry::WEBM_COMPATIBLE_AUDIO)),
-        _ => None,
-    }
-}
-
 fn push(argv: &mut Vec<String>, items: &[&str]) {
     argv.extend(items.iter().map(|s| (*s).to_string()));
 }
@@ -90,7 +80,7 @@ pub(crate) fn stream_mapped_invocation(
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
-    let (video_ok, audio_ok) = compat_tables(to)?;
+    let (video_ok, audio_ok) = registry::compat_tables(to)?;
     let video = probe.video_codec.as_deref()?;
     if !video_ok.contains(&video) {
         return None;
@@ -108,10 +98,12 @@ pub(crate) fn stream_mapped_invocation(
         // (timecode/metadata) streams, and the few subtitle codecs it has
         // no ID for. Attachments (fonts) ride along.
         push(&mut argv, &["-map", "0", "-map", "-0:d"]);
-        let mut kept_subs: Vec<&str> = Vec::new();
+        let mut any_kept_sub = false;
+        let mut any_mov_text = false;
         for (i, sub) in subtitles.iter().enumerate() {
             if *sub == "mov_text" || MKV_COPY_SUBTITLES.contains(sub) {
-                kept_subs.push(sub);
+                any_kept_sub = true;
+                any_mov_text |= *sub == "mov_text";
             } else {
                 push(&mut argv, &["-map", &format!("-0:s:{i}")]);
                 warnings.push(format!(
@@ -123,7 +115,7 @@ pub(crate) fn stream_mapped_invocation(
         push(&mut argv, &["-c:v", "copy"]);
         audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios);
 
-        if kept_subs.iter().any(|s| *s == "mov_text") {
+        if any_mov_text {
             // mov_text only ever comes from mp4/mov, which cannot hold the
             // codecs that would need a per-stream split here — so a global
             // SRT re-encode is safe, and text-to-text is lossless.
@@ -133,7 +125,7 @@ pub(crate) fn stream_mapped_invocation(
                  matroska has no codec for mov_text itself."
                     .to_string(),
             );
-        } else if !kept_subs.is_empty() {
+        } else if any_kept_sub {
             // Explicit: without this, ffmpeg re-encodes text subtitles to
             // its matroska default (ASS) — silently, and wrongly labelled
             // a stream copy.
@@ -254,7 +246,7 @@ fn audio_codec_args(
         .collect();
 
     if to == Format::Webm {
-        push(argv, &["-c:a", "libopus", "-b:a", "128k"]);
+        push(argv, &["-c:a", "libopus", "-b:a", registry::WEBM_AUDIO_BITRATE]);
         push(argv, &["-af", registry::OPUS_CHANNEL_LAYOUTS]);
         warnings.push(format!(
             "All audio tracks re-encoded to opus: {} not supported by webm \
@@ -270,7 +262,15 @@ fn audio_codec_args(
         if audio_ok.contains(codec) {
             push(argv, &[&format!("-c:a:{i}"), "copy"]);
         } else {
-            push(argv, &[&format!("-c:a:{i}"), "aac", &format!("-b:a:{i}"), "160k"]);
+            push(
+                argv,
+                &[
+                    &format!("-c:a:{i}"),
+                    "aac",
+                    &format!("-b:a:{i}"),
+                    registry::AUDIO_BITRATE,
+                ],
+            );
             reencoded.push(format!("track {i} ({codec})"));
         }
     }
@@ -359,8 +359,6 @@ mod tests {
     ) -> MediaProbe {
         MediaProbe {
             video_codec: video.map(str::to_owned),
-            audio_codec: audio.first().map(|s| (*s).to_string()),
-            subtitle_codec: subs.first().map(|s| (*s).to_string()),
             audio_codecs: audio.iter().map(|s| (*s).to_string()).collect(),
             subtitle_codecs: subs.iter().map(|s| (*s).to_string()).collect(),
             data_streams,

@@ -404,7 +404,7 @@ mod tests {
         };
         let probed = probed_for(&r, &j).expect("must probe a remuxable pair");
         assert_eq!(probed.video_codec.as_deref(), Some("h264"));
-        assert_eq!(probed.audio_codec.as_deref(), Some("aac"));
+        assert_eq!(probed.audio_codec(), Some("aac"));
     }
 
     /// The dry-run SSRF hole: ffprobe follows URLs, so a `--dry-run` of

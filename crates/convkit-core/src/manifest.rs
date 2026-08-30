@@ -544,6 +544,20 @@ pub fn version_is_current(probed: &str, pinned: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// Whether the running platform has manifest rows at all — the one
+    /// list every coverage-gated test shares, so adding a platform is a
+    /// one-line change instead of six.
+    fn manifest_covers_current_platform() -> bool {
+        matches!(
+            (current_os(), current_arch()),
+            ("windows", "x64")
+                | ("linux", "x64")
+                | ("linux", "arm64")
+                | ("macos", "x64")
+                | ("macos", "arm64")
+        )
+    }
     use super::*;
 
     #[test]
@@ -723,14 +737,7 @@ mod tests {
 
     #[test]
     fn bundled_with_is_empty_for_a_single_member_asset() {
-        let covered = matches!(
-            (current_os(), current_arch()),
-            ("windows", "x64")
-                | ("linux", "x64")
-                | ("linux", "arm64")
-                | ("macos", "x64")
-                | ("macos", "arm64")
-        );
+        let covered = manifest_covers_current_platform();
         if covered {
             assert!(bundled_with(Backend::Pandoc).is_empty());
         }
@@ -763,14 +770,7 @@ mod tests {
 
     #[test]
     fn has_managed_build_agrees_with_lookup_on_a_covered_platform() {
-        let covered = matches!(
-            (current_os(), current_arch()),
-            ("windows", "x64")
-                | ("linux", "x64")
-                | ("linux", "arm64")
-                | ("macos", "x64")
-                | ("macos", "arm64")
-        );
+        let covered = manifest_covers_current_platform();
         if covered {
             assert!(has_managed_build(Backend::Pandoc));
         }
@@ -800,14 +800,7 @@ mod tests {
 
     #[test]
     fn has_managed_build_is_true_for_typst_on_a_covered_platform() {
-        let covered = matches!(
-            (current_os(), current_arch()),
-            ("windows", "x64")
-                | ("linux", "x64")
-                | ("linux", "arm64")
-                | ("macos", "x64")
-                | ("macos", "arm64")
-        );
+        let covered = manifest_covers_current_platform();
         if covered {
             assert!(has_managed_build(Backend::Typst));
         }
@@ -823,14 +816,7 @@ mod tests {
         // version of this test guarded on `current_os()` alone, which on
         // aarch64 Linux would wrongly assert an entry exists where none
         // does (at the time) and fail.
-        let covered = matches!(
-            (current_os(), current_arch()),
-            ("windows", "x64")
-                | ("linux", "x64")
-                | ("linux", "arm64")
-                | ("macos", "x64")
-                | ("macos", "arm64")
-        );
+        let covered = manifest_covers_current_platform();
         if covered {
             let found = lookup(Backend::Pandoc);
             assert!(

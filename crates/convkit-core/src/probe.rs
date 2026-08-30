@@ -6,20 +6,19 @@ use crate::procutil::backend_command;
 /// The full stream inventory of a media file, not just the first stream of
 /// each type: the remux decision has to hold for *every* stream a container
 /// change would carry, or a `-c copy` approved off stream 1 ships a DTS
-/// track on stream 2 that most players can't decode. `video_codec`/
-/// `audio_codec`/`subtitle_codec` remain the firsts, both for callers that
-/// only need one answer and for tests that build probes by hand;
+/// track on stream 2 that most players can't decode.
 /// `all_audio`/`all_subtitles` are what stream-mapping decisions consult.
 /// `data_streams` counts tmcd/mebx/gpmd-style timecode and metadata tracks
 /// (camera/GoPro/iPhone footage), which some muxers reject outright and
-/// explicit mapping must deliberately exclude. `pix_fmt`/`color_transfer`
-/// describe the first real video stream, so a plan can recognise an HDR
-/// (PQ/HLG) source that needs tonemapping before an SDR target.
+/// explicit mapping must deliberately exclude. `color_transfer` describes
+/// the first real video stream, so a plan can recognise an HDR (PQ/HLG)
+/// source that needs tonemapping before an SDR target.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MediaProbe {
+    /// First real video stream's codec (attached-picture cover art
+    /// excluded) — genuinely a scalar, unlike audio/subtitles, which the
+    /// stream-mapping decisions consume in full.
     pub video_codec: Option<String>,
-    pub audio_codec: Option<String>,
-    pub subtitle_codec: Option<String>,
     /// Every audio stream's codec, in stream order. A stream ffprobe saw
     /// but could not name is recorded as `"unknown"` — never skipped:
     /// skipping would desynchronise these indices from the real `0:a:N`
@@ -35,28 +34,24 @@ pub struct MediaProbe {
     pub video_streams: usize,
     /// How many attachment streams (fonts in mkv).
     pub attachment_streams: usize,
-    pub pix_fmt: Option<String>,
     pub color_transfer: Option<String>,
 }
 
 impl MediaProbe {
-    /// Every audio codec seen, falling back to the legacy single field for
-    /// probes constructed by hand with only `audio_codec` set.
-    pub fn all_audio(&self) -> Vec<&str> {
-        if self.audio_codecs.is_empty() {
-            self.audio_codec.as_deref().into_iter().collect()
-        } else {
-            self.audio_codecs.iter().map(String::as_str).collect()
-        }
+    /// The first audio stream's codec — derived, never stored, so it can
+    /// never drift out of sync with `audio_codecs`.
+    pub fn audio_codec(&self) -> Option<&str> {
+        self.audio_codecs.first().map(String::as_str)
     }
 
-    /// Every subtitle codec seen, with the same fallback as `all_audio`.
+    /// Every audio codec seen, in stream order.
+    pub fn all_audio(&self) -> Vec<&str> {
+        self.audio_codecs.iter().map(String::as_str).collect()
+    }
+
+    /// Every subtitle codec seen, in stream order.
     pub fn all_subtitles(&self) -> Vec<&str> {
-        if self.subtitle_codecs.is_empty() {
-            self.subtitle_codec.as_deref().into_iter().collect()
-        } else {
-            self.subtitle_codecs.iter().map(String::as_str).collect()
-        }
+        self.subtitle_codecs.iter().map(String::as_str).collect()
     }
 
     /// Whether the video stream is HDR: PQ (smpte2084) or HLG
@@ -106,10 +101,6 @@ pub fn parse(json: &str) -> MediaProbe {
                     p.video_streams += 1;
                     if p.video_codec.is_none() {
                         p.video_codec = Some(name);
-                        p.pix_fmt = s
-                            .get("pix_fmt")
-                            .and_then(|f| f.as_str())
-                            .map(str::to_owned);
                         p.color_transfer = s
                             .get("color_transfer")
                             .and_then(|f| f.as_str())
@@ -117,18 +108,8 @@ pub fn parse(json: &str) -> MediaProbe {
                     }
                 }
             }
-            "audio" => {
-                if p.audio_codec.is_none() {
-                    p.audio_codec = Some(name.clone());
-                }
-                p.audio_codecs.push(name);
-            }
-            "subtitle" => {
-                if p.subtitle_codec.is_none() {
-                    p.subtitle_codec = Some(name.clone());
-                }
-                p.subtitle_codecs.push(name);
-            }
+            "audio" => p.audio_codecs.push(name),
+            "subtitle" => p.subtitle_codecs.push(name),
             "data" => p.data_streams += 1,
             "attachment" => p.attachment_streams += 1,
             _ => {}
@@ -140,7 +121,20 @@ pub fn parse(json: &str) -> MediaProbe {
 /// Runs ffprobe. This is the one place in core that spawns a process outside
 /// `exec`, because plan construction needs the answer before it can choose a
 /// recipe.
+///
+/// Refuses anything that is not an existing regular file *here, in core*:
+/// ffprobe honours URLs and device paths, so probing a raw user-supplied
+/// path is an outbound-fetch primitive. Callers may keep their own gates
+/// as fast paths, but the invariant lives where every future caller —
+/// including a `conv mcp` frontend — inherits it, the same reasoning that
+/// put refuse-by-default overwrite into `exec::run` (I5).
 pub fn run(ffprobe: &Path, input: &Path) -> Result<MediaProbe> {
+    if !input.is_file() {
+        return Err(ConvError::new(
+            ErrorCode::InputNotFound,
+            format!("not an existing regular file, refusing to probe: {}", input.display()),
+        ));
+    }
     // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
     // inside `backend_command`, not repeated here -- see its docs.
     let out = backend_command(ffprobe)
@@ -168,22 +162,22 @@ mod tests {
     fn extracts_first_video_and_audio_codec() {
         let p = parse(SAMPLE);
         assert_eq!(p.video_codec.as_deref(), Some("h264"));
-        assert_eq!(p.audio_codec.as_deref(), Some("aac"));
+        assert_eq!(p.audio_codec(), Some("aac"));
     }
 
     #[test]
     fn tolerates_a_file_with_no_audio() {
         let p = parse(r#"{"streams":[{"codec_type":"video","codec_name":"vp9"}]}"#);
         assert_eq!(p.video_codec.as_deref(), Some("vp9"));
-        assert_eq!(p.audio_codec, None);
+        assert_eq!(p.audio_codec(), None);
     }
 
     #[test]
     fn malformed_json_yields_an_empty_probe_rather_than_failing() {
         let p = parse("not json");
         assert_eq!(p.video_codec, None);
-        assert_eq!(p.audio_codec, None);
-        assert_eq!(p.subtitle_codec, None);
+        assert_eq!(p.audio_codec(), None);
+        assert!(p.subtitle_codecs.is_empty());
     }
 
     #[test]
@@ -194,13 +188,13 @@ mod tests {
             {"codec_type":"audio","codec_name":"aac"},
             {"codec_type":"subtitle","codec_name":"mov_text"}]}"#,
         );
-        assert_eq!(p.subtitle_codec.as_deref(), Some("mov_text"));
+        assert_eq!(p.subtitle_codecs.first().map(String::as_str), Some("mov_text"));
     }
 
     #[test]
     fn tolerates_a_file_with_no_subtitle_track() {
         let p = parse(SAMPLE);
-        assert_eq!(p.subtitle_codec, None);
+        assert!(p.subtitle_codecs.is_empty());
     }
 
     /// The full inventory: every audio/subtitle codec in stream order,
@@ -224,7 +218,6 @@ mod tests {
         assert_eq!(p.data_streams, 1);
         assert_eq!(p.attachment_streams, 1);
         assert_eq!(p.video_streams, 1, "cover art is not a video stream");
-        assert_eq!(p.pix_fmt.as_deref(), Some("yuv420p10le"));
         assert!(p.is_hdr());
     }
 
@@ -242,6 +235,6 @@ mod tests {
             {"codec_type":"audio","codec_name":"pcm_s16le"}]}"#,
         );
         assert_eq!(p.audio_codecs, vec!["unknown", "pcm_s16le"]);
-        assert_eq!(p.audio_codec.as_deref(), Some("unknown"));
+        assert_eq!(p.audio_codec(), Some("unknown"));
     }
 }

@@ -228,7 +228,11 @@ fn insert_image_family(t: &mut Table) {
 /// Constant-quality anchor for H.264. Visually transparent at normal viewing
 /// distance; see spec §7.4.
 const CRF: &str = "20";
-const AUDIO_BITRATE: &str = "160k";
+pub(crate) const AUDIO_BITRATE: &str = "160k";
+/// Opus bitrate for webm targets, shared with the probe-aware hybrid
+/// path in `media.rs` for the same drift-prevention reason as
+/// `AUDIO_BITRATE`.
+pub(crate) const WEBM_AUDIO_BITRATE: &str = "128k";
 
 /// libx264 with `-pix_fmt yuv420p` rejects odd frame dimensions outright
 /// ("width not divisible by 2"), and odd sizes are ordinary — screen
@@ -341,10 +345,9 @@ const VIDEO_TO_MOV: Recipe = VIDEO_TO_MP4;
 /// track, no subtitles" default selection, which mkv itself never needed).
 /// Video and audio use the same quality anchors as `VIDEO_TO_MP4`, applied
 /// to *every* video/audio stream `-map 0` selects, not just the first of
-/// each. `-movflags` is never added, for the same reason `REMUX_MKV` never
-/// adds it: it is a private AVOption of the mov/mp4 muxer family that makes
-/// ffmpeg exit 1 against any other muxer -- see `REMUX_WEBM`'s docs, which
-/// hit the identical error against the webm muxer. The one thing that
+/// each. `-movflags` is never added: it is a private AVOption of the mov/mp4
+/// muxer family that makes ffmpeg exit 1 against any other muxer (verified
+/// live against the webm muxer, which trips `assert_avoptions`). The one thing that
 /// varies between the two consts below is `$sub_codec`, spliced into
 /// `-c:s`; see each const's own docs for which sources get which.
 macro_rules! video_to_mkv_recipe {
@@ -398,12 +401,10 @@ macro_rules! video_to_mkv_recipe {
 /// hold most subtitle codecs, and the old argv's lack of `-map 0` meant
 /// ffmpeg's automatic selection also silently dropped every audio track
 /// past the first -- both are mp4-specific limitations mkv does not share
-/// (see `REMUX_MKV`'s own docs for why mkv is worth adding as a target at
-/// all). `-map 0` plus a per-stream-type codec for every type now carries
+/// (mkv is the lossless escape hatch for content mp4 would degrade). `-map 0` plus a per-stream-type codec for every type now carries
 /// everything through, so nothing is lost -- just re-encoded (video, audio)
 /// or copied untouched (subtitles) -- and there is no warning here for the
-/// same reason `REMUX_MKV` and `VIDEO_TO_WEBM` (also a full transcode) have
-/// none: a warning describing a loss that no longer happens is worse than
+/// same reason `VIDEO_TO_WEBM` (also a full transcode) has none: a warning describing a loss that no longer happens is worse than
 /// no warning at all.
 const VIDEO_TO_MKV: Recipe = Recipe {
     steps: &[video_to_mkv_recipe!("copy")],
@@ -413,9 +414,9 @@ const VIDEO_TO_MKV: Recipe = Recipe {
 /// `VIDEO_TO_MKV`'s sibling for the two sources whose subtitle codec, if
 /// they carry one at all, is guaranteed to be `mov_text`: mp4 and mov. That
 /// is a structural fact about those two containers, not something that
-/// varies per file -- `REMUX_MKV_SRT_SUBS`'s docs record the live-verified
-/// error a plain `-c:s copy` of `mov_text` hits against matroska ("Subtitle
-/// codec mov_text (94213) is not supported"), and matroska still has no
+/// varies per file -- a plain `-c:s copy` of `mov_text` into matroska was
+/// live-verified to fail ("Subtitle codec mov_text (94213) is not
+/// supported"), and matroska still has no
 /// codec ID for it here. Because the fact is about the *container*, not a
 /// particular file, `video_to_mkv_recipe_for` below can select this recipe
 /// from `from` alone, with no probe involved -- which matters specifically
@@ -423,7 +424,7 @@ const VIDEO_TO_MKV: Recipe = Recipe {
 /// `VIDEO_TO_MKV`'s own docs): there is no `MediaProbe` here to consult even
 /// if the choice needed one.
 ///
-/// Unlike `REMUX_MKV_SRT_SUBS`, video and audio are genuinely re-encoded on
+/// Unlike the probe-aware remux path, video and audio are genuinely re-encoded on
 /// this path, not stream-copied, so the warning says that plainly instead
 /// of reusing wording that would no longer be true here.
 const VIDEO_TO_MKV_SRT_SUBS: Recipe = Recipe {
@@ -439,7 +440,7 @@ const VIDEO_TO_MKV_SRT_SUBS: Recipe = Recipe {
 /// mkv` transcode, purely from the source format -- see
 /// `VIDEO_TO_MKV_SRT_SUBS`'s docs for why `from` alone is enough. The only
 /// reader is `insert_media_family`, at table-construction time; this is
-/// deliberately not shaped like `mkv_remux_for(probe: &MediaProbe)` because
+/// deliberately not probe-shaped because
 /// there is no probe on this path for it to take.
 fn video_to_mkv_recipe_for(from: Format) -> Recipe {
     match from {
@@ -471,7 +472,7 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
             Arg::Lit("-c:a"),
             Arg::Lit("libopus"),
             Arg::Lit("-b:a"),
-            Arg::Lit("128k"),
+            Arg::Lit(WEBM_AUDIO_BITRATE),
             Arg::Lit("-af"),
             Arg::Lit(OPUS_CHANNEL_LAYOUTS),
             Arg::Lit("-y"),
@@ -480,168 +481,6 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
     )],
     warnings: &[],
 };
-
-/// Stream-copy remux to MP4. Selected dynamically by `plan::build` when the
-/// source codecs are already legal in the target container. See Task 7.
-/// `-sn` matters here exactly as it does on `VIDEO_TO_MP4`: `-c copy` still
-/// triggers default stream selection, which happily copies a PGS subtitle
-/// track that the mp4 muxer cannot carry, and ffmpeg then dies with "Could
-/// not find tag for codec".
-pub const REMUX_MP4: Recipe = Recipe {
-    steps: &[step!(
-        Backend::Ffmpeg,
-        [
-            Arg::Lit("-i"),
-            Arg::Input,
-            Arg::Lit("-c"),
-            Arg::Lit("copy"),
-            Arg::Lit("-sn"),
-            Arg::Lit("-movflags"),
-            Arg::Lit("+faststart"),
-            Arg::Lit("-y"),
-            Arg::Output,
-        ]
-    )],
-    warnings: &[],
-};
-
-/// Stream-copy remux to WebM. `-movflags` is a private AVOption of the
-/// mov/mp4 muxer: passed to the webm muxer it trips `assert_avoptions` and
-/// ffmpeg exits 1 with "Option movflags not found". This recipe exists
-/// specifically so a WebM target never gets that flag; it does not share
-/// argv with `REMUX_MP4`.
-pub const REMUX_WEBM: Recipe = Recipe {
-    steps: &[step!(
-        Backend::Ffmpeg,
-        [
-            Arg::Lit("-i"),
-            Arg::Input,
-            Arg::Lit("-c"),
-            Arg::Lit("copy"),
-            Arg::Lit("-sn"),
-            Arg::Lit("-y"),
-            Arg::Output,
-        ]
-    )],
-    warnings: &[],
-};
-
-/// Stream-copy remux to MOV. `mov` shares its muxer implementation with
-/// `mp4` (verified via `ffmpeg -h muxer=mov`: "mov/mp4/tgp/psp/tg2/ipod/
-/// ismv/f4v muxer AVOptions"), so `-movflags +faststart` is legal here the
-/// same way it is on `REMUX_MP4` -- this is argv-identical to it, not an
-/// alias, because a future divergence (say, a mov-specific option) should
-/// be easy to add without disturbing `REMUX_MP4`.
-pub const REMUX_MOV: Recipe = Recipe {
-    steps: &[step!(
-        Backend::Ffmpeg,
-        [
-            Arg::Lit("-i"),
-            Arg::Input,
-            Arg::Lit("-c"),
-            Arg::Lit("copy"),
-            Arg::Lit("-sn"),
-            Arg::Lit("-movflags"),
-            Arg::Lit("+faststart"),
-            Arg::Lit("-y"),
-            Arg::Output,
-        ]
-    )],
-    warnings: &[],
-};
-
-/// Stream-copy remux to MKV -- the one recipe in this table that keeps
-/// *everything*. Every other remux/transcode target in this file carries
-/// `-sn` (or, for the lossy `* -> mp4` family, drops every audio track past
-/// the first too) because its container genuinely cannot hold what a
-/// source might carry: MP4 rejects a PGS bitmap subtitle outright, and so
-/// does WebM's default subtitle codec. Matroska was designed to hold
-/// anything, so none of that applies here: `-map 0` selects every stream
-/// on the input -- every audio track, every subtitle track (bitmap or
-/// text), chapters -- and `-c copy` copies each one as-is. No warning,
-/// because unlike the rest of this table, nothing here is actually lost.
-/// This is the reason mkv is worth adding as a target at all: it is the
-/// lossless escape hatch for content (multiple audio tracks, PGS/bitmap
-/// subtitles) that would otherwise have to be degraded to fit mp4.
-///
-/// One real exception, handled by a sibling recipe rather than here: `mkv`
-/// has no codec ID for `mov_text`, mp4/mov's own (and *only*) subtitle
-/// codec, so a plain `-c copy` of a `mov_text` stream into matroska fails
-/// outright -- verified live: `ffmpeg -i <mov_text source> -c copy -f
-/// matroska` exits 1 with `"Subtitle codec mov_text (94213) is not
-/// supported."`. `mkv_remux_for` is what picks between this recipe and that
-/// one; callers should go through it rather than reaching for `REMUX_MKV`
-/// directly.
-pub const REMUX_MKV: Recipe = Recipe {
-    steps: &[step!(
-        Backend::Ffmpeg,
-        [
-            Arg::Lit("-i"),
-            Arg::Input,
-            Arg::Lit("-map"),
-            Arg::Lit("0"),
-            Arg::Lit("-map"),
-            Arg::Lit("-0:d"),
-            Arg::Lit("-c"),
-            Arg::Lit("copy"),
-            Arg::Lit("-y"),
-            Arg::Output,
-        ]
-    )],
-    warnings: &[],
-};
-
-/// `REMUX_MKV`'s sibling for the one subtitle codec matroska rejects:
-/// `mov_text`. Text-to-text, not bitmap-to-text, so re-encoding it to SRT
-/// (also plain text) is a safe, essentially lossless substitution -- unlike
-/// a hypothetical bitmap source, where ffmpeg has no encoder to convert
-/// bitmap pixels into text at all. Video and audio are still stream-copied
-/// (`-c:v copy -c:a copy`), so this keeps the actually-expensive part of
-/// "remux" (no re-encoding the picture or the audio) while sidestepping the
-/// one codec matroska won't take. See `REMUX_MKV`'s own docs for how the
-/// live "not supported" error was verified, and `mkv_remux_for` for the
-/// selection logic between the two.
-pub const REMUX_MKV_SRT_SUBS: Recipe = Recipe {
-    steps: &[step!(
-        Backend::Ffmpeg,
-        [
-            Arg::Lit("-i"),
-            Arg::Input,
-            Arg::Lit("-map"),
-            Arg::Lit("0"),
-            Arg::Lit("-map"),
-            Arg::Lit("-0:d"),
-            Arg::Lit("-c:v"),
-            Arg::Lit("copy"),
-            Arg::Lit("-c:a"),
-            Arg::Lit("copy"),
-            Arg::Lit("-c:s"),
-            Arg::Lit("srt"),
-            Arg::Lit("-y"),
-            Arg::Output,
-        ]
-    )],
-    warnings: &[
-        "Subtitle tracks stored as MP4/MOV's mov_text are re-encoded to SRT text; \
-         matroska has no codec for mov_text itself. Video and audio are still \
-         stream-copied untouched.",
-    ],
-};
-
-/// Picks between `REMUX_MKV` and `REMUX_MKV_SRT_SUBS`: the latter only when
-/// the probe found a `mov_text` subtitle stream, since that's the one
-/// codec `-map 0 -c copy` cannot carry into matroska. Every other case --
-/// no subtitle stream at all, or one already in a matroska-native codec
-/// (srt, ass, PGS, ...) -- gets the plain stream copy. The only reader is
-/// `plan::select`'s `Format::Mkv` arm; callers should never reach for
-/// `REMUX_MKV` directly once a probe is in hand.
-pub fn mkv_remux_for(probe: &crate::MediaProbe) -> Recipe {
-    if probe.subtitle_codec.as_deref() == Some("mov_text") {
-        REMUX_MKV_SRT_SUBS
-    } else {
-        REMUX_MKV
-    }
-}
 
 const TO_GIF: Recipe = Recipe {
     steps: &[step!(
@@ -724,6 +563,19 @@ pub fn gif_recipe_for(probe: &crate::MediaProbe) -> Recipe {
     } else {
         TO_GIF
     }
+}
+
+/// The probe-aware *static* recipe choice — the single seam `plan::select`
+/// consults, so plan.rs never grows per-format probe dispatch of its own.
+/// Today the only case is the gif tonemap sibling; a future HDR-aware
+/// transcode sibling would slot in here, not in plan.rs. `None` when the
+/// probe changes nothing (or the pair isn't registered — a probe never
+/// makes an unsupported pair supported).
+pub(crate) fn probe_selected(from: Format, to: Format, probe: &crate::MediaProbe) -> Option<Recipe> {
+    if to == Format::Gif && lookup(from, to).is_some() {
+        return Some(gif_recipe_for(probe));
+    }
+    None
 }
 
 const GIF_TO_MP4: Recipe = Recipe {
@@ -894,8 +746,8 @@ pub const MOV_COMPATIBLE_AUDIO: &[&str] = &["aac", "mp3", "ac3", "alac", "pcm_s1
 /// carry (mp4's set, mov's set, webm's set, plus legacy codecs `avi` and
 /// `mkv` sources commonly carry) rather than every codec ffmpeg happens to
 /// support, since an unbounded list would just as accurately be described
-/// as "matroska accepts anything" without actually helping `can_remux`
-/// decide anything.
+/// as "matroska accepts anything" without actually helping the
+/// stream-mapping decision in `media.rs` decide anything.
 pub const MKV_COMPATIBLE_VIDEO: &[&str] = &[
     "h264", "hevc", "mpeg4", "av1", "vp8", "vp9", "prores", "mjpeg", "huffyuv", "ffv1", "rawvideo",
     "wmv2",
@@ -1239,39 +1091,35 @@ pub fn needs_probe(from: Format, to: Format) -> bool {
     );
     let container_change =
         matches!(to, Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm) && video_source;
+    // Audio→audio probing is restricted to m4a sources: mp3/flac/wav are
+    // single-codec containers, so the probe's answer there is fully
+    // determined by the extension and could never enable the copy path —
+    // it would be one wasted ffprobe spawn per file in a library batch.
+    // m4a (the mp4 container) genuinely varies: aac, alac, even mp3.
     let audio_extract = matches!(
         to,
         Format::M4a | Format::Mp3 | Format::Flac | Format::Wav
-    ) && (video_source
-        || matches!(
-            from,
-            Format::Mp3 | Format::M4a | Format::Wav | Format::Flac
-        ));
+    ) && (video_source || from == Format::M4a);
     // A gif target probes for the HDR transfer question, not for a stream
     // copy — see `gif_recipe_for`.
     let gif_target = to == Format::Gif && video_source;
     (container_change || audio_extract || gif_target) && from != to
 }
 
-/// Whether the probed codecs are legal in the target container — checked
-/// for *every* audio stream the probe saw, not just the first: a `-c copy`
-/// approved off stream 1 alone once shipped a DTS track on stream 2 that
-/// most players can't decode.
-pub fn can_remux(to: Format, probe: &crate::MediaProbe) -> bool {
-    let (video_ok, audio_ok) = match to {
-        Format::Mp4 => (MP4_COMPATIBLE_VIDEO, MP4_COMPATIBLE_AUDIO),
-        Format::Mov => (MOV_COMPATIBLE_VIDEO, MOV_COMPATIBLE_AUDIO),
-        Format::Mkv => (MKV_COMPATIBLE_VIDEO, MKV_COMPATIBLE_AUDIO),
-        Format::Webm => (WEBM_COMPATIBLE_VIDEO, WEBM_COMPATIBLE_AUDIO),
-        _ => return false,
-    };
-    let v = probe
-        .video_codec
-        .as_deref()
-        .is_some_and(|c| video_ok.contains(&c));
-    // A file with no audio stream remuxes fine.
-    let a = probe.all_audio().iter().all(|c| audio_ok.contains(c));
-    v && a
+/// The verified codec-compatibility tables for a remuxable target
+/// container, `None` for any other format. The single lookup both the
+/// probe-aware stream mapping (`media.rs`) and any future caller share, so
+/// the four-arm match can never be spelled twice again.
+pub(crate) fn compat_tables(
+    to: Format,
+) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    match to {
+        Format::Mp4 => Some((MP4_COMPATIBLE_VIDEO, MP4_COMPATIBLE_AUDIO)),
+        Format::Mov => Some((MOV_COMPATIBLE_VIDEO, MOV_COMPATIBLE_AUDIO)),
+        Format::Mkv => Some((MKV_COMPATIBLE_VIDEO, MKV_COMPATIBLE_AUDIO)),
+        Format::Webm => Some((WEBM_COMPATIBLE_VIDEO, WEBM_COMPATIBLE_AUDIO)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1531,8 +1379,9 @@ mod tests {
     }
 
     /// Camera/GoPro/iPhone footage carries tmcd/mebx/gpmd data streams the
-    /// matroska muxer rejects; `-map 0` must exclude them explicitly on
-    /// both the transcode and remux mkv recipes.
+    /// matroska muxer rejects; the static mkv transcode's `-map 0` must
+    /// exclude them explicitly (the probe-aware remux path in `media.rs`
+    /// carries its own exclusion).
     #[test]
     fn mkv_recipes_exclude_data_streams() {
         let transcode = lookup(Format::Mov, Format::Mkv).unwrap();
@@ -1541,13 +1390,6 @@ mod tests {
             argv.windows(2).any(|w| w == ["-map", "-0:d"]),
             "{argv:?}"
         );
-        for remux in [REMUX_MKV, REMUX_MKV_SRT_SUBS] {
-            let argv = remux.steps[0].render(&[Path::new("in.mov")], Path::new("out.mkv"));
-            assert!(
-                argv.windows(2).any(|w| w == ["-map", "-0:d"]),
-                "{argv:?}"
-            );
-        }
     }
 
     #[test]
@@ -1623,127 +1465,7 @@ mod tests {
         assert!(r.warnings[0].contains("loop"), "{:?}", r.warnings);
     }
 
-    #[test]
-    fn remux_mp4_keeps_faststart_and_drops_subtitle_selection() {
-        let argv = REMUX_MP4.steps[0].render(&[Path::new("in.mkv")], Path::new("out.mp4"));
-        assert_eq!(
-            argv,
-            vec![
-                "-i",
-                "in.mkv",
-                "-c",
-                "copy",
-                "-sn",
-                "-movflags",
-                "+faststart",
-                "-y",
-                "out.mp4"
-            ]
-        );
-    }
-
-    #[test]
-    fn remux_webm_omits_the_mp4_only_movflags_option() {
-        let argv = REMUX_WEBM.steps[0].render(&[Path::new("in.mkv")], Path::new("out.webm"));
-        assert_eq!(
-            argv,
-            vec!["-i", "in.mkv", "-c", "copy", "-sn", "-y", "out.webm"]
-        );
-    }
-
     // --- mov/mkv as conversion targets --------------------------------------
-
-    #[test]
-    fn remux_mov_keeps_faststart_like_remux_mp4() {
-        let argv = REMUX_MOV.steps[0].render(&[Path::new("in.mp4")], Path::new("out.mov"));
-        assert_eq!(
-            argv,
-            vec![
-                "-i",
-                "in.mp4",
-                "-c",
-                "copy",
-                "-sn",
-                "-movflags",
-                "+faststart",
-                "-y",
-                "out.mov"
-            ]
-        );
-    }
-
-    #[test]
-    fn remux_mkv_maps_every_stream_and_carries_no_warning() {
-        let argv = REMUX_MKV.steps[0].render(&[Path::new("in.mp4")], Path::new("out.mkv"));
-        assert_eq!(
-            argv,
-            vec!["-i", "in.mp4", "-map", "0", "-map", "-0:d", "-c", "copy", "-y", "out.mkv"]
-        );
-        assert!(
-            !argv.contains(&"-movflags".to_string()),
-            "mkv remux must not carry the mp4-only -movflags option: {argv:?}"
-        );
-        assert!(
-            !argv.contains(&"-sn".to_string()),
-            "mkv can hold any subtitle codec, so it must not disable subtitle \
-             stream selection: {argv:?}"
-        );
-        assert_eq!(
-            REMUX_MKV.warnings.len(),
-            0,
-            "remuxing to mkv loses nothing, so it must not carry a lossy-conversion warning: {:?}",
-            REMUX_MKV.warnings
-        );
-    }
-
-    /// Real, live-verified gap: matroska has no codec ID for `mov_text`
-    /// (mp4/mov's own, and only, subtitle codec), so a plain `-c copy`
-    /// dies with "Subtitle codec mov_text (94213) is not supported."
-    /// `REMUX_MKV_SRT_SUBS` is the fix -- video/audio stay stream-copied,
-    /// only the subtitle re-encodes to SRT.
-    #[test]
-    fn remux_mkv_srt_subs_still_stream_copies_video_and_audio() {
-        let argv = REMUX_MKV_SRT_SUBS.steps[0].render(&[Path::new("in.mp4")], Path::new("out.mkv"));
-        assert_eq!(
-            argv,
-            vec![
-                "-i", "in.mp4", "-map", "0", "-map", "-0:d", "-c:v", "copy", "-c:a", "copy", "-c:s", "srt", "-y",
-                "out.mkv"
-            ]
-        );
-        assert_eq!(
-            REMUX_MKV_SRT_SUBS.warnings.len(),
-            1,
-            "{:?}",
-            REMUX_MKV_SRT_SUBS.warnings
-        );
-        assert!(
-            REMUX_MKV_SRT_SUBS.warnings[0].contains("mov_text"),
-            "{:?}",
-            REMUX_MKV_SRT_SUBS.warnings
-        );
-    }
-
-    #[test]
-    fn mkv_remux_for_picks_the_srt_subs_variant_only_for_mov_text() {
-        let with_mov_text = crate::MediaProbe {
-            video_codec: Some("h264".into()),
-            audio_codec: Some("aac".into()),
-            subtitle_codec: Some("mov_text".into()),
-            ..crate::MediaProbe::default()
-        };
-        assert_eq!(mkv_remux_for(&with_mov_text), REMUX_MKV_SRT_SUBS);
-
-        for subtitle_codec in [None, Some("subrip".to_string()), Some("ass".to_string())] {
-            let probe = crate::MediaProbe {
-                video_codec: Some("h264".into()),
-                audio_codec: Some("aac".into()),
-                subtitle_codec,
-                ..crate::MediaProbe::default()
-            };
-            assert_eq!(mkv_remux_for(&probe), REMUX_MKV, "{probe:?}");
-        }
-    }
 
     #[test]
     fn video_to_mov_uses_the_spec_quality_anchors_and_faststart() {
@@ -1815,9 +1537,9 @@ mod tests {
     }
 
     /// mp4 and mov's *only* subtitle codec is `mov_text`, which matroska has
-    /// no codec ID for (see `REMUX_MKV_SRT_SUBS`'s live-verified error), so
+    /// no codec ID for (a live-verified muxer rejection), so
     /// both sources must route to the SRT-subs variant -- unlike `webm`/
-    /// `avi` above, and unlike `mkv_remux_for`, this needs no probe: it is
+    /// `avi` above, and unlike the probe-aware remux path, this needs no probe: it is
     /// decided purely from the source format, since a probe is never
     /// available on the path that reaches this recipe at all.
     #[test]
@@ -1900,49 +1622,6 @@ mod tests {
         assert!(needs_probe(Format::Mp4, Format::Mkv));
         assert!(needs_probe(Format::Mov, Format::Mkv));
         assert!(needs_probe(Format::Mkv, Format::Mov));
-    }
-
-    #[test]
-    fn can_remux_accepts_prores_into_mov_but_rejects_av1() {
-        let prores = crate::MediaProbe {
-            video_codec: Some("prores".into()),
-            audio_codec: Some("aac".into()),
-            subtitle_codec: None,
-            ..crate::MediaProbe::default()
-        };
-        assert!(can_remux(Format::Mov, &prores), "{prores:?}");
-
-        // Verified live against ffmpeg 9.0: the mov muxer refuses av1
-        // outright ("av1 only supported in MP4 and AVIF"), even though av1
-        // is legal in MP4_COMPATIBLE_VIDEO.
-        let av1 = crate::MediaProbe {
-            video_codec: Some("av1".into()),
-            audio_codec: Some("aac".into()),
-            subtitle_codec: None,
-            ..crate::MediaProbe::default()
-        };
-        assert!(!can_remux(Format::Mov, &av1), "{av1:?}");
-    }
-
-    #[test]
-    fn can_remux_accepts_a_broad_range_of_codecs_into_mkv() {
-        // Codecs mov and/or mp4/webm reject outright, all verified live to
-        // mux cleanly into matroska.
-        for (video, audio) in [
-            ("av1", "flac"),
-            ("vp9", "opus"),
-            ("prores", "pcm_s16le"),
-            ("h264", "truehd"),
-            ("mjpeg", "dts"),
-        ] {
-            let probe = crate::MediaProbe {
-                video_codec: Some(video.into()),
-                audio_codec: Some(audio.into()),
-                subtitle_codec: None,
-                ..crate::MediaProbe::default()
-            };
-            assert!(can_remux(Format::Mkv, &probe), "{probe:?}");
-        }
     }
 
     #[test]

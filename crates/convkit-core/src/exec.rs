@@ -177,15 +177,13 @@ impl Drop for ScratchGuard {
 }
 
 /// Whether a step's rendered argv performed a stream copy of the actual
-/// media -- what `Outcome::remuxed` reports. Bare `-c copy` covers every
-/// remux recipe except one: `REMUX_MKV_SRT_SUBS` (`registry::mkv_remux_for`'s
-/// answer when the source subtitle is `mov_text`, which matroska can't
-/// hold) still stream-copies video and audio, but spells it per-stream
-/// (`-c:v copy -c:a copy`) so it can give the subtitle stream a different
-/// codec (`-c:s srt`) alongside them. Without the second arm, this would
-/// report `false` for a conversion whose actual video/audio bytes were
-/// never re-encoded -- exactly the answer this field exists to give. A
-/// free function (not inlined into `run`) so it's unit-testable directly
+/// media -- what `Outcome::remuxed` reports. The stream-mapped invocations
+/// `media.rs` builds spell copies per-stream (`-c:v copy -c:a copy`,
+/// possibly alongside a `-c:s` re-encode of a text subtitle), so the
+/// second arm is the *normal* remux shape, not an exception; bare
+/// `-c copy` covers hand-written recipes and the third arm recognises an
+/// audio extraction whose track is copied with the video dropped outright.
+/// A free function (not inlined into `run`) so it's unit-testable directly
 /// against a plain `argv` slice, without needing a real backend or
 /// filesystem.
 fn is_remux(argv: &[String]) -> bool {
@@ -199,11 +197,15 @@ fn is_remux(argv: &[String]) -> bool {
         || (has(["-c:a", "copy"]) && !argv.iter().any(|a| a == "-c:v"))
 }
 
-/// Filters one step's diagnostic output down to the lines a user should
-/// see on a *successful* run. Per-backend patterns, deliberately
-/// conservative — surfacing a real "your images were dropped" beats
-/// echoing a progress line, so unrecognised chatter stays out. Lines are
-/// deduplicated in order and capped, with the overflow counted honestly.
+/// Filters one step's diagnostic output down to its salient lines. Worn in
+/// two hats, tuned in opposite directions — change patterns knowing both:
+/// on a *successful* run it selects the degradation notes a user should
+/// see, where precision matters (a false positive echoes the user's own
+/// filename back as a warning); on a *failed* run it picks the detail for
+/// the error message, where recall matters (the fallback there is the raw
+/// last-three-lines tail, so a missed pattern degrades, never hides).
+/// Per-backend patterns, deliberately conservative. Lines are deduplicated
+/// in order and capped, with the overflow counted honestly.
 fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
     const MAX_NOTES: usize = 5;
     let interesting = |line: &str| -> bool {

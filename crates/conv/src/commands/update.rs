@@ -776,12 +776,7 @@ mod tests {
     /// that `convkit-core` test.
     #[cfg(unix)]
     fn stub_at_managed_path(dir: &Path, backend: Backend, version: &str) -> PathBuf {
-        let name = backend.exe_name();
-        let p = dir.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\necho \"{name} {version}\"\n")).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        p
+        stub_with_version(dir, backend.exe_name(), version)
     }
 
     #[cfg(unix)]
