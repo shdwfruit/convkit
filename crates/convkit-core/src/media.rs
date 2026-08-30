@@ -119,10 +119,7 @@ pub(crate) fn stream_mapped_invocation(
         if to == Format::Webm {
             // libopus rejects ffmpeg's default `5.1(side)` layout (AC-3/DTS
             // rips); coerce to the nearest layout it accepts.
-            arg(
-                &mut argv,
-                &["-af", "aformat=channel_layouts=7.1|5.1|stereo|mono"],
-            );
+            arg(&mut argv, &["-af", registry::OPUS_CHANNEL_LAYOUTS]);
         }
         let offenders: Vec<&str> = audios
             .iter()

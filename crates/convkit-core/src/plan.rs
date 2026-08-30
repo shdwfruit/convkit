@@ -109,7 +109,7 @@ pub fn build(
     }
 
     let recipe =
-        select(from, to, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
+        select(from, to, probe, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
 
     let last = recipe.steps.len() - 1;
 
@@ -166,9 +166,11 @@ pub fn build(
     })
 }
 
-/// Chooses among the *static* recipes; the probe-aware media paths are
-/// handled in `build` itself (see `media`), so by the time this runs the
-/// answer is either a fallback-selection question or a plain table lookup.
+/// Chooses among the *static* recipes; the probe-aware stream-mapping
+/// paths are handled in `build` itself (see `media`), so by the time this
+/// runs the remaining probe question is only which static sibling fits —
+/// today, whether a gif target needs the tonemapping chain for an HDR
+/// source (`registry::gif_recipe_for`).
 ///
 /// `available` picks between the canonical (soffice) and fallback
 /// (pandoc+typst) recipes for a pair that `registry::has_fallback` — today,
@@ -182,7 +184,22 @@ pub fn build(
 /// route available gets the ordinary `backend_missing` naming soffice —
 /// the pair's own primary backend — rather than a confusing one naming
 /// typst.
-fn select(from: Format, to: Format, available: Option<&AvailableBackends>) -> Option<Recipe> {
+fn select(
+    from: Format,
+    to: Format,
+    probe: Option<&MediaProbe>,
+    available: Option<&AvailableBackends>,
+) -> Option<Recipe> {
+    if to == Format::Gif {
+        if let Some(p) = probe {
+            // Only when the pair is registered at all — the probe never
+            // makes an unsupported pair supported.
+            if registry::lookup(from, to).is_some() {
+                return Some(registry::gif_recipe_for(p));
+            }
+        }
+    }
+
     if let Some(avail) = available {
         if !avail.has(Backend::Soffice) && avail.has(Backend::Pandoc) && avail.has(Backend::Typst) {
             if let Some(fallback) = registry::lookup_fallback(from, to) {

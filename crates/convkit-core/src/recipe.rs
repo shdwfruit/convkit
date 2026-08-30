@@ -11,6 +11,13 @@ pub enum Arg {
     Lit(&'static str),
     /// The first (usually only) input path.
     Input,
+    /// The first input path with ImageMagick's `[0]` frame selector
+    /// appended: read only the first frame/page. The explicit frame policy
+    /// for single-image targets — without it, a multi-page TIFF or
+    /// animated WebP into jpg/png/bmp makes magick write `stem-0.jpg`,
+    /// `stem-1.jpg`, … and the conversion fails with an empty "produced no
+    /// output". Harmless on single-frame sources.
+    InputFirstFrame,
     /// The directory containing the first input path (`.` for a bare
     /// filename). For backends like `pandoc` that resolve a document's
     /// relative resources (images) against a search path rather than
@@ -96,6 +103,9 @@ impl Step {
             match arg {
                 Arg::Lit(s) => out.push((*s).to_string()),
                 Arg::Input => out.push(inputs[0].to_string_lossy().into_owned()),
+                Arg::InputFirstFrame => {
+                    out.push(format!("{}[0]", inputs[0].to_string_lossy()));
+                }
                 Arg::InputDir => {
                     let dir = inputs[0].parent().filter(|p| !p.as_os_str().is_empty());
                     out.push(match dir {

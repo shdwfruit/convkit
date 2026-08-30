@@ -29,6 +29,8 @@ macro_rules! step {
 
 // --- Image family ------------------------------------------------------------
 
+/// Lossy targets that keep alpha and frames as-is: webp/avif hold both
+/// transparency and animation, so nothing needs flattening or selecting.
 const IMG_LOSSY: Recipe = Recipe {
     steps: &[step!(
         Backend::Magick,
@@ -43,12 +45,60 @@ const IMG_LOSSY: Recipe = Recipe {
     warnings: &[],
 };
 
+/// The JPEG target is its own recipe because JPEG can hold neither
+/// transparency nor more than one frame, and both defaults used to be
+/// wrong: a transparent PNG/WebP/AVIF landed on a *black* field (the same
+/// bug `SVG_TO_LOSSY` documents and fixed for SVG only — the JPEG coder
+/// discards alpha and leaves the underlying RGB), and a multi-frame source
+/// made magick write `stem-0.jpg`, `stem-1.jpg`, … so the conversion
+/// failed with an empty "produced no output".
+const IMG_TO_JPG: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::InputFirstFrame,
+            Arg::Lit("-auto-orient"),
+            Arg::Lit("-background"),
+            Arg::Lit("white"),
+            Arg::Lit("-alpha"),
+            Arg::Lit("remove"),
+            Arg::Lit("-alpha"),
+            Arg::Lit("off"),
+            Arg::Lit("-quality"),
+            Arg::Lit(IMAGE_QUALITY),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[
+        "Transparency is flattened onto a white background, and only the first \
+         frame/page of a multi-frame source is kept; JPEG has neither alpha nor \
+         animation.",
+    ],
+};
+
+/// Lossless targets that keep frames as-is (tiff holds multi-page sources
+/// faithfully).
 const IMG_LOSSLESS: Recipe = Recipe {
     steps: &[step!(
         Backend::Magick,
         [Arg::Input, Arg::Lit("-auto-orient"), Arg::Output]
     )],
     warnings: &[],
+};
+
+/// Lossless single-image targets (png/bmp): magick writes a multi-frame
+/// source to these as `stem-0.png`, `stem-1.png`, … — the same
+/// produced-no-output failure `IMG_TO_JPG` fixes — so the first frame is
+/// selected explicitly.
+const IMG_LOSSLESS_SINGLE_FRAME: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [Arg::InputFirstFrame, Arg::Lit("-auto-orient"), Arg::Output]
+    )],
+    warnings: &[
+        "Only the first frame/page of a multi-frame source is kept; this target \
+         holds a single image.",
+    ],
 };
 
 /// `-background white` plus `-alpha remove -alpha off` composites onto a
@@ -94,10 +144,23 @@ const SVG_TO_LOSSLESS: Recipe = Recipe {
     warnings: &[],
 };
 
+/// `-compress jpeg` matters: magick's PDF default embeds pixels
+/// losslessly (Zip/Flate over raw RGB), which turned a 1.6 MB phone photo
+/// into a 35 MB PDF — 14× what JPEG-in-PDF at the same visual quality
+/// produces. Photographic sources are the overwhelmingly common case for
+/// image→PDF; the registry-wide quality anchor applies.
 const IMG_TO_PDF: Recipe = Recipe {
     steps: &[step!(
         Backend::Magick,
-        [Arg::Inputs, Arg::Lit("-auto-orient"), Arg::Output]
+        [
+            Arg::Inputs,
+            Arg::Lit("-auto-orient"),
+            Arg::Lit("-compress"),
+            Arg::Lit("jpeg"),
+            Arg::Lit("-quality"),
+            Arg::Lit(IMAGE_QUALITY),
+            Arg::Output,
+        ]
     )],
     warnings: &[],
 };
@@ -133,14 +196,17 @@ fn insert_image_family(t: &mut Table) {
             if from == to {
                 continue;
             }
-            t.insert(
-                (from, to),
-                if is_lossy(to) {
-                    IMG_LOSSY
-                } else {
-                    IMG_LOSSLESS
-                },
-            );
+            // Frame policy per target: jpg/png/bmp hold one image, so they
+            // take the first frame explicitly (jpg additionally flattens
+            // alpha); webp/avif hold animation and alpha as-is; tiff holds
+            // multi-page sources faithfully.
+            let recipe = match to {
+                Format::Jpg => IMG_TO_JPG,
+                Format::Png | Format::Bmp => IMG_LOSSLESS_SINGLE_FRAME,
+                _ if is_lossy(to) => IMG_LOSSY,
+                _ => IMG_LOSSLESS,
+            };
+            t.insert((from, to), recipe);
         }
         t.insert((from, Format::Pdf), IMG_TO_PDF);
     }
@@ -163,6 +229,21 @@ fn insert_image_family(t: &mut Table) {
 /// distance; see spec §7.4.
 const CRF: &str = "20";
 const AUDIO_BITRATE: &str = "160k";
+
+/// libx264 with `-pix_fmt yuv420p` rejects odd frame dimensions outright
+/// ("width not divisible by 2"), and odd sizes are ordinary — screen
+/// recordings and cropped clips hit this constantly. Scaling down by at
+/// most one pixel per axis is imperceptible; failing the whole conversion
+/// with an opaque "produced no output" is not. `GIF_TO_MP4` carried this
+/// from day one; every libx264 recipe needs it.
+const EVEN_SCALE: &str = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
+
+/// libopus rejects ffmpeg's default `5.1(side)` channel layout, which is
+/// exactly what AC-3/DTS surround rips decode to — so every `* -> webm`
+/// transcode of a surround source failed outright. Coercing to the nearest
+/// layout libopus accepts is what ffmpeg's own documentation prescribes.
+/// Shared with the probe-aware hybrid path in `media.rs`.
+pub(crate) const OPUS_CHANNEL_LAYOUTS: &str = "aformat=channel_layouts=7.1|5.1|stereo|mono";
 
 /// GIF frame rate and maximum width, each spelled once and spliced into
 /// `GIF_FILTER` via `concat!`. `concat!` requires every argument to expand to
@@ -203,6 +284,8 @@ const VIDEO_TO_MP4: Recipe = Recipe {
         [
             Arg::Lit("-i"),
             Arg::Input,
+            Arg::Lit("-vf"),
+            Arg::Lit(EVEN_SCALE),
             Arg::Lit("-c:v"),
             Arg::Lit("libx264"),
             Arg::Lit("-crf"),
@@ -273,6 +356,10 @@ macro_rules! video_to_mkv_recipe {
                 Arg::Input,
                 Arg::Lit("-map"),
                 Arg::Lit("0"),
+                Arg::Lit("-map"),
+                Arg::Lit("-0:d"),
+                Arg::Lit("-vf"),
+                Arg::Lit(EVEN_SCALE),
                 Arg::Lit("-c:v"),
                 Arg::Lit("libx264"),
                 Arg::Lit("-crf"),
@@ -385,6 +472,8 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
             Arg::Lit("libopus"),
             Arg::Lit("-b:a"),
             Arg::Lit("128k"),
+            Arg::Lit("-af"),
+            Arg::Lit(OPUS_CHANNEL_LAYOUTS),
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -491,6 +580,8 @@ pub const REMUX_MKV: Recipe = Recipe {
             Arg::Input,
             Arg::Lit("-map"),
             Arg::Lit("0"),
+            Arg::Lit("-map"),
+            Arg::Lit("-0:d"),
             Arg::Lit("-c"),
             Arg::Lit("copy"),
             Arg::Lit("-y"),
@@ -518,6 +609,8 @@ pub const REMUX_MKV_SRT_SUBS: Recipe = Recipe {
             Arg::Input,
             Arg::Lit("-map"),
             Arg::Lit("0"),
+            Arg::Lit("-map"),
+            Arg::Lit("-0:d"),
             Arg::Lit("-c:v"),
             Arg::Lit("copy"),
             Arg::Lit("-c:a"),
@@ -570,6 +663,68 @@ const TO_GIF: Recipe = Recipe {
          silently truncated.",
     ],
 };
+
+/// `GIF_FILTER` with an HDR→SDR mapping prefixed: convert the source's
+/// BT.2020 PQ/HLG signal to BT.709 with perceptual intent, then run the
+/// ordinary GIF chain. Without this, HDR code values are written straight
+/// into an sRGB GIF, so default iPhone 12+ / HDR-YouTube footage comes out
+/// grey and hue-shifted. Uses the core `scale` filter's color management
+/// (ffmpeg ≥ 8's rebuilt swscale) rather than the traditional
+/// zscale+tonemap chain deliberately: zscale needs libzimg, which common
+/// system builds (Homebrew's, verified on this machine) omit, while the
+/// managed pins are all ≥ 8-capable. On an older system ffmpeg this fails
+/// loudly with the option named in the error — a hard failure over silent
+/// garbage, with `conv install ffmpeg` as the escape hatch. Must stay a
+/// strict suffix match with `GIF_FILTER` (tested), so the two chains can
+/// never drift apart.
+const GIF_FILTER_TONEMAP: &str = concat!(
+    "scale=out_color_matrix=bt709:out_primaries=bt709:out_transfer=bt709:intent=perceptual,",
+    "format=yuv420p,",
+    "fps=",
+    gif_fps!(),
+    ",scale=w=min(",
+    gif_max_w!(),
+    r"\,iw):h=-2:flags=lanczos,split[a][b];",
+    "[a]palettegen=stats_mode=diff[p];",
+    "[b][p]paletteuse=dither=bayer:bayer_scale=3"
+);
+
+/// `TO_GIF`'s sibling for HDR sources, selected by `gif_recipe_for` when
+/// the probe reports a PQ/HLG transfer.
+pub const TO_GIF_TONEMAP: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-vf"),
+            Arg::Lit(GIF_FILTER_TONEMAP),
+            Arg::Lit("-loop"),
+            Arg::Lit("0"),
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[
+        "HDR source tonemapped to SDR for GIF; colors are approximated, not exact.",
+        "The whole filtered stream is buffered in memory for palette generation, \
+         so very long inputs are slow and memory-hungry rather than being \
+         silently truncated.",
+    ],
+};
+
+/// Picks between `TO_GIF` and its tonemapping sibling for a video → gif
+/// conversion: the probe is the only way to know the source is HDR, and
+/// with no probe (ffprobe missing/failed) the SDR chain is the safe
+/// default — wrong colors for HDR sources, but identical to today for the
+/// overwhelmingly-common SDR case.
+pub fn gif_recipe_for(probe: &crate::MediaProbe) -> Recipe {
+    if probe.is_hdr() {
+        TO_GIF_TONEMAP
+    } else {
+        TO_GIF
+    }
+}
 
 const GIF_TO_MP4: Recipe = Recipe {
     steps: &[step!(
@@ -1092,7 +1247,10 @@ pub fn needs_probe(from: Format, to: Format) -> bool {
             from,
             Format::Mp3 | Format::M4a | Format::Wav | Format::Flac
         ));
-    (container_change || audio_extract) && from != to
+    // A gif target probes for the HDR transfer question, not for a stream
+    // copy — see `gif_recipe_for`.
+    let gif_target = to == Format::Gif && video_source;
+    (container_change || audio_extract || gif_target) && from != to
 }
 
 /// Whether the probed codecs are legal in the target container — checked
@@ -1127,7 +1285,19 @@ mod tests {
         let argv = r.steps[0].render(&[Path::new("in.heic")], Path::new("out.jpg"));
         assert_eq!(
             argv,
-            vec!["in.heic", "-auto-orient", "-quality", "92", "out.jpg"]
+            vec![
+                "in.heic[0]",
+                "-auto-orient",
+                "-background",
+                "white",
+                "-alpha",
+                "remove",
+                "-alpha",
+                "off",
+                "-quality",
+                "92",
+                "out.jpg"
+            ]
         );
     }
 
@@ -1193,6 +1363,93 @@ mod tests {
         assert!(argv.contains(&"b.png".to_string()));
     }
 
+    /// Transparent PNG/WebP/AVIF used to become JPEGs on solid black — the
+    /// exact bug `SVG_TO_LOSSY` documents, fixed for SVG only. The raster
+    /// → JPEG recipe must flatten alpha onto white and warn.
+    #[test]
+    fn raster_to_jpg_flattens_alpha_onto_white() {
+        let r = lookup(Format::Png, Format::Jpg).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.png")], Path::new("out.jpg"));
+        let joined = argv.join(" ");
+        assert!(joined.contains("-background white"), "{joined}");
+        assert!(joined.contains("-alpha remove"), "{joined}");
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("white"), "{:?}", r.warnings);
+    }
+
+    /// Multi-page TIFF / animated WebP into single-image targets used to
+    /// fail with an empty "produced no output" (magick wrote stem-0.jpg,
+    /// stem-1.jpg, …). jpg/png/bmp select the first frame explicitly;
+    /// webp/avif/tiff keep every frame.
+    #[test]
+    fn single_image_targets_select_the_first_frame_explicitly() {
+        for to in [Format::Jpg, Format::Png, Format::Bmp] {
+            let r = lookup(Format::Tiff, to).unwrap();
+            let argv = r.steps[0].render(&[Path::new("scan.tiff")], Path::new("out"));
+            assert!(
+                argv.iter().any(|a| a == "scan.tiff[0]"),
+                "{to:?}: {argv:?}"
+            );
+        }
+        for to in [Format::Webp, Format::Avif] {
+            let r = lookup(Format::Tiff, to).unwrap();
+            let argv = r.steps[0].render(&[Path::new("scan.tiff")], Path::new("out"));
+            assert!(
+                argv.iter().any(|a| a == "scan.tiff"),
+                "{to:?} keeps all frames: {argv:?}"
+            );
+        }
+    }
+
+    /// A 1.6 MB phone photo used to become a 35 MB PDF: magick's PDF
+    /// default embeds pixels losslessly. The merge recipe must use
+    /// JPEG-in-PDF at the registry quality anchor.
+    #[test]
+    fn image_to_pdf_compresses_with_jpeg_at_the_quality_anchor() {
+        let r = lookup(Format::Heic, Format::Pdf).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.heic")], Path::new("out.pdf"));
+        let joined = argv.join(" ");
+        assert!(joined.contains("-compress jpeg"), "{joined}");
+        assert!(joined.contains("-quality 92"), "{joined}");
+    }
+
+    /// The tonemap chain must stay a strict prefix + the ordinary GIF
+    /// chain, so the two can never drift apart.
+    #[test]
+    fn gif_tonemap_filter_is_the_gif_filter_with_a_tonemap_prefix() {
+        assert!(
+            GIF_FILTER_TONEMAP.ends_with(GIF_FILTER),
+            "GIF_FILTER_TONEMAP must end with GIF_FILTER"
+        );
+        assert!(GIF_FILTER_TONEMAP.starts_with("scale=out_color_matrix=bt709"));
+        assert!(GIF_FILTER_TONEMAP.contains("intent=perceptual"));
+    }
+
+    /// `gif_recipe_for` picks the tonemap sibling exactly for PQ/HLG
+    /// transfers, and the plain chain otherwise (including no probe data).
+    #[test]
+    fn gif_recipe_tonemaps_only_hdr_transfers() {
+        for (transfer, tonemapped) in [
+            (Some("smpte2084"), true),
+            (Some("arib-std-b67"), true),
+            (Some("bt709"), false),
+            (None, false),
+        ] {
+            let probe = crate::MediaProbe {
+                video_codec: Some("hevc".into()),
+                color_transfer: transfer.map(str::to_owned),
+                ..crate::MediaProbe::default()
+            };
+            let r = gif_recipe_for(&probe);
+            let argv = r.steps[0].render(&[Path::new("in.mp4")], Path::new("out.gif"));
+            assert_eq!(
+                argv.iter().any(|a| a.contains("intent=perceptual")),
+                tonemapped,
+                "{transfer:?}"
+            );
+        }
+    }
+
     #[test]
     fn no_pair_converts_a_format_to_itself() {
         for (from, to) in all_pairs() {
@@ -1236,6 +1493,61 @@ mod tests {
         assert!(argv.contains(&"+faststart".to_string()), "{argv:?}");
         assert!(argv.contains(&"-sn".to_string()), "{argv:?}");
         assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    }
+
+    /// Odd-dimension sources (screen recordings, cropped clips) used to
+    /// fail every libx264 recipe with an opaque "produced no output":
+    /// `-pix_fmt yuv420p` requires even dimensions. Every libx264 recipe
+    /// must carry the even-size scale `GIF_TO_MP4` always had.
+    #[test]
+    fn every_libx264_transcode_scales_to_even_dimensions() {
+        for (from, to) in [
+            (Format::Mkv, Format::Mp4),
+            (Format::Mkv, Format::Mov),
+            (Format::Mp4, Format::Mkv),
+            (Format::Webm, Format::Mkv),
+            (Format::Gif, Format::Mp4),
+        ] {
+            let r = lookup(from, to).unwrap();
+            let argv = r.steps[0].render(&[Path::new("in")], Path::new("out"));
+            assert!(
+                argv.iter().any(|a| a.contains("trunc(iw/2)*2")),
+                "{from:?}->{to:?}: {argv:?}"
+            );
+        }
+    }
+
+    /// AC-3/DTS surround rips decode to `5.1(side)`, which libopus rejects
+    /// outright — every surround source used to fail `* -> webm`. The
+    /// transcode must coerce the layout.
+    #[test]
+    fn webm_transcode_coerces_channel_layouts_for_libopus() {
+        let r = lookup(Format::Mkv, Format::Webm).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.mkv")], Path::new("out.webm"));
+        assert!(
+            argv.iter().any(|a| a.contains("channel_layouts")),
+            "{argv:?}"
+        );
+    }
+
+    /// Camera/GoPro/iPhone footage carries tmcd/mebx/gpmd data streams the
+    /// matroska muxer rejects; `-map 0` must exclude them explicitly on
+    /// both the transcode and remux mkv recipes.
+    #[test]
+    fn mkv_recipes_exclude_data_streams() {
+        let transcode = lookup(Format::Mov, Format::Mkv).unwrap();
+        let argv = transcode.steps[0].render(&[Path::new("in.mov")], Path::new("out.mkv"));
+        assert!(
+            argv.windows(2).any(|w| w == ["-map", "-0:d"]),
+            "{argv:?}"
+        );
+        for remux in [REMUX_MKV, REMUX_MKV_SRT_SUBS] {
+            let argv = remux.steps[0].render(&[Path::new("in.mov")], Path::new("out.mkv"));
+            assert!(
+                argv.windows(2).any(|w| w == ["-map", "-0:d"]),
+                "{argv:?}"
+            );
+        }
     }
 
     #[test]
@@ -1365,7 +1677,7 @@ mod tests {
         let argv = REMUX_MKV.steps[0].render(&[Path::new("in.mp4")], Path::new("out.mkv"));
         assert_eq!(
             argv,
-            vec!["-i", "in.mp4", "-map", "0", "-c", "copy", "-y", "out.mkv"]
+            vec!["-i", "in.mp4", "-map", "0", "-map", "-0:d", "-c", "copy", "-y", "out.mkv"]
         );
         assert!(
             !argv.contains(&"-movflags".to_string()),
@@ -1395,7 +1707,7 @@ mod tests {
         assert_eq!(
             argv,
             vec![
-                "-i", "in.mp4", "-map", "0", "-c:v", "copy", "-c:a", "copy", "-c:s", "srt", "-y",
+                "-i", "in.mp4", "-map", "0", "-map", "-0:d", "-c:v", "copy", "-c:a", "copy", "-c:s", "srt", "-y",
                 "out.mkv"
             ]
         );
@@ -1472,7 +1784,8 @@ mod tests {
         assert_eq!(
             argv,
             vec![
-                "-i", "in.webm", "-map", "0", "-c:v", "libx264", "-crf", "20", "-preset", "medium",
+                "-i", "in.webm", "-map", "0", "-map", "-0:d", "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-crf", "20", "-preset", "medium",
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-c:s", "copy", "-y",
                 "out.mkv",
             ]
@@ -1519,6 +1832,10 @@ mod tests {
                     &format!("in.{ext}"),
                     "-map",
                     "0",
+                    "-map",
+                    "-0:d",
+                    "-vf",
+                    "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                     "-c:v",
                     "libx264",
                     "-crf",

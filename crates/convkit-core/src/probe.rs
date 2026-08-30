@@ -49,6 +49,17 @@ impl MediaProbe {
             self.subtitle_codecs.iter().map(String::as_str).collect()
         }
     }
+
+    /// Whether the video stream is HDR: PQ (smpte2084) or HLG
+    /// (arib-std-b67) transfer characteristics — the two transfers default
+    /// iPhone and HDR-YouTube footage actually carries. SDR targets need a
+    /// tonemap for these or the output comes out grey and hue-shifted.
+    pub fn is_hdr(&self) -> bool {
+        matches!(
+            self.color_transfer.as_deref(),
+            Some("smpte2084") | Some("arib-std-b67")
+        )
+    }
 }
 
 /// Parses `ffprobe -show_streams` JSON. Any malformed input yields an empty
