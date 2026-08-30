@@ -26,17 +26,38 @@ fn is_interactive_session() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
+/// The exact text of the yes/no prompt for `backend`. Pulled out of
+/// `prompt_yes_no` as a pure function, with no stdin/stderr of its own, so
+/// its wording can be unit-tested directly rather than only through a real
+/// TTY (which, per `should_install`'s own tests, this suite can't drive
+/// deterministically in CI).
+///
+/// When `backend`'s managed download also provisions another backend (see
+/// `manifest::bundled_with` — today: `ffprobe` and `ffmpeg` share one
+/// Windows zip), the prompt says so up front: a user asked "install
+/// ffprobe?" should know that saying yes also installs ffmpeg, not discover
+/// it silently afterward.
+fn prompt_message(backend: Backend) -> String {
+    let bundled = manifest::bundled_with(backend);
+    let also = if bundled.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = bundled.iter().map(|b| b.exe_name()).collect();
+        format!(" (also installs {})", names.join(", "))
+    };
+    format!(
+        "{} is required for this conversion and isn't installed.\nInstall it now?{also} [y/N] ",
+        backend.exe_name()
+    )
+}
+
 /// Prints the yes/no prompt to stderr and reads one line of stdin. Any read
 /// failure (EOF, a stream error) is treated as "no" — the same conservative
 /// default an unanswered prompt gets — rather than propagating an error
 /// through a path that must never panic or hang.
 fn prompt_yes_no(backend: Backend) -> bool {
     let mut stderr = std::io::stderr();
-    let _ = write!(
-        stderr,
-        "{} is required for this conversion and isn't installed.\nInstall it now? [y/N] ",
-        backend.exe_name()
-    );
+    let _ = write!(stderr, "{}", prompt_message(backend));
     let _ = stderr.flush();
 
     let mut line = String::new();
@@ -176,5 +197,34 @@ mod tests {
     fn plain_no_install_flag_refuses_a_managed_backend_too() {
         let cli = test_cli(false, true, false, false);
         assert!(!should_install(&cli, Backend::Ffmpeg));
+    }
+
+    /// A backend with no bundled sibling (e.g. typst, or ffmpeg/ffprobe off
+    /// Windows) gets the plain prompt, with no parenthetical at all.
+    #[test]
+    fn prompt_message_has_no_bundle_note_when_nothing_is_bundled() {
+        if manifest::bundled_with(Backend::Typst).is_empty() {
+            let msg = prompt_message(Backend::Typst);
+            assert!(msg.contains("typst is required"), "{msg}");
+            assert!(msg.contains("Install it now? [y/N] "), "{msg}");
+            assert!(!msg.contains("also installs"), "{msg}");
+        }
+    }
+
+    /// On Windows x64, asking to install `ffprobe` must make clear that
+    /// accepting also installs `ffmpeg` — the exact acceptance-check wording
+    /// this task calls out ("the prompt should make clear that accepting
+    /// installs ffmpeg's bundle").
+    #[test]
+    fn prompt_message_names_the_bundled_sibling_on_windows_x64() {
+        if (manifest::current_os(), manifest::current_arch()) == ("windows", "x64") {
+            let msg = prompt_message(Backend::Ffprobe);
+            assert!(msg.contains("ffprobe is required"), "{msg}");
+            assert!(msg.contains("also installs ffmpeg"), "{msg}");
+
+            let msg = prompt_message(Backend::Ffmpeg);
+            assert!(msg.contains("ffmpeg is required"), "{msg}");
+            assert!(msg.contains("also installs ffprobe"), "{msg}");
+        }
     }
 }

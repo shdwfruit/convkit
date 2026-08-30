@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::error::{ConvError, ErrorCode, Result};
-use crate::manifest::{Asset, Packaging};
+use crate::manifest::{ArchiveMember, Asset, Packaging};
+use crate::Backend;
 
 /// Upper bound on any single read this module performs — the HTTP response
 /// body, and each archive member pulled out of it. `ureq` decodes a gzipped
@@ -72,10 +73,14 @@ fn download_err(url: &str, e: impl std::fmt::Display) -> ConvError {
     )
 }
 
-fn extract_err(asset: &Asset, e: impl std::fmt::Display) -> ConvError {
+fn extract_err(asset: &Asset, member: &ArchiveMember, e: impl std::fmt::Display) -> ConvError {
     ConvError::new(
         ErrorCode::ConversionFailed,
-        format!("failed to extract {}: {e}", asset.url),
+        format!(
+            "failed to extract {} from {}: {e}",
+            member.backend.exe_name(),
+            asset.url
+        ),
     )
 }
 
@@ -109,13 +114,17 @@ fn download(url: &str) -> Result<Vec<u8>> {
     read_capped(resp.into_reader()).map_err(|e| download_err(url, e))
 }
 
-fn extract_zip(asset: &Asset, bytes: &[u8]) -> Result<Vec<u8>> {
+fn extract_zip(asset: &Asset, member: &ArchiveMember, bytes: &[u8]) -> Result<Vec<u8>> {
     let mut archive =
-        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| extract_err(asset, e))?;
-    let file = archive
-        .by_name(asset.archive_member)
-        .map_err(|e| extract_err(asset, format!("{} not found: {e}", asset.archive_member)))?;
-    read_capped(file).map_err(|e| extract_err(asset, e))
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| extract_err(asset, member, e))?;
+    let file = archive.by_name(member.archive_member).map_err(|e| {
+        extract_err(
+            asset,
+            member,
+            format!("{} not found: {e}", member.archive_member),
+        )
+    })?;
+    read_capped(file).map_err(|e| extract_err(asset, member, e))
 }
 
 /// A tar entry's path as stored may carry a leading `./` (many tar tools
@@ -129,31 +138,38 @@ fn strip_leading_dot_slash(s: &str) -> &str {
 
 /// Walks every entry of an already-opened tar `archive`, returning the bytes
 /// of the one entry whose (dot-slash-normalised) name matches
-/// `asset.archive_member` — capped the same as every other read in this
+/// `member.archive_member` — capped the same as every other read in this
 /// module. Shared by `extract_tar_gz` and `extract_tar_xz`, which differ only
 /// in how they get from compressed bytes to a `Read` of the raw tar stream;
 /// this is where the archive-supplied name is compared, and it is compared
 /// only, never joined onto a filesystem path — the entry's *bytes* are what
 /// this returns, not a path anyone writes to.
-fn extract_tar_member<R: Read>(asset: &Asset, mut archive: tar::Archive<R>) -> Result<Vec<u8>> {
-    let entries = archive.entries().map_err(|e| extract_err(asset, e))?;
+fn extract_tar_member<R: Read>(
+    asset: &Asset,
+    member: &ArchiveMember,
+    mut archive: tar::Archive<R>,
+) -> Result<Vec<u8>> {
+    let entries = archive
+        .entries()
+        .map_err(|e| extract_err(asset, member, e))?;
     for entry in entries {
-        let entry = entry.map_err(|e| extract_err(asset, e))?;
-        let path = entry.path().map_err(|e| extract_err(asset, e))?;
+        let entry = entry.map_err(|e| extract_err(asset, member, e))?;
+        let path = entry.path().map_err(|e| extract_err(asset, member, e))?;
         let name = path.to_string_lossy();
-        if strip_leading_dot_slash(&name) == asset.archive_member {
-            return read_capped(entry).map_err(|e| extract_err(asset, e));
+        if strip_leading_dot_slash(&name) == member.archive_member {
+            return read_capped(entry).map_err(|e| extract_err(asset, member, e));
         }
     }
     Err(extract_err(
         asset,
-        format!("{} not found in archive", asset.archive_member),
+        member,
+        format!("{} not found in archive", member.archive_member),
     ))
 }
 
-fn extract_tar_gz(asset: &Asset, bytes: &[u8]) -> Result<Vec<u8>> {
+fn extract_tar_gz(asset: &Asset, member: &ArchiveMember, bytes: &[u8]) -> Result<Vec<u8>> {
     let decoder = flate2::read::GzDecoder::new(bytes);
-    extract_tar_member(asset, tar::Archive::new(decoder))
+    extract_tar_member(asset, member, tar::Archive::new(decoder))
 }
 
 /// A `Write` sink capped at `cap` bytes, so decompressing a small `.xz`
@@ -207,17 +223,22 @@ fn decompress_xz_capped(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(output.buf)
 }
 
-fn extract_tar_xz(asset: &Asset, bytes: &[u8]) -> Result<Vec<u8>> {
-    let tar_bytes = decompress_xz_capped(bytes).map_err(|e| extract_err(asset, e))?;
-    extract_tar_member(asset, tar::Archive::new(Cursor::new(tar_bytes)))
+fn extract_tar_xz(asset: &Asset, member: &ArchiveMember, bytes: &[u8]) -> Result<Vec<u8>> {
+    let tar_bytes = decompress_xz_capped(bytes).map_err(|e| extract_err(asset, member, e))?;
+    extract_tar_member(asset, member, tar::Archive::new(Cursor::new(tar_bytes)))
 }
 
-fn extract(asset: &Asset, bytes: &[u8]) -> Result<Vec<u8>> {
+/// Extracts the bytes for one [`ArchiveMember`] of `asset` out of the
+/// already-downloaded, already-verified `bytes`. Called once per member in
+/// `asset.members` by `fetch_and_install`, all against the same in-memory
+/// `bytes` — the whole point of naming several members on one `Asset` is
+/// that this never re-downloads for the second (or third) one.
+fn extract(asset: &Asset, member: &ArchiveMember, bytes: &[u8]) -> Result<Vec<u8>> {
     match asset.packaging {
         Packaging::Raw => Ok(bytes.to_vec()),
-        Packaging::Zip => extract_zip(asset, bytes),
-        Packaging::TarGz => extract_tar_gz(asset, bytes),
-        Packaging::TarXz => extract_tar_xz(asset, bytes),
+        Packaging::Zip => extract_zip(asset, member, bytes),
+        Packaging::TarGz => extract_tar_gz(asset, member, bytes),
+        Packaging::TarXz => extract_tar_xz(asset, member, bytes),
     }
 }
 
@@ -316,20 +337,51 @@ fn install_bytes(dest: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Downloads `asset`, verifies its checksum, extracts the executable, and
-/// writes it to `dest` — the exact final path, typically
-/// `Resolver::managed_path(backend)`. Returns `dest` on success. See
-/// `install_bytes` for the atomicity guarantee this provides.
-pub fn fetch_and_install(asset: &Asset, dest: &Path) -> Result<PathBuf> {
-    let dest_dir = dest.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dest_dir).map_err(|e| io_err(dest_dir, e))?;
-
+/// Downloads `asset`, verifies its checksum exactly once, then extracts and
+/// installs *every* member `asset.members` names — not just the one whose
+/// backend the caller originally asked to install. `dest_for` maps each
+/// member's backend to its final path (in production, always
+/// `Resolver::managed_path`); this module stays decoupled from `Resolver`
+/// itself, taking a plain callback instead.
+///
+/// This is the entire mechanism behind "one download provisions every
+/// binary it contains": an asset whose upstream release bundles several
+/// tools (today: ffmpeg + ffprobe on Windows) is downloaded and its checksum
+/// verified once, and each member is extracted from those same in-memory
+/// bytes — `download`/`verify` are called exactly once per call to this
+/// function, regardless of how many members `asset.members` names.
+///
+/// Every member is extracted before any of them is written to disk, so a
+/// corrupt or truncated archive that's missing one named member fails
+/// before touching the filesystem at all, rather than leaving the pair
+/// half-installed. Each member that *is* written still goes through
+/// `install_bytes`'s atomic temp-name/finalize/rename sequence individually
+/// — see its docs for the cleanup guarantee that provides per file.
+///
+/// Returns `(backend, path)` for every member actually installed, on
+/// success.
+pub fn fetch_and_install(
+    asset: &Asset,
+    dest_for: impl Fn(Backend) -> PathBuf,
+) -> Result<Vec<(Backend, PathBuf)>> {
     let bytes = download(asset.url)?;
     verify(&bytes, asset.sha256)?;
-    let exe_bytes = extract(asset, &bytes)?;
 
-    install_bytes(dest, &exe_bytes)?;
-    Ok(dest.to_path_buf())
+    let mut extracted = Vec::with_capacity(asset.members.len());
+    for member in asset.members {
+        let exe_bytes = extract(asset, member, &bytes)?;
+        extracted.push((member.backend, exe_bytes));
+    }
+
+    let mut installed = Vec::with_capacity(extracted.len());
+    for (backend, exe_bytes) in extracted {
+        let dest = dest_for(backend);
+        let dest_dir = dest.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dest_dir).map_err(|e| io_err(dest_dir, e))?;
+        install_bytes(&dest, &exe_bytes)?;
+        installed.push((backend, dest));
+    }
+    Ok(installed)
 }
 
 #[cfg(test)]
@@ -362,18 +414,35 @@ mod tests {
         assert_eq!(e.code, ErrorCode::ConversionFailed);
     }
 
+    /// A single-member `ArchiveMember` for `backend`.
+    fn one_member(backend: crate::Backend, archive_member: &'static str) -> ArchiveMember {
+        ArchiveMember {
+            backend,
+            archive_member,
+        }
+    }
+
+    /// `Asset::members` is `&'static [ArchiveMember]` — the real manifest
+    /// only ever builds these as `static`s, but a test asset is a short-lived
+    /// local value, so this leaks it into a `'static` slice rather than
+    /// changing the production field's lifetime. Harmless: it only happens
+    /// inside a test process that exits shortly after.
+    fn leaked(ms: Vec<ArchiveMember>) -> &'static [ArchiveMember] {
+        Box::leak(ms.into_boxed_slice())
+    }
+
     #[test]
     fn extract_raw_returns_the_bytes_unchanged() {
+        let member = one_member(crate::Backend::Ffmpeg, "");
         let asset = Asset {
-            backend: crate::Backend::Ffmpeg,
             os: "linux",
             arch: "x64",
             url: "https://example.invalid/ffmpeg",
             sha256: "0",
             packaging: Packaging::Raw,
-            archive_member: "",
+            members: leaked(vec![member]),
         };
-        let out = extract(&asset, b"not-really-an-executable").unwrap();
+        let out = extract(&asset, &member, b"not-really-an-executable").unwrap();
         assert_eq!(out, b"not-really-an-executable");
     }
 
@@ -394,33 +463,69 @@ mod tests {
     #[test]
     fn extract_zip_finds_the_named_member() {
         let bytes = make_test_zip("bin/tool.exe", b"pretend-exe-bytes");
+        let member = one_member(crate::Backend::Ffmpeg, "bin/tool.exe");
         let asset = Asset {
-            backend: crate::Backend::Ffmpeg,
             os: "windows",
             arch: "x64",
             url: "https://example.invalid/tool.zip",
             sha256: "0",
             packaging: Packaging::Zip,
-            archive_member: "bin/tool.exe",
+            members: leaked(vec![member]),
         };
-        let out = extract(&asset, &bytes).unwrap();
+        let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
     }
 
     #[test]
     fn extract_zip_reports_a_missing_member() {
         let bytes = make_test_zip("bin/tool.exe", b"pretend-exe-bytes");
+        let member = one_member(crate::Backend::Ffmpeg, "bin/other.exe");
         let asset = Asset {
-            backend: crate::Backend::Ffmpeg,
             os: "windows",
             arch: "x64",
             url: "https://example.invalid/tool.zip",
             sha256: "0",
             packaging: Packaging::Zip,
-            archive_member: "bin/other.exe",
+            members: leaked(vec![member]),
         };
-        let e = extract(&asset, &bytes).unwrap_err();
+        let e = extract(&asset, &member, &bytes).unwrap_err();
         assert_eq!(e.code, ErrorCode::ConversionFailed);
+    }
+
+    /// The mechanism this task adds: one downloaded zip with two named
+    /// members must yield both binaries' bytes from the same in-memory
+    /// download — `extract` is called once per member, but the caller
+    /// (`fetch_and_install`) only ever downloads once.
+    #[test]
+    fn extract_pulls_every_member_out_of_one_shared_zip_download() {
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            writer.start_file("bin/ffmpeg.exe", options).unwrap();
+            std::io::Write::write_all(&mut writer, b"pretend-ffmpeg").unwrap();
+            writer.start_file("bin/ffprobe.exe", options).unwrap();
+            std::io::Write::write_all(&mut writer, b"pretend-ffprobe").unwrap();
+            writer.finish().unwrap();
+        }
+        let ffmpeg_member = one_member(crate::Backend::Ffmpeg, "bin/ffmpeg.exe");
+        let ffprobe_member = one_member(crate::Backend::Ffprobe, "bin/ffprobe.exe");
+        let asset = Asset {
+            os: "windows",
+            arch: "x64",
+            url: "https://example.invalid/bundle.zip",
+            sha256: "0",
+            packaging: Packaging::Zip,
+            members: leaked(vec![ffmpeg_member, ffprobe_member]),
+        };
+        assert_eq!(
+            extract(&asset, &ffmpeg_member, &buf).unwrap(),
+            b"pretend-ffmpeg"
+        );
+        assert_eq!(
+            extract(&asset, &ffprobe_member, &buf).unwrap(),
+            b"pretend-ffprobe"
+        );
     }
 
     /// Builds a tiny in-memory .tar.gz with one member, so `extract_tar_gz`
@@ -445,16 +550,16 @@ mod tests {
     #[test]
     fn extract_tar_gz_finds_the_named_member() {
         let bytes = make_test_tar_gz("pkg/bin/tool", b"pretend-exe-bytes");
+        let member = one_member(crate::Backend::Pandoc, "pkg/bin/tool");
         let asset = Asset {
-            backend: crate::Backend::Pandoc,
             os: "linux",
             arch: "x64",
             url: "https://example.invalid/tool.tar.gz",
             sha256: "0",
             packaging: Packaging::TarGz,
-            archive_member: "pkg/bin/tool",
+            members: leaked(vec![member]),
         };
-        let out = extract(&asset, &bytes).unwrap();
+        let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
     }
 
@@ -466,16 +571,16 @@ mod tests {
     #[test]
     fn extract_tar_gz_tolerates_a_leading_dot_slash_in_the_entry_name() {
         let bytes = make_test_tar_gz("./pkg/bin/tool", b"pretend-exe-bytes");
+        let member = one_member(crate::Backend::Pandoc, "pkg/bin/tool");
         let asset = Asset {
-            backend: crate::Backend::Pandoc,
             os: "linux",
             arch: "x64",
             url: "https://example.invalid/tool.tar.gz",
             sha256: "0",
             packaging: Packaging::TarGz,
-            archive_member: "pkg/bin/tool",
+            members: leaked(vec![member]),
         };
-        let out = extract(&asset, &bytes).unwrap();
+        let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
     }
 
@@ -509,16 +614,19 @@ mod tests {
             "typst-x86_64-unknown-linux-musl/typst",
             b"pretend-exe-bytes",
         );
+        let member = one_member(
+            crate::Backend::Typst,
+            "typst-x86_64-unknown-linux-musl/typst",
+        );
         let asset = Asset {
-            backend: crate::Backend::Typst,
             os: "linux",
             arch: "x64",
             url: "https://example.invalid/tool.tar.xz",
             sha256: "0",
             packaging: Packaging::TarXz,
-            archive_member: "typst-x86_64-unknown-linux-musl/typst",
+            members: leaked(vec![member]),
         };
-        let out = extract(&asset, &bytes).unwrap();
+        let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
     }
 
@@ -527,32 +635,32 @@ mod tests {
     #[test]
     fn extract_tar_xz_tolerates_a_leading_dot_slash_in_the_entry_name() {
         let bytes = make_test_tar_xz("./pkg/bin/tool", b"pretend-exe-bytes");
+        let member = one_member(crate::Backend::Typst, "pkg/bin/tool");
         let asset = Asset {
-            backend: crate::Backend::Typst,
             os: "linux",
             arch: "x64",
             url: "https://example.invalid/tool.tar.xz",
             sha256: "0",
             packaging: Packaging::TarXz,
-            archive_member: "pkg/bin/tool",
+            members: leaked(vec![member]),
         };
-        let out = extract(&asset, &bytes).unwrap();
+        let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
     }
 
     #[test]
     fn extract_tar_xz_reports_a_missing_member() {
         let bytes = make_test_tar_xz("pkg/bin/tool", b"pretend-exe-bytes");
+        let member = one_member(crate::Backend::Typst, "pkg/bin/other-tool");
         let asset = Asset {
-            backend: crate::Backend::Typst,
             os: "linux",
             arch: "x64",
             url: "https://example.invalid/tool.tar.xz",
             sha256: "0",
             packaging: Packaging::TarXz,
-            archive_member: "pkg/bin/other-tool",
+            members: leaked(vec![member]),
         };
-        let e = extract(&asset, &bytes).unwrap_err();
+        let e = extract(&asset, &member, &bytes).unwrap_err();
         assert_eq!(e.code, ErrorCode::ConversionFailed);
     }
 

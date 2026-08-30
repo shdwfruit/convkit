@@ -240,11 +240,17 @@ session is interactive, `conv` now offers to close that loop for you:
 ```console
 $ conv clip.mkv clip.mp4
 ffmpeg is required for this conversion and isn't installed.
-Install it now? [y/N] y
+Install it now? (also installs ffprobe) [y/N] y
 downloading https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip ...
 ✓ clip.mp4 · 4.2 MB · 0.1s · stream copy, no re-encode
   C:\Users\Rick Xie\Videos\clip.mp4
 ```
+
+ffmpeg and ffprobe ship in that one zip upstream, so the prompt says so up
+front, and both land from the single download above — not two prompts, not
+two fetches. `conv install ffprobe` on a fresh machine does the same thing
+in reverse: same manifest entry either way, so whichever of the two names
+you ask for, both get installed together.
 
 Answering anything other than `y`/`yes` — or the prompt never appearing at
 all — leaves today's behaviour exactly as it was: the structured
