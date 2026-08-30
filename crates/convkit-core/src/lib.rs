@@ -11,6 +11,7 @@ mod procutil;
 pub mod recipe;
 pub mod registry;
 pub mod resolve;
+pub mod winpath;
 
 pub use backend::{Backend, PackageManager};
 pub use backend_overrides::BackendOverrides;

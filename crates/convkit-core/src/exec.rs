@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::error::{ConvError, ErrorCode, Result};
 use crate::procutil::backend_command;
-use crate::{plan, probe, registry, Backend, Format, OutputMode, Resolver};
+use crate::{plan, probe, registry, winpath, Backend, Format, OutputMode, Resolver};
 
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -201,6 +201,14 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             ));
         }
     }
+
+    // Before anything else touching the destination: on Windows, a name
+    // like `aux.jpg` is a device, not a file. Refusing it here -- ahead of
+    // the scratch directory and any spawn -- is what keeps `conv photo.heic
+    // aux.jpg` from blocking forever on a device that never accepts the
+    // write, leaving an orphaned backend process and an uncleaned scratch
+    // directory behind when the user gives up and kills conv (F197).
+    winpath::check_output_name(&req.output)?;
 
     // I5: enforced here, not only by the CLI's own fast-path check in
     // `batch.rs`, so refuse-by-default (spec §8) holds for every caller of
