@@ -1,6 +1,6 @@
 ---
 source: crates/convkit-core/tests/recipes.rs
-expression: "lines.join(\"\n\")"
+expression: "lines.join(\"\\n\")"
 ---
 avi -> flac: ffmpeg -i in.avi -vn -c:a flac -y out.flac
 avi -> gif: ffmpeg -i in.avi -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
@@ -51,9 +51,9 @@ jpg -> webp: magick in.jpg -auto-orient -quality 92 out.webp
 m4a -> flac: ffmpeg -i in.m4a -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
 m4a -> mp3: ffmpeg -i in.m4a -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
 m4a -> wav: ffmpeg -i in.m4a -vn -c:a pcm_s16le -y out.wav
-md -> docx: pandoc in.md --standalone -o out.docx
-md -> html: pandoc in.md --standalone -o out.html
-md -> pdf: pandoc in.md --standalone -o out.convkit-step0.docx
+md -> docx: pandoc in.md --standalone --resource-path . -o out.docx
+md -> html: pandoc in.md --standalone --resource-path . -o out.html
+md -> pdf: pandoc in.md --standalone --resource-path . -o out.convkit-step0.docx
 md -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . out.convkit-step0.docx
 mkv -> flac: ffmpeg -i in.mkv -vn -c:a flac -y out.flac
 mkv -> gif: ffmpeg -i in.mkv -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif

@@ -261,6 +261,11 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
                 if !cli.quiet {
                     print!("{}", render::conversion_success_human(o, styled_out));
                 }
+                // Backend-reported degradation goes to stderr even under
+                // --quiet: "silences everything except errors" — and a
+                // conversion that dropped your images is in the errors'
+                // half of that bargain, exit code notwithstanding.
+                eprint!("{}", render::conversion_notes_human("", o, styled_err));
             }
             Err(e) => {
                 eprint!(
@@ -274,13 +279,19 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
 
     let mut err = String::new();
     for r in results {
-        if let Err(e) = &r.result {
-            err.push_str(&render::conversion_failure_human(
-                &r.input,
-                r.to.ext(),
-                e,
-                styled_err,
-            ));
+        match &r.result {
+            Err(e) => {
+                err.push_str(&render::conversion_failure_human(
+                    &r.input,
+                    r.to.ext(),
+                    e,
+                    styled_err,
+                ));
+            }
+            Ok(o) => {
+                let label = r.input.display().to_string();
+                err.push_str(&render::conversion_notes_human(&label, o, styled_err));
+            }
         }
     }
     eprint!("{err}");
@@ -529,6 +540,8 @@ mod tests {
                 output: PathBuf::from("out.gif"),
                 bytes: 1,
                 warnings: vec![],
+                notes: vec![],
+                backend_output: vec![],
                 backends: vec![],
                 remuxed: false,
                 elapsed_ms: 1,

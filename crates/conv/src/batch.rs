@@ -183,6 +183,8 @@ mod tests {
             output: PathBuf::from("out"),
             bytes: 1,
             warnings: vec![],
+            notes: vec![],
+            backend_output: vec![],
             backends: vec![],
             remuxed: false,
             elapsed_ms: 0,

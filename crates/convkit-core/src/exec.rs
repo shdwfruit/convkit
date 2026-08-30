@@ -38,11 +38,32 @@ pub enum Event {
     },
 }
 
+/// One step's raw diagnostic output, kept even on success. Backends
+/// routinely exit 0 while reporting real degradation — pandoc's "Could not
+/// fetch resource", ImageMagick's "Premature end of JPEG file", ffmpeg's
+/// error-concealment lines — and reading stderr only on failure discarded
+/// every one of them. `stderr` also carries soffice's stdout, the stream
+/// it actually reports on.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackendOutput {
+    pub backend: Backend,
+    pub stderr: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
     pub output: PathBuf,
     pub bytes: u64,
     pub warnings: Vec<String>,
+    /// Degradation the *backends* reported during a successful run —
+    /// filtered, deduplicated lines from `backend_output` (see
+    /// `classify_backend_noise`). Distinct from `warnings`, which are the
+    /// plan's own up-front fidelity caveats: `notes` are discovered at
+    /// execution time, from the run that actually happened.
+    pub notes: Vec<String>,
+    /// The raw per-step diagnostics `notes` was distilled from, so `--json`
+    /// consumers can apply their own judgement. Tail-capped per step.
+    pub backend_output: Vec<BackendOutput>,
     pub backends: Vec<(Backend, String)>,
     pub remuxed: bool,
     /// Wall-clock time this conversion took, in whole milliseconds. Always
@@ -168,9 +189,98 @@ impl Drop for ScratchGuard {
 /// against a plain `argv` slice, without needing a real backend or
 /// filesystem.
 fn is_remux(argv: &[String]) -> bool {
-    argv.windows(2).any(|w| w == ["-c", "copy"])
-        || (argv.windows(2).any(|w| w == ["-c:v", "copy"])
-            && argv.windows(2).any(|w| w == ["-c:a", "copy"]))
+    let has = |pair: [&str; 2]| argv.windows(2).any(|w| w == pair);
+    has(["-c", "copy"])
+        || (has(["-c:v", "copy"]) && has(["-c:a", "copy"]))
+        // Audio extraction by stream copy: the audio bytes are untouched
+        // and there is no video codec argument at all (the video stream is
+        // dropped, not re-encoded), so this is every bit as lossless as a
+        // container remux.
+        || (has(["-c:a", "copy"]) && !argv.iter().any(|a| a == "-c:v"))
+}
+
+/// Filters one step's diagnostic output down to the lines a user should
+/// see on a *successful* run. Per-backend patterns, deliberately
+/// conservative — surfacing a real "your images were dropped" beats
+/// echoing a progress line, so unrecognised chatter stays out. Lines are
+/// deduplicated in order and capped, with the overflow counted honestly.
+fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
+    const MAX_NOTES: usize = 5;
+    let interesting = |line: &str| -> bool {
+        match backend {
+            Backend::Pandoc => {
+                line.contains("[WARNING]")
+                    || line.contains("[ERROR]")
+                    || line.contains("Could not fetch resource")
+            }
+            Backend::Magick => {
+                line.contains("@ warning/")
+                    || line.contains("@ error/")
+                    || line.starts_with("magick:")
+                    || line.starts_with("convert:")
+            }
+            Backend::Ffmpeg | Backend::Ffprobe => {
+                // ffmpeg's banner/config/progress chatter never matches
+                // these; its genuine trouble reports do ("Invalid NAL unit
+                // size", "corrupt decoded frame", "Error while decoding").
+                if line.starts_with("ffmpeg version")
+                    || line.starts_with("configuration:")
+                    || line.trim_start().starts_with("built with")
+                    || line.trim_start().starts_with("lib")
+                {
+                    return false;
+                }
+                ["Invalid", "invalid", "corrupt", "Corrupt", "concealing", "Error", "error"]
+                    .iter()
+                    .any(|k| line.contains(k))
+            }
+            Backend::Soffice => {
+                // `javaldx` grumbles about a missing JRE on every run on
+                // some systems; that noise would drown real reports.
+                !line.contains("javaldx")
+                    && ["Error", "rejected", "no export filter", "cannot open"]
+                        .iter()
+                        .any(|k| line.contains(k))
+            }
+            Backend::Typst => line.contains("warning:") || line.contains("error:"),
+        }
+    };
+
+    let mut notes: Vec<String> = Vec::new();
+    let mut extra = 0usize;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || !interesting(line) {
+            continue;
+        }
+        if notes.iter().any(|n| n == line) {
+            continue;
+        }
+        if notes.len() < MAX_NOTES {
+            notes.push(line.to_string());
+        } else {
+            extra += 1;
+        }
+    }
+    if extra > 0 {
+        notes.push(format!("(+{extra} more {} messages)", backend.exe_name()));
+    }
+    notes
+}
+
+/// The last `max` bytes of `s`, on a char boundary — raw backend output is
+/// kept for `--json` consumers, but a backend that logs megabytes must not
+/// balloon the envelope. The tail is what matters: backends summarise at
+/// the end.
+fn tail_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut start = s.len() - max;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
 }
 
 /// Runs a conversion plan end to end: resolves each step's backend, spawns
@@ -270,6 +380,8 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
 
     let total = built.steps.len();
     let mut backends = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    let mut backend_output: Vec<BackendOutput> = Vec::new();
     // Tracks the stem of whatever this step's actual input file is: the
     // request's first input for step 0, the previous step's located output
     // for every step after. `soffice` names its OutDir result after this.
@@ -352,31 +464,68 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             }
         };
 
+        // soffice reports on stdout; everything else on stderr. One
+        // combined transcript per step serves both the failure message
+        // below and, on success, the notes/raw-output channels — reading
+        // stderr only on failure was how every backend's "I produced
+        // something, but not what you asked for" report got discarded.
+        let mut step_report = String::from_utf8_lossy(&out.stderr).into_owned();
+        if step.backend == Backend::Soffice {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !stdout.trim().is_empty() {
+                if !step_report.is_empty() {
+                    step_report.push('\n');
+                }
+                step_report.push_str(&stdout);
+            }
+        }
+
         if !out.status.success() || !is_non_empty(&produced) {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            // `.rev().take(3)` alone selects the *last* three lines but
-            // leaves them in reverse (bottom-up) order; `.rev()` again
-            // after `.take(3)` restores the original top-down reading
-            // order without changing which three lines were picked.
-            let tail: String = stderr
-                .lines()
-                .rev()
-                .take(3)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("; ");
+            // Prefer the lines the classifier would keep — the actual
+            // `width not divisible by 2`, not ffmpeg's trailing progress
+            // line — falling back to the last three lines when nothing
+            // matches. The exit status is always included: "produced no
+            // output" with no status hid every crash as a mystery.
+            let salient = classify_backend_noise(step.backend, &step_report);
+            let detail: String = if salient.is_empty() {
+                step_report
+                    .lines()
+                    .rev()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            } else {
+                salient.into_iter().take(3).collect::<Vec<_>>().join("; ")
+            };
             return Err(ConvError {
                 code: ErrorCode::ConversionFailed,
                 message: if is_non_empty(&produced) {
-                    format!("{} failed: {tail}", step.backend.exe_name())
+                    format!(
+                        "{} failed ({}): {detail}",
+                        step.backend.exe_name(),
+                        out.status
+                    )
                 } else {
                     // soffice exits 0 on failure, so this branch is load-bearing.
-                    format!("{} produced no output. {tail}", step.backend.exe_name())
+                    format!(
+                        "{} produced no output ({}). {detail}",
+                        step.backend.exe_name(),
+                        out.status
+                    )
                 },
                 backend: Some(step.backend),
                 remediation: None,
+            });
+        }
+
+        notes.extend(classify_backend_noise(step.backend, &step_report));
+        if !step_report.trim().is_empty() {
+            backend_output.push(BackendOutput {
+                backend: step.backend,
+                stderr: tail_str(&step_report, 16 * 1024).to_string(),
             });
         }
 
@@ -398,6 +547,8 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         output: req.output.clone(),
         bytes,
         warnings: built.warnings,
+        notes,
+        backend_output,
         backends,
         remuxed,
         elapsed_ms: 0,

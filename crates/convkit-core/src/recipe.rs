@@ -11,6 +11,13 @@ pub enum Arg {
     Lit(&'static str),
     /// The first (usually only) input path.
     Input,
+    /// The directory containing the first input path (`.` for a bare
+    /// filename). For backends like `pandoc` that resolve a document's
+    /// relative resources (images) against a search path rather than
+    /// against the document's own location — without `--resource-path
+    /// <this>`, `conv docs/readme.md out.docx` run from anywhere but
+    /// `docs/` silently dropped every image.
+    InputDir,
     /// Every input path, in order. Used by the image→PDF merge recipe.
     Inputs,
     /// The output path this step writes.
@@ -89,6 +96,13 @@ impl Step {
             match arg {
                 Arg::Lit(s) => out.push((*s).to_string()),
                 Arg::Input => out.push(inputs[0].to_string_lossy().into_owned()),
+                Arg::InputDir => {
+                    let dir = inputs[0].parent().filter(|p| !p.as_os_str().is_empty());
+                    out.push(match dir {
+                        Some(d) => d.to_string_lossy().into_owned(),
+                        None => ".".to_string(),
+                    });
+                }
                 Arg::Inputs => out.extend(inputs.iter().map(|p| p.to_string_lossy().into_owned())),
                 Arg::Output => out.push(output.to_string_lossy().into_owned()),
                 Arg::OutDir => {

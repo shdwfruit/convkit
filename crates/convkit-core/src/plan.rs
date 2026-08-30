@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::Result;
+use crate::media;
 use crate::probe::MediaProbe;
 use crate::resolve::AvailableBackends;
 use crate::{registry, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe};
@@ -69,8 +70,46 @@ pub fn build(
         ));
     }
 
+    // Probe-aware media paths first: a container change whose video codec
+    // already fits the target gets a stream-mapped copy (or hybrid
+    // copy-video/transcode-audio) invocation built from the probe, and an
+    // audio extraction whose codec the target holds natively gets a
+    // `-c:a copy`. Both are constructed dynamically — the static registry
+    // table can only spell literal argv, which is exactly how default
+    // stream selection silently dropped tracks. Registration in the static
+    // table still gates the pair (`lookup` below is what decides a pair is
+    // supported at all); these only change *how* an already-supported pair
+    // runs when a probe is in hand.
+    if let Some(p) = probe {
+        if registry::lookup(from, to).is_some() {
+            let dynamic = if registry::needs_probe(from, to) {
+                media::stream_mapped_invocation(to, p, &inputs[0], output)
+            } else {
+                None
+            }
+            .or_else(|| media::audio_copy_invocation(from, to, p, &inputs[0], output));
+            if let Some(m) = dynamic {
+                return Ok(ConversionPlan {
+                    from,
+                    to,
+                    inputs: inputs.to_vec(),
+                    output: output.to_path_buf(),
+                    steps: vec![PlannedStep {
+                        backend: Backend::Ffmpeg,
+                        program: Backend::Ffmpeg.exe_name().to_string(),
+                        argv: m.argv,
+                        output_mode: OutputMode::Path,
+                        output: output.to_path_buf(),
+                        intermediate_ext: None,
+                    }],
+                    warnings: m.warnings,
+                });
+            }
+        }
+    }
+
     let recipe =
-        select(from, to, probe, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
+        select(from, to, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
 
     let last = recipe.steps.len() - 1;
 
@@ -127,11 +166,9 @@ pub fn build(
     })
 }
 
-/// Prefers a stream copy when the probe says the codecs already fit. The
-/// stream-copy recipe is chosen per target container: `-movflags +faststart`
-/// is an mp4-muxer-family-only option (mp4 and mov share it; mkv and webm
-/// reject it outright), so `REMUX_MP4`/`REMUX_MOV`/`REMUX_MKV`/`REMUX_WEBM`
-/// are four distinct recipes, not one shared const.
+/// Chooses among the *static* recipes; the probe-aware media paths are
+/// handled in `build` itself (see `media`), so by the time this runs the
+/// answer is either a fallback-selection question or a plain table lookup.
 ///
 /// `available` picks between the canonical (soffice) and fallback
 /// (pandoc+typst) recipes for a pair that `registry::has_fallback` — today,
@@ -145,31 +182,7 @@ pub fn build(
 /// route available gets the ordinary `backend_missing` naming soffice —
 /// the pair's own primary backend — rather than a confusing one naming
 /// typst.
-fn select(
-    from: Format,
-    to: Format,
-    probe: Option<&MediaProbe>,
-    available: Option<&AvailableBackends>,
-) -> Option<Recipe> {
-    if registry::needs_probe(from, to) {
-        if let Some(p) = probe {
-            if registry::can_remux(to, p) {
-                let remux = match to {
-                    Format::Mp4 => registry::REMUX_MP4,
-                    Format::Mov => registry::REMUX_MOV,
-                    // Not a plain `REMUX_MKV`: matroska rejects `mov_text`
-                    // outright, so this picks the SRT-subtitle sibling when
-                    // the probe found one. See `mkv_remux_for`'s own docs.
-                    Format::Mkv => registry::mkv_remux_for(p),
-                    Format::Webm => registry::REMUX_WEBM,
-                    // `needs_probe` only returns true for Mp4/Mov/Mkv/Webm targets.
-                    _ => unreachable!("needs_probe restricts targets to Mp4, Mov, Mkv, or Webm"),
-                };
-                return Some(remux);
-            }
-        }
-    }
-
+fn select(from: Format, to: Format, available: Option<&AvailableBackends>) -> Option<Recipe> {
     if let Some(avail) = available {
         if !avail.has(Backend::Soffice) && avail.has(Backend::Pandoc) && avail.has(Backend::Typst) {
             if let Some(fallback) = registry::lookup_fallback(from, to) {
@@ -211,6 +224,7 @@ mod tests {
             video_codec: Some("h264".into()),
             audio_codec: Some("aac".into()),
             subtitle_codec: None,
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mkv,
@@ -222,8 +236,18 @@ mod tests {
         )
         .unwrap();
         assert!(
-            plan.steps[0].argv.windows(2).any(|w| w == ["-c", "copy"]),
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:v", "copy"]),
             "{:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:a", "copy"]),
+            "{:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-map", "0:v:0"]),
+            "the remux must map its streams explicitly, never rely on default selection: {:?}",
             plan.steps[0].argv
         );
     }
@@ -234,6 +258,7 @@ mod tests {
             video_codec: Some("vp9".into()),
             audio_codec: Some("opus".into()),
             subtitle_codec: None,
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mkv,
@@ -325,6 +350,7 @@ mod tests {
             video_codec: Some("vp9".into()),
             audio_codec: Some("opus".into()),
             subtitle_codec: None,
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mkv,
@@ -336,7 +362,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            plan.steps[0].argv.windows(2).any(|w| w == ["-c", "copy"]),
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:v", "copy"])
+                && plan.steps[0].argv.windows(2).any(|w| w == ["-c:a", "copy"]),
             "{:?}",
             plan.steps[0].argv
         );
@@ -356,6 +383,7 @@ mod tests {
             video_codec: Some("h264".into()),
             audio_codec: Some("aac".into()),
             subtitle_codec: None,
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mp4,
@@ -367,7 +395,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            plan.steps[0].argv.windows(2).any(|w| w == ["-c", "copy"]),
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:v", "copy"])
+                && plan.steps[0].argv.windows(2).any(|w| w == ["-c:a", "copy"]),
             "{:?}",
             plan.steps[0].argv
         );
@@ -388,6 +417,7 @@ mod tests {
             video_codec: Some("h264".into()),
             audio_codec: Some("aac".into()),
             subtitle_codec: None,
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mp4,
@@ -399,13 +429,19 @@ mod tests {
         )
         .unwrap();
         assert!(
-            plan.steps[0].argv.windows(2).any(|w| w == ["-c", "copy"]),
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:v", "copy"])
+                && plan.steps[0].argv.windows(2).any(|w| w == ["-c:a", "copy"]),
             "{:?}",
             plan.steps[0].argv
         );
         assert!(
             plan.steps[0].argv.windows(2).any(|w| w == ["-map", "0"]),
             "mkv remux must preserve every stream via -map 0: {:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-map", "-0:d"]),
+            "mkv remux must exclude data streams the matroska muxer rejects: {:?}",
             plan.steps[0].argv
         );
         assert!(
@@ -429,6 +465,7 @@ mod tests {
             video_codec: Some("h264".into()),
             audio_codec: Some("aac".into()),
             subtitle_codec: Some("mov_text".into()),
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mp4,

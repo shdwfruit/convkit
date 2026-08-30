@@ -81,11 +81,31 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
         "bytes": o.bytes,
         "remuxed": o.remuxed,
         "warnings": o.warnings,
+        "notes": o.notes,
+        "backend_output": o.backend_output,
         "elapsed_ms": o.elapsed_ms,
         "backends": o.backends.iter()
             .map(|(b, v)| json!({ "backend": b, "version": v }))
             .collect::<Vec<_>>(),
     })
+}
+
+/// Backend-reported degradation on a *successful* conversion, rendered for
+/// stderr — a script watching only stderr must see trouble even when the
+/// exit code is 0. `label` names the input in batch mode (where per-job
+/// success lines are suppressed) and is empty for a single job.
+pub fn conversion_notes_human(label: &str, o: &Outcome, styled: bool) -> String {
+    let mut s = String::new();
+    for n in &o.notes {
+        let line = if label.is_empty() {
+            format!("warning  {n}")
+        } else {
+            format!("warning  {label}: {n}")
+        };
+        s.push_str(&paint(&line, yellow_bold(), styled));
+        s.push('\n');
+    }
+    s
 }
 
 // --- Part 2: informative human-mode rendering for a real conversion -------
@@ -121,6 +141,10 @@ fn green_bold() -> Style {
 
 fn red_bold() -> Style {
     AnsiColor::Red.on_default().bold()
+}
+
+fn yellow_bold() -> Style {
+    AnsiColor::Yellow.on_default().bold()
 }
 
 fn dim() -> Style {
@@ -379,6 +403,8 @@ mod tests {
             output: PathBuf::from("long.gif"),
             bytes,
             warnings: warnings.into_iter().map(str::to_string).collect(),
+            notes: vec![],
+            backend_output: vec![],
             backends: vec![],
             remuxed,
             elapsed_ms: 900,

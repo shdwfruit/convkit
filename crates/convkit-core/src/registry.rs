@@ -904,6 +904,12 @@ const PDF_TO_DOCX: Recipe = Recipe {
 /// Mirrors `soffice_step!`: the plain pandoc invocation shared by
 /// `MD_TO_DOCX` and `MD_TO_HTML`, plus a variant that tags an intermediate
 /// file's extension for a multi-step recipe like `MD_TO_PDF`.
+/// `--resource-path` points pandoc's resource resolution at the input
+/// document's own directory: pandoc resolves a document's relative image
+/// paths against the *working directory* by default, so `conv
+/// docs/readme.md out.docx` run from anywhere but `docs/` silently dropped
+/// every image (pandoc still exits 0, merely printing "Could not fetch
+/// resource" to stderr).
 macro_rules! pandoc_step {
     () => {
         step!(
@@ -911,6 +917,8 @@ macro_rules! pandoc_step {
             [
                 Arg::Input,
                 Arg::Lit("--standalone"),
+                Arg::Lit("--resource-path"),
+                Arg::InputDir,
                 Arg::Lit("-o"),
                 Arg::Output
             ]
@@ -922,6 +930,8 @@ macro_rules! pandoc_step {
             args: &[
                 Arg::Input,
                 Arg::Lit("--standalone"),
+                Arg::Lit("--resource-path"),
+                Arg::InputDir,
                 Arg::Lit("-o"),
                 Arg::Output,
             ],
@@ -1062,17 +1072,33 @@ pub fn backends_for(from: Format, to: Format) -> Vec<Backend> {
 }
 
 /// True when the pair might be satisfiable by a stream copy, so the caller
-/// should run ffprobe before building a plan.
+/// should run ffprobe before building a plan. Two shapes qualify: a
+/// container change between video containers (the classic remux), and an
+/// audio extraction whose source codec the target container might already
+/// hold natively (`mp4 → m4a` used to re-encode AAC to AAC for want of
+/// this probe).
 pub fn needs_probe(from: Format, to: Format) -> bool {
-    let container_change = matches!(to, Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm)
-        && matches!(
+    let video_source = matches!(
+        from,
+        Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm | Format::Avi
+    );
+    let container_change =
+        matches!(to, Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm) && video_source;
+    let audio_extract = matches!(
+        to,
+        Format::M4a | Format::Mp3 | Format::Flac | Format::Wav
+    ) && (video_source
+        || matches!(
             from,
-            Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm | Format::Avi
-        );
-    container_change && from != to
+            Format::Mp3 | Format::M4a | Format::Wav | Format::Flac
+        ));
+    (container_change || audio_extract) && from != to
 }
 
-/// Whether the probed codecs are legal in the target container.
+/// Whether the probed codecs are legal in the target container — checked
+/// for *every* audio stream the probe saw, not just the first: a `-c copy`
+/// approved off stream 1 alone once shipped a DTS track on stream 2 that
+/// most players can't decode.
 pub fn can_remux(to: Format, probe: &crate::MediaProbe) -> bool {
     let (video_ok, audio_ok) = match to {
         Format::Mp4 => (MP4_COMPATIBLE_VIDEO, MP4_COMPATIBLE_AUDIO),
@@ -1086,10 +1112,7 @@ pub fn can_remux(to: Format, probe: &crate::MediaProbe) -> bool {
         .as_deref()
         .is_some_and(|c| video_ok.contains(&c));
     // A file with no audio stream remuxes fine.
-    let a = probe
-        .audio_codec
-        .as_deref()
-        .is_none_or(|c| audio_ok.contains(&c));
+    let a = probe.all_audio().iter().all(|c| audio_ok.contains(c));
     v && a
 }
 
@@ -1395,6 +1418,7 @@ mod tests {
             video_codec: Some("h264".into()),
             audio_codec: Some("aac".into()),
             subtitle_codec: Some("mov_text".into()),
+            ..crate::MediaProbe::default()
         };
         assert_eq!(mkv_remux_for(&with_mov_text), REMUX_MKV_SRT_SUBS);
 
@@ -1403,6 +1427,7 @@ mod tests {
                 video_codec: Some("h264".into()),
                 audio_codec: Some("aac".into()),
                 subtitle_codec,
+                ..crate::MediaProbe::default()
             };
             assert_eq!(mkv_remux_for(&probe), REMUX_MKV, "{probe:?}");
         }
@@ -1566,6 +1591,7 @@ mod tests {
             video_codec: Some("prores".into()),
             audio_codec: Some("aac".into()),
             subtitle_codec: None,
+            ..crate::MediaProbe::default()
         };
         assert!(can_remux(Format::Mov, &prores), "{prores:?}");
 
@@ -1576,6 +1602,7 @@ mod tests {
             video_codec: Some("av1".into()),
             audio_codec: Some("aac".into()),
             subtitle_codec: None,
+            ..crate::MediaProbe::default()
         };
         assert!(!can_remux(Format::Mov, &av1), "{av1:?}");
     }
@@ -1595,6 +1622,7 @@ mod tests {
                 video_codec: Some(video.into()),
                 audio_codec: Some(audio.into()),
                 subtitle_codec: None,
+                ..crate::MediaProbe::default()
             };
             assert!(can_remux(Format::Mkv, &probe), "{probe:?}");
         }
