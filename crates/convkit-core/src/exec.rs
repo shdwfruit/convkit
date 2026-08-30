@@ -1,11 +1,11 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Serialize;
 
 use crate::error::{ConvError, ErrorCode, Result};
+use crate::procutil::backend_command;
 use crate::{plan, probe, registry, Backend, Format, OutputMode, Resolver};
 
 #[derive(Debug, Clone)]
@@ -66,14 +66,17 @@ static SCRATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Creates a private scratch directory inside `dest_dir`, named
 /// `.convkit-<pid>-<counter>`.
 ///
-/// Every intermediate step file, the LibreOffice profile, and the
-/// temp-named final output all live here instead of directly in the user's
-/// destination directory. This is load-bearing, not tidiness: `soffice`
-/// only ever gets `--outdir <scratch>`, never the user's real directory, so
-/// it can neither overwrite nor be confused with a pre-existing file there
-/// (e.g. converting `report.docx` into a directory that already holds an
-/// older `report.pdf`), and two conversions writing into the same
-/// destination directory can never collide on the same landing name.
+/// Every intermediate step file and the temp-named final output live here
+/// instead of directly in the user's destination directory. This is
+/// load-bearing, not tidiness: `soffice` only ever gets `--outdir <scratch>`,
+/// never the user's real directory, so it can neither overwrite nor be
+/// confused with a pre-existing file there (e.g. converting `report.docx`
+/// into a directory that already holds an older `report.pdf`), and two
+/// conversions writing into the same destination directory can never
+/// collide on the same landing name.
+///
+/// The LibreOffice profile does *not* live here — see `make_lo_profile_dir`
+/// for why it deliberately lives outside both `scratch` and `dest_dir`.
 fn make_scratch_dir(dest_dir: &Path) -> Result<PathBuf> {
     if !dest_dir.is_dir() {
         return Err(ConvError::new(
@@ -96,22 +99,59 @@ fn make_scratch_dir(dest_dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Owns a conversion's scratch directory and removes it (recursively) on
-/// drop, unconditionally. By the time `run` returns — success or error —
-/// the real output has already been renamed out of the scratch directory if
-/// it was ever going to exist at all, so everything the guard finds still
-/// inside is genuinely disposable: intermediates, a populated LibreOffice
-/// profile, or (on a failure partway through) a temp-named output that
-/// never made it out.
+/// Owns a conversion's scratch directory *and* every LibreOffice profile
+/// directory created for it, removing all of them (recursively) on drop,
+/// unconditionally. By the time `run` returns — success or error — the real
+/// output has already been renamed out of the scratch directory if it was
+/// ever going to exist at all, so everything the guard finds still inside
+/// `scratch` is genuinely disposable: intermediates, or (on a failure
+/// partway through) a temp-named output that never made it out. Each
+/// tracked profile directory is disposable for the same reason: it exists
+/// solely to give one `soffice` invocation an isolated
+/// `-env:UserInstallation`, and nothing downstream ever depends on it
+/// surviving past that invocation.
+///
+/// `profiles` lives outside `scratch` — see `make_lo_profile_dir`'s docs for
+/// why — so cleaning it up is no longer a side effect of removing `scratch`
+/// the way it was when the profile lived underneath it; each profile is
+/// tracked here explicitly instead, appended to as each soffice step runs.
+/// One `Drop` still walks both `scratch` and every tracked profile, so this
+/// remains a single cleanup mechanism, not two: a panic or an early return
+/// partway through a multi-step recipe still cleans up every profile
+/// created before that point, not just the last one.
 ///
 /// This is what makes cleanup cover every return path — backend resolution
 /// failure, spawn failure, a rename failure, even a panic — without needing
 /// an explicit `cleanup()` call at each one.
-struct ScratchGuard(PathBuf);
+struct ScratchGuard {
+    scratch: PathBuf,
+    profiles: Vec<PathBuf>,
+}
+
+impl ScratchGuard {
+    fn new(scratch: PathBuf) -> Self {
+        ScratchGuard {
+            scratch,
+            profiles: Vec::new(),
+        }
+    }
+
+    /// Registers `profile` for cleanup on drop. Called right after
+    /// `make_lo_profile_dir` computes the path and before the soffice
+    /// process that will populate it is ever spawned, so a profile is
+    /// tracked — and therefore guaranteed cleaned up — regardless of
+    /// whether that invocation succeeds, fails, or panics.
+    fn track_profile(&mut self, profile: PathBuf) {
+        self.profiles.push(profile);
+    }
+}
 
 impl Drop for ScratchGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(&self.scratch);
+        for profile in &self.profiles {
+            let _ = std::fs::remove_dir_all(profile);
+        }
     }
 }
 
@@ -202,8 +242,9 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         .unwrap_or_else(|| Path::new("."));
     let scratch = make_scratch_dir(dest_dir)?;
     // Lives for the rest of this function; its `Drop` removes `scratch`
-    // (and everything left inside it) on every exit path.
-    let _guard = ScratchGuard(scratch.clone());
+    // (and everything left inside it) plus every tracked LibreOffice
+    // profile directory, on every exit path.
+    let mut guard = ScratchGuard::new(scratch.clone());
 
     let final_name = req.output.file_name().ok_or_else(|| {
         ConvError::new(
@@ -245,14 +286,19 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         });
         let resolved = resolver.resolve(step.backend)?;
 
-        let mut cmd = Command::new(&resolved.path);
+        // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
+        // inside `backend_command`, not repeated here -- see its docs.
+        let mut cmd = backend_command(&resolved.path);
 
         // Constraint: every soffice invocation gets its own isolated
-        // profile, and now it lives inside the scratch directory too — one
-        // `remove_dir_all` on `scratch` cleans up the profile along with
-        // everything else, populated or not.
+        // profile. It lives in the system temp directory, not under
+        // `scratch` (see `make_lo_profile_dir`'s docs) — tracked on `guard`
+        // right away, before the process that will populate it is even
+        // spawned, so it is cleaned up on every exit path exactly like
+        // `scratch` itself.
         if step.backend == Backend::Soffice {
-            let profile = scratch.join(format!("lo-profile-{i}"));
+            let profile = make_lo_profile_dir();
+            guard.track_profile(profile.clone());
             let url = user_installation_url(&profile)?;
             // `plan::build` already inserted `plan::USER_INSTALLATION_
             // PLACEHOLDER` as this step's first argv element specifically
@@ -439,6 +485,48 @@ fn locate_outdir_result(input_stem: &OsStr, want_ext: &str, dir: &Path) -> Resul
 
 fn io_err(e: std::io::Error) -> ConvError {
     ConvError::new(ErrorCode::ConversionFailed, e.to_string())
+}
+
+/// Uniquifies the LibreOffice profile directory across however many soffice
+/// invocations happen to run inside one process — a single conversion's
+/// recipe can invoke soffice more than once, and Task 12's rayon batch mode
+/// can run multiple conversions concurrently. A separate counter from
+/// `SCRATCH_COUNTER`, not a reuse of it, because a profile's uniqueness no
+/// longer has anything to do with which scratch directory (if any) happens
+/// to be backing the surrounding conversion.
+static LO_PROFILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Where a soffice invocation's isolated `-env:UserInstallation` profile
+/// lives: a short, uniquely-named directory (`convkit-lo-<pid>-<n>`)
+/// directly under the system temp directory — deliberately *not* inside
+/// `scratch`, and therefore not inside the user's destination directory at
+/// all.
+///
+/// LibreOffice creates a fairly deep tree beneath whatever profile path it's
+/// given (`user/config/...` and more). Nesting that under `scratch`, itself
+/// nested inside the user's destination directory, routinely blew past
+/// Windows' 260-character `MAX_PATH` for any destination with a realistic
+/// amount of nesting already in it — a synced OneDrive `Documents` folder, a
+/// project directory a few levels deep. LibreOffice then failed to
+/// initialize the profile and reported it as "the configuration file ...
+/// bootstrap.ini is corrupt," a message that points at the LibreOffice
+/// installation rather than the real cause — while `soffice` itself still
+/// exited 0, so the only visible symptom on the convkit side was "no output
+/// produced," exactly the trap `is_non_empty` below exists to catch, just
+/// for a cause invisible from here.
+///
+/// The profile has no co-location requirement with the rest of the
+/// conversion: only the final output temp file must sit on the destination
+/// volume, so the closing `std::fs::rename` stays atomic (this function
+/// changes nothing about that — `temp_final` is still `scratch.join(...)`).
+/// The profile is scratch state LibreOffice itself reads and writes, so
+/// system temp — always short, always writable — is a strictly better home
+/// for it than a path built from the user's own, arbitrarily long and deep,
+/// destination directory.
+fn make_lo_profile_dir() -> PathBuf {
+    let pid = std::process::id();
+    let n = LO_PROFILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("convkit-lo-{pid}-{n}"))
 }
 
 /// Percent-encodes every byte outside the RFC 3986 "unreserved" set
@@ -1041,12 +1129,53 @@ mod tests {
         assert!(scratch.is_dir());
 
         {
-            let _guard = ScratchGuard(scratch.clone());
+            let _guard = ScratchGuard::new(scratch.clone());
         }
 
         assert!(
             !scratch.exists(),
             "scratch directory must be removed recursively on drop"
+        );
+    }
+
+    /// The LibreOffice profile now lives outside `scratch` entirely (see
+    /// `make_lo_profile_dir`'s docs), so its cleanup is no longer a free
+    /// side effect of removing `scratch` — `ScratchGuard` must track and
+    /// remove it itself. Proven against *two* separately-tracked, populated
+    /// profile directories (mirroring more than one soffice step in a
+    /// single recipe) sitting entirely outside `scratch`, so this can't pass
+    /// by accident of both happening to be nested under the same directory
+    /// `scratch`'s own removal would already sweep up.
+    #[test]
+    fn scratch_guard_also_removes_every_tracked_profile_directory_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = dir.path().join(".convkit-test-scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        let profiles_root = tempfile::tempdir().unwrap();
+        let profile_a = profiles_root.path().join("convkit-lo-test-0");
+        let profile_b = profiles_root.path().join("convkit-lo-test-1");
+        for profile in [&profile_a, &profile_b] {
+            std::fs::create_dir_all(profile.join("user/config")).unwrap();
+            std::fs::write(profile.join("user/config/registrymodifications.xcu"), b"x").unwrap();
+        }
+        assert!(profile_a.is_dir());
+        assert!(profile_b.is_dir());
+
+        {
+            let mut guard = ScratchGuard::new(scratch.clone());
+            guard.track_profile(profile_a.clone());
+            guard.track_profile(profile_b.clone());
+        }
+
+        assert!(!scratch.exists(), "scratch directory must still be removed");
+        assert!(
+            !profile_a.exists(),
+            "the first tracked profile directory must be removed too"
+        );
+        assert!(
+            !profile_b.exists(),
+            "the second tracked profile directory must be removed too"
         );
     }
 
@@ -1168,6 +1297,44 @@ mod tests {
             crate::plan::USER_INSTALLATION_PLACEHOLDER,
             "the real process must never see the dry-run placeholder text"
         );
+        // The profile-path fix: the real URL must never point inside this
+        // conversion's scratch directory (named `.convkit-<pid>-<n>` -- see
+        // `make_scratch_dir`) or, by extension, the destination directory
+        // that scratch dir lives in.
+        assert!(
+            !first_token.contains(".convkit-"),
+            "the profile must not be nested inside the scratch directory: {first_token:?}"
+        );
+    }
+
+    /// The bug this fix addresses, at the unit level: `make_lo_profile_dir`
+    /// must place every profile directly under the system temp directory --
+    /// never inside any particular conversion's scratch or destination
+    /// directory, which is what let a real LibreOffice profile tree (`user/
+    /// config/...` and more) nest deep enough to blow past Windows'
+    /// 260-character `MAX_PATH` in the field. Also checks two calls never
+    /// collide, even back-to-back in the same process -- the property that
+    /// keeps concurrent soffice invocations (Task 12's rayon batch mode, or
+    /// more than one soffice step in a single recipe) from colliding on the
+    /// same profile.
+    #[test]
+    fn make_lo_profile_dir_lives_directly_under_system_temp_and_is_unique_per_call() {
+        let a = make_lo_profile_dir();
+        let b = make_lo_profile_dir();
+        assert_ne!(a, b, "two calls must never produce the same profile path");
+        for p in [&a, &b] {
+            assert_eq!(
+                p.parent(),
+                Some(std::env::temp_dir().as_path()),
+                "profile must live directly under the system temp directory: {}",
+                p.display()
+            );
+            let name = p.file_name().unwrap().to_string_lossy();
+            assert!(
+                name.starts_with("convkit-lo-"),
+                "unexpected profile directory name: {name}"
+            );
+        }
     }
 
     // --- Task 2: Arg::BackendPath substitution for the pandoc+typst

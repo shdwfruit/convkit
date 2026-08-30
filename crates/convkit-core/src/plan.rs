@@ -16,14 +16,14 @@ use crate::{registry, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe}
 /// LibreOffice against their live profile, the exact collision this flag
 /// exists to prevent, which fails outright if LibreOffice is already open.
 ///
-/// `build` can't know the real per-run scratch profile path — that only
-/// exists once `exec::run` creates a scratch directory for this specific
-/// run — so it emits this placeholder instead, keeping the printed command
-/// honest about the flag's *presence* while `exec::run` substitutes the
-/// real, isolated URL in for it at execution time (see `exec::run`'s
-/// `debug_assert_eq!` against this constant). `plan::build` stays pure
-/// either way: no filesystem access, no real scratch path, just this fixed
-/// string.
+/// `build` can't know the real per-run profile path — that only exists once
+/// `exec::run` computes an isolated profile directory for this specific
+/// soffice invocation — so it emits this placeholder instead, keeping the
+/// printed command honest about the flag's *presence* while `exec::run`
+/// substitutes the real, isolated URL in for it at execution time (see
+/// `exec::run`'s `debug_assert_eq!` against this constant). `plan::build`
+/// stays pure either way: no filesystem access, no real profile path, just
+/// this fixed string.
 pub const USER_INSTALLATION_PLACEHOLDER: &str = "-env:UserInstallation=<per-run temp profile>";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

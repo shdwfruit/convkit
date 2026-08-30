@@ -1,7 +1,7 @@
 use std::path::Path;
-use std::process::Command;
 
 use crate::error::{ConvError, ErrorCode, Result};
+use crate::procutil::backend_command;
 
 /// The codecs already present in a media file. `video_codec`/`audio_codec`
 /// decide whether a container change can be a stream copy at all (see
@@ -43,7 +43,9 @@ pub fn parse(json: &str) -> MediaProbe {
 /// `exec`, because plan construction needs the answer before it can choose a
 /// recipe.
 pub fn run(ffprobe: &Path, input: &Path) -> Result<MediaProbe> {
-    let out = Command::new(ffprobe)
+    // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
+    // inside `backend_command`, not repeated here -- see its docs.
+    let out = backend_command(ffprobe)
         .args(["-v", "quiet", "-print_format", "json", "-show_streams"])
         .arg(input)
         .output()

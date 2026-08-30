@@ -7,6 +7,7 @@ pub mod install;
 pub mod manifest;
 pub mod plan;
 pub mod probe;
+mod procutil;
 pub mod recipe;
 pub mod registry;
 pub mod resolve;

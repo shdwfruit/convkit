@@ -616,7 +616,13 @@ impl Resolver {
         flag: &str,
         timeout: Duration,
     ) -> Option<String> {
-        let mut cmd = Command::new(path);
+        // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
+        // inside `backend_command`, not repeated here -- see its docs. This
+        // is what stops soffice's own version probe (and the ImageMagick-6
+        // `convert` identification probe in `looks_like_imagemagick`, which
+        // also routes through here) from popping a console window -- worse,
+        // one stuck reading "Press Enter to continue..." -- on every resolve.
+        let mut cmd = crate::procutil::backend_command(path);
         cmd.arg(flag);
 
         let profile = (backend == Backend::Soffice).then(|| {

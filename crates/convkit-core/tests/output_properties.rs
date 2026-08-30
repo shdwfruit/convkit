@@ -417,6 +417,88 @@ fn docx_to_pdf_produces_a_real_pdf() {
     assert_eq!(&header, b"%PDF-");
 }
 
+/// Builds a directory whose full path is at least `min_len` bytes long by
+/// repeatedly appending a fixed-length nested subdirectory under `base`,
+/// then creates it. Every segment name is well under the ~255-byte
+/// component limit every mainstream filesystem enforces, so this genuinely
+/// gets *deeper*, not just longer components -- meaningful on Linux and
+/// macOS too, not only on Windows where `MAX_PATH` (260 bytes) is a real,
+/// enforced ceiling. `Path::join` throughout means the result uses each
+/// platform's own native separator.
+fn make_deep_dir(base: &Path, min_len: usize) -> PathBuf {
+    let segment = "convkit_deep_destination_directory_segment";
+    let mut dir = base.to_path_buf();
+    while dir.as_os_str().len() < min_len {
+        dir = dir.join(segment);
+    }
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
+        panic!(
+            "failed to create deep test directory {}: {e}",
+            dir.display()
+        )
+    });
+    dir
+}
+
+/// The regression test for the LibreOffice-profile-path fix (see the fix's
+/// own report). Before it, `exec::run` created the `-env:UserInstallation`
+/// profile *inside* the per-conversion scratch directory, which itself
+/// lives inside the user's chosen destination directory -- so LibreOffice's
+/// own, fairly deep profile tree (`user/config/...` and more) ended up
+/// nested under whatever the destination path already was. On Windows that
+/// routinely blew past the 260-character `MAX_PATH`: `soffice` still
+/// exited 0 (see `a_backend_that_writes_nothing_is_a_failure_even_on_exit_
+/// zero` in `exec.rs` for the general shape of that trap), but produced no
+/// PDF, and the only visible symptom was LibreOffice's own "the
+/// configuration file ... bootstrap.ini is corrupt" popup -- a message that
+/// points at the LibreOffice installation, not at convkit's own path
+/// choice.
+///
+/// This drives a real `docx -> pdf` conversion, through the exact same
+/// `exec::run` path `conv` uses in production, with *both* the input and
+/// the output sitting in a destination directory built to be at least 150
+/// characters deep -- comfortably past what the old, buggy code needed to
+/// fail on this project's own controlled experiment (a 151-character
+/// destination was already enough). The directory lives inside a
+/// `tempfile::tempdir()` so it cleans itself up regardless of outcome.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn docx_to_pdf_succeeds_in_a_deep_destination_directory() {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Soffice);
+
+    let base = tempfile::tempdir().unwrap();
+    let deep_dir = make_deep_dir(base.path(), 150);
+    assert!(
+        deep_dir.as_os_str().len() >= 150,
+        "test setup failed to build a deep enough directory: {} ({} bytes)",
+        deep_dir.display(),
+        deep_dir.as_os_str().len()
+    );
+
+    let input = deep_dir.join("sample.docx");
+    std::fs::copy(fixture("sample.docx"), &input)
+        .unwrap_or_else(|e| panic!("failed to copy fixture into deep dir: {e}"));
+    let output = deep_dir.join("out.pdf");
+
+    let req = exec::Request {
+        from: Format::Docx,
+        to: Format::Pdf,
+        inputs: vec![input],
+        output: output.clone(),
+        overwrite: false,
+    };
+    exec::run(&req, &resolver, &mut |_| {})
+        .unwrap_or_else(|e| panic!("docx -> pdf into a deep destination directory failed: {e}"));
+
+    let mut header = [0u8; 5];
+    std::fs::File::open(&output)
+        .unwrap_or_else(|e| panic!("expected a real output file at {}: {e}", output.display()))
+        .read_exact(&mut header)
+        .unwrap();
+    assert_eq!(&header, b"%PDF-", "output is not a real PDF");
+}
+
 /// Override-authority fix verification (see the fix's own report). The
 /// coordinator's own attempt to prove this could never force ffprobe
 /// genuinely unavailable: a plain `--ffprobe-path <nonexistent>` used to
