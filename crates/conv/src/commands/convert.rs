@@ -124,6 +124,15 @@ fn probed_for(resolver: &Resolver, job: &input::Job) -> Option<MediaProbe> {
     if !registry::needs_probe(job.from, job.to) {
         return None;
     }
+    // `--dry-run` is documented as inert, but ffprobe honours URLs and
+    // device paths, so probing the raw positional would turn a preview of
+    // `http://…/x.mkv` into a real outbound fetch. Mirror `exec::run`'s
+    // own input gate: only an existing regular file is ever probed, and
+    // anything else falls back to the conservative transcode preview the
+    // no-probe path already produces.
+    if !job.inputs[0].is_file() {
+        return None;
+    }
     resolver
         .resolve(Backend::Ffprobe)
         .ok()
@@ -365,7 +374,8 @@ mod tests {
 
     /// C3's core mechanism: a pair that might remux (`mkv -> mp4`) must
     /// actually invoke ffprobe and return its codecs, not silently stay
-    /// `None`.
+    /// `None`. The input must be a real file on disk — `probed_for` now
+    /// refuses to probe anything else (see the URL test below).
     #[test]
     fn probed_for_runs_ffprobe_on_a_pair_that_might_remux() {
         let dir = tempfile::tempdir().unwrap();
@@ -373,15 +383,42 @@ mod tests {
         let mut r = Resolver::new();
         r.with_override(Backend::Ffprobe, stub);
 
-        let j = job(
-            convkit_core::Format::Mkv,
-            convkit_core::Format::Mp4,
-            "in.mkv",
-            "out.mp4",
-        );
+        let input = dir.path().join("in.mkv");
+        std::fs::write(&input, b"x").unwrap();
+        let j = input::Job {
+            inputs: vec![input],
+            output: PathBuf::from("out.mp4"),
+            from: convkit_core::Format::Mkv,
+            to: convkit_core::Format::Mp4,
+        };
         let probed = probed_for(&r, &j).expect("must probe a remuxable pair");
         assert_eq!(probed.video_codec.as_deref(), Some("h264"));
         assert_eq!(probed.audio_codec.as_deref(), Some("aac"));
+    }
+
+    /// The dry-run SSRF hole: ffprobe follows URLs, so a `--dry-run` of
+    /// `http://…/x.mkv` used to make a real network request from a command
+    /// documented as inert. Anything that is not an existing regular file
+    /// must skip the probe entirely — ffprobe is never spawned at all.
+    #[test]
+    fn probed_for_never_probes_an_input_that_is_not_a_local_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_ffprobe_stub(dir.path());
+        let mut r = Resolver::new();
+        r.with_override(Backend::Ffprobe, stub);
+
+        for input in ["http://192.0.2.1/x.mkv", "definitely-missing.mkv"] {
+            let j = job(
+                convkit_core::Format::Mkv,
+                convkit_core::Format::Mp4,
+                input,
+                "out.mp4",
+            );
+            assert!(
+                probed_for(&r, &j).is_none(),
+                "{input} must not be probed"
+            );
+        }
     }
 
     /// A pair that can never remux (no container change ffmpeg would ever

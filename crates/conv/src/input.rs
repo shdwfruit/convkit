@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use convkit_core::{ConvError, ErrorCode, Format, Kind, Remediation};
@@ -57,6 +57,20 @@ fn resolve_pair(paths: &[PathBuf]) -> Result<(PathBuf, PathBuf), ConvError> {
 fn format_of(p: &Path) -> Result<Format, ConvError> {
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
     Format::from_ext(ext).ok_or_else(|| ConvError::unknown_format(ext))
+}
+
+/// The key two planned outputs are compared on to decide they'd land on the
+/// same file. Absolute, so `./a.webp` and `a.webp` collide; case-folded on
+/// Windows and macOS, whose default filesystems are case-insensitive, so
+/// `A.webp` and `a.webp` collide there too — while staying distinct paths on
+/// Linux, where they genuinely are distinct files.
+fn collision_key(output: &Path) -> PathBuf {
+    let abs = std::path::absolute(output).unwrap_or_else(|_| output.to_path_buf());
+    if cfg!(any(windows, target_os = "macos")) {
+        PathBuf::from(abs.to_string_lossy().to_lowercase())
+    } else {
+        abs
+    }
 }
 
 /// Natural-order comparison: a run of digits compares by numeric value, not
@@ -138,7 +152,14 @@ pub fn jobs_from(
     if let Some(to_str) = to {
         let to_fmt = Format::from_ext(to_str).ok_or_else(|| ConvError::unknown_format(to_str))?;
         let mut jobs = Vec::with_capacity(paths.len());
-        let mut seen: HashSet<PathBuf> = HashSet::new();
+        // Two inputs that differ only in extension (`a.jpg a.png --to webp`)
+        // — or, where the filesystem is case-insensitive, only in letter
+        // case — plan onto one output path. The jobs then race in rayon,
+        // one result silently replaces the other, and both report OK; so
+        // the collision check runs for every `--to` batch, not only under
+        // `-o`, and compares `collision_key`s rather than raw paths. Maps
+        // key → first input so the error can name both colliding inputs.
+        let mut seen: HashMap<PathBuf, PathBuf> = HashMap::new();
         for input in paths {
             let from_fmt = format_of(input)?;
             let base = input.with_extension(to_fmt.ext());
@@ -157,11 +178,13 @@ pub fn jobs_from(
                 }
                 None => base,
             };
-            if outdir.is_some() && !seen.insert(output.clone()) {
+            if let Some(prev) = seen.insert(collision_key(&output), input.clone()) {
                 return Err(ConvError::new(
                     ErrorCode::InvalidInvocation,
                     format!(
-                        "outputs collide: more than one input produces {}",
+                        "outputs collide: {} and {} both produce {}",
+                        prev.display(),
+                        input.display(),
                         output.display()
                     ),
                 ));
@@ -239,7 +262,9 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
     // component collides with an existing file), not a conversion failure,
     // hence `InvalidInvocation` (exit 2) rather than letting it surface
     // later as an exec-time `ConversionFailed` (exit 1) once per job.
-    if let Some(dir) = &cli.outdir {
+    // Skipped under `--dry-run`, which is documented as inert: a preview
+    // must not leave a directory behind.
+    if let Some(dir) = cli.outdir.as_ref().filter(|_| !cli.dry_run) {
         std::fs::create_dir_all(dir).map_err(|e| ConvError {
             code: ErrorCode::InvalidInvocation,
             message: format!("cannot create output directory {}: {e}", dir.display()),
@@ -256,9 +281,63 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
 
     let target_format = cli.to.as_deref().and_then(Format::from_ext);
 
+    // Without `--to`, positional grammar gives the last path an *output*
+    // meaning (the pair and image-merge forms), so a directory positional
+    // is only ever safe to expand as inputs when nothing it contains can
+    // end up on the output side. Expanding regardless of position meant
+    // `conv ./pair` (two files inside) became the pair `a.heic -> b.jpg` —
+    // the folder's own second file as the output target, clobbered under
+    // `-y` — and `conv in.mp4 ./somedir` did the same with somedir's first
+    // file. The one no-`--to` shape where input directories are legitimate
+    // is the image merge, recognisable by its explicit `.pdf` final
+    // positional; everything else gets a refusal that names the fix.
+    let merge_target = cli.to.is_none()
+        && cli.paths.len() >= 2
+        && cli
+            .paths
+            .last()
+            .is_some_and(|p| Format::from_path(p) == Some(Format::Pdf) && !p.is_dir());
+
     let mut expanded: Vec<PathBuf> = Vec::with_capacity(cli.paths.len());
-    for path in &cli.paths {
+    for (idx, path) in cli.paths.iter().enumerate() {
         if path.is_dir() {
+            if cli.to.is_none() {
+                let last = idx == cli.paths.len() - 1;
+                if last && cli.paths.len() >= 2 {
+                    return Err(ConvError {
+                        code: ErrorCode::InvalidInvocation,
+                        message: format!(
+                            "output target {} is a directory",
+                            path.display()
+                        ),
+                        backend: None,
+                        remediation: Some(Remediation {
+                            managed: None,
+                            manual: Some(format!(
+                                "write into it with `-o {}` plus `--to <format>`",
+                                path.display()
+                            )),
+                        }),
+                    });
+                }
+                if !merge_target {
+                    return Err(ConvError {
+                        code: ErrorCode::InvalidInvocation,
+                        message: format!(
+                            "{} is a directory; pass --to <format> to convert its contents",
+                            path.display()
+                        ),
+                        backend: None,
+                        remediation: Some(Remediation {
+                            managed: None,
+                            manual: Some(format!(
+                                "e.g. `conv {} --to jpg`, or name the files explicitly",
+                                path.display()
+                            )),
+                        }),
+                    });
+                }
+            }
             // I3: an unreadable directory is a filesystem/usage problem, not
             // an unsupported format pair — no formats have even been looked
             // at yet at this point.
@@ -373,6 +452,125 @@ mod tests {
     fn outdir_redirects_outputs() {
         let jobs = jobs_from(&v(&["x/a.heic"]), Some("jpg"), Some(Path::new("out"))).unwrap();
         assert_eq!(jobs[0].output, PathBuf::from("out").join("a.jpg"));
+    }
+
+    // --- The two data-loss paths: output collisions in any `--to` batch,
+    // and directory positionals leaking into the output slot ----------------
+
+    /// The exact bug: `conv a.jpg a.png --to webp` planned two jobs onto one
+    /// `a.webp`, they raced in rayon, one result was silently lost, and both
+    /// reported OK with exit 0 — because the collision check only ran under
+    /// `-o`. It must run for every `--to` batch.
+    #[test]
+    fn same_stem_inputs_collide_even_without_outdir() {
+        let e = jobs_from(&v(&["a.jpg", "a.png"]), Some("webp"), None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("collide"), "{}", e.message);
+        assert!(
+            e.message.contains("a.jpg") && e.message.contains("a.png"),
+            "the error must name both colliding inputs: {}",
+            e.message
+        );
+    }
+
+    /// `./a.png` and `a.png` are one file; comparing raw paths would let
+    /// them slip past the collision check.
+    #[test]
+    fn relative_and_absolute_spellings_of_one_output_collide() {
+        let e = jobs_from(&v(&["a.jpg", "./a.png"]), Some("webp"), None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("collide"), "{}", e.message);
+    }
+
+    /// On the case-insensitive filesystems macOS and Windows default to,
+    /// `A.webp` and `a.webp` are the same file, so stems differing only in
+    /// case are the same silent-overwrite race with extra steps.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn outputs_differing_only_by_case_collide_on_case_insensitive_platforms() {
+        let e = jobs_from(&v(&["A.jpg", "a.png"]), Some("webp"), None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("collide"), "{}", e.message);
+    }
+
+    /// Distinct stems must keep planning cleanly — the collision check may
+    /// not turn into a blanket refusal of ordinary batches.
+    #[test]
+    fn distinct_stems_still_batch_cleanly_without_outdir() {
+        let jobs = jobs_from(&v(&["a.jpg", "b.png"]), Some("webp"), None).unwrap();
+        assert_eq!(jobs.len(), 2);
+    }
+
+    /// The exact F63 repro: `conv ./pair` where pair/ holds `a.heic` and
+    /// `b.jpg` used to expand into the pair `a.heic -> b.jpg` — the user's
+    /// own existing file as the output target, overwritten under `-y`. A
+    /// directory alone must be refused with the `--to` remediation instead.
+    #[test]
+    fn a_single_directory_positional_without_to_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let pair = dir.path().join("pair");
+        std::fs::create_dir(&pair).unwrap();
+        std::fs::write(pair.join("a.heic"), b"input").unwrap();
+        std::fs::write(pair.join("b.jpg"), b"existing photo").unwrap();
+
+        let cli = cli_for(vec![pair], None, None);
+        let e = plan_jobs(&cli).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("--to"), "{}", e.message);
+        assert!(e.remediation.is_some());
+    }
+
+    /// A directory in the output position (`conv in.mp4 ./somedir`) used to
+    /// be expanded too, making somedir's own first file the output target.
+    /// It must be refused, pointing at `-o`.
+    #[test]
+    fn a_directory_in_the_output_position_is_rejected_not_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("somedir");
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("precious.gif"), b"do not clobber").unwrap();
+        let input = dir.path().join("in.mp4");
+        std::fs::write(&input, b"x").unwrap();
+
+        let cli = cli_for(vec![input, out.clone()], None, None);
+        let e = plan_jobs(&cli).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("directory"), "{}", e.message);
+        let manual = e.remediation.and_then(|r| r.manual).unwrap_or_default();
+        assert!(manual.contains("-o"), "{manual}");
+    }
+
+    /// A directory paired with a non-PDF file (`conv dir b.jpg`) is neither
+    /// the merge form nor a safe pair — expanding it would feed the pair
+    /// grammar the same way `conv ./pair` did. Refused with the `--to` hint.
+    #[test]
+    fn a_directory_with_a_non_pdf_output_positional_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let photos = dir.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        std::fs::write(photos.join("a.heic"), b"x").unwrap();
+
+        let cli = cli_for(vec![photos, dir.path().join("b.jpg")], None, None);
+        let e = plan_jobs(&cli).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("--to"), "{}", e.message);
+    }
+
+    /// `--dry-run` is documented as inert: previewing `-o` into a directory
+    /// that doesn't exist yet must not create it.
+    #[test]
+    fn plan_jobs_does_not_create_the_outdir_under_dry_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.heic");
+        std::fs::write(&input, b"x").unwrap();
+        let outdir = dir.path().join("out");
+
+        let mut cli = cli_for(vec![input], Some("jpg"), Some(outdir.clone()));
+        cli.dry_run = true;
+        let jobs = plan_jobs(&cli).unwrap();
+
+        assert!(!outdir.exists(), "--dry-run must not create -o's target");
+        assert_eq!(jobs[0].output, outdir.join("a.jpg"));
     }
 
     #[test]
