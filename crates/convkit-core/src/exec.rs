@@ -220,27 +220,42 @@ fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
                     || line.starts_with("convert:")
             }
             Backend::Ffmpeg | Backend::Ffprobe => {
-                // ffmpeg's banner/config/progress chatter never matches
-                // these; its genuine trouble reports do ("Invalid NAL unit
-                // size", "corrupt decoded frame", "Error while decoding").
-                if line.starts_with("ffmpeg version")
-                    || line.starts_with("configuration:")
-                    || line.trim_start().starts_with("built with")
-                    || line.trim_start().starts_with("lib")
-                {
-                    return false;
-                }
-                ["Invalid", "invalid", "corrupt", "Corrupt", "concealing", "Error", "error"]
+                // Substring-matching keywords anywhere would fire on the
+                // stream-dump lines (`Input #0, … from 'error_report.mp4'`,
+                // `title : Trial and Error`) that echo the user's own
+                // paths and tags — demonstrated as warning spam on
+                // byte-clean conversions. Genuine trouble reports come in
+                // exactly two shapes: component-tagged lines
+                // (`[h264 @ 0x…] Invalid NAL unit size`) and bare
+                // line-initial reports (`Error while decoding stream …`).
+                const KEYWORDS: &[&str] = &[
+                    "Invalid",
+                    "invalid",
+                    "corrupt",
+                    "Corrupt",
+                    "concealing",
+                    "Error",
+                    "error",
+                    "Failed",
+                    "failed",
+                    "Could not",
+                ];
+                let component_tagged = line.starts_with('[') && line.contains("] ");
+                let line_initial = ["Error", "Invalid", "Failed", "Could not", "Cannot"]
                     .iter()
-                    .any(|k| line.contains(k))
+                    .any(|k| line.starts_with(k));
+                (component_tagged && KEYWORDS.iter().any(|k| line.contains(k))) || line_initial
             }
             Backend::Soffice => {
                 // `javaldx` grumbles about a missing JRE on every run on
-                // some systems; that noise would drown real reports.
+                // some systems, and soffice's own `convert <path> ->
+                // <path>` echo can contain anything the user named a file
+                // — so only line-initial reports and two specific phrases
+                // count.
                 !line.contains("javaldx")
-                    && ["Error", "rejected", "no export filter", "cannot open"]
-                        .iter()
-                        .any(|k| line.contains(k))
+                    && (line.starts_with("Error")
+                        || line.contains("no export filter")
+                        || line.contains("rejected"))
             }
             Backend::Typst => line.contains("warning:") || line.contains("error:"),
         }
@@ -728,6 +743,82 @@ pub(crate) fn user_installation_url(profile: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // --- classify_backend_noise: catch real degradation, never echo the
+    // user's own filenames back as warnings -------------------------------
+
+    /// Demonstrated false-positive class: ffmpeg's stream-dump and
+    /// metadata lines echo the user's paths and tags, so a file named
+    /// `error_report.mp4` or a title of "Trial and Error" used to produce
+    /// warning lines on a byte-clean conversion.
+    #[test]
+    fn ffmpeg_classifier_ignores_stream_dump_lines_echoing_user_names() {
+        let clean = "\
+ffmpeg version 9.0.1 Copyright (c) 2000-2026\n\
+  built with Apple clang version 17.0.0\n\
+  configuration: --prefix=/opt/homebrew --enable-libzimg\n\
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'error_report.mp4':\n\
+  Metadata:\n\
+    title           : Trial and Error (Live)\n\
+  Duration: 00:00:01.00, start: 0.000000, bitrate: 100 kb/s\n\
+Output #0, mp3, to './.convkit-1-0/error_report.mp3':\n\
+Stream mapping:\n\
+  Stream #0:1 -> #0:0 (aac (native) -> mp3 (libmp3lame))\n\
+frame=   10 fps=0.0 q=-1.0 size=      16KiB time=00:00:01.00\n\
+[libx264 @ 0x7f8] frame I:1 Avg QP:20.00 size: 1024\n";
+        assert!(
+            classify_backend_noise(Backend::Ffmpeg, clean).is_empty(),
+            "{:?}",
+            classify_backend_noise(Backend::Ffmpeg, clean)
+        );
+    }
+
+    /// The genuine reports come in exactly two shapes — component-tagged
+    /// and line-initial — and both must still be caught.
+    #[test]
+    fn ffmpeg_classifier_keeps_component_tagged_and_line_initial_reports() {
+        let noisy = "\
+[h264 @ 0x7f8] Invalid NAL unit size (1553038 > 32032).\n\
+[h264 @ 0x7f8] concealing 45 DC, 45 AC, 45 MV errors in I frame\n\
+Error while decoding stream #0:0: Invalid data found when processing input\n";
+        let notes = classify_backend_noise(Backend::Ffmpeg, noisy);
+        assert_eq!(notes.len(), 3, "{notes:?}");
+    }
+
+    /// Repeated identical lines dedup, and the cap reports its overflow
+    /// honestly.
+    #[test]
+    fn classifier_dedups_and_caps_with_an_honest_overflow_count() {
+        let mut noisy = String::new();
+        for i in 0..8 {
+            noisy.push_str(&format!("[h264 @ 0x1] Invalid NAL unit size ({i}).\n"));
+            noisy.push_str("[h264 @ 0x1] Invalid NAL unit size (0).\n");
+        }
+        let notes = classify_backend_noise(Backend::Ffmpeg, &noisy);
+        assert_eq!(notes.len(), 6, "{notes:?}"); // 5 kept + overflow line
+        assert!(notes[5].contains("more"), "{notes:?}");
+    }
+
+    /// pandoc's degradation channel — the exact line that meant "your
+    /// images were dropped" — must survive classification.
+    #[test]
+    fn pandoc_classifier_keeps_could_not_fetch_resource() {
+        let notes = classify_backend_noise(
+            Backend::Pandoc,
+            "[WARNING] Could not fetch resource missing.png: replacing image with description\n",
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
+
+    /// soffice's `convert <path> -> <path>` echo can contain anything the
+    /// user named a file; only line-initial reports count.
+    #[test]
+    fn soffice_classifier_ignores_the_convert_echo_line() {
+        let out = "convert /tmp/Error Analysis.docx -> /tmp/out/Error Analysis.pdf using filter : writer_pdf_Export\n";
+        assert!(classify_backend_noise(Backend::Soffice, out).is_empty());
+        let bad = "Error: source file could not be loaded\n";
+        assert_eq!(classify_backend_noise(Backend::Soffice, bad).len(), 1);
+    }
 
     /// Writes a tiny script that copies argv's last element into existence,
     /// with one exception: invoked with exactly one argument that is

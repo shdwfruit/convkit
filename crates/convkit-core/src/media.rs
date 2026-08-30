@@ -9,9 +9,9 @@
 //! because one audio codec didn't fit, and camera timecode streams that
 //! made the matroska muxer fail outright. This module builds the argv
 //! *from the probe*: every stream is mapped explicitly, every stream the
-//! target can't carry is excluded deliberately and reported as a warning,
-//! and a source whose video fits but whose audio doesn't gets a hybrid
-//! copy-video/transcode-audio invocation instead of a full re-encode.
+//! target can't carry is excluded deliberately and reported as a warning
+//! naming exactly what was lost or re-encoded, and a source whose video
+//! fits but whose audio doesn't keeps the video as a stream copy.
 //!
 //! Everything here is pure argv construction — no filesystem access, no
 //! process spawning — so `plan::build` can use it for both `--dry-run`
@@ -33,29 +33,37 @@ pub struct MediaInvocation {
 }
 
 /// Subtitle codecs that are plain text and can therefore be re-encoded
-/// between text formats (srt/ass/mov_text/webvtt) essentially losslessly.
-/// Bitmap codecs (PGS, dvd_subtitle) have no text to extract, so a target
-/// without bitmap support can only drop them — with a warning.
+/// between text formats (srt/ass/mov_text/webvtt) essentially losslessly —
+/// modulo ASS styling, which gets its own warning. Bitmap codecs (PGS,
+/// dvd_subtitle, xsub) have no text to extract, so a target without
+/// bitmap support can only drop them — with a warning. A stream the probe
+/// saw but could not name (`unknown`) is treated as neither.
 const TEXT_SUBTITLES: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"];
+
+/// Subtitle codecs matroska takes with a plain `-c:s copy` — verified the
+/// hard way: its muxer rejects `mov_text` ("Subtitle codec mov_text
+/// (94213) is not supported") and `xsub` outright, while text formats and
+/// the two common bitmap formats copy cleanly. `mov_text` is handled by
+/// re-encoding to SRT; anything not listed here and not `mov_text` is
+/// excluded from the mapping with a warning, because ffmpeg's fallback —
+/// its default matroska subtitle encoder — dies on any bitmap source
+/// ("Subtitle encoding currently only possible from text to text or
+/// bitmap to bitmap").
+const MKV_COPY_SUBTITLES: &[&str] = &[
+    "subrip",
+    "srt",
+    "ass",
+    "ssa",
+    "webvtt",
+    "text",
+    "hdmv_pgs_subtitle",
+    "dvd_subtitle",
+];
 
 fn is_text_subtitle(codec: &str) -> bool {
     TEXT_SUBTITLES.contains(&codec)
 }
 
-/// The audio encoder + bitrate a hybrid (copy-video/transcode-audio)
-/// invocation uses per target container, matching the static transcode
-/// recipes' own choices.
-fn audio_encoder_for(to: Format) -> Option<(&'static str, &'static str)> {
-    match to {
-        Format::Mp4 | Format::Mov | Format::Mkv => Some(("aac", "160k")),
-        Format::Webm => Some(("libopus", "128k")),
-        _ => None,
-    }
-}
-
-/// The subtitle codec a target container wants text subtitles in, or
-/// `None` when the container takes them as-is (matroska copies everything
-/// except `mov_text`).
 fn compat_tables(to: Format) -> Option<(&'static [&'static str], &'static [&'static str])> {
     match to {
         Format::Mp4 => Some((registry::MP4_COMPATIBLE_VIDEO, registry::MP4_COMPATIBLE_AUDIO)),
@@ -66,11 +74,16 @@ fn compat_tables(to: Format) -> Option<(&'static [&'static str], &'static [&'sta
     }
 }
 
+fn push(argv: &mut Vec<String>, items: &[&str]) {
+    argv.extend(items.iter().map(|s| (*s).to_string()));
+}
+
 /// Builds the stream-mapped invocation for a container change, given a
 /// probe: a full stream copy when every stream fits the target, a hybrid
-/// copy-video/transcode-audio invocation when only the audio doesn't, and
-/// `None` when the video itself has to be re-encoded (or was never seen) —
-/// the caller then falls back to the registry's static transcode recipe.
+/// that keeps the video copied and re-encodes only the audio tracks that
+/// don't fit, and `None` when the video itself has to be re-encoded (or
+/// was never seen) — the caller then falls back to the registry's static
+/// transcode recipe.
 pub(crate) fn stream_mapped_invocation(
     to: Format,
     probe: &MediaProbe,
@@ -84,108 +97,190 @@ pub(crate) fn stream_mapped_invocation(
     }
 
     let audios = probe.all_audio();
-    let all_audio_legal = audios.iter().all(|c| audio_ok.contains(c));
-
     let subtitles = probe.all_subtitles();
-    let all_subs_text = subtitles.iter().all(|c| is_text_subtitle(c));
 
     let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
     let mut warnings: Vec<String> = Vec::new();
-    let arg = |argv: &mut Vec<String>, items: &[&str]| {
-        argv.extend(items.iter().map(|s| (*s).to_string()));
-    };
 
-    // --- stream selection ------------------------------------------------
     if to == Format::Mkv {
-        // Matroska holds almost anything, so keep everything — except data
-        // (timecode/metadata) streams, which its muxer rejects outright.
-        arg(&mut argv, &["-map", "0", "-map", "-0:d"]);
-    } else {
-        // mp4/mov/webm: name exactly what is carried. `?` keeps a map legal
-        // when the source has no stream of that type at all.
-        arg(&mut argv, &["-map", "0:v:0", "-map", "0:a?"]);
-        if !subtitles.is_empty() && all_subs_text {
-            arg(&mut argv, &["-map", "0:s?"]);
+        // Matroska holds almost anything: keep everything, then carve out
+        // the exceptions its muxer genuinely rejects — data
+        // (timecode/metadata) streams, and the few subtitle codecs it has
+        // no ID for. Attachments (fonts) ride along.
+        push(&mut argv, &["-map", "0", "-map", "-0:d"]);
+        let mut kept_subs: Vec<&str> = Vec::new();
+        for (i, sub) in subtitles.iter().enumerate() {
+            if *sub == "mov_text" || MKV_COPY_SUBTITLES.contains(sub) {
+                kept_subs.push(sub);
+            } else {
+                push(&mut argv, &["-map", &format!("-0:s:{i}")]);
+                warnings.push(format!(
+                    "Subtitle track {i} ({sub}) cannot be carried by mkv; it is dropped."
+                ));
+            }
         }
-    }
 
-    // --- codecs ----------------------------------------------------------
-    arg(&mut argv, &["-c:v", "copy"]);
-    if all_audio_legal {
-        arg(&mut argv, &["-c:a", "copy"]);
-    } else {
-        let (encoder, bitrate) = audio_encoder_for(to)?;
-        arg(&mut argv, &["-c:a", encoder, "-b:a", bitrate]);
-        if to == Format::Webm {
-            // libopus rejects ffmpeg's default `5.1(side)` layout (AC-3/DTS
-            // rips); coerce to the nearest layout it accepts.
-            arg(&mut argv, &["-af", registry::OPUS_CHANNEL_LAYOUTS]);
+        push(&mut argv, &["-c:v", "copy"]);
+        audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios);
+
+        if kept_subs.iter().any(|s| *s == "mov_text") {
+            // mov_text only ever comes from mp4/mov, which cannot hold the
+            // codecs that would need a per-stream split here — so a global
+            // SRT re-encode is safe, and text-to-text is lossless.
+            push(&mut argv, &["-c:s", "srt"]);
+            warnings.push(
+                "Subtitle tracks stored as MP4/MOV's mov_text are re-encoded to SRT text; \
+                 matroska has no codec for mov_text itself."
+                    .to_string(),
+            );
+        } else if !kept_subs.is_empty() {
+            // Explicit: without this, ffmpeg re-encodes text subtitles to
+            // its matroska default (ASS) — silently, and wrongly labelled
+            // a stream copy.
+            push(&mut argv, &["-c:s", "copy"]);
         }
-        let offenders: Vec<&str> = audios
+
+        if probe.data_streams > 0 {
+            warnings.push(format!(
+                "{} timecode/metadata data stream(s) in the source are not carried by mkv.",
+                probe.data_streams
+            ));
+        }
+    } else {
+        // mp4/mov/webm: name exactly what is carried, per stream.
+        push(&mut argv, &["-map", "0:v:0", "-map", "0:a?"]);
+        if probe.video_streams > 1 {
+            warnings.push(format!(
+                "{} additional video stream(s) in the source are not carried by {}; \
+                 convert to mkv to keep them.",
+                probe.video_streams - 1,
+                to.ext(),
+            ));
+        }
+
+        // Text subtitles ride along, each mapped by its own index so a
+        // bitmap sibling never costs the text tracks their seat; bitmap
+        // and unidentifiable tracks are excluded by never being mapped.
+        let kept_subs: Vec<(usize, &str)> = subtitles
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| is_text_subtitle(s))
+            .map(|(i, s)| (i, *s))
+            .collect();
+        let dropped_subs: Vec<&str> = subtitles
             .iter()
             .copied()
-            .filter(|c| !audio_ok.contains(c))
+            .filter(|s| !is_text_subtitle(s))
             .collect();
-        warnings.push(format!(
-            "Audio re-encoded to {encoder}: {} {} not supported by {}. Video is stream-copied untouched.",
-            offenders.join("/"),
-            if offenders.len() == 1 { "is" } else { "are" },
-            to.ext(),
-        ));
-    }
+        for (i, _) in &kept_subs {
+            push(&mut argv, &["-map", &format!("0:s:{i}")]);
+        }
+        if !dropped_subs.is_empty() {
+            warnings.push(format!(
+                "Subtitle track(s) ({}) cannot be carried by {}; they are dropped. \
+                 Convert to mkv to keep them.",
+                dropped_subs.join("/"),
+                to.ext(),
+            ));
+        }
 
-    // --- subtitles -------------------------------------------------------
-    match to {
-        Format::Mkv => {
-            if subtitles.iter().any(|c| *c == "mov_text") {
-                // Matroska has no codec ID for mp4/mov's mov_text; re-encode
-                // text-to-text into SRT, which it does take.
-                arg(&mut argv, &["-c:s", "srt"]);
-                warnings.push(
-                    "Subtitle tracks stored as MP4/MOV's mov_text are re-encoded to SRT text; \
-                     matroska has no codec for mov_text itself."
-                        .to_string(),
-                );
+        push(&mut argv, &["-c:v", "copy"]);
+        audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios);
+
+        if !kept_subs.is_empty() {
+            let target_codec = if to == Format::Webm { "webvtt" } else { "mov_text" };
+            push(&mut argv, &["-c:s", target_codec]);
+            if kept_subs.iter().any(|(_, s)| matches!(*s, "ass" | "ssa")) {
+                warnings.push(format!(
+                    "ASS subtitle styling is not preserved by {target_codec}; the text is kept."
+                ));
             }
         }
-        Format::Mp4 | Format::Mov | Format::Webm => {
-            if !subtitles.is_empty() {
-                if all_subs_text {
-                    let target_codec = if to == Format::Webm { "webvtt" } else { "mov_text" };
-                    arg(&mut argv, &["-c:s", target_codec]);
-                } else {
-                    warnings.push(format!(
-                        "Bitmap subtitle track(s) ({}) cannot be carried by {}; they are dropped. \
-                         Convert to mkv to keep them.",
-                        subtitles
-                            .iter()
-                            .copied()
-                            .filter(|c| !is_text_subtitle(c))
-                            .collect::<Vec<_>>()
-                            .join("/"),
-                        to.ext(),
-                    ));
-                }
-            }
-        }
-        _ => {}
-    }
 
-    if probe.data_streams > 0 {
-        warnings.push(format!(
-            "{} timecode/metadata data stream(s) in the source are not carried by {}.",
-            probe.data_streams,
-            to.ext(),
-        ));
+        if probe.attachment_streams > 0 {
+            warnings.push(format!(
+                "{} attachment stream(s) (fonts) in the source are not carried by {}; \
+                 convert to mkv to keep them.",
+                probe.attachment_streams,
+                to.ext(),
+            ));
+        }
+        // Data streams: no warning for mp4/mov — their muxer regenerates a
+        // tmcd track from the copied video's timecode side data, so
+        // claiming a loss would be untrue (verified against a real tmcd
+        // source). webm genuinely cannot carry them.
+        if to == Format::Webm && probe.data_streams > 0 {
+            warnings.push(format!(
+                "{} timecode/metadata data stream(s) in the source are not carried by webm.",
+                probe.data_streams
+            ));
+        }
     }
 
     if matches!(to, Format::Mp4 | Format::Mov) {
-        arg(&mut argv, &["-movflags", "+faststart"]);
+        push(&mut argv, &["-movflags", "+faststart"]);
     }
-    arg(&mut argv, &["-y"]);
+    push(&mut argv, &["-y"]);
     argv.push(output.to_string_lossy().into_owned());
 
     Some(MediaInvocation { argv, warnings })
+}
+
+/// Emits the audio codec arguments: a plain `-c:a copy` when every track
+/// fits, or — when some don't — a per-track split that copies the legal
+/// tracks and re-encodes only the offenders, so an AAC track never pays a
+/// generation loss for its DTS sibling. WebM is the exception: filtering
+/// (the channel-layout coercion libopus requires) cannot coexist with
+/// stream copy on the same invocation, so any offender there re-encodes
+/// every track.
+fn audio_codec_args(
+    argv: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+    to: Format,
+    audio_ok: &[&str],
+    audios: &[&str],
+) {
+    let all_legal = audios.iter().all(|c| audio_ok.contains(c));
+    if all_legal {
+        push(argv, &["-c:a", "copy"]);
+        return;
+    }
+
+    let offenders: Vec<String> = audios
+        .iter()
+        .copied()
+        .filter(|c| !audio_ok.contains(c))
+        .map(str::to_owned)
+        .collect();
+
+    if to == Format::Webm {
+        push(argv, &["-c:a", "libopus", "-b:a", "128k"]);
+        push(argv, &["-af", registry::OPUS_CHANNEL_LAYOUTS]);
+        warnings.push(format!(
+            "All audio tracks re-encoded to opus: {} not supported by webm \
+             (stream copy and the required channel-layout filter cannot mix). \
+             Video is stream-copied untouched.",
+            offenders.join("/"),
+        ));
+        return;
+    }
+
+    let mut reencoded: Vec<String> = Vec::new();
+    for (i, codec) in audios.iter().enumerate() {
+        if audio_ok.contains(codec) {
+            push(argv, &[&format!("-c:a:{i}"), "copy"]);
+        } else {
+            push(argv, &[&format!("-c:a:{i}"), "aac", &format!("-b:a:{i}"), "160k"]);
+            reencoded.push(format!("track {i} ({codec})"));
+        }
+    }
+    warnings.push(format!(
+        "Audio {} re-encoded to aac ({} not supported by {}); every other track \
+         and the video are stream-copied untouched.",
+        reencoded.join(", "),
+        offenders.join("/"),
+        to.ext(),
+    ));
 }
 
 /// Audio codecs each audio target container can hold as-is — the gate for
@@ -204,10 +299,11 @@ fn copyable_audio_for(to: Format) -> Option<&'static [&'static str]> {
 
 /// Builds a stream-copy audio extraction when the source's first audio
 /// stream is already in a codec the target container holds natively.
-/// `None` falls back to the registry's static transcode recipe. An audio
-/// source keeps its attached cover art where the target can carry it,
-/// matching the static keep-art recipes; a video source drops the video
-/// stream.
+/// `None` falls back to the registry's static transcode recipe — including
+/// for a stream the probe saw but could not name, which is `"unknown"`
+/// here and in no allowlist. An audio source keeps its attached cover art
+/// where the target can carry it, matching the static keep-art recipes; a
+/// video source drops the video stream.
 pub(crate) fn audio_copy_invocation(
     from: Format,
     to: Format,
@@ -228,19 +324,15 @@ pub(crate) fn audio_copy_invocation(
     );
 
     let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
-    let mut push = |items: &[&str]| {
-        // Closure over argv only; warnings are appended after.
-        items.iter().for_each(|s| argv.push((*s).to_string()));
-    };
     // The probe describes stream order, so map the first audio stream
     // explicitly rather than trusting default selection (which picks by
     // channel count and could grab a stream the probe never approved).
-    push(&["-map", "0:a:0"]);
+    push(&mut argv, &["-map", "0:a:0"]);
     if audio_source && to != Format::Wav {
         // WAV can't carry an attached picture; everything else keeps it.
-        push(&["-map", "0:v?", "-c:v", "copy"]);
+        push(&mut argv, &["-map", "0:v?", "-c:v", "copy"]);
     }
-    push(&["-c:a", "copy", "-y"]);
+    push(&mut argv, &["-c:a", "copy", "-y"]);
     argv.push(output.to_string_lossy().into_owned());
 
     let mut warnings = Vec::new();
@@ -272,6 +364,7 @@ mod tests {
             audio_codecs: audio.iter().map(|s| (*s).to_string()).collect(),
             subtitle_codecs: subs.iter().map(|s| (*s).to_string()).collect(),
             data_streams,
+            video_streams: usize::from(video.is_some()),
             ..MediaProbe::default()
         }
     }
@@ -295,21 +388,19 @@ mod tests {
         assert!(m.warnings.is_empty(), "{:?}", m.warnings);
     }
 
-    /// A DTS track on stream 2 must veto the full copy — the probe once
-    /// approved a remux off stream 1 alone and shipped a DTS track most
-    /// players can't decode. Video stays copied; audio is re-encoded, with
-    /// a warning that says so.
+    /// A DTS track on stream 2 must not veto its AAC sibling's stream
+    /// copy: only the offending track is re-encoded, per-stream, and the
+    /// warning names exactly which.
     #[test]
-    fn an_illegal_second_audio_track_forces_the_hybrid_not_a_full_copy() {
+    fn an_illegal_audio_track_reencodes_only_itself() {
         let m = invoke(Format::Mp4, &probe(Some("h264"), &["aac", "dts"], &[], 0)).unwrap();
         assert!(has(&m.argv, ["-c:v", "copy"]), "{:?}", m.argv);
-        assert!(has(&m.argv, ["-c:a", "aac"]), "{:?}", m.argv);
+        assert!(has(&m.argv, ["-c:a:0", "copy"]), "{:?}", m.argv);
+        assert!(has(&m.argv, ["-c:a:1", "aac"]), "{:?}", m.argv);
         assert!(!has(&m.argv, ["-c:a", "copy"]), "{:?}", m.argv);
-        assert!(
-            m.warnings.iter().any(|w| w.contains("dts")),
-            "{:?}",
-            m.warnings
-        );
+        let w = m.warnings.join(" ");
+        assert!(w.contains("track 1 (dts)"), "{:?}", m.warnings);
+        assert!(w.contains("stream-copied"), "{:?}", m.warnings);
     }
 
     /// The all-or-nothing bug (F2): incompatible audio used to trigger a
@@ -322,19 +413,21 @@ mod tests {
     }
 
     /// An incompatible *video* codec is not this module's job: the caller
-    /// falls back to the registry's static transcode recipe.
+    /// falls back to the registry's static transcode recipe. Same for a
+    /// video stream the probe could not identify (`unknown` placeholder).
     #[test]
-    fn incompatible_video_falls_back_to_the_static_transcode() {
+    fn incompatible_or_unknown_video_falls_back_to_the_static_transcode() {
         assert!(invoke(Format::Mp4, &probe(Some("prores"), &["aac"], &[], 0)).is_none());
         assert!(invoke(Format::Mp4, &probe(None, &["aac"], &[], 0)).is_none());
+        assert!(invoke(Format::Mp4, &probe(Some("unknown"), &["aac"], &[], 0)).is_none());
     }
 
     /// Text subtitles the target can carry are carried (F9): mp4 takes
-    /// mov_text, webm takes webvtt.
+    /// mov_text, webm takes webvtt — each mapped by its own index.
     #[test]
     fn text_subtitles_are_carried_not_dropped() {
         let m = invoke(Format::Mp4, &probe(Some("h264"), &["aac"], &["subrip"], 0)).unwrap();
-        assert!(has(&m.argv, ["-map", "0:s?"]), "{:?}", m.argv);
+        assert!(has(&m.argv, ["-map", "0:s:0"]), "{:?}", m.argv);
         assert!(has(&m.argv, ["-c:s", "mov_text"]), "{:?}", m.argv);
         assert!(!m.argv.contains(&"-sn".to_string()), "{:?}", m.argv);
 
@@ -346,17 +439,25 @@ mod tests {
         assert!(has(&m.argv, ["-c:s", "webvtt"]), "{:?}", m.argv);
     }
 
-    /// Bitmap subtitles genuinely can't fit mp4 — they are excluded from
-    /// the mapping, and the loss is named in a warning instead of silently
-    /// swallowed by `-sn`.
+    /// Mixed text + bitmap subtitles: the text track keeps its seat (its
+    /// own `-map 0:s:N`), only the bitmap track is dropped, and the
+    /// warning names the dropped one — a bitmap sibling used to silently
+    /// cost the text track its mapping.
     #[test]
-    fn bitmap_subtitles_are_dropped_with_a_warning_never_silently() {
+    fn a_bitmap_sibling_never_costs_a_text_subtitle_its_seat() {
         let m = invoke(
             Format::Mp4,
-            &probe(Some("h264"), &["aac"], &["hdmv_pgs_subtitle"], 0),
+            &probe(
+                Some("h264"),
+                &["aac"],
+                &["subrip", "hdmv_pgs_subtitle"],
+                0,
+            ),
         )
         .unwrap();
-        assert!(!m.argv.iter().any(|a| a.starts_with("0:s")), "{:?}", m.argv);
+        assert!(has(&m.argv, ["-map", "0:s:0"]), "{:?}", m.argv);
+        assert!(!has(&m.argv, ["-map", "0:s:1"]), "{:?}", m.argv);
+        assert!(has(&m.argv, ["-c:s", "mov_text"]), "{:?}", m.argv);
         assert!(
             m.warnings
                 .iter()
@@ -366,12 +467,26 @@ mod tests {
         );
     }
 
-    /// F5: camera/GoPro timecode data streams break the matroska muxer, so
-    /// the mkv remux keeps everything except them — and says so.
+    /// ASS styling does not survive mov_text/webvtt; carrying the text is
+    /// right, but silence about the styling would not be.
     #[test]
-    fn mkv_remux_excludes_data_streams_and_warns_when_they_exist() {
+    fn ass_subtitles_warn_about_styling_loss() {
+        let m = invoke(Format::Mp4, &probe(Some("h264"), &["aac"], &["ass"], 0)).unwrap();
+        assert!(has(&m.argv, ["-c:s", "mov_text"]), "{:?}", m.argv);
+        assert!(
+            m.warnings.iter().any(|w| w.contains("styling")),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    /// F5: camera/GoPro timecode data streams break the matroska muxer, so
+    /// the mkv remux keeps everything except them — and says so. mp4/mov
+    /// get no such warning: their muxer regenerates the tmcd track from
+    /// the copied video's side data, so nothing is actually lost there.
+    #[test]
+    fn data_stream_warnings_track_what_each_muxer_actually_does() {
         let m = invoke(Format::Mkv, &probe(Some("h264"), &["aac"], &[], 2)).unwrap();
-        assert!(has(&m.argv, ["-map", "0"]), "{:?}", m.argv);
         assert!(has(&m.argv, ["-map", "-0:d"]), "{:?}", m.argv);
         assert!(
             m.warnings.iter().any(|w| w.contains("timecode")),
@@ -379,11 +494,49 @@ mod tests {
             m.warnings
         );
 
+        let mp4 = invoke(Format::Mp4, &probe(Some("h264"), &["aac"], &[], 1)).unwrap();
+        assert!(
+            !mp4.warnings.iter().any(|w| w.contains("timecode")),
+            "mp4 regenerates tmcd; warning would be untrue: {:?}",
+            mp4.warnings
+        );
+
         let quiet = invoke(Format::Mkv, &probe(Some("h264"), &["aac"], &[], 0)).unwrap();
         assert!(quiet.warnings.is_empty(), "{:?}", quiet.warnings);
     }
 
-    /// mkv's one subtitle exception: mov_text re-encodes to SRT.
+    /// Subtitle codecs matroska has no ID for (xsub, unknown) are excluded
+    /// per-index with a warning — ffmpeg's fallback (its default ASS
+    /// encoder) dies on bitmap sources, which made avi-with-XSUB → mkv
+    /// fail outright.
+    #[test]
+    fn mkv_excludes_subtitle_codecs_matroska_rejects() {
+        let m = invoke(
+            Format::Mkv,
+            &probe(Some("mpeg4"), &["mp3"], &["xsub"], 0),
+        )
+        .unwrap();
+        assert!(has(&m.argv, ["-map", "-0:s:0"]), "{:?}", m.argv);
+        assert!(
+            m.warnings.iter().any(|w| w.contains("xsub")),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    /// Text subtitles into mkv must be `-c:s copy` explicitly — without
+    /// it, ffmpeg silently re-encodes them to its matroska default (ASS).
+    #[test]
+    fn mkv_copies_text_subtitles_explicitly() {
+        let m = invoke(
+            Format::Mkv,
+            &probe(Some("vp9"), &["opus"], &["webvtt"], 0),
+        )
+        .unwrap();
+        assert!(has(&m.argv, ["-c:s", "copy"]), "{:?}", m.argv);
+    }
+
+    /// mkv's one subtitle re-encode: mov_text to SRT.
     #[test]
     fn mkv_reencodes_mov_text_subtitles_to_srt() {
         let m = invoke(
@@ -399,8 +552,42 @@ mod tests {
         );
     }
 
+    /// A second video stream cannot ride into mp4/mov/webm's single
+    /// `-map 0:v:0`; the loss must be named.
+    #[test]
+    fn additional_video_streams_are_warned_about() {
+        let mut p = probe(Some("h264"), &["aac"], &[], 0);
+        p.video_streams = 2;
+        let m = invoke(Format::Mp4, &p).unwrap();
+        assert!(
+            m.warnings
+                .iter()
+                .any(|w| w.contains("additional video stream")),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    /// Font attachments (mkv) cannot ride into mp4/mov/webm; the loss must
+    /// be named. Into mkv they ride along silently — nothing is lost.
+    #[test]
+    fn attachment_streams_are_warned_about_for_non_mkv_targets() {
+        let mut p = probe(Some("h264"), &["aac"], &[], 0);
+        p.attachment_streams = 1;
+        let m = invoke(Format::Mp4, &p).unwrap();
+        assert!(
+            m.warnings.iter().any(|w| w.contains("attachment")),
+            "{:?}",
+            m.warnings
+        );
+        let mkv = invoke(Format::Mkv, &p).unwrap();
+        assert!(mkv.warnings.is_empty(), "{:?}", mkv.warnings);
+    }
+
     /// The webm hybrid must coerce channel layouts for libopus (F4's
-    /// surround-layout rejection applies to the hybrid path too).
+    /// surround-layout rejection applies to the hybrid path too) — and
+    /// because filtering can't mix with stream copy, every track
+    /// re-encodes there, with the warning saying so.
     #[test]
     fn webm_hybrid_coerces_channel_layouts_for_libopus() {
         let m = invoke(Format::Webm, &probe(Some("vp9"), &["ac3"], &[], 0)).unwrap();
@@ -411,6 +598,11 @@ mod tests {
                 .any(|a| a.contains("aformat=channel_layouts")),
             "{:?}",
             m.argv
+        );
+        assert!(
+            m.warnings.iter().any(|w| w.contains("All audio")),
+            "{:?}",
+            m.warnings
         );
     }
 
@@ -453,12 +645,22 @@ mod tests {
     }
 
     /// A codec the target can't hold as-is falls back to the static
-    /// transcode recipe.
+    /// transcode recipe — as does a stream the probe could not identify
+    /// (an `unknown` first track once slipped through as a "lossless"
+    /// copy of bytes nothing could decode).
     #[test]
-    fn non_matching_audio_codec_falls_back_to_transcode() {
+    fn non_matching_or_unknown_audio_falls_back_to_transcode() {
         assert!(
             audio_invoke(Format::Mp4, Format::Mp3, &probe(Some("h264"), &["aac"], &[], 0))
                 .is_none()
+        );
+        assert!(
+            audio_invoke(
+                Format::Avi,
+                Format::Wav,
+                &probe(None, &["unknown", "pcm_s16le"], &[], 0)
+            )
+            .is_none()
         );
     }
 

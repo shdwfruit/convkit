@@ -20,12 +20,21 @@ pub struct MediaProbe {
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub subtitle_codec: Option<String>,
-    /// Every audio stream's codec, in stream order.
+    /// Every audio stream's codec, in stream order. A stream ffprobe saw
+    /// but could not name is recorded as `"unknown"` — never skipped:
+    /// skipping would desynchronise these indices from the real `0:a:N`
+    /// positions the stream-mapping argv is built against, and `"unknown"`
+    /// appears in no compatibility allowlist, so every gate rejects it.
     pub audio_codecs: Vec<String>,
-    /// Every subtitle stream's codec, in stream order.
+    /// Every subtitle stream's codec, in stream order — same `"unknown"`
+    /// placeholder rule as `audio_codecs`.
     pub subtitle_codecs: Vec<String>,
     /// How many data (timecode/metadata) streams the source carries.
     pub data_streams: usize,
+    /// How many real video streams (attached-picture cover art excluded).
+    pub video_streams: usize,
+    /// How many attachment streams (fonts in mkv).
+    pub attachment_streams: usize,
     pub pix_fmt: Option<String>,
     pub color_transfer: Option<String>,
 }
@@ -75,10 +84,14 @@ pub fn parse(json: &str) -> MediaProbe {
     let mut p = MediaProbe::default();
     for s in streams {
         let kind = s.get("codec_type").and_then(|t| t.as_str()).unwrap_or("");
+        // ffprobe omits codec_name entirely for codecs it cannot identify;
+        // see `audio_codecs`' docs for why that becomes a placeholder
+        // rather than a skipped entry.
         let name = s
             .get("codec_name")
             .and_then(|n| n.as_str())
-            .map(str::to_owned);
+            .unwrap_or("unknown")
+            .to_owned();
         match kind {
             "video" => {
                 // Cover art embedded in an audio file (mp3/m4a/flac) shows
@@ -89,35 +102,35 @@ pub fn parse(json: &str) -> MediaProbe {
                     .and_then(|d| d.get("attached_pic"))
                     .and_then(|a| a.as_i64())
                     == Some(1);
-                if !attached_pic && p.video_codec.is_none() {
-                    p.video_codec = name;
-                    p.pix_fmt = s
-                        .get("pix_fmt")
-                        .and_then(|f| f.as_str())
-                        .map(str::to_owned);
-                    p.color_transfer = s
-                        .get("color_transfer")
-                        .and_then(|f| f.as_str())
-                        .map(str::to_owned);
+                if !attached_pic {
+                    p.video_streams += 1;
+                    if p.video_codec.is_none() {
+                        p.video_codec = Some(name);
+                        p.pix_fmt = s
+                            .get("pix_fmt")
+                            .and_then(|f| f.as_str())
+                            .map(str::to_owned);
+                        p.color_transfer = s
+                            .get("color_transfer")
+                            .and_then(|f| f.as_str())
+                            .map(str::to_owned);
+                    }
                 }
             }
             "audio" => {
-                if let Some(name) = name {
-                    if p.audio_codec.is_none() {
-                        p.audio_codec = Some(name.clone());
-                    }
-                    p.audio_codecs.push(name);
+                if p.audio_codec.is_none() {
+                    p.audio_codec = Some(name.clone());
                 }
+                p.audio_codecs.push(name);
             }
             "subtitle" => {
-                if let Some(name) = name {
-                    if p.subtitle_codec.is_none() {
-                        p.subtitle_codec = Some(name.clone());
-                    }
-                    p.subtitle_codecs.push(name);
+                if p.subtitle_codec.is_none() {
+                    p.subtitle_codec = Some(name.clone());
                 }
+                p.subtitle_codecs.push(name);
             }
             "data" => p.data_streams += 1,
+            "attachment" => p.attachment_streams += 1,
             _ => {}
         }
     }
@@ -188,5 +201,47 @@ mod tests {
     fn tolerates_a_file_with_no_subtitle_track() {
         let p = parse(SAMPLE);
         assert_eq!(p.subtitle_codec, None);
+    }
+
+    /// The full inventory: every audio/subtitle codec in stream order,
+    /// data and attachment counts, and cover art excluded from the video
+    /// count.
+    #[test]
+    fn records_the_full_stream_inventory() {
+        let p = parse(
+            r#"{"streams":[
+            {"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p10le","color_transfer":"smpte2084"},
+            {"codec_type":"video","codec_name":"mjpeg","disposition":{"attached_pic":1}},
+            {"codec_type":"audio","codec_name":"aac"},
+            {"codec_type":"audio","codec_name":"dts"},
+            {"codec_type":"subtitle","codec_name":"subrip"},
+            {"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle"},
+            {"codec_type":"data","codec_name":"tmcd"},
+            {"codec_type":"attachment","codec_name":"ttf"}]}"#,
+        );
+        assert_eq!(p.audio_codecs, vec!["aac", "dts"]);
+        assert_eq!(p.subtitle_codecs, vec!["subrip", "hdmv_pgs_subtitle"]);
+        assert_eq!(p.data_streams, 1);
+        assert_eq!(p.attachment_streams, 1);
+        assert_eq!(p.video_streams, 1, "cover art is not a video stream");
+        assert_eq!(p.pix_fmt.as_deref(), Some("yuv420p10le"));
+        assert!(p.is_hdr());
+    }
+
+    /// ffprobe omits codec_name entirely for codecs it cannot identify.
+    /// Skipping such a stream would desynchronise `audio_codecs` indices
+    /// from the real `0:a:N` positions the stream-mapping argv is built
+    /// against — demonstrated as a silent-corruption path where the copy
+    /// gate approved stream 0 off stream 1's codec. It must become an
+    /// `"unknown"` placeholder instead.
+    #[test]
+    fn nameless_streams_become_unknown_placeholders_not_gaps() {
+        let p = parse(
+            r#"{"streams":[
+            {"codec_type":"audio"},
+            {"codec_type":"audio","codec_name":"pcm_s16le"}]}"#,
+        );
+        assert_eq!(p.audio_codecs, vec!["unknown", "pcm_s16le"]);
+        assert_eq!(p.audio_codec.as_deref(), Some("unknown"));
     }
 }
