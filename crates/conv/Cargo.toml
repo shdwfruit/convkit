@@ -35,6 +35,13 @@ indicatif = "0.17"
 # on `std::io::IsTerminal`, rather than adding a new styling dependency.
 anstyle = "1"
 
+# APFS resolves names normalization-insensitively (NFC and NFD spellings of
+# one stem land on one physical file), so the batch output-collision key
+# must normalize before comparing -- macOS only; NTFS and Linux filesystems
+# are byte-preserving.
+[target.'cfg(target_os = "macos")'.dependencies]
+unicode-normalization = "0.1"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

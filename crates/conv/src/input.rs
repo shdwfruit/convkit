@@ -60,14 +60,37 @@ fn format_of(p: &Path) -> Result<Format, ConvError> {
 }
 
 /// The key two planned outputs are compared on to decide they'd land on the
-/// same file. Absolute, so `./a.webp` and `a.webp` collide; case-folded on
-/// Windows and macOS, whose default filesystems are case-insensitive, so
-/// `A.webp` and `a.webp` collide there too — while staying distinct paths on
-/// Linux, where they genuinely are distinct files.
+/// same file. Absolute, so `./a.webp` and `a.webp` collide; the parent
+/// directory is canonicalized, so `sub/../a.webp` and `a.webp` collide, and
+/// so do two spellings through a symlinked directory (`std::path::absolute`
+/// alone is lexical and resolves neither — both bypasses were demonstrated
+/// as silent data loss). The parent, not the whole path, because the output
+/// usually doesn't exist yet; when the parent doesn't either (e.g. `-o`
+/// under `--dry-run`), every job falls back to the same lexical form, so
+/// keys stay comparable. Case-folded on Windows and macOS, whose default
+/// filesystems are case-insensitive, so `A.webp` and `a.webp` collide there
+/// too — while staying distinct paths on Linux, where they genuinely are
+/// distinct files. (Deliberate tradeoff: a custom case-sensitive APFS
+/// volume gets a false refusal rather than Linux-on-FAT32 getting a silent
+/// overwrite.) On macOS the key is additionally NFC-normalized: APFS name
+/// lookup is normalization-insensitive, so an NFC `café.webp` and an NFD
+/// `café.webp` are one physical file despite differing bytes.
 fn collision_key(output: &Path) -> PathBuf {
     let abs = std::path::absolute(output).unwrap_or_else(|_| output.to_path_buf());
+    let abs = match (abs.parent(), abs.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => std::fs::canonicalize(
+            parent,
+        )
+        .map(|real| real.join(name))
+        .unwrap_or(abs),
+        _ => abs,
+    };
     if cfg!(any(windows, target_os = "macos")) {
-        PathBuf::from(abs.to_string_lossy().to_lowercase())
+        let folded = abs.to_string_lossy().to_lowercase();
+        #[cfg(target_os = "macos")]
+        let folded: String = unicode_normalization::UnicodeNormalization::nfc(folded.chars())
+            .collect();
+        PathBuf::from(folded)
     } else {
         abs
     }
@@ -499,6 +522,51 @@ mod tests {
     fn distinct_stems_still_batch_cleanly_without_outdir() {
         let jobs = jobs_from(&v(&["a.jpg", "b.png"]), Some("webp"), None).unwrap();
         assert_eq!(jobs.len(), 2);
+    }
+
+    /// `std::path::absolute` is lexical: it resolves neither `..` nor
+    /// symlinks, and both were demonstrated as silent-loss bypasses of the
+    /// collision check. Canonicalizing the parent closes both.
+    #[test]
+    fn dot_dot_spellings_of_one_output_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let a = dir.path().join("a.jpg");
+        let b = dir.path().join("sub").join("..").join("a.png");
+        let e = jobs_from(&[a, b], Some("webp"), None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("collide"), "{}", e.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_spellings_of_one_output_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("alias")).unwrap();
+
+        let a = real.join("x.jpg");
+        let b = dir.path().join("alias").join("x.png");
+        let e = jobs_from(&[a, b], Some("webp"), None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("collide"), "{}", e.message);
+    }
+
+    /// APFS name lookup is normalization-insensitive: an NFC `café.webp`
+    /// and an NFD `café.webp` are one physical file despite differing
+    /// bytes, so the two stems must collide on macOS.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nfc_and_nfd_spellings_of_one_stem_collide_on_macos() {
+        let e = jobs_from(
+            &v(&["caf\u{e9}.jpg", "cafe\u{301}.png"]),
+            Some("webp"),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("collide"), "{}", e.message);
     }
 
     /// The exact F63 repro: `conv ./pair` where pair/ holds `a.heic` and
