@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use convkit_core::{Backend, Resolver};
+use convkit_core::Resolver;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -138,43 +138,32 @@ changes nothing, and exits non-zero if anything is.")]
 }
 
 impl Cli {
+    /// Builds the `Resolver` every conversion, `doctor`, and `update` run
+    /// through, from whichever `--<backend>-path` flags were passed. The
+    /// actual override-application and ffprobe-sibling-inference logic
+    /// lives in `convkit_core::BackendOverrides` -- this just maps this
+    /// struct's own six flag fields onto its six fields, so `conv`'s CLI
+    /// surface (flag names, `#[arg(...)]` attributes, doc comments shown in
+    /// `--help`) stays exactly where it already was, on `Cli` itself.
     pub fn resolver(&self) -> Resolver {
-        let mut r = Resolver::new();
-        for (path, backend) in [
-            (&self.ffmpeg_path, Backend::Ffmpeg),
-            (&self.magick_path, Backend::Magick),
-            (&self.pandoc_path, Backend::Pandoc),
-            (&self.soffice_path, Backend::Soffice),
-            (&self.typst_path, Backend::Typst),
-        ] {
-            if let Some(p) = path {
-                r.with_override(backend, p.clone());
-            }
+        convkit_core::BackendOverrides {
+            ffmpeg: self.ffmpeg_path.clone(),
+            ffprobe: self.ffprobe_path.clone(),
+            magick: self.magick_path.clone(),
+            pandoc: self.pandoc_path.clone(),
+            soffice: self.soffice_path.clone(),
+            typst: self.typst_path.clone(),
         }
-        if let Some(p) = &self.ffprobe_path {
-            r.with_override(Backend::Ffprobe, p.clone());
-        } else if let Some(p) = &self.ffmpeg_path {
-            // ffprobe ships beside ffmpeg; honour the same override
-            // directory -- but only when the caller didn't pin ffprobe
-            // explicitly. An explicit --ffprobe-path must win over this
-            // inference, not the other way around.
-            if let Some(dir) = p.parent() {
-                let probe = dir.join(if cfg!(windows) {
-                    "ffprobe.exe"
-                } else {
-                    "ffprobe"
-                });
-                r.with_override(Backend::Ffprobe, probe);
-            }
-        }
-        r
+        .resolver()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
-    use convkit_core::Source;
+    use convkit_core::Backend;
 
     fn cli(ffmpeg_path: Option<PathBuf>, ffprobe_path: Option<PathBuf>) -> Cli {
         Cli {
@@ -198,75 +187,38 @@ mod tests {
         }
     }
 
-    /// An explicit `--ffprobe-path` must take precedence over the sibling
-    /// `--ffmpeg-path` otherwise infers from its own directory -- exactly
-    /// the scenario the fix brief calls out: pinning `--ffprobe-path` at a
-    /// nonexistent file to force the no-probe transcode path must not be
-    /// silently overridden by the ffmpeg-directory inference just because
-    /// `--ffmpeg-path` also happens to be set.
+    /// The override-application and ffprobe-sibling-inference precedence
+    /// this used to test directly is now `convkit_core::BackendOverrides`'s
+    /// own responsibility, tested thoroughly (including the cross-platform
+    /// path reasoning) in `convkit-core`. What's left to prove here is
+    /// narrower but still real: that `Cli::resolver()` maps every one of
+    /// its six flag fields onto the matching `BackendOverrides` field,
+    /// rather than, say, `magick_path` ending up on `Backend::Pandoc`.
     #[test]
-    fn explicit_ffprobe_path_wins_over_the_ffmpeg_sibling_inference() {
-        let ffmpeg = PathBuf::from(r"C:\tools\ffmpeg\bin\ffmpeg.exe");
-        let ffprobe = PathBuf::from(r"C:\elsewhere\my-ffprobe.exe");
-        let c = cli(Some(ffmpeg), Some(ffprobe.clone()));
-        let r = c.resolver();
-        let candidates = r.candidates(Backend::Ffprobe);
-        assert_eq!(
-            candidates.first(),
-            Some(&(ffprobe, Source::Override)),
-            "{candidates:?}"
+    fn resolver_maps_every_flag_to_its_own_backend_override() {
+        let mut c = cli(
+            Some(PathBuf::from("/o/ffmpeg")),
+            Some(PathBuf::from("/o/ffprobe")),
         );
-    }
+        c.magick_path = Some(PathBuf::from("/o/magick"));
+        c.pandoc_path = Some(PathBuf::from("/o/pandoc"));
+        c.soffice_path = Some(PathBuf::from("/o/soffice"));
+        c.typst_path = Some(PathBuf::from("/o/typst"));
 
-    /// With no explicit `--ffprobe-path`, `--ffmpeg-path` alone must still
-    /// infer the sibling in the same directory -- the pre-existing
-    /// behaviour this fix must not regress.
-    ///
-    /// Sibling inference is not a Windows concept: it walks whatever
-    /// `Path::parent()` returns, so this must hold on every platform. The
-    /// input path is built with a platform-appropriate literal (backslashes
-    /// are just filename characters on Unix, so a Windows-style literal
-    /// here would have no parent at all and the test would pass vacuously
-    /// without ever exercising the inference).
-    #[test]
-    fn ffmpeg_path_alone_still_infers_the_sibling_ffprobe() {
-        let ffmpeg = if cfg!(windows) {
-            PathBuf::from(r"C:\tools\ffmpeg\bin\ffmpeg.exe")
-        } else {
-            PathBuf::from("/tools/ffmpeg/bin/ffmpeg")
-        };
-        let c = cli(Some(ffmpeg), None);
         let r = c.resolver();
-        let candidates = r.candidates(Backend::Ffprobe);
-        let expected_probe = if cfg!(windows) {
-            r"C:\tools\ffmpeg\bin\ffprobe.exe"
-        } else {
-            "/tools/ffmpeg/bin/ffprobe"
-        };
-        assert_eq!(
-            candidates.first(),
-            Some(&(PathBuf::from(expected_probe), Source::Override)),
-            "{candidates:?}"
-        );
-    }
-
-    /// `--ffprobe-path` alone (no `--ffmpeg-path` at all) still overrides
-    /// ffprobe, and must never accidentally also override ffmpeg itself.
-    #[test]
-    fn ffprobe_path_alone_overrides_only_ffprobe() {
-        let ffprobe = PathBuf::from(r"C:\elsewhere\my-ffprobe.exe");
-        let c = cli(None, Some(ffprobe.clone()));
-        let r = c.resolver();
-        assert_eq!(
-            r.candidates(Backend::Ffprobe).first(),
-            Some(&(ffprobe, Source::Override))
-        );
-        let ffmpeg_candidates = r.candidates(Backend::Ffmpeg);
-        assert!(
-            !ffmpeg_candidates
-                .first()
-                .is_some_and(|(_, source)| *source == Source::Override),
-            "--ffprobe-path must not also override ffmpeg: {ffmpeg_candidates:?}"
-        );
+        for (backend, expected) in [
+            (Backend::Ffmpeg, "/o/ffmpeg"),
+            (Backend::Ffprobe, "/o/ffprobe"),
+            (Backend::Magick, "/o/magick"),
+            (Backend::Pandoc, "/o/pandoc"),
+            (Backend::Soffice, "/o/soffice"),
+            (Backend::Typst, "/o/typst"),
+        ] {
+            assert_eq!(
+                r.candidates(backend).first().map(|(p, _)| p.as_path()),
+                Some(Path::new(expected)),
+                "{backend:?}: wrong override made it through Cli::resolver()"
+            );
+        }
     }
 }

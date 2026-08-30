@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod backend_overrides;
 pub mod error;
 pub mod exec;
 pub mod format;
@@ -11,6 +12,7 @@ pub mod registry;
 pub mod resolve;
 
 pub use backend::{Backend, PackageManager};
+pub use backend_overrides::BackendOverrides;
 pub use error::{manual_hint_for, ConvError, ErrorCode, Remediation, Result};
 pub use exec::{Event, Outcome, Request};
 pub use format::{Format, Kind};
