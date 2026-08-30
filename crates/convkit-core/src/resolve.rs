@@ -1044,7 +1044,10 @@ mod tests {
     // --- soffice.exe as an explicit override (F31) ---------------------------
 
     /// Both launcher stubs side by side, as every Windows LibreOffice
-    /// install has them.
+    /// install has them. `cfg(windows)` because every caller is: without it
+    /// this is dead code on Linux and macOS, where `-D warnings` makes that
+    /// a build failure.
+    #[cfg(windows)]
     fn libreoffice_program_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("soffice.exe"), b"gui stub").unwrap();
