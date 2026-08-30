@@ -424,18 +424,24 @@ mod tests {
 
     /// `available_for` must actually run `check_availability` for a pair
     /// that has a fallback recipe (docx -> pdf), reporting exactly which of
-    /// soffice/pandoc/typst are resolvable. Soffice is deliberately left
-    /// pointed at a nonexistent override path rather than isolated via a
-    /// managed-dir override (unavailable from this crate — that escape
-    /// hatch is `pub(crate)` to `convkit-core`), relying on the real host
-    /// genuinely having no resolvable soffice, same as this project's own
-    /// bare `cargo test --workspace` CI job.
+    /// soffice/pandoc/typst are resolvable. Soffice is pointed at a
+    /// nonexistent override path *and* has `without_well_known()` called on
+    /// it — a public, always-available `Resolver` method (unlike
+    /// `with_managed_dir`, which stays `pub(crate)` to `convkit-core`) that
+    /// exists exactly for this: a plain nonexistent override falls through
+    /// to `WellKnown`, and on Windows/macOS that's the only candidate a
+    /// standard LibreOffice install is ever found through (its installer
+    /// doesn't add `program\`/`MacOS/` to `PATH`), so relying on "the real
+    /// host genuinely has no resolvable soffice" broke the instant this
+    /// project's own dev machine got a real, working LibreOffice install.
+    /// See `Resolver::without_well_known`'s docs.
     #[test]
     fn available_for_checks_availability_for_a_pair_with_a_fallback_recipe() {
         let dir = tempfile::tempdir().unwrap();
         let pandoc_stub = resolvable_stub(dir.path(), "pandoc_stub");
         let typst_stub = resolvable_stub(dir.path(), "typst_stub");
         let mut r = Resolver::new();
+        r.without_well_known();
         r.with_override(Backend::Pandoc, pandoc_stub);
         r.with_override(Backend::Typst, typst_stub);
         r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));

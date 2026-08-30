@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::error::{ConvError, Result};
 use crate::Backend;
@@ -41,6 +42,26 @@ impl FromIterator<Backend> for AvailableBackends {
 /// costs nothing and removes any doubt).
 static VERSION_PROBE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// How long a version probe (`version_of`/`probe_first_line`) waits for the
+/// child to exit before giving up, killing it, and reporting the backend's
+/// version as unknown. `Command::output()`/`wait()` has no built-in timeout,
+/// so without this a backend that never exits -- most concretely, a
+/// misresolved GUI-subsystem launcher like `soffice.exe` (see `well_known`'s
+/// docs), which pops a console window and returns *before* doing any work,
+/// leaving nothing else around to ever finish -- hangs the probe, and with
+/// it `doctor`, `resolve`, and any test that resolves a backend, forever.
+/// 5 seconds is already generous for a tool printing its own version; a
+/// version probe slower than that is broken in its own right, so a timeout
+/// here can never mistake a legitimately slow *conversion* for a hang --
+/// conversion execution (`exec::run`) does not use this and is not subject
+/// to it.
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the timeout loop below polls `Child::try_wait` while waiting
+/// for a version probe to finish. Short enough that a real probe's result
+/// is picked up promptly; long enough not to spin the CPU.
+const VERSION_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Override,
@@ -61,6 +82,18 @@ pub struct ResolvedBackend {
 #[derive(Debug, Default)]
 pub struct Resolver {
     overrides: HashMap<Backend, PathBuf>,
+    /// Escape hatch that suppresses `Source::WellKnown` entirely for this
+    /// `Resolver` -- see `without_well_known`'s docs for why this exists
+    /// and why it's a plain (always-compiled, not `#[cfg(test)]`) field:
+    /// unlike every other candidate source, `WellKnown`'s fixed absolute
+    /// paths have no override *value* that can suppress them (`resolve()`
+    /// always falls through an override/env-var that doesn't point at a
+    /// real file to the next candidate, and `WellKnown` is the last one),
+    /// so on a host with a real backend genuinely installed at its
+    /// standard location, nothing else can make that backend deterministically
+    /// unresolvable. Defaults to `false`; `conv`'s own `Cli::resolver()`
+    /// never sets it, so production behaviour is unaffected.
+    well_known_disabled: bool,
     /// Test-only escape hatch from the real, machine-global
     /// `Resolver::managed_dir()`. Production code never sets this — see
     /// `candidates`'s use of `managed_dir_for` — so behaviour outside tests
@@ -80,6 +113,13 @@ pub struct Resolver {
     /// it fully controls.
     #[cfg(test)]
     convert_search_dir_override: Option<PathBuf>,
+    /// Test-only override of the version probe's timeout (see
+    /// `VERSION_PROBE_TIMEOUT`), so a test proving the kill-on-timeout path
+    /// itself (Fix 2) can use a deliberately-hung stub without burning the
+    /// real 5-second production timeout on every run. Production code
+    /// always uses `VERSION_PROBE_TIMEOUT`.
+    #[cfg(test)]
+    probe_timeout_override: Option<Duration>,
     /// Successful resolutions, keyed by backend. `Mutex` rather than
     /// `RefCell` because a `Resolver` is expected to be shared across
     /// threads in Task 12's rayon batch mode — plain interior mutability
@@ -94,6 +134,45 @@ impl Resolver {
 
     pub fn with_override(&mut self, backend: Backend, path: PathBuf) {
         self.overrides.insert(backend, path);
+    }
+
+    /// Suppresses `Source::WellKnown` entirely for this `Resolver` --
+    /// `resolve`/`candidates` will only ever consider override/env/managed/
+    /// PATH afterward. `LibreOffice`'s Windows and macOS installers don't
+    /// add `program\` (or the `.app`'s `MacOS/`) to `PATH`, so `WellKnown`
+    /// is the *only* candidate that finds a standard install -- meaning on
+    /// a host with a real, working LibreOffice there (an entirely ordinary
+    /// state for a contributor to end up in, and not something this method
+    /// is meant to work around outside of tests), nothing else can make
+    /// `Backend::Soffice` deterministically unresolvable. This exists
+    /// purely so a test needing exactly that can still be deterministic
+    /// without depending on the host's real install state, or on
+    /// destructively touching it. Not called anywhere outside tests --
+    /// `conv`'s own `Cli::resolver()` never calls it -- so it changes
+    /// nothing about how a real invocation resolves a backend.
+    pub fn without_well_known(&mut self) {
+        self.well_known_disabled = true;
+    }
+
+    /// Whether `WellKnown` candidates should be skipped for this `Resolver`:
+    /// either `without_well_known` was called on it directly (the
+    /// in-process case: convkit-core's own tests, and any dependent crate's
+    /// tests, like `conv`'s unit tests, that construct a `Resolver`
+    /// themselves), or the `CONVKIT_NO_WELL_KNOWN` environment variable is
+    /// set. The env var covers the one case a per-instance flag can't: an
+    /// integration test that drives the real, separately-spawned `conv`
+    /// binary (`assert_cmd`) has no `Resolver` value to call a method on,
+    /// only the child process's environment (`Command::env`) to set. Never
+    /// read by `conv`'s own production code path -- only `Resolver` itself
+    /// consults it -- and safe from the cross-test interference a global
+    /// `std::env::set_var` in an in-process unit test would risk (Rust
+    /// tests run in parallel threads within one process; each
+    /// `assert_cmd::Command` instead spawns a genuinely separate child
+    /// process with its own environment block, so setting this for one
+    /// integration test can never affect another test running concurrently
+    /// in the same suite).
+    fn well_known_disabled(&self) -> bool {
+        self.well_known_disabled || std::env::var_os("CONVKIT_NO_WELL_KNOWN").is_some()
     }
 
     /// Redirects the `Source::Managed` candidate to `dir` instead of the
@@ -112,6 +191,25 @@ impl Resolver {
     #[cfg(test)]
     pub(crate) fn with_convert_search_dir(&mut self, dir: PathBuf) {
         self.convert_search_dir_override = Some(dir);
+    }
+
+    /// Redirects the version probe's timeout to `timeout` instead of the
+    /// real `VERSION_PROBE_TIMEOUT`, so a test can prove a hung child gets
+    /// killed without waiting the real 5 seconds. See
+    /// `probe_timeout_override`.
+    #[cfg(test)]
+    pub(crate) fn with_probe_timeout(&mut self, timeout: Duration) {
+        self.probe_timeout_override = Some(timeout);
+    }
+
+    /// `probe_timeout_override` when a test has set one, otherwise the real
+    /// `VERSION_PROBE_TIMEOUT`.
+    fn probe_timeout(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(timeout) = self.probe_timeout_override {
+            return timeout;
+        }
+        VERSION_PROBE_TIMEOUT
     }
 
     /// Where `conv install` places managed binaries.
@@ -169,12 +267,34 @@ impl Resolver {
 
     /// Platform install locations checked last, for tools that commonly are not
     /// on PATH. LibreOffice on Windows and macOS is the main reason this exists.
+    ///
+    /// On Windows, LibreOffice ships three binaries in `program\`:
+    /// `soffice.bin` (the real engine, never invoked directly), `soffice.com`
+    /// (a console-subsystem launcher that blocks until the work is done and
+    /// writes a capturable stdout), and `soffice.exe` (a GUI-subsystem
+    /// launcher that pops its own console window and returns immediately,
+    /// before the work finishes). Every one of `resolve`'s callers --
+    /// `doctor`'s version probe, and a real conversion waiting for `soffice`
+    /// to actually produce output -- needs the blocking, capturable one, so
+    /// for each install location `.com` is listed before `.exe`; `resolve()`
+    /// walks candidates in order and takes the first that exists, so `.exe`
+    /// is only ever reached when that particular install genuinely lacks a
+    /// `.com` (day-one LibreOffice on Windows always ships both, but this
+    /// keeps a hypothetical partial install from resolving to nothing).
     fn well_known(backend: Backend) -> Vec<PathBuf> {
         match (backend, cfg!(windows), cfg!(target_os = "macos")) {
-            (Backend::Soffice, true, _) => vec![
-                PathBuf::from(r"C:\Program Files\LibreOffice\program\soffice.exe"),
-                PathBuf::from(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
-            ],
+            (Backend::Soffice, true, _) => [
+                r"C:\Program Files\LibreOffice\program",
+                r"C:\Program Files (x86)\LibreOffice\program",
+            ]
+            .into_iter()
+            .flat_map(|dir| {
+                [
+                    PathBuf::from(dir).join("soffice.com"),
+                    PathBuf::from(dir).join("soffice.exe"),
+                ]
+            })
+            .collect(),
             (Backend::Soffice, _, true) => {
                 vec![PathBuf::from(
                     "/Applications/LibreOffice.app/Contents/MacOS/soffice",
@@ -197,15 +317,37 @@ impl Resolver {
         }
         let managed = self.managed_dir_for().join(Self::managed_filename(backend));
         out.push((managed, Source::Managed));
-        if let Ok(p) = which::which(exe) {
+        if let Ok(p) = Self::which_backend(backend, exe) {
             out.push((p, Source::Path));
         }
-        out.extend(
-            Self::well_known(backend)
-                .into_iter()
-                .map(|p| (p, Source::WellKnown)),
-        );
+        if !self.well_known_disabled() {
+            out.extend(
+                Self::well_known(backend)
+                    .into_iter()
+                    .map(|p| (p, Source::WellKnown)),
+            );
+        }
         out
+    }
+
+    /// `PATH` lookup for `backend`. Ordinary `which::which(exe)` for every
+    /// backend except `Soffice` on Windows: `which("soffice")` there has no
+    /// extension of its own, so `which` appends one by walking `PATHEXT` in
+    /// whatever order the user's environment defines it -- normally
+    /// `.COM` before `.EXE`, but that is a user-controlled setting, not a
+    /// guarantee, and picking `.exe` is exactly the bug this exists to
+    /// prevent (see `well_known`'s docs on why `.com` is required). This
+    /// probes `soffice.com` explicitly first, falling back to `soffice.exe`
+    /// only when no `.com` is on `PATH` at all -- the same precedence
+    /// `well_known` uses for the fixed install locations, applied to `PATH`
+    /// too, per the fix brief's "do the same anywhere else a soffice path
+    /// is constructed or discovered, including the PATH lookup."
+    fn which_backend(backend: Backend, exe: &str) -> std::result::Result<PathBuf, which::Error> {
+        if cfg!(windows) && backend == Backend::Soffice {
+            which::which("soffice.com").or_else(|_| which::which("soffice.exe"))
+        } else {
+            which::which(exe)
+        }
     }
 
     /// Resolves a backend, caching the result so each backend is probed —
@@ -222,7 +364,8 @@ impl Resolver {
             if !path.is_file() {
                 continue;
             }
-            let version = Self::version_of(backend, &path).unwrap_or_else(|| "unknown".into());
+            let version = Self::version_of(backend, &path, self.probe_timeout())
+                .unwrap_or_else(|| "unknown".into());
             let resolved = ResolvedBackend {
                 backend,
                 path,
@@ -296,10 +439,11 @@ impl Resolver {
     /// actually contain `ImageMagick` before accepting it.
     fn magick_convert_fallback(&self) -> Option<ResolvedBackend> {
         let path = self.convert_candidate_path()?;
-        if !path.is_file() || !Self::looks_like_imagemagick(&path) {
+        if !path.is_file() || !Self::looks_like_imagemagick(&path, self.probe_timeout()) {
             return None;
         }
-        let version = Self::version_of(Backend::Magick, &path).unwrap_or_else(|| "unknown".into());
+        let version = Self::version_of(Backend::Magick, &path, self.probe_timeout())
+            .unwrap_or_else(|| "unknown".into());
         Some(ResolvedBackend {
             backend: Backend::Magick,
             path,
@@ -325,8 +469,8 @@ impl Resolver {
     /// -version`'s. A `convert` that isn't ImageMagick (some unrelated
     /// program sharing the name) has no reason to print that word, so this
     /// rejects it rather than adopting it as the image backend.
-    fn looks_like_imagemagick(path: &Path) -> bool {
-        Self::probe_first_line(Backend::Magick, path, "-version")
+    fn looks_like_imagemagick(path: &Path, timeout: Duration) -> bool {
+        Self::probe_first_line(Backend::Magick, path, "-version", timeout)
             .is_some_and(|line| line.contains("ImageMagick"))
     }
 
@@ -352,12 +496,12 @@ impl Resolver {
     /// this a probe could collide with an already-running LibreOffice. The
     /// probe's profile directory is removed afterward on a best-effort
     /// basis; nothing downstream depends on it surviving.
-    fn version_of(backend: Backend, path: &Path) -> Option<String> {
+    fn version_of(backend: Backend, path: &Path, timeout: Duration) -> Option<String> {
         let flag = match backend {
             Backend::Ffmpeg | Backend::Ffprobe | Backend::Magick => "-version",
             Backend::Pandoc | Backend::Soffice | Backend::Typst => "--version",
         };
-        let first_line = Self::probe_first_line(backend, path, flag)?;
+        let first_line = Self::probe_first_line(backend, path, flag, timeout)?;
         extract_version_token(&first_line).map(str::to_string)
     }
 
@@ -370,7 +514,12 @@ impl Resolver {
     /// ...") is just "6.9.11-60" — exactly the version number, and
     /// therefore exactly the substring that does *not* contain the literal
     /// word "ImageMagick" this needs to check for.
-    fn probe_first_line(backend: Backend, path: &Path, flag: &str) -> Option<String> {
+    fn probe_first_line(
+        backend: Backend,
+        path: &Path,
+        flag: &str,
+        timeout: Duration,
+    ) -> Option<String> {
         let mut cmd = Command::new(path);
         cmd.arg(flag);
 
@@ -387,10 +536,11 @@ impl Resolver {
             }
         }
 
-        let out = cmd.output().ok()?;
+        let out = Self::run_with_timeout(cmd, timeout);
         if let Some(profile) = &profile {
             let _ = std::fs::remove_dir_all(profile);
         }
+        let out = out?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let text = if stdout.trim().is_empty() {
             String::from_utf8_lossy(&out.stderr).into_owned()
@@ -398,6 +548,45 @@ impl Resolver {
             stdout.into_owned()
         };
         text.lines().next().map(str::to_string)
+    }
+
+    /// `Command::output()` with a deadline, so a version probe can never
+    /// hang the process. No timeout API exists on `std::process::Command`
+    /// (this is exactly the deferred finding this fix promotes), so this
+    /// hand-rolls one without a heavier dependency: spawn the child with its
+    /// stdout/stderr piped, poll `Child::try_wait` on a short interval until
+    /// either it exits or `timeout` elapses, and on the latter, `kill` it.
+    ///
+    /// Returns `None` on spawn failure, on timeout, or if reaping/collecting
+    /// the child's output ever fails -- `version_of`'s caller already treats
+    /// `None` as "report unknown," so a timeout needs no separate case.
+    ///
+    /// On a timeout, the child is both killed *and* waited on afterward
+    /// (`Child::wait`, not just `kill`), so it is actually reaped rather
+    /// than left as a zombie (Unix) or a stray process/console window
+    /// (Windows) -- "kill" alone only requests termination, it does not
+    /// collect the exit status.
+    fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().ok()?;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return None;
+                    }
+                    std::thread::sleep(VERSION_PROBE_POLL_INTERVAL);
+                }
+                Err(_) => return None,
+            }
+        }
+
+        child.wait_with_output().ok()
     }
 }
 
@@ -559,20 +748,21 @@ mod tests {
     /// LibreOffice is never offered as a managed install is
     /// `Backend::is_managed()` being `false` for it — a static predicate
     /// `ConvError::backend_missing` reads before it ever looks at
-    /// `candidates()` — asserted directly and unconditionally here; the
-    /// `resolve()`-based check below is only asserted on when this
-    /// particular machine genuinely has no soffice anywhere, exactly like
-    /// the pandoc test above.
+    /// `candidates()` — asserted directly and unconditionally here.
+    /// `without_well_known` (added once this project's own dev machine
+    /// genuinely got a real LibreOffice install) makes the `resolve()`-based
+    /// check below unconditional too, rather than only asserted on when the
+    /// host happens to have none.
     #[test]
     fn libreoffice_is_never_offered_as_a_managed_install() {
         assert!(!Backend::Soffice.is_managed());
 
         let mut r = Resolver::new();
         r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
+        r.without_well_known();
         r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
-        if let Err(e) = r.resolve(Backend::Soffice) {
-            assert_eq!(e.remediation.unwrap().managed, None);
-        }
+        let e = r.resolve(Backend::Soffice).unwrap_err();
+        assert_eq!(e.remediation.unwrap().managed, None);
     }
 
     // --- Controller review round 3: version_of used the wrong flag and
@@ -780,6 +970,101 @@ mod tests {
         );
     }
 
+    // --- Windows soffice.exe incident: the version probe must never be
+    // able to hang. `Command::output()`/`wait()` has no built-in timeout;
+    // a misresolved `soffice.exe` (a GUI-subsystem launcher that pops its
+    // own console window and never returns without a human to dismiss it —
+    // see `well_known`'s docs) hung `doctor`, `resolve`, and `cargo test`
+    // itself with no way to cancel. These stand in for that with a stub
+    // that never exits on its own, proving `run_with_timeout` (and
+    // `version_of`/`resolve` built on it) kills it and moves on instead.
+
+    /// Writes a script that never exits by itself — an infinite loop —
+    /// standing in for a genuinely hung backend without depending on any
+    /// particular platform's GUI-subsystem quirks.
+    fn stub_that_never_exits(dir: &Path) -> PathBuf {
+        let (name, body) = if cfg!(windows) {
+            ("never_exits.bat", "@echo off\r\n:loop\r\ngoto loop\r\n")
+        } else {
+            ("never_exits.sh", "#!/bin/sh\nwhile :; do :; done\n")
+        };
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// A hung child must be killed at (not well after) its deadline, and
+    /// must report `None` rather than a false success — proof at the
+    /// mechanism level, beneath `version_of`.
+    #[test]
+    fn run_with_timeout_kills_a_hung_child_at_the_deadline_not_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_never_exits(dir.path());
+        let timeout = Duration::from_millis(150);
+
+        let started = Instant::now();
+        let out = Resolver::run_with_timeout(Command::new(&stub), timeout);
+        let elapsed = started.elapsed();
+
+        assert!(
+            out.is_none(),
+            "a hung child must report no output, not a false success"
+        );
+        assert!(
+            elapsed >= timeout,
+            "must not report a timeout before the deadline actually passed: {elapsed:?}"
+        );
+        assert!(
+            elapsed < timeout * 10,
+            "must be killed promptly at the deadline, not left running: {elapsed:?}"
+        );
+    }
+
+    /// The complement: an ordinary, fast-exiting child still gets its
+    /// output back — the timeout machinery must not interfere with the
+    /// normal, non-hung case.
+    #[test]
+    fn run_with_timeout_returns_output_for_a_child_that_exits_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_echoes_first_arg(dir.path());
+        let mut cmd = Command::new(&stub);
+        cmd.arg("--version");
+
+        let out = Resolver::run_with_timeout(cmd, Duration::from_secs(5))
+            .expect("a fast, well-behaved child must not be treated as hung");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("--version-9"));
+    }
+
+    /// End-to-end through `resolve()`: a hung backend must resolve as
+    /// present (the file genuinely exists) with version `"unknown"`,
+    /// promptly, rather than hanging the whole call. `with_probe_timeout`
+    /// shortens the real 5-second `VERSION_PROBE_TIMEOUT` so proving this
+    /// doesn't cost the suite anywhere near that long.
+    #[test]
+    fn a_hung_version_probe_is_killed_and_reported_as_unknown_rather_than_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_never_exits(dir.path());
+        let mut r = Resolver::new();
+        r.with_probe_timeout(Duration::from_millis(150));
+        r.with_override(Backend::Ffmpeg, stub);
+
+        let started = Instant::now();
+        let resolved = r.resolve(Backend::Ffmpeg).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(resolved.version, "unknown");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "must not wait anywhere near the real 5s production timeout: {elapsed:?}"
+        );
+    }
+
     // --- Fix 2: ImageMagick 6's `convert` fallback for `Backend::Magick` --
     // Ubuntu/Debian's `apt-get install imagemagick` installs ImageMagick 6,
     // whose unified binary is `convert`, not `magick` (ImageMagick 7 only).
@@ -898,11 +1183,20 @@ mod tests {
         }
     }
 
+    /// `without_well_known` makes this deterministic even on a host with a
+    /// real, working LibreOffice install: without it, the bogus
+    /// `Soffice` override would fall through to `WellKnown` and genuinely
+    /// resolve there, which is exactly what happened when LibreOffice
+    /// appeared on this project's own dev machine (see `resolve.rs`'s
+    /// `without_well_known` docs) -- Soffice is otherwise the only backend
+    /// with a real fallback location a plain nonexistent override can't
+    /// suppress.
     #[test]
     fn check_availability_only_marks_backends_that_actually_resolve() {
         let dir = tempfile::tempdir().unwrap();
         let stub = stub_that_echoes_first_arg(dir.path());
         let mut r = Resolver::new();
+        r.without_well_known();
         r.with_override(Backend::Pandoc, stub);
         r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
 

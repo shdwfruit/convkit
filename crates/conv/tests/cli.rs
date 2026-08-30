@@ -283,8 +283,17 @@ fn install_soffice_json_refusal_has_no_managed_remediation() {
 // soffice is unavailable, not the (unusable) soffice one. `--soffice-path`
 // is pointed at a file guaranteed not to exist — the same per-backend
 // override mechanism `cli.rs`'s `Cli::resolver` already wires up for every
-// backend — so this is deterministic regardless of whether this host
-// happens to have a real LibreOffice installed elsewhere.
+// backend — but on Windows/macOS a plain nonexistent override alone falls
+// through to `WellKnown`, the only candidate a standard LibreOffice install
+// is ever found through there (its installer doesn't add `program\`/
+// `MacOS/` to `PATH`) — so once this project's own dev machine got a real,
+// working LibreOffice install, `--soffice-path <missing>` alone stopped
+// being enough to make soffice unresolvable. `CONVKIT_NO_WELL_KNOWN` is
+// `Resolver`'s escape hatch for exactly this (see its docs in
+// `resolve.rs`): safe to set here specifically because `assert_cmd`'s
+// `.env(...)` only affects this one child process's environment, never the
+// test binary's own, so it can't leak into any other test running
+// concurrently in this suite.
 #[test]
 fn dry_run_previews_the_pandoc_typst_fallback_when_soffice_path_is_unresolvable() {
     let dir = tempfile::tempdir().unwrap();
@@ -299,6 +308,7 @@ fn dry_run_previews_the_pandoc_typst_fallback_when_soffice_path_is_unresolvable(
     let missing_soffice = dir.path().join("definitely-does-not-exist");
 
     conv()
+        .env("CONVKIT_NO_WELL_KNOWN", "1")
         .args(["in.docx", "out.pdf", "--dry-run"])
         .arg("--pandoc-path")
         .arg(&pandoc_stub)

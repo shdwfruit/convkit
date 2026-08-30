@@ -1233,14 +1233,18 @@ mod tests {
     /// the_dry_run_placeholder` already requires for the unrelated
     /// `-env:UserInstallation` mechanism.
     ///
-    /// Soffice is deliberately left un-overridden here, relying on the real
-    /// host genuinely having no resolvable soffice -- true of this
-    /// project's own bare `cargo test --workspace` CI job (see
-    /// `.github/workflows/ci.yml`: "Runs on a bare runner with NO
-    /// conversion backends installed") and of every machine this task was
-    /// developed and verified against. `with_managed_dir` isolates the one
-    /// candidate that could otherwise leak a real installed pandoc/typst in
-    /// from this machine's own managed install directory.
+    /// Soffice is deliberately left un-overridden here; what makes it
+    /// unresolvable is `without_well_known`, not host luck -- a plain
+    /// nonexistent override/env value falls through to `WellKnown`, and
+    /// `WellKnown` is the only candidate a standard LibreOffice install is
+    /// ever found through on Windows or macOS (its installer doesn't add
+    /// `program\`/`MacOS/` to `PATH`), so relying on "the real host
+    /// genuinely has no resolvable soffice" broke the instant this
+    /// project's own dev machine got a real, working LibreOffice install —
+    /// see `without_well_known`'s docs in `resolve.rs`. `with_managed_dir`
+    /// isolates the one remaining candidate that could otherwise leak a
+    /// real installed pandoc/typst in from this machine's own managed
+    /// install directory.
     #[test]
     fn fallback_recipe_substitutes_the_real_typst_path_and_never_touches_soffice() {
         let dir = tempfile::tempdir().unwrap();
@@ -1256,6 +1260,7 @@ mod tests {
 
         let mut r = Resolver::new();
         r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
+        r.without_well_known();
         r.with_override(Backend::Pandoc, pandoc_stub);
         r.with_override(Backend::Typst, typst_stub.clone());
 
@@ -1310,13 +1315,18 @@ mod tests {
     /// fully_available` checks at the pure planning layer. `with_managed_dir`
     /// isolates the Managed candidate so a real pandoc/typst installed on
     /// this machine (e.g. via `conv install`) can't leak in and change which
-    /// backends this test's `Resolver` sees as available.
+    /// backends this test's `Resolver` sees as available. `without_well_known`
+    /// does the same for Soffice's `WellKnown` candidate -- otherwise the
+    /// override below would fall through to a real, working LibreOffice on
+    /// a machine that has one, making soffice resolve after all. See
+    /// `without_well_known`'s docs in `resolve.rs`.
     #[test]
     fn only_pandoc_available_still_reports_backend_missing_naming_soffice() {
         let dir = tempfile::tempdir().unwrap();
         let pandoc_stub = stub_that_creates_its_output(dir.path());
         let mut r = Resolver::new();
         r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
+        r.without_well_known();
         r.with_override(Backend::Pandoc, pandoc_stub);
         r.with_override(Backend::Typst, PathBuf::from("/definitely/not/here"));
         r.with_override(
