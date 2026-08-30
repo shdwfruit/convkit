@@ -181,7 +181,7 @@ soffice   missing    manual install only  |  winget install TheDocumentFoundatio
 whichever is on `PATH` is what gets suggested.)
 
 **`conv capabilities`** lists every registered conversion pair and which
-backend(s) drive it — 107 pairs across 27 formats as of this writing:
+backend(s) drive it — 115 pairs across 27 formats as of this writing:
 
 ```console
 $ conv capabilities

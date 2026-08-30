@@ -129,20 +129,22 @@ pub fn build(
 
 /// Prefers a stream copy when the probe says the codecs already fit. The
 /// stream-copy recipe is chosen per target container: `-movflags +faststart`
-/// is an mp4-muxer-only option that makes ffmpeg exit 1 on a WebM output, so
-/// `REMUX_MP4` and `REMUX_WEBM` are distinct recipes, not one shared const.
+/// is an mp4-muxer-family-only option (mp4 and mov share it; mkv and webm
+/// reject it outright), so `REMUX_MP4`/`REMUX_MOV`/`REMUX_MKV`/`REMUX_WEBM`
+/// are four distinct recipes, not one shared const.
 ///
 /// `available` picks between the canonical (soffice) and fallback
 /// (pandoc+typst) recipes for a pair that `registry::has_fallback` — today,
 /// only `docx`/`odt` → `pdf`. `None` (the caller has no availability
 /// information, or never bothered to check because the pair has no
 /// fallback anyway) always yields the canonical recipe, keeping the
-/// 107-pair argv snapshot byte-identical to before this existed. `Some`
-/// prefers soffice when present; otherwise pandoc+typst when *both* are
-/// present; otherwise falls through to the canonical (soffice) recipe
-/// anyway, so a user with neither route available gets the ordinary
-/// `backend_missing` naming soffice — the pair's own primary backend —
-/// rather than a confusing one naming typst.
+/// argv snapshot (`recipes.rs`'s `every_registered_pair_renders_stable_argv`)
+/// byte-identical to before this existed. `Some` prefers soffice when
+/// present; otherwise pandoc+typst when *both* are present; otherwise falls
+/// through to the canonical (soffice) recipe anyway, so a user with neither
+/// route available gets the ordinary `backend_missing` naming soffice —
+/// the pair's own primary backend — rather than a confusing one naming
+/// typst.
 fn select(
     from: Format,
     to: Format,
@@ -154,9 +156,14 @@ fn select(
             if registry::can_remux(to, p) {
                 let remux = match to {
                     Format::Mp4 => registry::REMUX_MP4,
+                    Format::Mov => registry::REMUX_MOV,
+                    // Not a plain `REMUX_MKV`: matroska rejects `mov_text`
+                    // outright, so this picks the SRT-subtitle sibling when
+                    // the probe found one. See `mkv_remux_for`'s own docs.
+                    Format::Mkv => registry::mkv_remux_for(p),
                     Format::Webm => registry::REMUX_WEBM,
-                    // `needs_probe` only returns true for Mp4/Webm targets.
-                    _ => unreachable!("needs_probe restricts targets to Mp4 or Webm"),
+                    // `needs_probe` only returns true for Mp4/Mov/Mkv/Webm targets.
+                    _ => unreachable!("needs_probe restricts targets to Mp4, Mov, Mkv, or Webm"),
                 };
                 return Some(remux);
             }
@@ -203,6 +210,7 @@ mod tests {
         let probe = MediaProbe {
             video_codec: Some("h264".into()),
             audio_codec: Some("aac".into()),
+            subtitle_codec: None,
         };
         let plan = build(
             Format::Mkv,
@@ -225,6 +233,7 @@ mod tests {
         let probe = MediaProbe {
             video_codec: Some("vp9".into()),
             audio_codec: Some("opus".into()),
+            subtitle_codec: None,
         };
         let plan = build(
             Format::Mkv,
@@ -315,6 +324,7 @@ mod tests {
         let probe = MediaProbe {
             video_codec: Some("vp9".into()),
             audio_codec: Some("opus".into()),
+            subtitle_codec: None,
         };
         let plan = build(
             Format::Mkv,
@@ -335,6 +345,117 @@ mod tests {
             "webm remux must not carry the mp4-only -movflags option: {:?}",
             plan.steps[0].argv
         );
+    }
+
+    /// mov/mkv as conversion targets (mov and mkv were sources only before
+    /// this): `mp4 -> mov` with compatible codecs must select `REMUX_MOV`,
+    /// the mp4-muxer-family remux that carries `-movflags +faststart`.
+    #[test]
+    fn mp4_to_mov_with_compatible_codecs_selects_the_mov_remux_variant() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            audio_codec: Some("aac".into()),
+            subtitle_codec: None,
+        };
+        let plan = build(
+            Format::Mp4,
+            Format::Mov,
+            &[p("in.mp4")],
+            Path::new("out.mov"),
+            Some(&probe),
+            None,
+        )
+        .unwrap();
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c", "copy"]),
+            "{:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            plan.steps[0].argv.contains(&"-movflags".to_string()),
+            "mov shares the mp4 muxer family, so its remux must keep +faststart: {:?}",
+            plan.steps[0].argv
+        );
+    }
+
+    /// `mp4 -> mkv` with compatible codecs must select `REMUX_MKV`: a
+    /// `-map 0 -c copy` stream copy with no `-movflags` at all (matroska is
+    /// not part of the mov/mp4 muxer family, the exact class of bug the
+    /// `REMUX_MP4`/`REMUX_WEBM` split exists to prevent from reappearing).
+    #[test]
+    fn mp4_to_mkv_with_compatible_codecs_selects_the_mkv_remux_variant_with_no_movflags() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            audio_codec: Some("aac".into()),
+            subtitle_codec: None,
+        };
+        let plan = build(
+            Format::Mp4,
+            Format::Mkv,
+            &[p("in.mp4")],
+            Path::new("out.mkv"),
+            Some(&probe),
+            None,
+        )
+        .unwrap();
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c", "copy"]),
+            "{:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-map", "0"]),
+            "mkv remux must preserve every stream via -map 0: {:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            !plan.steps[0].argv.contains(&"-movflags".to_string()),
+            "mkv is not part of the mov/mp4 muxer family and must never carry -movflags: {:?}",
+            plan.steps[0].argv
+        );
+    }
+
+    /// The gap `mkv_remux_for` exists to close, exercised through the full
+    /// `build` entry point rather than just the registry helper directly:
+    /// a real `mp4` source's *only* possible subtitle codec is `mov_text`,
+    /// and matroska has no codec ID for it, so a plain `REMUX_MKV` would
+    /// make `mp4 -> mkv` fail outright on any source that carries a
+    /// subtitle track at all. `select` must route to `REMUX_MKV_SRT_SUBS`
+    /// instead, keeping video/audio as a stream copy and only re-encoding
+    /// the subtitle.
+    #[test]
+    fn mp4_to_mkv_with_a_mov_text_subtitle_reencodes_only_the_subtitle_stream() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            audio_codec: Some("aac".into()),
+            subtitle_codec: Some("mov_text".into()),
+        };
+        let plan = build(
+            Format::Mp4,
+            Format::Mkv,
+            &[p("in.mp4")],
+            Path::new("out.mkv"),
+            Some(&probe),
+            None,
+        )
+        .unwrap();
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:v", "copy"]),
+            "{:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:a", "copy"]),
+            "{:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:s", "srt"]),
+            "{:?}",
+            plan.steps[0].argv
+        );
+        assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+        assert!(plan.warnings[0].contains("mov_text"), "{:?}", plan.warnings);
     }
 
     /// `Arg::Input` indexes `inputs[0]` unchecked in `Step::render`, so an
@@ -441,9 +562,9 @@ mod tests {
     }
 
     /// `None` — no availability hint at all — must always yield the
-    /// canonical (soffice) recipe. This is what keeps the 107-pair argv
-    /// snapshot (which calls `build` with `None` for every pair) byte-
-    /// identical to before this selection existed.
+    /// canonical (soffice) recipe. This is what keeps the argv snapshot
+    /// (which calls `build` with `None` for every pair) byte-identical to
+    /// before this selection existed.
     #[test]
     fn no_availability_hint_yields_the_canonical_soffice_recipe() {
         let plan = build(

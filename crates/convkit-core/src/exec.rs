@@ -115,6 +115,24 @@ impl Drop for ScratchGuard {
     }
 }
 
+/// Whether a step's rendered argv performed a stream copy of the actual
+/// media -- what `Outcome::remuxed` reports. Bare `-c copy` covers every
+/// remux recipe except one: `REMUX_MKV_SRT_SUBS` (`registry::mkv_remux_for`'s
+/// answer when the source subtitle is `mov_text`, which matroska can't
+/// hold) still stream-copies video and audio, but spells it per-stream
+/// (`-c:v copy -c:a copy`) so it can give the subtitle stream a different
+/// codec (`-c:s srt`) alongside them. Without the second arm, this would
+/// report `false` for a conversion whose actual video/audio bytes were
+/// never re-encoded -- exactly the answer this field exists to give. A
+/// free function (not inlined into `run`) so it's unit-testable directly
+/// against a plain `argv` slice, without needing a real backend or
+/// filesystem.
+fn is_remux(argv: &[String]) -> bool {
+    argv.windows(2).any(|w| w == ["-c", "copy"])
+        || (argv.windows(2).any(|w| w == ["-c:v", "copy"])
+            && argv.windows(2).any(|w| w == ["-c:a", "copy"]))
+}
+
 /// Runs a conversion plan end to end: resolves each step's backend, spawns
 /// it, verifies it actually produced output, and atomically renames the
 /// result into place.
@@ -207,7 +225,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         .steps
         .first()
         .ok_or_else(|| ConvError::new(ErrorCode::ConversionFailed, "recipe has no steps"))?;
-    let remuxed = first_step.argv.windows(2).any(|w| w == ["-c", "copy"]);
+    let remuxed = is_remux(&first_step.argv);
 
     let total = built.steps.len();
     let mut backends = Vec::new();
@@ -1385,5 +1403,58 @@ mod tests {
         let e = substitute_backend_paths(&argv, &r).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::BackendMissing);
         assert_eq!(e.backend, Some(Backend::Typst));
+    }
+
+    // --- mov/mkv as conversion targets: `is_remux` must recognize
+    // `REMUX_MKV_SRT_SUBS`'s per-stream `-c:v copy -c:a copy` too, not just
+    // bare `-c copy` --------------------------------------------------------
+
+    #[test]
+    fn is_remux_recognizes_bare_c_copy() {
+        let argv: Vec<String> = ["-i", "in.mp4", "-c", "copy", "-y", "out.mov"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(is_remux(&argv));
+    }
+
+    #[test]
+    fn is_remux_recognizes_per_stream_video_and_audio_copy() {
+        // REMUX_MKV_SRT_SUBS's exact shape: video and audio stream-copied,
+        // subtitle re-encoded to srt.
+        let argv: Vec<String> = [
+            "-i", "in.mp4", "-map", "0", "-c:v", "copy", "-c:a", "copy", "-c:s", "srt", "-y",
+            "out.mkv",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(
+            is_remux(&argv),
+            "video and audio are genuinely stream-copied here, only the \
+             subtitle is re-encoded -- this must report true: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn is_remux_requires_both_video_and_audio_copy_not_just_one() {
+        // A hypothetical partial copy (only one of the two streams copied)
+        // must not be reported as a remux -- guards against a future
+        // recipe accidentally satisfying this with e.g. `-c:v copy` alone
+        // while the audio is genuinely transcoded.
+        let video_only: Vec<String> = ["-c:v", "copy", "-c:a", "aac"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!is_remux(&video_only), "{video_only:?}");
+    }
+
+    #[test]
+    fn is_remux_is_false_for_a_genuine_transcode() {
+        let argv: Vec<String> = ["-c:v", "libx264", "-crf", "20", "-c:a", "aac"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!is_remux(&argv));
     }
 }

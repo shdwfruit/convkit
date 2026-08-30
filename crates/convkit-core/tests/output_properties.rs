@@ -109,9 +109,12 @@ fn convert_fixture(name: &str, to_ext: &str) -> PathBuf {
 }
 
 /// Remuxes a fixture into a different container with a raw stream-copy
-/// `ffmpeg` call -- not through convkit's own recipe table, which (by
-/// design; see `registry.rs`'s `insert_media_family`) has no recipe that
-/// targets `.mkv` at all. This exists purely to build test input for
+/// `ffmpeg` call -- deliberately not through convkit's own `mp4 -> mkv`
+/// recipe, even though the registry has carried one since mov/mkv became
+/// conversion targets. Building this test's input via the very feature the
+/// test exists to verify would make a break in *that* feature show up here
+/// as a confusing fixture-setup failure instead of the clear assertion this
+/// test is actually about. This exists purely to build test input for
 /// `mkv_to_mp4_with_compatible_codecs_is_a_stream_copy`.
 fn remux_fixture_to(name: &str, container_ext: &str) -> PathBuf {
     let resolver = Resolver::new();
