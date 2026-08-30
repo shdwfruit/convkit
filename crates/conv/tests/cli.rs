@@ -283,17 +283,22 @@ fn install_soffice_json_refusal_has_no_managed_remediation() {
 // soffice is unavailable, not the (unusable) soffice one. `--soffice-path`
 // is pointed at a file guaranteed not to exist — the same per-backend
 // override mechanism `cli.rs`'s `Cli::resolver` already wires up for every
-// backend — but on Windows/macOS a plain nonexistent override alone falls
-// through to `WellKnown`, the only candidate a standard LibreOffice install
-// is ever found through there (its installer doesn't add `program\`/
-// `MacOS/` to `PATH`) — so once this project's own dev machine got a real,
-// working LibreOffice install, `--soffice-path <missing>` alone stopped
-// being enough to make soffice unresolvable. `CONVKIT_NO_WELL_KNOWN` is
-// `Resolver`'s escape hatch for exactly this (see its docs in
-// `resolve.rs`): safe to set here specifically because `assert_cmd`'s
-// `.env(...)` only affects this one child process's environment, never the
-// test binary's own, so it can't leak into any other test running
-// concurrently in this suite.
+// backend — but a plain nonexistent override alone isn't enough on its own:
+// `Resolver::resolve` skips a candidate whose path isn't a file and falls
+// through to the next one, and soffice has more fallback candidates than
+// any other backend (`Source::Env`'s `CONVKIT_SOFFICE`, a real `soffice` on
+// `PATH` — the ordinary way it's found on Linux via `apt install
+// libreoffice` — and, on Windows/macOS only, `Source::WellKnown`'s fixed
+// Program Files/`/Applications` locations, the only candidate a *standard*
+// LibreOffice install is ever found through there, since its installer
+// doesn't add `program\`/`MacOS/` to `PATH`). `command_with_no_backends`
+// (see its own docs above) closes every one of those for this one child
+// process without touching this test binary's own environment or any other
+// test running concurrently in this suite; pandoc and typst still resolve
+// regardless, since their `--pandoc-path`/`--typst-path` overrides point at
+// real, existing stub files and `Resolver::resolve` returns the very first
+// candidate that's a file, before ever consulting env/managed/PATH/
+// well-known for them.
 #[test]
 fn dry_run_previews_the_pandoc_typst_fallback_when_soffice_path_is_unresolvable() {
     let dir = tempfile::tempdir().unwrap();
@@ -307,9 +312,8 @@ fn dry_run_previews_the_pandoc_typst_fallback_when_soffice_path_is_unresolvable(
     std::fs::write(&typst_stub, b"stub").unwrap();
     let missing_soffice = dir.path().join("definitely-does-not-exist");
 
-    conv()
-        .env("CONVKIT_NO_WELL_KNOWN", "1")
-        .args(["in.docx", "out.pdf", "--dry-run"])
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.args(["in.docx", "out.pdf", "--dry-run"])
         .arg("--pandoc-path")
         .arg(&pandoc_stub)
         .arg("--typst-path")
@@ -385,18 +389,24 @@ fn install_magick_reports_no_managed_build_on_every_platform() {
 
 // --- Part 1: install-and-retry prompt for a missing backend ----------------
 //
-// `magick` is the reliably-missing backend used below: this project's own
-// bare CI runner has no conversion backends installed at all, and `magick`
-// specifically is also absent on the machine this task was developed
-// against (ImageMagick is installed but not linked onto PATH) — unlike
-// `ffmpeg`/`pandoc`/`typst`, which a prior `conv install` had already
-// provisioned as managed backends on that same machine, making them
-// unsuitable for a deterministic "still missing" test here. `magick` also
-// happens to never be offerable (`manifest::has_managed_build` is `false`
-// for it on every platform — no verified manifest entry exists), so these
-// prove "no prompt, no hang" via that gate; the Windows-only test further
-// down proves the same guarantee for a genuinely offerable backend, via the
-// TTY gate specifically.
+// `magick` is the backend used below. It's never offerable
+// (`manifest::has_managed_build` is `false` for it on every platform — no
+// verified manifest entry exists), so these prove "no prompt, no hang" via
+// that gate; the Windows-only test further down proves the same guarantee
+// for a genuinely offerable backend, via the TTY gate specifically.
+//
+// Every test here that expects `backend_missing` needs `magick` to
+// genuinely fail to resolve — and *only* relying on this host happening to
+// lack a real ImageMagick install is exactly the bug a prior version of
+// this suite had: GitHub's `windows-latest` runner ships ImageMagick
+// pre-installed, so `magick` resolved there, ran, and correctly rejected
+// the deliberately-invalid `a.png` with `conversion_failed` (exit 1) instead
+// of `backend_missing` (exit 3) — the same disease an earlier review had
+// already found and fixed the other way around (tests that failed on a
+// machine *with* pandoc or LibreOffice installed). `command_with_no_backends`
+// below closes every candidate `Resolver::candidates` would otherwise try,
+// so these tests exercise the `backend_missing` path deterministically
+// regardless of what's actually installed on the host running them.
 //
 // Every test here adds an explicit `.timeout(...)` on top of assert_cmd's
 // own default (stdin is always a pipe, never a real TTY, so
@@ -412,12 +422,70 @@ fn write_unreadable_png(dir: &std::path::Path) {
     .unwrap();
 }
 
+/// Gives a `conv` child process an environment in which *no* backend can
+/// possibly resolve, regardless of what happens to be installed, on `PATH`,
+/// or set in `CONVKIT_*` on the host actually running this suite —
+/// `Resolver::candidates`'s full chain is explicit `--<backend>-path` flag
+/// -> `CONVKIT_<BACKEND>` env var -> managed directory -> `PATH` ->
+/// well-known platform locations, and every one of those but the first
+/// (which no test here ever passes) is closed off:
+///
+/// - `env_clear()` drops the whole inherited environment first, including
+///   every `CONVKIT_*` override a developer's own shell might happen to
+///   have set — a plain `.env(...)` added on top of the inherited
+///   environment could never undo that, only add to it.
+/// - `PATH` is then set to a fresh, empty tempdir rather than left unset or
+///   cleared to nothing: an empty-string `PATH` still has one path
+///   component — `""` — which conventionally means "the current
+///   directory", not "no directories", and every test here genuinely runs
+///   with a real current directory. A real, empty directory has no such
+///   loophole.
+/// - the managed-install directory (`LOCALAPPDATA` on Windows,
+///   `XDG_DATA_HOME` elsewhere — see `Resolver::managed_dir`) is pointed at
+///   a second fresh, empty tempdir, so `Source::Managed` can't find a real
+///   `conv install`-placed binary either.
+/// - `CONVKIT_NO_WELL_KNOWN` is set, `Resolver`'s own escape hatch (see
+///   `resolve.rs`) for the one candidate an emptied `PATH` can't touch:
+///   `Source::WellKnown`'s fixed absolute install locations (LibreOffice's
+///   Windows/macOS paths are the only ones any backend has). This is a
+///   no-op for `magick`, which has no well-known locations on any platform,
+///   but keeps this helper correct for any other backend a test might use
+///   it with.
+/// - `SYSTEMROOT` is added back from this test process's own real
+///   environment, when present — verified empirically (not assumed) to be
+///   unnecessary for `conv.exe` to spawn at all in this environment, but
+///   cheap insurance against a Windows process that needs it to start on a
+///   host where it matters, and it can never help a backend resolve.
+///
+/// Returns the two `TempDir` guards alongside `cmd` so callers keep them
+/// alive for as long as the assertion needs them — they delete their
+/// directory on drop, and `cmd`'s env values are borrowed paths into them.
+fn command_with_no_backends() -> (Command, tempfile::TempDir, tempfile::TempDir) {
+    let empty_path = tempfile::tempdir().unwrap();
+    let empty_managed_dir = tempfile::tempdir().unwrap();
+
+    let mut cmd = conv();
+    cmd.env_clear();
+    if let Ok(system_root) = std::env::var("SYSTEMROOT") {
+        cmd.env("SYSTEMROOT", system_root);
+    }
+    cmd.env("PATH", empty_path.path());
+    #[cfg(windows)]
+    cmd.env("LOCALAPPDATA", empty_managed_dir.path());
+    #[cfg(not(windows))]
+    cmd.env("XDG_DATA_HOME", empty_managed_dir.path());
+    cmd.env("CONVKIT_NO_WELL_KNOWN", "1");
+
+    (cmd, empty_path, empty_managed_dir)
+}
+
 #[test]
 fn piped_stdin_never_prompts_and_reports_the_structured_error() {
     let dir = tempfile::tempdir().unwrap();
     write_unreadable_png(dir.path());
 
-    let assert = conv()
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
         .current_dir(dir.path())
         .args(["a.png", "a.jpg"])
         .timeout(Duration::from_secs(10))
@@ -440,7 +508,8 @@ fn json_mode_never_prompts_on_a_missing_backend() {
     let dir = tempfile::tempdir().unwrap();
     write_unreadable_png(dir.path());
 
-    let assert = conv()
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
         .current_dir(dir.path())
         .args(["a.png", "a.jpg", "--json"])
         .timeout(Duration::from_secs(10))
@@ -462,7 +531,8 @@ fn no_install_flag_never_prompts_even_though_it_would_otherwise_be_offerable() {
     let dir = tempfile::tempdir().unwrap();
     write_unreadable_png(dir.path());
 
-    let assert = conv()
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
         .current_dir(dir.path())
         .args(["a.png", "a.jpg", "--no-install"])
         .timeout(Duration::from_secs(10))
@@ -481,8 +551,8 @@ fn quiet_flag_never_prompts_either() {
     let dir = tempfile::tempdir().unwrap();
     write_unreadable_png(dir.path());
 
-    conv()
-        .current_dir(dir.path())
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
         .args(["a.png", "a.jpg", "--quiet"])
         .timeout(Duration::from_secs(10))
         .assert()
@@ -505,28 +575,27 @@ fn yes_and_no_install_together_is_a_usage_error() {
 /// proving the TTY gate itself, not just the "never offerable at all" gate
 /// every test above exercises via `magick`.
 ///
-/// `ffmpeg` is already provisioned as a managed backend on the machine this
-/// was developed against (a prior `conv install ffmpeg` put it in the real,
-/// shared `%LOCALAPPDATA%\convkit\bin`), so a plain `--ffmpeg-path
-/// <nonexistent>` alone doesn't make it unresolvable — `Resolver::resolve`
-/// falls through an unusable override to the next candidate, and Managed
-/// still finds the real one. This redirects `LOCALAPPDATA` to an empty
-/// temp directory and narrows `PATH` to just `System32`, for this child
-/// process only — never touching the real managed install, or anything
-/// else on the host — so `ffmpeg` genuinely can't be found for this one
-/// invocation regardless of what's actually installed.
+/// `ffmpeg` is a poor fit for `command_with_no_backends`'s usual well: a
+/// plain `--ffmpeg-path <nonexistent>` alone doesn't make it unresolvable
+/// on a machine where a prior `conv install ffmpeg` already provisioned it
+/// as a managed backend (`Resolver::resolve` falls through an unusable
+/// override to the next candidate, and `Source::Managed` still finds the
+/// real one) — this is exactly why `command_with_no_backends` also
+/// redirects the managed directory, not just `PATH`, and additionally
+/// clears every `CONVKIT_*` var via `env_clear()` (a `CONVKIT_FFMPEG` set
+/// in a developer's own shell would otherwise resolve here too, via
+/// `Source::Env`, ahead of both). No `--ffmpeg-path` override is passed at
+/// all: the whole point is that `ffmpeg` fails to resolve through every
+/// *other* candidate.
 #[cfg(windows)]
 #[test]
 fn piped_stdin_never_prompts_even_for_a_genuinely_offerable_backend() {
     let dir = tempfile::tempdir().unwrap();
-    let fake_local_app_data = dir.path().join("fake-local-app-data");
-    std::fs::create_dir_all(&fake_local_app_data).unwrap();
     std::fs::write(dir.path().join("in.mp4"), b"not a real mp4").unwrap();
 
-    let assert = conv()
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
         .current_dir(dir.path())
-        .env("LOCALAPPDATA", &fake_local_app_data)
-        .env("PATH", r"C:\Windows\System32")
         .args(["in.mp4", "out.gif"])
         .timeout(Duration::from_secs(10))
         .assert()
@@ -653,15 +722,17 @@ fn json_success_is_unchanged_except_for_the_additive_elapsed_ms_key() {
     assert!(v["results"][0]["elapsed_ms"].is_number(), "{v}");
 }
 
-/// Acceptance check 3's shape: a real, unstubbed failing conversion (no
-/// ImageMagick on this machine's PATH — see this module's own doc comment
-/// on why `magick` is the reliable choice) must not look like a success.
+/// Acceptance check 3's shape: a real, unstubbed failing conversion (backend
+/// deliberately made unresolvable via `command_with_no_backends` — see this
+/// module's own doc comment on why `magick` is the reliable choice) must not
+/// look like a success.
 #[test]
 fn failing_conversion_prints_a_fail_header_message_and_one_remediation_line() {
     let dir = tempfile::tempdir().unwrap();
     write_unreadable_png(dir.path());
 
-    let assert = conv()
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
         .current_dir(dir.path())
         .args(["a.png", "a.jpg"])
         .timeout(Duration::from_secs(10))

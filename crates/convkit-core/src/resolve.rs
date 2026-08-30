@@ -748,11 +748,26 @@ mod tests {
     /// LibreOffice is never offered as a managed install is
     /// `Backend::is_managed()` being `false` for it — a static predicate
     /// `ConvError::backend_missing` reads before it ever looks at
-    /// `candidates()` — asserted directly and unconditionally here.
+    /// `candidates()` — asserted directly and unconditionally here (the
+    /// same, zero-I/O guarantee `error.rs`'s own
+    /// `backend_missing_never_leaves_remediation_empty` proves
+    /// independently, with no `Resolver` involved at all).
+    ///
     /// `without_well_known` (added once this project's own dev machine
-    /// genuinely got a real LibreOffice install) makes the `resolve()`-based
-    /// check below unconditional too, rather than only asserted on when the
-    /// host happens to have none.
+    /// genuinely got a real LibreOffice install) closes the `WellKnown`
+    /// candidate, but `resolve()`'s remaining two — `Source::Env`
+    /// (`CONVKIT_SOFFICE`) and `Source::Path` (a real `soffice` genuinely on
+    /// `PATH`, the ordinary way LibreOffice is found on Linux via `apt
+    /// install libreoffice`) — read this test's own real, global process
+    /// environment. An in-process unit test can't redirect either the way a
+    /// spawned child's can (see `cli.rs`'s `command_with_no_backends`,
+    /// which uses `env_clear()`): Rust tests run in parallel threads within
+    /// one process, so mutating `PATH`/`CONVKIT_SOFFICE` here would race
+    /// every other test thread. So the `resolve()`-based check below stays
+    /// best-effort — asserted only when this host genuinely doesn't resolve
+    /// a real `soffice` through either of those two candidates — the same
+    /// conditional shape `a_missing_backend_produces_a_remediable_error`
+    /// above already uses for the identical reason.
     #[test]
     fn libreoffice_is_never_offered_as_a_managed_install() {
         assert!(!Backend::Soffice.is_managed());
@@ -761,8 +776,9 @@ mod tests {
         r.with_managed_dir(tempfile::tempdir().unwrap().path().to_path_buf());
         r.without_well_known();
         r.with_override(Backend::Soffice, PathBuf::from("/definitely/not/here"));
-        let e = r.resolve(Backend::Soffice).unwrap_err();
-        assert_eq!(e.remediation.unwrap().managed, None);
+        if let Err(e) = r.resolve(Backend::Soffice) {
+            assert_eq!(e.remediation.unwrap().managed, None);
+        }
     }
 
     // --- Controller review round 3: version_of used the wrong flag and
@@ -1191,6 +1207,21 @@ mod tests {
     /// `without_well_known` docs) -- Soffice is otherwise the only backend
     /// with a real fallback location a plain nonexistent override can't
     /// suppress.
+    ///
+    /// Two candidates `without_well_known` can't touch -- `Source::Env`
+    /// (`CONVKIT_SOFFICE`) and `Source::Path` (a real `soffice` on this
+    /// process's own real `PATH`, e.g. from `apt install libreoffice`) --
+    /// read this test's own real, global environment, which an in-process
+    /// unit test can't redirect the way `cli.rs`'s spawned-child tests do
+    /// (see `command_with_no_backends` there, which uses `env_clear()`).
+    /// So the `Soffice` half of this assertion is best-effort, conditioned
+    /// on `resolve()` itself agreeing soffice is missing here -- the same
+    /// shape `libreoffice_is_never_offered_as_a_managed_install` and
+    /// `a_missing_backend_produces_a_remediable_error` already use for the
+    /// identical reason. `Pandoc`'s half stays unconditional: its override
+    /// points at a real, existing stub file, so `resolve()` returns it from
+    /// the very first candidate it tries, before `Env`/`Managed`/`Path`/
+    /// `WellKnown` are ever consulted -- host state can't affect it.
     #[test]
     fn check_availability_only_marks_backends_that_actually_resolve() {
         let dir = tempfile::tempdir().unwrap();
@@ -1202,7 +1233,9 @@ mod tests {
 
         let available = r.check_availability(&[Backend::Pandoc, Backend::Soffice]);
         assert!(available.has(Backend::Pandoc));
-        assert!(!available.has(Backend::Soffice));
+        if r.resolve(Backend::Soffice).is_err() {
+            assert!(!available.has(Backend::Soffice));
+        }
     }
 
     #[test]
