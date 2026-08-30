@@ -221,16 +221,27 @@ mod tests {
     /// With no explicit `--ffprobe-path`, `--ffmpeg-path` alone must still
     /// infer the sibling in the same directory -- the pre-existing
     /// behaviour this fix must not regress.
+    ///
+    /// Sibling inference is not a Windows concept: it walks whatever
+    /// `Path::parent()` returns, so this must hold on every platform. The
+    /// input path is built with a platform-appropriate literal (backslashes
+    /// are just filename characters on Unix, so a Windows-style literal
+    /// here would have no parent at all and the test would pass vacuously
+    /// without ever exercising the inference).
     #[test]
     fn ffmpeg_path_alone_still_infers_the_sibling_ffprobe() {
-        let ffmpeg = PathBuf::from(r"C:\tools\ffmpeg\bin\ffmpeg.exe");
+        let ffmpeg = if cfg!(windows) {
+            PathBuf::from(r"C:\tools\ffmpeg\bin\ffmpeg.exe")
+        } else {
+            PathBuf::from("/tools/ffmpeg/bin/ffmpeg")
+        };
         let c = cli(Some(ffmpeg), None);
         let r = c.resolver();
         let candidates = r.candidates(Backend::Ffprobe);
         let expected_probe = if cfg!(windows) {
             r"C:\tools\ffmpeg\bin\ffprobe.exe"
         } else {
-            r"C:\tools\ffmpeg\bin\ffprobe"
+            "/tools/ffmpeg/bin/ffprobe"
         };
         assert_eq!(
             candidates.first(),
