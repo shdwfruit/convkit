@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Drives `integration-windows` only -- see that job for why it is not on
+  # the push path. Weekly rather than nightly: what this catches is drift
+  # (a new LibreOffice from Chocolatey, a pinned managed download rotting),
+  # which moves on the scale of weeks.
+  schedule:
+    - cron: "17 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -128,5 +134,79 @@ jobs:
       - name: cargo build --workspace
         run: cargo build --workspace
 
+      - name: cargo test --workspace -- --ignored (real backends)
+        run: cargo test --workspace -- --ignored
+
+  # The Windows half of the same idea, and the job whose absence let three
+  # Windows-only defects reach a user rather than CI: the `soffice.com`
+  # launcher choice, the LibreOffice profile blowing past MAX_PATH, and
+  # missing CREATE_NO_WINDOW were all found by running conv by hand on a
+  # Windows machine. The `test` matrix above does run on windows-latest, but
+  # with zero backends, so it can only ever check the argv convkit would
+  # have produced.
+  #
+  # Deliberately not on the push path. LibreOffice from Chocolatey is a
+  # several-hundred-megabyte install and the slowest, least reliable step
+  # here, and gating every push on it buys less than it costs for a project
+  # this size. Run it from the Actions tab before cutting a release, and let
+  # the weekly schedule catch drift in between.
+  integration-windows:
+    name: integration (windows, real backends)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --workspace
+        run: cargo build --workspace
+
+      # ffmpeg, ffprobe, pandoc and typst come from convkit's own managed
+      # installer rather than a package manager. That is the same pinned
+      # URL-plus-SHA-256 path a Windows user gets from `conv install`, so
+      # this exercises the installer on Windows as a side effect -- the
+      # `.exe` managed filenames in particular have no other coverage.
+      - name: Install managed backends via conv itself
+        run: |
+          $conv = ".\target\debug\conv.exe"
+          # `install ffmpeg` brings ffprobe with it -- they come from one
+          # archive -- so asking for both would download it twice.
+          foreach ($b in @("ffmpeg", "pandoc", "typst")) {
+            & $conv install $b --yes
+            if ($LASTEXITCODE -ne 0) { throw "conv install $b failed ($LASTEXITCODE)" }
+          }
+
+      # ImageMagick ships on some runner images and not others, so this
+      # checks rather than assumes. LibreOffice never ships and is always
+      # installed; it is what puts `soffice.com` at the well-known path the
+      # resolver looks for, which is the Windows-specific behaviour with the
+      # worst track record.
+      - name: Install ImageMagick and LibreOffice
+        run: |
+          if (-not (Get-Command magick -ErrorAction SilentlyContinue)) {
+            choco install imagemagick --no-progress -y
+          }
+          choco install libreoffice-fresh --no-progress -y
+
+      - name: conv doctor
+        run: |
+          $env:PATH = "C:\Program Files\LibreOffice\program;$env:PATH"
+          .\target\debug\conv.exe doctor
+
+      # Same reasoning as the Ubuntu job's HEIC check: separate "this
+      # ImageMagick can decode HEVC" from "our recipe is correct", so a
+      # decoder gap fails here by name instead of surfacing later as a
+      # confusing property-test failure.
+      - name: Verify ImageMagick can decode HEIC
+        run: |
+          magick tests\fixtures\photo.heic "$env:RUNNER_TEMP\heic-check.jpg"
+          if ($LASTEXITCODE -ne 0) { throw "ImageMagick could not decode tests/fixtures/photo.heic" }
+          Get-Item "$env:RUNNER_TEMP\heic-check.jpg" | Select-Object Length
+
+      # The suite this job exists for. It includes the deep-destination
+      # regression tests, which only mean anything here: on Linux a
+      # 240-character path is unremarkable, so those tests are inert in the
+      # Ubuntu job that is currently the only place they run.
       - name: cargo test --workspace -- --ignored (real backends)
         run: cargo test --workspace -- --ignored
