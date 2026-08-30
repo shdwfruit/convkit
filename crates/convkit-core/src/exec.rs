@@ -298,6 +298,11 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         // inside `backend_command`, not repeated here -- see its docs.
         let mut cmd = backend_command(&resolved.path);
 
+        // Decided before the argv is built so both branches below agree, and
+        // per step rather than per run: a two-step recipe can have a short
+        // intermediate and a long final output.
+        let verbatim_paths = wants_verbatim_paths(step);
+
         // Constraint: every soffice invocation gets its own isolated
         // profile. It lives in the system temp directory, not under
         // `scratch` (see `make_lo_profile_dir`'s docs) — tracked on `guard`
@@ -324,10 +329,16 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                  step's first argv element"
             );
             cmd.arg(format!("-env:UserInstallation={url}"));
-            let rest = substitute_backend_paths(&step.argv[1..], resolver)?;
+            // The placeholder occupies index 0 and is replaced above rather
+            // than passed through, so the recorded positions -- which count
+            // from the full argv -- shift down by one for this slice.
+            let shifted: Vec<usize> = step.path_args.iter().map(|i| i - 1).collect();
+            let rest =
+                substitute_backend_paths(&step.argv[1..], &shifted, verbatim_paths, resolver)?;
             cmd.args(&rest);
         } else {
-            let argv = substitute_backend_paths(&step.argv, resolver)?;
+            let argv =
+                substitute_backend_paths(&step.argv, &step.path_args, verbatim_paths, resolver)?;
             cmd.args(&argv);
         }
 
@@ -375,13 +386,35 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                 .rev()
                 .collect::<Vec<_>>()
                 .join("; ");
+            // Backends report a long-path failure as something else
+            // entirely -- a missing input, a missing export filter -- so
+            // when one fails with a path this long, say so rather than
+            // leaving the user to read an error that names the wrong cause
+            // (F193).
+            let long_path = winpath::long_path_note(
+                step.path_args
+                    .iter()
+                    .filter_map(|&i| step.argv.get(i))
+                    .map(String::as_str)
+                    .chain(step.output.to_str()),
+            );
+            let base = if is_non_empty(&produced) {
+                format!("{} failed: {tail}", step.backend.exe_name())
+            } else {
+                // soffice exits 0 on failure, so this branch is load-bearing.
+                // `tail` is often empty, so the separator goes with it rather
+                // than being left dangling on the end of the sentence.
+                format!(
+                    "{} produced no output.{}",
+                    step.backend.exe_name(),
+                    suffix(&tail)
+                )
+            };
             return Err(ConvError {
                 code: ErrorCode::ConversionFailed,
-                message: if is_non_empty(&produced) {
-                    format!("{} failed: {tail}", step.backend.exe_name())
-                } else {
-                    // soffice exits 0 on failure, so this branch is load-bearing.
-                    format!("{} produced no output. {tail}", step.backend.exe_name())
+                message: match long_path {
+                    Some(note) => format!("{base} ({note})"),
+                    None => base,
                 },
                 backend: Some(step.backend),
                 remediation: None,
@@ -440,16 +473,61 @@ const KNOWN_BACKENDS: &[Backend] = &[
 /// recipe needs a backend this way that turns out to be missing surfaces
 /// the same `backend_missing` error naming that backend that any other
 /// resolution failure would.
-fn substitute_backend_paths(argv: &[String], resolver: &Resolver) -> Result<Vec<OsString>> {
+fn substitute_backend_paths(
+    argv: &[String],
+    path_args: &[usize],
+    verbatim_paths: bool,
+    resolver: &Resolver,
+) -> Result<Vec<OsString>> {
     let mut out = Vec::with_capacity(argv.len());
-    for tok in argv {
+    for (i, tok) in argv.iter().enumerate() {
         let named = KNOWN_BACKENDS.iter().find(|b| *tok == b.path_placeholder());
         match named {
             Some(&backend) => out.push(resolver.resolve(backend)?.path.into_os_string()),
+            None if verbatim_paths && path_args.contains(&i) => {
+                // Only the recorded path positions, never a filter graph or a
+                // codec name that happens to look path-shaped.
+                match winpath::to_verbatim(tok) {
+                    Some(v) => out.push(OsString::from(v)),
+                    None => out.push(OsString::from(tok)),
+                }
+            }
             None => out.push(OsString::from(tok)),
         }
     }
     Ok(out)
+}
+
+/// Whether this step's paths should be handed to the backend in extended
+/// (`\\?\`) form.
+///
+/// Decided per step, over every path the step touches *plus* the file it is
+/// declared to produce. The declared output matters on its own: a soffice
+/// step is given an `--outdir`, so the only long path in its argv may be a
+/// directory that is still short while the file soffice creates inside it is
+/// not.
+///
+/// The whole step switches together or not at all. Mixing forms within one
+/// command is the kind of half-measure that produces a failure nobody can
+/// read.
+fn wants_verbatim_paths(step: &plan::PlannedStep) -> bool {
+    step.path_args
+        .iter()
+        .filter_map(|&i| step.argv.get(i))
+        .map(String::as_str)
+        .chain(step.output.to_str())
+        .any(winpath::is_long)
+}
+
+/// A backend's stderr tail, ready to append to a sentence -- empty when
+/// there was nothing to say, rather than a trailing space that made every
+/// silent soffice failure read as an unfinished sentence.
+fn suffix(tail: &str) -> String {
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!(" {tail}")
+    }
 }
 
 /// In OutDir mode the backend names the file `<input-stem>.<ext>` itself.
@@ -1587,9 +1665,91 @@ mod tests {
         let mut r = Resolver::new();
         r.overrides_only();
 
-        let e = substitute_backend_paths(&argv, &r).unwrap_err();
+        let e = substitute_backend_paths(&argv, &[], false, &r).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::BackendMissing);
         assert_eq!(e.backend, Some(Backend::Typst));
+    }
+
+    // --- extended-length path rewriting (F193) -------------------------------
+
+    fn step_with(argv: &[&str], path_args: Vec<usize>, output: &str) -> plan::PlannedStep {
+        plan::PlannedStep {
+            backend: Backend::Magick,
+            program: "magick".to_string(),
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            output_mode: OutputMode::Path,
+            output: PathBuf::from(output),
+            intermediate_ext: None,
+            path_args,
+        }
+    }
+
+    #[test]
+    fn an_ordinary_step_is_left_in_plain_path_form() {
+        let step = step_with(
+            &["in.heic", "-quality", "92", "out.jpg"],
+            vec![0, 3],
+            "out.jpg",
+        );
+        assert!(
+            !wants_verbatim_paths(&step),
+            "rewriting a short path would change every conversion's argv for nothing"
+        );
+    }
+
+    /// The soffice shape: the only path in the argv is an `--outdir`, which
+    /// can still be under the threshold while the file soffice writes inside
+    /// it is over. The declared output is therefore part of the decision, not
+    /// just the argv.
+    #[test]
+    #[cfg(windows)]
+    fn a_short_outdir_with_a_long_declared_output_still_switches() {
+        let deep = format!("C:\\{}", "d".repeat(300));
+        let step = step_with(&["--outdir", "C:\\short", "in.docx"], vec![1, 2], &deep);
+        assert!(wants_verbatim_paths(&step));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_long_path_in_the_argv_switches_the_whole_step() {
+        let deep = format!("C:\\{}\\in.heic", "d".repeat(300));
+        let step = step_with(&[&deep, "-quality", "92", "out.jpg"], vec![0, 3], "out.jpg");
+        assert!(wants_verbatim_paths(&step));
+    }
+
+    /// Only the recorded path positions are rewritten. A filter graph is a
+    /// single argv token full of punctuation, and rewriting it as if it were
+    /// a path would produce a command nobody could debug.
+    #[test]
+    fn only_recorded_path_positions_are_rewritten() {
+        let argv: Vec<String> = [
+            "-i",
+            "in.mp4",
+            "-vf",
+            "fps=15,scale=w=min(640\\,iw)",
+            "out.gif",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut r = Resolver::new();
+        r.overrides_only();
+
+        let out = substitute_backend_paths(&argv, &[1, 4], true, &r).unwrap();
+        assert_eq!(out[2], "-vf", "a flag must never be touched");
+        assert_eq!(
+            out[3], "fps=15,scale=w=min(640\\,iw)",
+            "the filter graph must survive verbatim rewriting untouched"
+        );
+    }
+
+    /// The empty-tail case: `soffice` exits 0 on failure with nothing on
+    /// stderr, and the message used to end in a bare trailing space -- an
+    /// unfinished sentence for the most common silent failure there is.
+    #[test]
+    fn an_empty_stderr_tail_adds_nothing_to_the_message() {
+        assert_eq!(suffix(""), "");
+        assert_eq!(suffix("boom"), " boom");
     }
 
     // --- mov/mkv as conversion targets: `is_remux` must recognize

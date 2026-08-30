@@ -40,6 +40,12 @@ pub struct PlannedStep {
     /// the *input* path, not the output.
     pub output: PathBuf,
     pub intermediate_ext: Option<String>,
+    /// Indices into `argv` holding filesystem paths, for the executor's
+    /// Windows extended-path rewriting (F193). `serde(skip)`: this is
+    /// execution detail, and the `--json` plan envelope is a published
+    /// contract that must not gain a key for it.
+    #[serde(skip)]
+    pub path_args: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -98,7 +104,10 @@ pub fn build(
         } else {
             vec![step_outputs[i - 1].as_path()]
         };
-        let mut argv = step.render(&inputs_here, &step_outputs[i]);
+        let crate::recipe::Rendered {
+            mut argv,
+            mut path_args,
+        } = step.render_full(&inputs_here, &step_outputs[i]);
         if step.backend == Backend::Soffice {
             // See `USER_INSTALLATION_PLACEHOLDER`'s docs: every real
             // Soffice invocation gets this flag from `exec::run`, so the
@@ -106,6 +115,10 @@ pub fn build(
             // rather than silently omitting a flag that's load-bearing for
             // profile isolation.
             argv.insert(0, USER_INSTALLATION_PLACEHOLDER.to_string());
+            // Inserting at the front shifts every recorded position by one.
+            for index in &mut path_args {
+                *index += 1;
+            }
         }
         steps.push(PlannedStep {
             backend: step.backend,
@@ -114,6 +127,7 @@ pub fn build(
             output_mode: step.output,
             output: step_outputs[i].clone(),
             intermediate_ext: step.intermediate_ext.map(str::to_owned),
+            path_args,
         });
     }
 
