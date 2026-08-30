@@ -283,6 +283,76 @@ question, and retries. `--json` output is completely unaffected: a
 missing-backend conversion under `--json` reports exactly the same envelope
 it always has (see below), and exits `3`, with no prompt ever offered.
 
+### Keeping backends up to date (`conv update`)
+
+"Up to date" means one specific thing here: **matching the version convkit
+has pinned and verified**, not "whatever is newest upstream." That is not a
+limitation — it is the same security model `conv install` already uses.
+Every managed backend is installed from a pinned URL with a pinned SHA-256
+someone verified by downloading the asset; chasing latest upstream would
+mean fetching an unverified binary, exactly what the manifest above exists
+to prevent. The consequence is worth stating plainly: **updating `conv`
+itself is what advances the pins.** A newer convkit ships a newer manifest,
+and `conv update` then brings your backends in line with it.
+
+```console
+$ conv update --check
+ffmpeg   up to date   (9.0.1-essentials_build-www.gyan.dev)
+ffprobe  up to date   (9.0.1-essentials_build-www.gyan.dev)
+magick   unmanaged    not installed -- convkit can't update this; run: winget install ImageMagick.ImageMagick
+pandoc   up to date   (3.11)
+soffice  unmanaged    installed 26.8.0.3 -- convkit can't update this; run: winget install TheDocumentFoundation.LibreOffice
+typst    up to date   (0.15.1)
+
+conv 0.1.0 -- installed via cargo (C:\Users\Rick Xie\.cargo\bin\conv.exe)
+  to update: cargo install --path <repo> (or, once published: cargo install convkit)
+```
+
+`--check` changes nothing and never touches the network; it reports what's
+stale and exits non-zero if anything is — the form to use in a script or a
+scheduled job. Plain `conv update` reinstalls whatever a `--check` would
+have flagged, through the exact same pinned-URL-plus-checksum path `conv
+install` uses (`install::fetch_and_install`, atomic temp-then-rename), and
+says so as it happens:
+
+```console
+$ conv update
+downloading https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-windows-x86_64.zip ...
+pandoc   updated      -> 3.11  C:\Users\Rick Xie\AppData\Local\convkit\bin\pandoc.exe
+...
+```
+
+ffmpeg and ffprobe still share one download when both need updating, the
+same as `conv install ffmpeg` — `conv update` never fetches that zip twice
+just because both names appear in its own internal list of backends to
+check.
+
+Two backends convkit cannot update itself — `magick` (ImageMagick) and
+`soffice` (LibreOffice) — are only ever *reported*: installed version, and
+the package-manager command that would update them, via the same
+`manual_hint` machinery `conv doctor` uses. `conv update` never runs a
+package manager on your behalf.
+
+`conv update` also never replaces the `conv` binary itself. Downloading and
+swapping the executable that's currently running is a real,
+platform-specific security surface, and — with no convkit release tagged
+yet — there is nothing published to fetch anyway. Instead it detects how
+`conv` was installed from its own executable's path and prints the exact
+command to upgrade it: `cargo install --path <repo>` (or, once published,
+`cargo install convkit`) under `~/.cargo/bin`, `brew upgrade convkit` under
+a Homebrew prefix, `scoop update conv` under a Scoop install, or the
+releases page otherwise. An updated managed backend takes effect
+immediately — `conv` resolves each one by path on every run, so nothing
+needs a shell restart; only a `PATH` change would, and `conv update` never
+touches `PATH`.
+
+`--yes` has no effect on `conv update`: running the command at all is
+already the explicit consent an install prompt elsewhere in this tool would
+be asking for. `--no-install` makes it behave exactly like `--check` —
+report only, install nothing. `--json` follows the same envelope shape as
+every other command — `ok` plus the plural `backends` key, with one
+additive `conv` object alongside it for convkit's own status.
+
 ## Machine-readable output (`--json`)
 
 Every command accepts `--json` and always writes exactly one JSON document,

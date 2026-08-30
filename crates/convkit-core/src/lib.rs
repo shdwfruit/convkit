@@ -11,7 +11,7 @@ pub mod registry;
 pub mod resolve;
 
 pub use backend::{Backend, PackageManager};
-pub use error::{ConvError, ErrorCode, Remediation, Result};
+pub use error::{manual_hint_for, ConvError, ErrorCode, Remediation, Result};
 pub use exec::{Event, Outcome, Request};
 pub use format::{Format, Kind};
 pub use plan::build as build_plan;

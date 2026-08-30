@@ -748,3 +748,151 @@ fn failing_conversion_prints_a_fail_header_message_and_one_remediation_line() {
     assert!(stderr.contains("magick not found"), "{stderr}");
     assert!(stderr.contains("try"), "{stderr}");
 }
+
+// --- `conv update` / `conv update --check` --------------------------------
+//
+// Only `--check` is exercised here — it changes nothing and touches no
+// network, the same reasoning `install`'s own tests above give for covering
+// just the no-network refusal paths rather than a real download.
+// `command_with_no_backends` (see its own docs above) makes every backend,
+// managed and unmanaged alike, deterministically unresolvable regardless of
+// what this host actually has installed, so these are green in both the
+// clean CI environment and the project's own hostile one (real ImageMagick
+// and LibreOffice on `PATH`) — that host state only ever changes the
+// unmanaged rows, never whether a managed backend is missing.
+
+/// Acceptance check 1/2's shape, made host-independent: with every backend
+/// unresolvable, `--check` must name every managed backend as missing (not
+/// silently skip any), report the two unmanaged backends without ever
+/// running a package manager, and exit non-zero.
+#[test]
+fn update_check_reports_every_managed_backend_missing_in_an_isolated_environment() {
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .args(["update", "--check"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    for name in ["ffmpeg", "ffprobe", "pandoc", "typst"] {
+        assert!(stdout.contains(name), "{stdout}");
+    }
+    assert!(stdout.contains("missing"), "{stdout}");
+    assert!(stdout.contains("magick"), "{stdout}");
+    assert!(stdout.contains("soffice"), "{stdout}");
+    assert!(stdout.contains("unmanaged"), "{stdout}");
+    assert!(
+        !stdout.to_ascii_lowercase().contains("downloading"),
+        "--check must never attempt a download: {stdout}"
+    );
+    assert!(
+        stdout.contains("conv "),
+        "must report conv's own version: {stdout}"
+    );
+}
+
+/// Acceptance check 4's shape: `--json`'s envelope carries `ok`, the plural
+/// `backends` key, and an additive `conv` object — and, mirroring
+/// `doctor`/`install`'s own documented stdout/stderr split, a non-ok
+/// envelope (something outdated or missing) lands on stderr, not stdout.
+#[test]
+fn update_check_json_envelope_lands_on_stderr_when_something_is_missing() {
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .args(["update", "--check", "--json"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let output = assert.get_output();
+    assert_eq!(
+        output.stdout,
+        b"",
+        "a non-ok envelope must land on stderr, not stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("stderr must be valid JSON");
+    assert_eq!(v["ok"], false);
+    let backends = v["backends"].as_array().expect("backends must be an array");
+    assert_eq!(backends.len(), 6, "{v}");
+    let ffmpeg = backends
+        .iter()
+        .find(|b| b["backend"] == "ffmpeg")
+        .expect("ffmpeg must be reported");
+    assert_eq!(ffmpeg["action"], "missing");
+    assert_eq!(ffmpeg["managed"], true);
+    let magick = backends
+        .iter()
+        .find(|b| b["backend"] == "magick")
+        .expect("magick must be reported");
+    assert_eq!(magick["action"], "unmanaged");
+    assert_eq!(magick["managed"], false);
+    assert!(magick["manual_hint"].is_string(), "{v}");
+    assert!(v["conv"]["version"].is_string(), "{v}");
+    assert!(v["conv"]["update_hint"].is_string(), "{v}");
+}
+
+/// `--no-install` must make `conv update` behave like `--check` — report
+/// only, install nothing — the same "never install anything" meaning it
+/// already carries for a real conversion's install-and-retry prompt.
+#[test]
+fn update_no_install_behaves_like_check_and_never_downloads() {
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .args(["update", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        !stdout.to_ascii_lowercase().contains("downloading"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("missing"), "{stdout}");
+}
+
+/// The top-level `conv --help` command list must mention `update` in a
+/// one-line description consistent in tone with the other subcommands —
+/// a directory entry, not the full explanation (that lives in `conv update
+/// --help`, covered below).
+#[test]
+fn top_level_help_lists_the_update_subcommand() {
+    conv()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("update"))
+        .stdout(contains("Update managed backends"));
+}
+
+/// `conv update --help` is this command's real documentation: it must
+/// explain what "up to date" means (pinned/verified, not latest upstream),
+/// state the consequence (updating conv itself advances the pins), be
+/// explicit that it never replaces the running binary, and cover
+/// `--check`. Wording is asserted loosely (substrings of the actual text)
+/// so this doesn't lock the exact prose, only that each point is present.
+#[test]
+fn update_help_explains_the_pinned_not_latest_design_and_no_self_replace() {
+    let out = conv().args(["update", "--help"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
+    assert!(stdout.contains("pinned"), "{stdout}");
+    assert!(stdout.contains("upstream"), "{stdout}");
+    assert!(
+        stdout.contains("checksum") || stdout.contains("sha-256"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("advances the pins") || stdout.contains("advance the pins"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("never replaces") || stdout.contains("never replace"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("security surface"), "{stdout}");
+    assert!(stdout.contains("--check"), "{stdout}");
+    assert!(
+        stdout.contains("path"),
+        "must mention resolving by path (no shell restart needed): {stdout}"
+    );
+}

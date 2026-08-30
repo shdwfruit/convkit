@@ -83,6 +83,44 @@ pub enum Command {
     Install { backend: String },
     /// List every supported conversion.
     Capabilities,
+    /// Update managed backends to the versions this convkit pins.
+    #[command(long_about = "\
+Brings managed backends (ffmpeg, ffprobe, pandoc, typst) in line with the \
+exact versions THIS BUILD of convkit has pinned and verified -- not the \
+latest versions available upstream. Every managed backend is installed \
+from a pinned URL with a verified SHA-256 checksum; chasing latest \
+upstream would mean fetching unverified binaries, which is exactly what \
+the pinning exists to prevent.
+
+The consequence: updating conv itself is what advances the pins. A newer \
+convkit ships a newer manifest, and `conv update` then brings your \
+backends in line with it.
+
+This never replaces the conv binary itself. Self-replacement is a \
+platform-specific security surface, and today there is nothing published \
+to fetch anyway -- so instead this detects how conv was installed and \
+prints the exact command to upgrade it, alongside the version currently \
+running.
+
+Unmanaged backends (magick/ImageMagick, soffice/LibreOffice) are only \
+ever reported -- installed version, and the package-manager command that \
+would update them -- never touched; convkit never runs a package manager \
+on your behalf.
+
+Updated backends take effect on your very next run: conv resolves each \
+one by its path every time, so nothing needs a shell restart. Only a \
+PATH change would need a new terminal, and `conv update` never touches \
+PATH.
+
+Use --check in a script or a scheduled job: it reports what's stale, \
+changes nothing, and exits non-zero if anything is.")]
+    Update {
+        /// Report what's stale without installing or changing anything;
+        /// exits with a non-zero status if any managed backend doesn't
+        /// match its pinned version.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 impl Cli {

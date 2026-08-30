@@ -104,16 +104,22 @@ impl std::fmt::Display for ConvError {
 
 impl std::error::Error for ConvError {}
 
-impl ConvError {
-    /// The manual-install command for `backend`: the right command for a
-    /// detected package manager, or the official download page when none is
-    /// detected — so this is never empty, regardless of what's on PATH.
-    fn manual_hint_always_some(backend: Backend) -> String {
-        PackageManager::detect()
-            .map(|pm| backend.manual_hint(pm).to_string())
-            .unwrap_or_else(|| backend.download_hint().to_string())
-    }
+/// The manual-install (or, for `commands::update`'s purposes, manual-
+/// *update*) command for `backend`: the right command for whichever
+/// package manager `PackageManager::detect` finds on `PATH`, or the
+/// official download page when none is detected — so this is never empty,
+/// regardless of what's installed. `pub` (not `ConvError`'s own private
+/// helper) specifically so `commands::update` can reuse the exact same
+/// computation for an unmanaged backend (`magick`/`soffice`) it's merely
+/// *reporting* on, not one it's building a `ConvError` around — same
+/// command either way, so there is exactly one place that computes it.
+pub fn manual_hint_for(backend: Backend) -> String {
+    PackageManager::detect()
+        .map(|pm| backend.manual_hint(pm).to_string())
+        .unwrap_or_else(|| backend.download_hint().to_string())
+}
 
+impl ConvError {
     /// A required backend could not be resolved anywhere. `remediation.managed`
     /// is only offered when `manifest::has_managed_build(backend)` is true —
     /// that is, when a `conv install <backend>` would actually succeed on
@@ -137,7 +143,7 @@ impl ConvError {
             backend: Some(backend),
             remediation: Some(Remediation {
                 managed,
-                manual: Some(Self::manual_hint_always_some(backend)),
+                manual: Some(manual_hint_for(backend)),
             }),
         }
     }
@@ -158,7 +164,7 @@ impl ConvError {
             backend: Some(backend),
             remediation: Some(Remediation {
                 managed: None,
-                manual: Some(Self::manual_hint_always_some(backend)),
+                manual: Some(manual_hint_for(backend)),
             }),
         }
     }
@@ -179,7 +185,7 @@ impl ConvError {
             backend: Some(backend),
             remediation: Some(Remediation {
                 managed: None,
-                manual: Some(Self::manual_hint_always_some(backend)),
+                manual: Some(manual_hint_for(backend)),
             }),
         }
     }

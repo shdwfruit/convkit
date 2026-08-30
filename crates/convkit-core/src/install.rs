@@ -441,6 +441,7 @@ mod tests {
             sha256: "0",
             packaging: Packaging::Raw,
             members: leaked(vec![member]),
+            version: "0",
         };
         let out = extract(&asset, &member, b"not-really-an-executable").unwrap();
         assert_eq!(out, b"not-really-an-executable");
@@ -471,6 +472,7 @@ mod tests {
             sha256: "0",
             packaging: Packaging::Zip,
             members: leaked(vec![member]),
+            version: "0",
         };
         let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
@@ -487,6 +489,7 @@ mod tests {
             sha256: "0",
             packaging: Packaging::Zip,
             members: leaked(vec![member]),
+            version: "0",
         };
         let e = extract(&asset, &member, &bytes).unwrap_err();
         assert_eq!(e.code, ErrorCode::ConversionFailed);
@@ -517,6 +520,7 @@ mod tests {
             sha256: "0",
             packaging: Packaging::Zip,
             members: leaked(vec![ffmpeg_member, ffprobe_member]),
+            version: "0",
         };
         assert_eq!(
             extract(&asset, &ffmpeg_member, &buf).unwrap(),
@@ -558,6 +562,7 @@ mod tests {
             sha256: "0",
             packaging: Packaging::TarGz,
             members: leaked(vec![member]),
+            version: "0",
         };
         let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
@@ -579,6 +584,7 @@ mod tests {
             sha256: "0",
             packaging: Packaging::TarGz,
             members: leaked(vec![member]),
+            version: "0",
         };
         let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
@@ -625,6 +631,7 @@ mod tests {
             sha256: "0",
             packaging: Packaging::TarXz,
             members: leaked(vec![member]),
+            version: "0",
         };
         let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
@@ -643,6 +650,7 @@ mod tests {
             sha256: "0",
             packaging: Packaging::TarXz,
             members: leaked(vec![member]),
+            version: "0",
         };
         let out = extract(&asset, &member, &bytes).unwrap();
         assert_eq!(out, b"pretend-exe-bytes");
@@ -659,6 +667,7 @@ mod tests {
             sha256: "0",
             packaging: Packaging::TarXz,
             members: leaked(vec![member]),
+            version: "0",
         };
         let e = extract(&asset, &member, &bytes).unwrap_err();
         assert_eq!(e.code, ErrorCode::ConversionFailed);

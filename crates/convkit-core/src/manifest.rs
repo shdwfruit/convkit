@@ -77,6 +77,23 @@ pub struct Asset {
     /// Every executable this one download provisions. Never empty; `Raw`
     /// packaging always has exactly one.
     pub members: &'static [ArchiveMember],
+    /// The pinned version this asset provisions, taken directly from the
+    /// release tag each entry below cites in its own comment (with a
+    /// non-numeric tag prefix like `b`/`v` stripped, since none of the
+    /// backends themselves put that prefix in their own `--version`
+    /// banner). Deliberately a field of its own rather than something
+    /// parsed back out of `url` at compare time: `url` is a URL, not a
+    /// version grammar, and every entry's tag is already right there in
+    /// this file's own comments — recording it directly means a reviewer
+    /// checking a new entry checks one string against the tag once, not a
+    /// parser's behaviour on every possible URL shape.
+    ///
+    /// This is what `commands::update` (the `conv` binary) compares a
+    /// probed `ResolvedBackend::version` against — see
+    /// `version_is_current`'s docs for the comparison rule, which is
+    /// deliberately tolerant of a build suffix the probe carries but this
+    /// field never does.
+    pub version: &'static str,
 }
 
 /// Every verified (backend, platform) pair `conv install` can provision.
@@ -106,6 +123,7 @@ pub static ALL: &[Asset] = &[
                 archive_member: "ffmpeg-9.0.1-essentials_build/bin/ffprobe.exe",
             },
         ],
+        version: "9.0.1",
     },
     // --- ffmpeg / ffprobe: Linux x64, macOS x64, macOS arm64 -----------
     // eugeneware/ffmpeg-static release `b6.1.1` — a pinned tag, ffmpeg
@@ -126,6 +144,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Ffmpeg,
             archive_member: "",
         }],
+        version: "6.1.1",
     },
     Asset {
         os: "linux",
@@ -137,6 +156,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Ffprobe,
             archive_member: "",
         }],
+        version: "6.1.1",
     },
     Asset {
         os: "macos",
@@ -148,6 +168,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Ffmpeg,
             archive_member: "",
         }],
+        version: "6.1.1",
     },
     Asset {
         os: "macos",
@@ -159,6 +180,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Ffprobe,
             archive_member: "",
         }],
+        version: "6.1.1",
     },
     Asset {
         os: "macos",
@@ -170,6 +192,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Ffmpeg,
             archive_member: "",
         }],
+        version: "6.1.1",
     },
     Asset {
         os: "macos",
@@ -181,6 +204,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Ffprobe,
             archive_member: "",
         }],
+        version: "6.1.1",
     },
     // --- pandoc: all four platforms -------------------------------------
     // jgm/pandoc release 3.11 — a real version tag, not "latest".
@@ -194,6 +218,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Pandoc,
             archive_member: "pandoc-3.11/pandoc.exe",
         }],
+        version: "3.11",
     },
     Asset {
         os: "linux",
@@ -205,6 +230,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Pandoc,
             archive_member: "pandoc-3.11/bin/pandoc",
         }],
+        version: "3.11",
     },
     Asset {
         os: "macos",
@@ -216,6 +242,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Pandoc,
             archive_member: "pandoc-3.11-x86_64/bin/pandoc",
         }],
+        version: "3.11",
     },
     Asset {
         os: "macos",
@@ -227,6 +254,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Pandoc,
             archive_member: "pandoc-3.11-arm64/bin/pandoc",
         }],
+        version: "3.11",
     },
     // --- typst: all four platforms --------------------------------------
     // typst/typst release 0.15.1 — a real version tag, not "latest". Linux
@@ -247,6 +275,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Typst,
             archive_member: "typst-x86_64-pc-windows-msvc/typst.exe",
         }],
+        version: "0.15.1",
     },
     Asset {
         os: "linux",
@@ -258,6 +287,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Typst,
             archive_member: "typst-x86_64-unknown-linux-musl/typst",
         }],
+        version: "0.15.1",
     },
     Asset {
         os: "macos",
@@ -269,6 +299,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Typst,
             archive_member: "typst-x86_64-apple-darwin/typst",
         }],
+        version: "0.15.1",
     },
     Asset {
         os: "macos",
@@ -280,6 +311,7 @@ pub static ALL: &[Asset] = &[
             backend: Backend::Typst,
             archive_member: "typst-aarch64-apple-darwin/typst",
         }],
+        version: "0.15.1",
     },
 ];
 
@@ -374,6 +406,40 @@ pub fn bundled_with(backend: Backend) -> Vec<Backend> {
 /// relocatable build at all, which is false.
 pub fn has_managed_build(backend: Backend) -> bool {
     backend.is_managed() && lookup(backend).is_some()
+}
+
+/// Whether a live-probed version string reports the same version `pinned`
+/// names — tolerant of a build suffix the probe carries but the manifest's
+/// pinned tag never does (`"9.0.1-essentials_build"` vs. pinned `"9.0.1"`;
+/// `"6.1.1-static"` vs. pinned `"6.1.1"`; a plain `"3.11"` vs. pinned
+/// `"3.11"` with nothing to strip at all).
+///
+/// Exact equality would report every real, correctly-installed managed
+/// backend as "outdated," since every one of them appends something to the
+/// bare version number in its own `--version`/`-version` banner. A bare
+/// `probed.starts_with(pinned)` almost works, but has its own false
+/// positive at a digit boundary: pinned `"9.0.1"` is a literal string
+/// prefix of a hypothetical probed `"9.0.10"`, even though `9.0.10` is a
+/// different, newer version, not `9.0.1` with a build suffix. So the rule
+/// this function actually applies is: `probed` matches `pinned` exactly, or
+/// `pinned` is a prefix of `probed` immediately followed by a *non-digit*
+/// (`-`, `.`, a space, or the end of the string) — never immediately
+/// followed by another digit, which would mean `probed` is naming a longer
+/// version number entirely.
+///
+/// Deliberately biased toward false "current" over false "outdated": a
+/// probed string this function fails to recognise as current triggers a
+/// re-download that lands the exact same bytes right back where they
+/// started, which is wasted work, not a wrong result — worse than the
+/// occasional overly-generous match this prefix rule allows.
+pub fn version_is_current(probed: &str, pinned: &str) -> bool {
+    if probed == pinned {
+        return true;
+    }
+    match probed.strip_prefix(pinned) {
+        Some(rest) => !rest.starts_with(|c: char| c.is_ascii_digit()),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -648,5 +714,56 @@ mod tests {
                 current_arch()
             );
         }
+    }
+
+    // --- `Asset::version` + `version_is_current`: the machinery `conv
+    // update` compares a live probe against a manifest pin with ----------
+
+    #[test]
+    fn every_asset_carries_a_nonempty_version_with_no_leading_tag_prefix() {
+        for a in ALL {
+            assert!(!a.version.is_empty(), "{} has no version", a.url);
+            let first = a.version.chars().next().unwrap();
+            assert!(
+                first.is_ascii_digit(),
+                "{}'s version {:?} should start with a digit, not a tag \
+                 prefix like 'v' or 'b' -- probed banners never carry one",
+                a.url,
+                a.version
+            );
+        }
+    }
+
+    #[test]
+    fn version_is_current_accepts_an_exact_match() {
+        assert!(version_is_current("3.11", "3.11"));
+    }
+
+    #[test]
+    fn version_is_current_accepts_a_real_build_suffix() {
+        assert!(version_is_current("9.0.1-essentials_build", "9.0.1"));
+        assert!(version_is_current("6.1.1-static", "6.1.1"));
+    }
+
+    /// The exact false-positive a bare `starts_with` would let through:
+    /// "9.0.1" is a literal string prefix of "9.0.10", but 9.0.10 is a
+    /// different, newer version -- not 9.0.1 plus a build suffix.
+    #[test]
+    fn version_is_current_rejects_a_longer_version_that_merely_shares_a_prefix() {
+        assert!(!version_is_current("9.0.10", "9.0.1"));
+        assert!(!version_is_current("3.111", "3.11"));
+    }
+
+    #[test]
+    fn version_is_current_rejects_a_genuinely_different_version() {
+        assert!(!version_is_current("3.10", "3.11"));
+        assert!(!version_is_current("unknown", "3.11"));
+    }
+
+    #[test]
+    fn version_is_current_rejects_when_probed_is_a_prefix_of_pinned() {
+        // The reverse direction: probed reports an OLDER, shorter version
+        // than what's pinned -- must never be read as current.
+        assert!(!version_is_current("9.0", "9.0.1"));
     }
 }

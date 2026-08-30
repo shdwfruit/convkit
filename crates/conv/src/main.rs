@@ -16,6 +16,7 @@ fn main() {
         Some(cli::Command::Doctor) => commands::doctor::run(&cli),
         Some(cli::Command::Capabilities) => commands::capabilities::run(&cli),
         Some(cli::Command::Install { backend }) => commands::install::run(&cli, backend),
+        Some(cli::Command::Update { check }) => commands::update::run(&cli, *check),
     };
     std::process::exit(code);
 }
