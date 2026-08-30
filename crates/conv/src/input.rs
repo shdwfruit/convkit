@@ -210,10 +210,72 @@ pub fn jobs_from(
     }])
 }
 
+/// Whether a positional still carries a wildcard that nobody expanded.
+///
+/// `[` is deliberately not counted. `wild` treats it as a character class and
+/// has already acted on it by the time this runs, so a second opinion here
+/// would be too late to matter; that is a separate defect against `wild`'s
+/// own expansion, not this pass.
+fn has_unexpanded_wildcard(token: &str) -> bool {
+    token.contains('*') || token.contains('?')
+}
+
+/// Expands the globs the shell left behind.
+///
+/// `wild` exists because neither cmd.exe nor PowerShell expands wildcards for
+/// a native executable, but it honours the shell's quoting: a glob inside
+/// quotes is passed through literally, by design. PowerShell re-quotes every
+/// argument containing a space, so on a machine whose home directory is
+/// `C:\Users\Rick Xie` -- a space in the path -- the README's headline batch
+/// example failed with `input not found: ...\*.heic`, and `--dry-run`
+/// cheerfully printed a plan with a literal `*` in both the input and the
+/// output (F66). The trigger is a space anywhere in the argument, so this is
+/// most of the paths a person would actually type.
+///
+/// Expanding here rather than switching on `wild`'s `glob-quoted-on-windows`
+/// feature keeps quoting as an escape hatch: a file whose name genuinely
+/// contains a wildcard character still wins, because an existing path is
+/// never treated as a pattern. A pattern that matches nothing is left exactly
+/// as typed, so the "input not found" error still names what the user wrote
+/// rather than silently converting nothing.
+///
+/// `globbable` is how many leading positionals are inputs. Without `--to` the
+/// last positional is the output -- in both the two-argument pair form and
+/// the `a.png b.png out.pdf` merge form -- and an output must never be
+/// expanded: `conv a.heic *.jpg` would otherwise turn every existing JPEG in
+/// the directory into an extra input.
+///
+/// Matches are sorted in the same natural order directory expansion uses
+/// (`p2` before `p10`), which matters because the image-to-PDF recipe merges
+/// its inputs in the order given.
+fn expand_globs(paths: &[PathBuf], globbable: usize) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for (i, path) in paths.iter().enumerate() {
+        let pattern = path.to_str();
+        let expandable =
+            i < globbable && !path.exists() && pattern.is_some_and(has_unexpanded_wildcard);
+        if !expandable {
+            out.push(path.clone());
+            continue;
+        }
+        let mut matched: Vec<PathBuf> = glob::glob(pattern.expect("checked above"))
+            .map(|paths| paths.flatten().collect())
+            .unwrap_or_default();
+        if matched.is_empty() {
+            out.push(path.clone());
+            continue;
+        }
+        matched.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
+        out.extend(matched);
+    }
+    out
+}
+
 /// Expands any directory positional into the files directly inside it
 /// (non-recursive; subdirectories and files with an unrecognised extension
-/// are skipped), then delegates to `jobs_from`. Glob expansion is already
-/// done by `wild` in `main.rs` before this ever runs — this never globs.
+/// are skipped), then delegates to `jobs_from`. Globs the shell already expanded arrive
+/// here as ordinary paths; the ones it quoted are expanded by
+/// `expand_globs` immediately below, before any directory is read.
 ///
 /// A file whose format already matches `--to` is skipped during this
 /// expansion, regardless of whether `-o` is set: without this, `conv
@@ -256,8 +318,16 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
 
     let target_format = cli.to.as_deref().and_then(Format::from_ext);
 
-    let mut expanded: Vec<PathBuf> = Vec::with_capacity(cli.paths.len());
-    for path in &cli.paths {
+    // Without `--to`, the last positional is the output and must not be
+    // globbed. See `expand_globs`.
+    let globbable = match cli.to {
+        Some(_) => cli.paths.len(),
+        None => cli.paths.len().saturating_sub(1),
+    };
+    let positionals = expand_globs(&cli.paths, globbable);
+
+    let mut expanded: Vec<PathBuf> = Vec::with_capacity(positionals.len());
+    for path in &positionals {
         if path.is_dir() {
             // I3: an unreadable directory is a filesystem/usage problem, not
             // an unsupported format pair — no formats have even been looked
@@ -315,6 +385,95 @@ mod tests {
 
     fn v(p: &[&str]) -> Vec<PathBuf> {
         p.iter().map(PathBuf::from).collect()
+    }
+
+    // --- quoted globs the shell left for us (F66) ----------------------------
+
+    /// Three files whose natural order differs from their lexicographic
+    /// order, in a directory whose name contains a space -- the condition
+    /// that makes PowerShell quote the whole argument and `wild` leave the
+    /// glob alone.
+    fn photos_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let photos = dir.path().join("my photos");
+        std::fs::create_dir(&photos).unwrap();
+        for name in ["p 1.heic", "p2.heic", "p10.heic"] {
+            std::fs::write(photos.join(name), b"x").unwrap();
+        }
+        dir
+    }
+
+    fn names(paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    /// The README's headline Windows batch example, which failed with
+    /// `input not found: ...\*.heic` on any path containing a space.
+    #[test]
+    fn a_glob_the_shell_quoted_is_expanded_here() {
+        let dir = photos_dir();
+        let pattern = dir.path().join("my photos").join("*.heic");
+        let got = expand_globs(&[pattern], 1);
+        assert_eq!(
+            names(&got),
+            vec!["p 1.heic", "p2.heic", "p10.heic"],
+            "expanded, and in natural order -- image-to-PDF merges in the \
+             order given, so p10 must not sort before p2"
+        );
+    }
+
+    /// An output is not an input. `conv a.heic *.jpg` must convert one file,
+    /// not turn every existing JPEG in the directory into an extra input.
+    #[test]
+    fn the_output_positional_is_never_globbed() {
+        let dir = photos_dir();
+        let input = dir.path().join("my photos").join("p2.heic");
+        let output = dir.path().join("my photos").join("*.jpg");
+        let got = expand_globs(&[input.clone(), output.clone()], 1);
+        assert_eq!(got, vec![input, output]);
+    }
+
+    /// A pattern that matches nothing stays exactly as typed, so the error
+    /// the user sees still names what they wrote.
+    #[test]
+    fn a_pattern_matching_nothing_is_left_alone() {
+        let dir = photos_dir();
+        let pattern = dir.path().join("my photos").join("*.tiff");
+        assert_eq!(
+            expand_globs(std::slice::from_ref(&pattern), 1),
+            vec![pattern]
+        );
+    }
+
+    #[test]
+    fn a_path_with_no_wildcard_is_untouched() {
+        let paths = v(&["photo.heic", "out.jpg"]);
+        assert_eq!(expand_globs(&paths, 1), paths);
+    }
+
+    /// Quoting stays an escape hatch: a file whose name genuinely contains a
+    /// wildcard character is used as itself, never as a pattern. Only
+    /// testable off Windows, which refuses to create such a name at all.
+    #[test]
+    #[cfg(not(windows))]
+    fn a_real_file_named_like_a_pattern_wins_over_globbing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let literal = dir.path().join("a*b.heic");
+        std::fs::write(&literal, b"x").unwrap();
+        std::fs::write(dir.path().join("axxb.heic"), b"x").unwrap();
+
+        assert_eq!(
+            expand_globs(std::slice::from_ref(&literal), 1),
+            vec![literal]
+        );
     }
 
     // --- I3: `UnsupportedPair` is reserved for a well-formed pair with no

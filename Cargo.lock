@@ -236,6 +236,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "convkit-core",
+ "glob",
  "indicatif",
  "insta",
  "predicates",
