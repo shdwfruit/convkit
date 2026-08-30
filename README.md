@@ -34,9 +34,14 @@ $ curl --proto '=https' --tlsv1.2 -LsSf \
 > irm https://github.com/shdwfruit/convkit/releases/latest/download/convkit-installer.ps1 | iex
 ```
 
-An MSI (`convkit-x86_64-pc-windows-msvc.msi`) and a Homebrew formula
-(`convkit.rb`) are also attached to each release. The Windows binaries are
-not code-signed, so SmartScreen warns on first run.
+```console
+# Homebrew (macOS / Linux)
+$ brew install shdwfruit/tap/convkit
+```
+
+An MSI (`convkit-x86_64-pc-windows-msvc.msi`) is also attached to each
+release. The Windows binaries are not code-signed, so SmartScreen warns on
+first run.
 
 From source — requires Rust 1.85+ and a C toolchain on every platform (the
 HTTPS downloader's `ring` dependency compiles C at build time):
