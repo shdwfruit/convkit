@@ -34,6 +34,7 @@ use std::process::Command;
 /// "aarch64"))]` and never compiles on Windows at all, so there is no
 /// console window for it to suppress.
 pub(crate) fn backend_command(path: impl AsRef<Path>) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(path.as_ref());
     #[cfg(windows)]
     {
