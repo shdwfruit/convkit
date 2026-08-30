@@ -461,6 +461,65 @@ fn make_deep_dir(base: &Path, min_len: usize) -> PathBuf {
 /// fail on this project's own controlled experiment (a 151-character
 /// destination was already enough). The directory lives inside a
 /// `tempfile::tempdir()` so it cleans itself up regardless of outcome.
+/// F193, the half the LibreOffice-profile fix above did not reach. Moving
+/// the profile out of the destination left the scratch directory and every
+/// step intermediate still nested inside it, so a destination a user could
+/// legitimately have -- around 240 characters -- still pushed the path
+/// backends actually receive past `MAX_PATH`. They failed naming the wrong
+/// cause: soffice with `no export filter for  found`, magick with `unable to
+/// open image`, neither mentioning length.
+///
+/// `md -> pdf` is the sharpest case available without magick installed: two
+/// steps, so it covers an intermediate path as well as a final one, and its
+/// second step is soffice, which is one of the two backends that is not long
+/// path aware. Measured on Windows 10 19045 with a 432-character
+/// destination: `md -> pdf` and `docx -> pdf` both failed before this fix
+/// and both succeed after, while `mp4 -> gif` succeeded either way -- ffmpeg
+/// having no such limit -- which is what makes this a fix rather than a
+/// workaround for one backend.
+///
+/// 240 rather than 150: the profile bug fired at 150, but the destination
+/// side needs the path itself to approach 260 before a backend refuses it.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn md_to_pdf_succeeds_in_a_destination_that_approaches_max_path() {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Pandoc);
+    require_backend(&resolver, Backend::Soffice);
+
+    let base = tempfile::tempdir().unwrap();
+    let deep_dir = make_deep_dir(base.path(), 240);
+
+    let input = deep_dir.join("sample.md");
+    std::fs::write(&input, "# Title\n\nBody text.\n").unwrap();
+    let output = deep_dir.join("out.pdf");
+    assert!(
+        output.as_os_str().len() >= 248,
+        "test setup must exceed the verbatim threshold: {} ({} bytes)",
+        output.display(),
+        output.as_os_str().len()
+    );
+
+    let req = exec::Request {
+        from: Format::Md,
+        to: Format::Pdf,
+        inputs: vec![input],
+        output: output.clone(),
+        overwrite: false,
+    };
+    exec::run(&req, &resolver, &mut |_| {}).unwrap_or_else(|e| {
+        panic!(
+            "md -> pdf into a {}-character destination failed: {e}",
+            output.as_os_str().len()
+        )
+    });
+
+    let bytes = std::fs::metadata(&output)
+        .unwrap_or_else(|e| panic!("no PDF at {}: {e}", output.display()))
+        .len();
+    assert!(bytes > 0, "PDF is empty: {}", output.display());
+}
+
 #[test]
 #[ignore = "requires backends; run with --ignored"]
 fn docx_to_pdf_succeeds_in_a_deep_destination_directory() {

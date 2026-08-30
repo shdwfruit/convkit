@@ -1,5 +1,6 @@
 use std::io::IsTerminal;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anstyle::{AnsiColor, Style};
@@ -8,19 +9,68 @@ use serde_json::json;
 
 use crate::batch::JobResult;
 
-/// Shell-ish rendering for humans. Quoting is display-only — execution passes
-/// argv directly and never goes through a shell.
+/// The characters a token may contain and still be printed bare. Everything
+/// outside this set gets quoted.
+///
+/// Deliberately conservative, and the same set on both platforms even though
+/// the two shells disagree about which characters are special: `,` and `=`
+/// are harmless in bash but are argument delimiters to cmd.exe, and quoting
+/// a token that did not need it costs nothing while missing one produces a
+/// line that does not run. Everything convkit actually emits as a flag
+/// (`-c:v`, `+faststart`, `-crf`, `20`, `writer_pdf_import`) stays bare.
+fn is_bare_safe(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '\\' | ':' | '+' | '-')
+}
+
+/// One argv token, quoted so it survives being pasted into the shell this
+/// binary was built for.
+///
+/// This used to quote only when a token contained a space, and then with
+/// Rust's `{:?}` Debug formatting, which is not shell quoting at all: it
+/// escapes backslashes (`C:\\Users\\Rick Xie`) and renders non-ASCII as
+/// `\u{301}`, while leaving every token *without* a space completely bare.
+/// The flagship `mp4 -> gif` command is one such token -- a filter graph full
+/// of `;`, `(`, `)`, `[` and `]` -- so the README's opening demo parsed in
+/// neither bash nor PowerShell (F76).
+///
+/// The rules differ by platform because the shells do:
+///
+/// * POSIX gets single quotes, which are fully literal; an embedded `'` is
+///   closed, escaped and reopened (`'\''`), the standard idiom.
+/// * Windows gets double quotes, which is the one form both cmd.exe and
+///   PowerShell accept. PowerShell's single quotes would be more literal but
+///   mean nothing to cmd.exe. The residue is narrow and worth naming: a path
+///   containing `$` interpolates under PowerShell and one containing `%VAR%`
+///   expands under cmd.exe. Neither appears in anything convkit generates,
+///   only in a path a user chose.
+fn shell_quote(token: &str) -> String {
+    if !token.is_empty() && token.chars().all(is_bare_safe) {
+        return token.to_string();
+    }
+    if cfg!(windows) {
+        // A literal `"` cannot occur in a Windows path, so this only ever
+        // fires on a token a caller constructed; `""` is how both shells
+        // spell an escaped quote inside a quoted string.
+        format!("\"{}\"", token.replace('"', "\"\""))
+    } else {
+        format!("'{}'", token.replace('\'', r"'\''"))
+    }
+}
+
+/// Renders a plan as the command lines it stands for.
+///
+/// The quoting is display-only in the sense that execution never goes
+/// through a shell -- argv is passed directly -- but it is real shell
+/// quoting, not decoration: the README calls `--dry-run` "the actual
+/// product demo" and shows its output as something to run, so a line that
+/// cannot be pasted is a wrong answer rather than an ugly one.
 pub fn plan_human(plan: &ConversionPlan) -> String {
     let mut s = String::new();
     for step in &plan.steps {
-        s.push_str(&step.program);
+        s.push_str(&shell_quote(&step.program));
         for a in &step.argv {
             s.push(' ');
-            if a.contains(' ') {
-                s.push_str(&format!("{a:?}"));
-            } else {
-                s.push_str(a);
-            }
+            s.push_str(&shell_quote(a));
         }
         s.push('\n');
     }
@@ -117,22 +167,59 @@ pub fn conversion_notes_human(label: &str, o: &Outcome, styled: bool) -> String 
 // `--dry-run` previews and pre-job failures the brief never asked to
 // change.
 
-/// Whether stdout is a real terminal — the single gate for every bit of
-/// colour and Unicode (`✓`/`✗`/`·`) `conversion_success_human` and
-/// `batch_summary_human` emit. `std::io::IsTerminal` (stable stdlib, no
-/// extra dependency) is used specifically because it's correct on a
-/// Windows console as well as a Unix pty — a hand-rolled guess (e.g.
-/// "assume yes unless an env var says otherwise") is exactly what the brief
-/// warned against ("detect a TTY properly rather than guessing").
+/// Whether ANSI escape sequences will actually be *interpreted* by the
+/// console rather than printed as literal bytes — and, on Windows, the call
+/// that makes them so.
+///
+/// Being a terminal is not the same as understanding ANSI. Classic conhost —
+/// still the default host for cmd.exe and Windows PowerShell 5.1 on Windows
+/// 10, where `HKCU\Console\VirtualTerminalLevel` is unset — ships with
+/// `ENABLE_VIRTUAL_TERMINAL_PROCESSING` off. Gating styling on
+/// `is_terminal()` alone (which is what this module used to do) therefore
+/// printed `←[1m←[32m✓←[0m` literally, and left a stack of half-drawn
+/// indicatif spinner lines above it, on every single run (F163).
+///
+/// `anstyle_query::windows::enable_ansi_colors` both turns VT on and reports
+/// whether that worked, returning `None` off Windows, where ANSI needs no
+/// enabling. It is already in the dependency graph via clap/anstream — which
+/// is exactly why `conv --help` always rendered correctly on conhost while
+/// conv's own output did not. Turning VT on also repairs indicatif's
+/// progress rendering, since that draws through the same console.
+///
+/// Cached, because the enabling is a process-wide side effect that should
+/// happen once; `main` calls this before any output so the console is in its
+/// final mode before the first byte is written.
+///
+/// One deliberate conservatism: the underlying call enables VT on stdout and
+/// stderr *together* and reports failure if either handle refuses, so
+/// redirecting one stream on Windows also drops styling from the other. That
+/// trades a little colour for the guarantee that we never emit an escape the
+/// console would show literally — the failure this exists to prevent.
+pub fn ansi_supported() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| anstyle_query::windows::enable_ansi_colors().unwrap_or(true))
+}
+
+/// The styling rule itself, split out from the two stream accessors below so
+/// it can be tested without a console: styling requires *both* a real
+/// terminal and a console that will interpret what we send it. Neither
+/// condition implies the other — a redirected stream is a console that is
+/// not a terminal, and conhost is a terminal that does not read ANSI.
+fn styled(is_terminal: bool, ansi: bool) -> bool {
+    is_terminal && ansi
+}
+
+/// Whether stdout gets colour and Unicode (`✓`/`✗`/`·`), gating
+/// `conversion_success_human` and `batch_summary_human`.
 pub fn stdout_styled() -> bool {
-    std::io::stdout().is_terminal()
+    styled(std::io::stdout().is_terminal(), ansi_supported())
 }
 
 /// The stderr counterpart, gating `conversion_failure_human` — failures are
 /// reported on stderr, so that's the stream whose terminal-ness decides
 /// whether its `✗` and colour appear.
 pub fn stderr_styled() -> bool {
-    std::io::stderr().is_terminal()
+    styled(std::io::stderr().is_terminal(), ansi_supported())
 }
 
 fn green_bold() -> Style {
@@ -419,6 +506,103 @@ mod tests {
 
     fn only_ascii(s: &str) -> bool {
         s.is_ascii()
+    }
+
+    // --- shell quoting for --dry-run (F76) -----------------------------------
+
+    /// The exact token that made the README's opening demo unrunnable: the
+    /// gif filter graph, which contains `;` (a command separator in every
+    /// shell), `(`, `)`, `[` and `]`, and no spaces at all -- so the old
+    /// "quote only if it contains a space" rule emitted it bare.
+    #[test]
+    fn the_gif_filter_graph_is_quoted_even_though_it_has_no_spaces() {
+        let graph = "fps=15,scale=w=min(640\\,iw):h=-2:flags=lanczos,split[a][b];\
+                     [a]palettegen=stats_mode=diff[p]";
+        let quoted = shell_quote(graph);
+        assert_ne!(quoted, graph, "a bare filter graph does not parse anywhere");
+        assert!(quoted.starts_with(if cfg!(windows) { '"' } else { '\'' }));
+        assert!(quoted.ends_with(if cfg!(windows) { '"' } else { '\'' }));
+        assert!(quoted.contains("palettegen"), "{quoted}");
+    }
+
+    /// Flags and plain names stay bare, so the common line reads the way it
+    /// always did rather than turning into a wall of quotes.
+    #[test]
+    fn ordinary_flags_and_names_are_left_bare() {
+        for token in ["-i", "-y", "-crf", "20", "-c:v", "+faststart", "clip.mp4"] {
+            assert_eq!(shell_quote(token), token);
+        }
+    }
+
+    /// A path with a space used to be rendered with Rust's Debug formatting,
+    /// which doubles every backslash -- so the printed Windows path was not
+    /// the path.
+    #[test]
+    fn a_path_with_a_space_keeps_its_real_backslashes() {
+        let path = "C:\\Users\\Rick Xie\\out dir\\clip.mp3";
+        let quoted = shell_quote(path);
+        assert!(!quoted.contains("\\\\"), "Debug escaping is back: {quoted}");
+        assert!(quoted.contains("Rick Xie"), "{quoted}");
+    }
+
+    /// Debug formatting also escaped combining marks as `\u{301}`, so an NFD
+    /// file name -- what macOS writes -- printed as something that is not the
+    /// file name.
+    #[test]
+    fn a_combining_mark_survives_as_itself() {
+        let nfd = "cafe\u{301} photo.jpg";
+        assert!(shell_quote(nfd).contains('\u{301}'));
+        assert!(!shell_quote(nfd).contains("\\u{"));
+    }
+
+    #[test]
+    fn an_embedded_quote_is_escaped_the_way_the_host_shell_spells_it() {
+        if cfg!(windows) {
+            assert_eq!(shell_quote("a\"b"), "\"a\"\"b\"");
+        } else {
+            assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        }
+    }
+
+    #[test]
+    fn an_empty_token_is_quoted_rather_than_vanishing() {
+        let quoted = shell_quote("");
+        assert!(quoted.len() == 2, "{quoted}");
+    }
+
+    // --- styling gate (F163) --------------------------------------------------
+
+    /// Being a terminal is not enough on Windows: conhost is a real terminal
+    /// that prints ANSI escapes literally until virtual-terminal processing
+    /// is enabled. Both conditions are required, and neither alone suffices —
+    /// this is the whole content of the F163 fix, stated as a truth table so
+    /// it can be checked without a console.
+    #[test]
+    fn styling_needs_both_a_terminal_and_a_console_that_reads_ansi() {
+        assert!(styled(true, true));
+        // A real terminal that shows escapes literally (conhost, VT off).
+        assert!(!styled(true, false));
+        // Piped or redirected: no styling regardless of console capability.
+        assert!(!styled(false, true));
+        assert!(!styled(false, false));
+    }
+
+    /// `ansi_supported` is a cached, process-wide side effect (it *enables*
+    /// VT on Windows), so it must answer the same way every time it is asked
+    /// — `stdout_styled` and `stderr_styled` each call it, and a batch calls
+    /// it again to decide whether to draw a progress bar.
+    #[test]
+    fn ansi_support_is_decided_once_and_stays_decided() {
+        assert_eq!(ansi_supported(), ansi_supported());
+    }
+
+    /// Off Windows there is nothing to enable, so the answer is
+    /// unconditionally yes; the `unwrap_or(true)` in `ansi_supported` is what
+    /// makes the Windows-only call a no-op everywhere else.
+    #[test]
+    #[cfg(not(windows))]
+    fn ansi_is_always_supported_off_windows() {
+        assert!(ansi_supported());
     }
 
     // --- human_size / human_elapsed -----------------------------------------

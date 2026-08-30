@@ -98,35 +98,85 @@ impl Step {
     /// public entry point every caller goes through, which rejects empty
     /// inputs with a typed `ConvError` before any `Step` is ever rendered.
     pub fn render(&self, inputs: &[&Path], output: &Path) -> Vec<String> {
-        let mut out = Vec::with_capacity(self.args.len());
+        self.render_full(inputs, output).argv
+    }
+
+    /// `render` plus the positions of the tokens that are filesystem paths.
+    ///
+    /// Only the executor needs the positions; every other caller -- the
+    /// registry's snapshot tests, `--dry-run`'s renderer -- wants the command
+    /// line alone, which is why `render` stays the short spelling and
+    /// delegates here rather than the two walking `args` separately and
+    /// drifting apart.
+    pub fn render_full(&self, inputs: &[&Path], output: &Path) -> Rendered {
+        let mut argv = Vec::with_capacity(self.args.len());
+        let mut path_args = Vec::new();
         for arg in self.args {
             match arg {
-                Arg::Lit(s) => out.push((*s).to_string()),
-                Arg::Input => out.push(inputs[0].to_string_lossy().into_owned()),
+                Arg::Lit(s) => argv.push((*s).to_string()),
+                Arg::Input => {
+                    path_args.push(argv.len());
+                    argv.push(inputs[0].to_string_lossy().into_owned());
+                }
                 Arg::InputFirstFrame => {
-                    out.push(format!("{}[0]", inputs[0].to_string_lossy()));
+                    // magick's frame selector rides on the token itself
+                    // (`photo.tiff[0]`), so this is deliberately NOT
+                    // recorded in `path_args`: the Windows long-path
+                    // rewriter would absolutise the selector into the
+                    // filename and hand magick a file that doesn't exist.
+                    argv.push(format!("{}[0]", inputs[0].to_string_lossy()));
                 }
                 Arg::InputDir => {
                     let dir = inputs[0].parent().filter(|p| !p.as_os_str().is_empty());
-                    out.push(match dir {
+                    path_args.push(argv.len());
+                    argv.push(match dir {
                         Some(d) => d.to_string_lossy().into_owned(),
                         None => ".".to_string(),
                     });
                 }
-                Arg::Inputs => out.extend(inputs.iter().map(|p| p.to_string_lossy().into_owned())),
-                Arg::Output => out.push(output.to_string_lossy().into_owned()),
+                Arg::Inputs => {
+                    for input in inputs {
+                        path_args.push(argv.len());
+                        argv.push(input.to_string_lossy().into_owned());
+                    }
+                }
+                Arg::Output => {
+                    path_args.push(argv.len());
+                    argv.push(output.to_string_lossy().into_owned());
+                }
                 Arg::OutDir => {
                     let dir = output.parent().filter(|p| !p.as_os_str().is_empty());
-                    out.push(match dir {
+                    path_args.push(argv.len());
+                    argv.push(match dir {
                         Some(d) => d.to_string_lossy().into_owned(),
                         None => ".".to_string(),
                     });
                 }
-                Arg::BackendPath(backend) => out.push(backend.path_placeholder()),
+                // Not a filesystem path in the sense `path_args` means: it is
+                // a placeholder the executor swaps for a resolved executable,
+                // and rewriting it as a path would break that substitution.
+                Arg::BackendPath(backend) => argv.push(backend.path_placeholder()),
             }
         }
-        out
+        Rendered { argv, path_args }
     }
+}
+
+/// One step's rendered command line, plus the positions in it that hold
+/// filesystem paths.
+///
+/// The positions exist because the executor has to be able to rewrite paths
+/// -- and only paths -- without re-deriving which tokens are which. On
+/// Windows a path close to `MAX_PATH` has to be handed over in extended
+/// (`\\?\`) form or the backend fails with an error naming the wrong cause
+/// (F193), and a heuristic over rendered strings would eventually rewrite a
+/// filter graph or a codec name. Recording the positions at the one moment
+/// they are known for certain costs nothing and cannot drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rendered {
+    pub argv: Vec<String>,
+    /// Indices into `argv`, ascending.
+    pub path_args: Vec<usize>,
 }
 
 #[cfg(test)]
@@ -144,8 +194,13 @@ mod tests {
 
     #[test]
     fn renders_positional_input_and_output() {
-        let argv = GIF.render(&[Path::new("in.mp4")], Path::new("out.gif"));
-        assert_eq!(argv, vec!["-i", "in.mp4", "-y", "out.gif"]);
+        let r = GIF.render_full(&[Path::new("in.mp4")], Path::new("out.gif"));
+        assert_eq!(r.argv, vec!["-i", "in.mp4", "-y", "out.gif"]);
+        assert_eq!(
+            r.path_args,
+            vec![1, 3],
+            "the input and the output, not the flags"
+        );
     }
 
     #[test]
@@ -156,8 +211,9 @@ mod tests {
             output: OutputMode::OutDir,
             intermediate_ext: None,
         };
-        let argv = step.render(&[Path::new("a/in.docx")], Path::new("b/out.pdf"));
-        assert_eq!(argv, vec!["--outdir", "b", "a/in.docx"]);
+        let r = step.render_full(&[Path::new("a/in.docx")], Path::new("b/out.pdf"));
+        assert_eq!(r.argv, vec!["--outdir", "b", "a/in.docx"]);
+        assert_eq!(r.path_args, vec![1, 2], "the out-dir and the input");
     }
 
     #[test]
@@ -168,10 +224,9 @@ mod tests {
             output: OutputMode::OutDir,
             intermediate_ext: None,
         };
-        assert_eq!(
-            step.render(&[Path::new("in.docx")], Path::new("out.pdf")),
-            vec!["."]
-        );
+        let r = step.render_full(&[Path::new("in.docx")], Path::new("out.pdf"));
+        assert_eq!(r.argv, vec!["."]);
+        assert_eq!(r.path_args, vec![0]);
     }
 
     #[test]

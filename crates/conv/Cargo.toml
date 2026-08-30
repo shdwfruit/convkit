@@ -26,6 +26,10 @@ path = "src/main.rs"
 convkit-core = { path = "../convkit-core", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
 wild = "2"
+# The second pass over positionals that `wild` deliberately leaves alone: a
+# glob the shell quoted (see `input::expand_globs`). Already in the tree as
+# wild's own dependency.
+glob = "0.3"
 serde.workspace = true
 serde_json.workspace = true
 rayon = "1"
@@ -34,6 +38,12 @@ indicatif = "0.17"
 # -- used directly here (Part 2) for the same ANSI styling machinery, gated
 # on `std::io::IsTerminal`, rather than adding a new styling dependency.
 anstyle = "1"
+# Windows consoles do not interpret ANSI escapes unless
+# `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is turned on explicitly; this crate is
+# the call that turns it on and reports whether it took (see
+# `render::ansi_supported`). Already in the tree via clap/anstream, which is
+# why `--help` rendered correctly on conhost while conv's own output did not.
+anstyle-query = "1"
 
 # APFS resolves names normalization-insensitively (NFC and NFD spellings of
 # one stem land on one physical file), so the batch output-collision key

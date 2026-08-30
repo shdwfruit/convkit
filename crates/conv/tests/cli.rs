@@ -1081,3 +1081,45 @@ fn the_conversion_path_still_accepts_every_conversion_only_flag() {
         .success()
         .stdout(contains("magick"));
 }
+
+/// F197: `conv photo.heic aux.jpg` used to hang indefinitely -- magick
+/// blocked on the AUX device, and killing conv left an orphaned `magick.exe`
+/// and an uncleaned scratch directory behind because `ScratchGuard`'s `Drop`
+/// never ran. The refusal now happens before any backend is even resolved,
+/// which is why this test needs no backend and can assert a fast exit.
+#[cfg(windows)]
+#[test]
+fn a_reserved_windows_device_name_as_output_is_refused_before_any_backend_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("in.mp4"), b"not a real mp4").unwrap();
+
+    for (output, device) in [
+        ("aux.gif", "AUX"),
+        ("con.gif", "CON"),
+        ("nul.gif", "NUL"),
+        ("COM1.GIF", "COM1"),
+    ] {
+        let assert = conv()
+            .current_dir(dir.path())
+            .args(["in.mp4", output, "--no-install"])
+            .timeout(Duration::from_secs(10))
+            .assert()
+            .code(2);
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(stderr.contains(device), "{output}: {stderr}");
+        assert!(stderr.contains("reserved Windows device name"), "{stderr}");
+    }
+}
+
+/// The companion to the refusal: a name that merely *starts* with a device
+/// word is an ordinary file and must still be planned. `--dry-run` keeps this
+/// backend-free -- what is being asserted is that the name check did not fire.
+#[cfg(windows)]
+#[test]
+fn a_name_that_merely_starts_with_a_device_word_is_still_converted() {
+    conv()
+        .args(["in.mp4", "conx.gif", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("conx.gif"));
+}

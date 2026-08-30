@@ -31,9 +31,12 @@ fn num_cpus_or_one() -> usize {
 /// conversion with no progress indication at all. A `md -> pdf` (pandoc
 /// plus a LibreOffice cold start, several seconds) used to show nothing
 /// until it either finished or failed. Suppressed under `--quiet` and
-/// `--json`, exactly like `bar`.
+/// `--json`, exactly like `bar` — and, like `bar`, on a console that cannot
+/// interpret ANSI (see `render::ansi_supported`), where indicatif's redraws
+/// pile up as a stack of orphaned `starting...` lines instead of animating in
+/// place (F163).
 fn single_job_spinner(cli: &Cli, job_count: usize) -> Option<indicatif::ProgressBar> {
-    if cli.quiet || cli.json || job_count != 1 {
+    if cli.quiet || cli.json || job_count != 1 || !crate::render::ansi_supported() {
         return None;
     }
     let pb = indicatif::ProgressBar::new_spinner();
@@ -85,7 +88,10 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
         .build()
         .expect("thread pool");
 
-    let bar = (!cli.quiet && !cli.json && jobs.len() > 1)
+    // Same ANSI gate as `single_job_spinner`: indicatif draws by rewriting
+    // the line it just wrote, which a console without virtual-terminal
+    // processing renders as a growing pile of dead lines (F163).
+    let bar = (!cli.quiet && !cli.json && jobs.len() > 1 && crate::render::ansi_supported())
         .then(|| indicatif::ProgressBar::new(jobs.len() as u64));
     let spinner = single_job_spinner(cli, jobs.len());
     let resolver = cli.resolver();
