@@ -174,10 +174,22 @@ impl Step {
                 }
                 Arg::InputFirstFrame => {
                     // magick's frame selector rides on the token itself
-                    // (`photo.tiff[0]`), so this is deliberately NOT
-                    // recorded in `path_args`: the Windows long-path
-                    // rewriter would absolutise the selector into the
-                    // filename and hand magick a file that doesn't exist.
+                    // (`photo.tiff[0]`), and this *is* a path for the
+                    // Windows long-path rewriter's purposes. Leaving it out
+                    // of `path_args` left the most common image conversions
+                    // -- everything reaching `IMG_TO_JPG` -- still failing
+                    // past MAX_PATH while every other recipe was fixed.
+                    //
+                    // The two worries that argue against including it both
+                    // turn out not to hold, checked rather than reasoned
+                    // about. `std::path::absolute` never touches the
+                    // filesystem, so a name ending in `[0]` is carried
+                    // through as an ordinary file name rather than resolved
+                    // and lost; and magick parses the selector off the end
+                    // of a verbatim path exactly as it does a plain one --
+                    // `magick "\\?\C:\...\p.heic[0]" out.jpg` exits 0 on a
+                    // 270-character input that fails without the prefix.
+                    path_args.push(argv.len());
                     argv.push(format!("{}[0]", inputs[0].to_string_lossy()));
                 }
                 Arg::InputDir => {
@@ -258,6 +270,31 @@ mod tests {
             r.path_args,
             vec![1, 3],
             "the input and the output, not the flags"
+        );
+    }
+
+    /// The frame selector is part of the token, but the token is still a
+    /// path: excluding it from `path_args` is what left `heic -> jpg` and
+    /// every other `IMG_TO_JPG` conversion failing past MAX_PATH on Windows
+    /// after the rest of the long-path fix landed.
+    #[test]
+    fn the_first_frame_selector_is_still_a_path_position() {
+        let step = Step {
+            backend: Backend::Magick,
+            args: &[Arg::InputFirstFrame, Arg::Lit("-auto-orient"), Arg::Output],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let r = step.render_full(
+            &[Path::new("photo.heic")],
+            Path::new("out.jpg"),
+            &Tuning::default(),
+        );
+        assert_eq!(r.argv[0], "photo.heic[0]");
+        assert_eq!(
+            r.path_args,
+            vec![0, 2],
+            "the selector token and the output, not the flag"
         );
     }
 

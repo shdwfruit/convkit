@@ -481,6 +481,59 @@ fn make_deep_dir(base: &Path, min_len: usize) -> PathBuf {
 ///
 /// 240 rather than 150: the profile bug fired at 150, but the destination
 /// side needs the path itself to approach 260 before a backend refuses it.
+/// The magick half of the same long-path guarantee, and the one the first
+/// round missed: `IMG_TO_JPG` passes its input as `photo.heic[0]` -- the
+/// frame selector rides on the token -- and that token was left out of the
+/// positions the Windows rewriter is allowed to touch, so the most common
+/// image conversions there are went on failing past `MAX_PATH` while every
+/// other recipe was fixed.
+///
+/// The input lives in the deep directory too, not just the output: that is
+/// what puts the selector token itself over the limit. Measured on Windows
+/// 10 19045 with a 270-character input, magick reported `Input file does not
+/// exist` before the fix and produced a byte-identical JPEG to the
+/// short-path conversion after it.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn heic_to_jpg_succeeds_when_the_input_itself_approaches_max_path() {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+
+    let base = tempfile::tempdir().unwrap();
+    let deep_dir = make_deep_dir(base.path(), 240);
+
+    let input = deep_dir.join("photo.heic");
+    std::fs::copy(fixture("photo.heic"), &input)
+        .unwrap_or_else(|e| panic!("failed to copy fixture into deep dir: {e}"));
+    assert!(
+        input.as_os_str().len() >= 248,
+        "the input token is what must exceed the threshold here: {} ({} bytes)",
+        input.display(),
+        input.as_os_str().len()
+    );
+    let output = deep_dir.join("out.jpg");
+
+    let req = exec::Request {
+        from: Format::Heic,
+        to: Format::Jpg,
+        inputs: vec![input.clone()],
+        output: output.clone(),
+        overwrite: false,
+        tuning: Default::default(),
+    };
+    exec::run(&req, &resolver, &mut |_| {}).unwrap_or_else(|e| {
+        panic!(
+            "heic -> jpg from a {}-character input failed: {e}",
+            input.as_os_str().len()
+        )
+    });
+
+    let bytes = std::fs::metadata(&output)
+        .unwrap_or_else(|e| panic!("no JPEG at {}: {e}", output.display()))
+        .len();
+    assert!(bytes > 0, "JPEG is empty: {}", output.display());
+}
+
 #[test]
 #[ignore = "requires backends; run with --ignored"]
 fn md_to_pdf_succeeds_in_a_destination_that_approaches_max_path() {

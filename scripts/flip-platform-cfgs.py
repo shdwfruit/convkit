@@ -19,7 +19,8 @@ Usage, from the repo root:
     python scripts/flip-platform-cfgs.py . revert
 
 It edits files in place; `revert` is idempotent, and `git status` shows any
-residue if a run is interrupted.
+residue if a run is interrupted. Line endings are preserved byte for
+byte, so a clean round-trip leaves no file looking modified.
 """
 import io
 import os
@@ -45,7 +46,11 @@ for root, _dirs, files in os.walk(os.path.join(REPO, 'crates')):
         if not name.endswith('.rs'):
             continue
         path = os.path.join(root, name)
-        text = io.open(path, encoding='utf-8').read()
+        # newline='' preserves the file's own line endings; normalising them
+        # would leave every touched file looking modified to git even after a
+        # clean revert.
+        with io.open(path, encoding='utf-8', newline='') as fh:
+            text = fh.read()
         idx = -1
         for marker in MARKERS:
             found = text.find(marker)
@@ -58,6 +63,7 @@ for root, _dirs, files in os.walk(os.path.join(REPO, 'crates')):
         for old, new in SWAPS:
             tail = tail.replace(new, old) if MODE == 'revert' else tail.replace(old, new)
         if tail != before:
-            io.open(path, 'w', encoding='utf-8', newline='\n').write(head + tail)
+            with io.open(path, 'w', encoding='utf-8', newline='') as fh:
+                fh.write(head + tail)
             changed += 1
 print(f'{MODE}: {changed} files')
