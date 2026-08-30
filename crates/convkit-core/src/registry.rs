@@ -571,7 +571,11 @@ pub fn gif_recipe_for(probe: &crate::MediaProbe) -> Recipe {
 /// transcode sibling would slot in here, not in plan.rs. `None` when the
 /// probe changes nothing (or the pair isn't registered — a probe never
 /// makes an unsupported pair supported).
-pub(crate) fn probe_selected(from: Format, to: Format, probe: &crate::MediaProbe) -> Option<Recipe> {
+pub(crate) fn probe_selected(
+    from: Format,
+    to: Format,
+    probe: &crate::MediaProbe,
+) -> Option<Recipe> {
     if to == Format::Gif && lookup(from, to).is_some() {
         return Some(gif_recipe_for(probe));
     }
@@ -1096,10 +1100,8 @@ pub fn needs_probe(from: Format, to: Format) -> bool {
     // determined by the extension and could never enable the copy path —
     // it would be one wasted ffprobe spawn per file in a library batch.
     // m4a (the mp4 container) genuinely varies: aac, alac, even mp3.
-    let audio_extract = matches!(
-        to,
-        Format::M4a | Format::Mp3 | Format::Flac | Format::Wav
-    ) && (video_source || from == Format::M4a);
+    let audio_extract = matches!(to, Format::M4a | Format::Mp3 | Format::Flac | Format::Wav)
+        && (video_source || from == Format::M4a);
     // A gif target probes for the HDR transfer question, not for a stream
     // copy — see `gif_recipe_for`.
     let gif_target = to == Format::Gif && video_source;
@@ -1234,10 +1236,7 @@ mod tests {
         for to in [Format::Jpg, Format::Png, Format::Bmp] {
             let r = lookup(Format::Tiff, to).unwrap();
             let argv = r.steps[0].render(&[Path::new("scan.tiff")], Path::new("out"));
-            assert!(
-                argv.iter().any(|a| a == "scan.tiff[0]"),
-                "{to:?}: {argv:?}"
-            );
+            assert!(argv.iter().any(|a| a == "scan.tiff[0]"), "{to:?}: {argv:?}");
         }
         for to in [Format::Webp, Format::Avif] {
             let r = lookup(Format::Tiff, to).unwrap();
@@ -1386,10 +1385,7 @@ mod tests {
     fn mkv_recipes_exclude_data_streams() {
         let transcode = lookup(Format::Mov, Format::Mkv).unwrap();
         let argv = transcode.steps[0].render(&[Path::new("in.mov")], Path::new("out.mkv"));
-        assert!(
-            argv.windows(2).any(|w| w == ["-map", "-0:d"]),
-            "{argv:?}"
-        );
+        assert!(argv.windows(2).any(|w| w == ["-map", "-0:d"]), "{argv:?}");
     }
 
     #[test]
@@ -1506,9 +1502,29 @@ mod tests {
         assert_eq!(
             argv,
             vec![
-                "-i", "in.webm", "-map", "0", "-map", "-0:d", "-vf",
-                "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-crf", "20", "-preset", "medium",
-                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-c:s", "copy", "-y",
+                "-i",
+                "in.webm",
+                "-map",
+                "0",
+                "-map",
+                "-0:d",
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "20",
+                "-preset",
+                "medium",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-c:s",
+                "copy",
+                "-y",
                 "out.mkv",
             ]
         );

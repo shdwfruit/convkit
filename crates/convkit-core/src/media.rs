@@ -180,7 +180,11 @@ pub(crate) fn stream_mapped_invocation(
         audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios);
 
         if !kept_subs.is_empty() {
-            let target_codec = if to == Format::Webm { "webvtt" } else { "mov_text" };
+            let target_codec = if to == Format::Webm {
+                "webvtt"
+            } else {
+                "mov_text"
+            };
             push(&mut argv, &["-c:s", target_codec]);
             if kept_subs.iter().any(|(_, s)| matches!(*s, "ass" | "ssa")) {
                 warnings.push(format!(
@@ -246,7 +250,10 @@ fn audio_codec_args(
         .collect();
 
     if to == Format::Webm {
-        push(argv, &["-c:a", "libopus", "-b:a", registry::WEBM_AUDIO_BITRATE]);
+        push(
+            argv,
+            &["-c:a", "libopus", "-b:a", registry::WEBM_AUDIO_BITRATE],
+        );
         push(argv, &["-af", registry::OPUS_CHANNEL_LAYOUTS]);
         warnings.push(format!(
             "All audio tracks re-encoded to opus: {} not supported by webm \
@@ -318,10 +325,7 @@ pub(crate) fn audio_copy_invocation(
         return None;
     }
 
-    let audio_source = matches!(
-        from,
-        Format::Mp3 | Format::M4a | Format::Wav | Format::Flac
-    );
+    let audio_source = matches!(from, Format::Mp3 | Format::M4a | Format::Wav | Format::Flac);
 
     let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
     // The probe describes stream order, so map the first audio stream
@@ -429,11 +433,7 @@ mod tests {
         assert!(has(&m.argv, ["-c:s", "mov_text"]), "{:?}", m.argv);
         assert!(!m.argv.contains(&"-sn".to_string()), "{:?}", m.argv);
 
-        let m = invoke(
-            Format::Webm,
-            &probe(Some("vp9"), &["opus"], &["subrip"], 0),
-        )
-        .unwrap();
+        let m = invoke(Format::Webm, &probe(Some("vp9"), &["opus"], &["subrip"], 0)).unwrap();
         assert!(has(&m.argv, ["-c:s", "webvtt"]), "{:?}", m.argv);
     }
 
@@ -445,12 +445,7 @@ mod tests {
     fn a_bitmap_sibling_never_costs_a_text_subtitle_its_seat() {
         let m = invoke(
             Format::Mp4,
-            &probe(
-                Some("h264"),
-                &["aac"],
-                &["subrip", "hdmv_pgs_subtitle"],
-                0,
-            ),
+            &probe(Some("h264"), &["aac"], &["subrip", "hdmv_pgs_subtitle"], 0),
         )
         .unwrap();
         assert!(has(&m.argv, ["-map", "0:s:0"]), "{:?}", m.argv);
@@ -509,11 +504,7 @@ mod tests {
     /// fail outright.
     #[test]
     fn mkv_excludes_subtitle_codecs_matroska_rejects() {
-        let m = invoke(
-            Format::Mkv,
-            &probe(Some("mpeg4"), &["mp3"], &["xsub"], 0),
-        )
-        .unwrap();
+        let m = invoke(Format::Mkv, &probe(Some("mpeg4"), &["mp3"], &["xsub"], 0)).unwrap();
         assert!(has(&m.argv, ["-map", "-0:s:0"]), "{:?}", m.argv);
         assert!(
             m.warnings.iter().any(|w| w.contains("xsub")),
@@ -526,11 +517,7 @@ mod tests {
     /// it, ffmpeg silently re-encodes them to its matroska default (ASS).
     #[test]
     fn mkv_copies_text_subtitles_explicitly() {
-        let m = invoke(
-            Format::Mkv,
-            &probe(Some("vp9"), &["opus"], &["webvtt"], 0),
-        )
-        .unwrap();
+        let m = invoke(Format::Mkv, &probe(Some("vp9"), &["opus"], &["webvtt"], 0)).unwrap();
         assert!(has(&m.argv, ["-c:s", "copy"]), "{:?}", m.argv);
     }
 
@@ -591,9 +578,7 @@ mod tests {
         let m = invoke(Format::Webm, &probe(Some("vp9"), &["ac3"], &[], 0)).unwrap();
         assert!(has(&m.argv, ["-c:a", "libopus"]), "{:?}", m.argv);
         assert!(
-            m.argv
-                .iter()
-                .any(|a| a.contains("aformat=channel_layouts")),
+            m.argv.iter().any(|a| a.contains("aformat=channel_layouts")),
             "{:?}",
             m.argv
         );
@@ -635,8 +620,12 @@ mod tests {
     /// stream copy, dropping the video explicitly.
     #[test]
     fn matching_audio_codec_extracts_by_stream_copy() {
-        let m = audio_invoke(Format::Mp4, Format::M4a, &probe(Some("h264"), &["aac"], &[], 0))
-            .unwrap();
+        let m = audio_invoke(
+            Format::Mp4,
+            Format::M4a,
+            &probe(Some("h264"), &["aac"], &[], 0),
+        )
+        .unwrap();
         assert!(has(&m.argv, ["-map", "0:a:0"]), "{:?}", m.argv);
         assert!(has(&m.argv, ["-c:a", "copy"]), "{:?}", m.argv);
         assert!(!m.argv.contains(&"aac".to_string()), "{:?}", m.argv);
@@ -648,18 +637,18 @@ mod tests {
     /// copy of bytes nothing could decode).
     #[test]
     fn non_matching_or_unknown_audio_falls_back_to_transcode() {
-        assert!(
-            audio_invoke(Format::Mp4, Format::Mp3, &probe(Some("h264"), &["aac"], &[], 0))
-                .is_none()
-        );
-        assert!(
-            audio_invoke(
-                Format::Avi,
-                Format::Wav,
-                &probe(None, &["unknown", "pcm_s16le"], &[], 0)
-            )
-            .is_none()
-        );
+        assert!(audio_invoke(
+            Format::Mp4,
+            Format::Mp3,
+            &probe(Some("h264"), &["aac"], &[], 0)
+        )
+        .is_none());
+        assert!(audio_invoke(
+            Format::Avi,
+            Format::Wav,
+            &probe(None, &["unknown", "pcm_s16le"], &[], 0)
+        )
+        .is_none());
     }
 
     /// An audio source keeps its cover art through a copy extraction,
@@ -673,9 +662,17 @@ mod tests {
         assert!(has(&m.argv, ["-map", "0:v?"]), "{:?}", m.argv);
         assert!(has(&m.argv, ["-c:v", "copy"]), "{:?}", m.argv);
 
-        let m = audio_invoke(Format::Mp4, Format::M4a, &probe(Some("h264"), &["aac"], &[], 0))
-            .unwrap();
-        assert!(!has(&m.argv, ["-map", "0:v?"]), "video sources drop video: {:?}", m.argv);
+        let m = audio_invoke(
+            Format::Mp4,
+            Format::M4a,
+            &probe(Some("h264"), &["aac"], &[], 0),
+        )
+        .unwrap();
+        assert!(
+            !has(&m.argv, ["-map", "0:v?"]),
+            "video sources drop video: {:?}",
+            m.argv
+        );
     }
 
     /// More than one audio track can't all fit a single-track extraction;

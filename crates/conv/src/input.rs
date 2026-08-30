@@ -78,18 +78,18 @@ fn format_of(p: &Path) -> Result<Format, ConvError> {
 fn collision_key(output: &Path) -> PathBuf {
     let abs = std::path::absolute(output).unwrap_or_else(|_| output.to_path_buf());
     let abs = match (abs.parent(), abs.file_name()) {
-        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => std::fs::canonicalize(
-            parent,
-        )
-        .map(|real| real.join(name))
-        .unwrap_or(abs),
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            std::fs::canonicalize(parent)
+                .map(|real| real.join(name))
+                .unwrap_or(abs)
+        }
         _ => abs,
     };
     if cfg!(any(windows, target_os = "macos")) {
         let folded = abs.to_string_lossy().to_lowercase();
         #[cfg(target_os = "macos")]
-        let folded: String = unicode_normalization::UnicodeNormalization::nfc(folded.chars())
-            .collect();
+        let folded: String =
+            unicode_normalization::UnicodeNormalization::nfc(folded.chars()).collect();
         PathBuf::from(folded)
     } else {
         abs
@@ -400,10 +400,7 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
                 if last && positionals.len() >= 2 {
                     return Err(ConvError {
                         code: ErrorCode::InvalidInvocation,
-                        message: format!(
-                            "output target {} is a directory",
-                            path.display()
-                        ),
+                        message: format!("output target {} is a directory", path.display()),
                         backend: None,
                         remediation: Some(Remediation {
                             managed: None,

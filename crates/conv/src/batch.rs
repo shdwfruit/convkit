@@ -171,10 +171,8 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                         exec::Event::StepReport {
                             backend, report, ..
                         } if cli.verbose => {
-                            let text = crate::render::verbose_report_human(
-                                backend.exe_name(),
-                                &report,
-                            );
+                            let text =
+                                crate::render::verbose_report_human(backend.exe_name(), &report);
                             print_verbose(&spinner, &bar, text.trim_end());
                         }
                         _ => {}

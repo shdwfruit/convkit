@@ -132,7 +132,10 @@ pub fn run(ffprobe: &Path, input: &Path) -> Result<MediaProbe> {
     if !input.is_file() {
         return Err(ConvError::new(
             ErrorCode::InputNotFound,
-            format!("not an existing regular file, refusing to probe: {}", input.display()),
+            format!(
+                "not an existing regular file, refusing to probe: {}",
+                input.display()
+            ),
         ));
     }
     // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
@@ -188,7 +191,10 @@ mod tests {
             {"codec_type":"audio","codec_name":"aac"},
             {"codec_type":"subtitle","codec_name":"mov_text"}]}"#,
         );
-        assert_eq!(p.subtitle_codecs.first().map(String::as_str), Some("mov_text"));
+        assert_eq!(
+            p.subtitle_codecs.first().map(String::as_str),
+            Some("mov_text")
+        );
     }
 
     #[test]

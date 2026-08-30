@@ -425,10 +425,7 @@ mod tests {
                 input,
                 "out.mp4",
             );
-            assert!(
-                probed_for(&r, &j).is_none(),
-                "{input} must not be probed"
-            );
+            assert!(probed_for(&r, &j).is_none(), "{input} must not be probed");
         }
     }
 

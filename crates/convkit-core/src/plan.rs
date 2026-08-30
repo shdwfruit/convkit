@@ -254,7 +254,7 @@ mod tests {
         let probe = MediaProbe {
             video_codec: Some("h264".into()),
             audio_codecs: vec!["aac".into()],
-                        ..MediaProbe::default()
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mkv,
@@ -276,7 +276,10 @@ mod tests {
             plan.steps[0].argv
         );
         assert!(
-            plan.steps[0].argv.windows(2).any(|w| w == ["-map", "0:v:0"]),
+            plan.steps[0]
+                .argv
+                .windows(2)
+                .any(|w| w == ["-map", "0:v:0"]),
             "the remux must map its streams explicitly, never rely on default selection: {:?}",
             plan.steps[0].argv
         );
@@ -287,7 +290,7 @@ mod tests {
         let probe = MediaProbe {
             video_codec: Some("vp9".into()),
             audio_codecs: vec!["opus".into()],
-                        ..MediaProbe::default()
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mkv,
@@ -377,7 +380,7 @@ mod tests {
         let probe = MediaProbe {
             video_codec: Some("vp9".into()),
             audio_codecs: vec!["opus".into()],
-                        ..MediaProbe::default()
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mkv,
@@ -409,7 +412,7 @@ mod tests {
         let probe = MediaProbe {
             video_codec: Some("h264".into()),
             audio_codecs: vec!["aac".into()],
-                        ..MediaProbe::default()
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mp4,
@@ -441,7 +444,7 @@ mod tests {
         let probe = MediaProbe {
             video_codec: Some("h264".into()),
             audio_codecs: vec!["aac".into()],
-                        ..MediaProbe::default()
+            ..MediaProbe::default()
         };
         let plan = build(
             Format::Mp4,
