@@ -1,5 +1,6 @@
 use std::io::IsTerminal;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anstyle::{AnsiColor, Style};
@@ -97,22 +98,59 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
 // `--dry-run` previews and pre-job failures the brief never asked to
 // change.
 
-/// Whether stdout is a real terminal — the single gate for every bit of
-/// colour and Unicode (`✓`/`✗`/`·`) `conversion_success_human` and
-/// `batch_summary_human` emit. `std::io::IsTerminal` (stable stdlib, no
-/// extra dependency) is used specifically because it's correct on a
-/// Windows console as well as a Unix pty — a hand-rolled guess (e.g.
-/// "assume yes unless an env var says otherwise") is exactly what the brief
-/// warned against ("detect a TTY properly rather than guessing").
+/// Whether ANSI escape sequences will actually be *interpreted* by the
+/// console rather than printed as literal bytes — and, on Windows, the call
+/// that makes them so.
+///
+/// Being a terminal is not the same as understanding ANSI. Classic conhost —
+/// still the default host for cmd.exe and Windows PowerShell 5.1 on Windows
+/// 10, where `HKCU\Console\VirtualTerminalLevel` is unset — ships with
+/// `ENABLE_VIRTUAL_TERMINAL_PROCESSING` off. Gating styling on
+/// `is_terminal()` alone (which is what this module used to do) therefore
+/// printed `←[1m←[32m✓←[0m` literally, and left a stack of half-drawn
+/// indicatif spinner lines above it, on every single run (F163).
+///
+/// `anstyle_query::windows::enable_ansi_colors` both turns VT on and reports
+/// whether that worked, returning `None` off Windows, where ANSI needs no
+/// enabling. It is already in the dependency graph via clap/anstream — which
+/// is exactly why `conv --help` always rendered correctly on conhost while
+/// conv's own output did not. Turning VT on also repairs indicatif's
+/// progress rendering, since that draws through the same console.
+///
+/// Cached, because the enabling is a process-wide side effect that should
+/// happen once; `main` calls this before any output so the console is in its
+/// final mode before the first byte is written.
+///
+/// One deliberate conservatism: the underlying call enables VT on stdout and
+/// stderr *together* and reports failure if either handle refuses, so
+/// redirecting one stream on Windows also drops styling from the other. That
+/// trades a little colour for the guarantee that we never emit an escape the
+/// console would show literally — the failure this exists to prevent.
+pub fn ansi_supported() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| anstyle_query::windows::enable_ansi_colors().unwrap_or(true))
+}
+
+/// The styling rule itself, split out from the two stream accessors below so
+/// it can be tested without a console: styling requires *both* a real
+/// terminal and a console that will interpret what we send it. Neither
+/// condition implies the other — a redirected stream is a console that is
+/// not a terminal, and conhost is a terminal that does not read ANSI.
+fn styled(is_terminal: bool, ansi: bool) -> bool {
+    is_terminal && ansi
+}
+
+/// Whether stdout gets colour and Unicode (`✓`/`✗`/`·`), gating
+/// `conversion_success_human` and `batch_summary_human`.
 pub fn stdout_styled() -> bool {
-    std::io::stdout().is_terminal()
+    styled(std::io::stdout().is_terminal(), ansi_supported())
 }
 
 /// The stderr counterpart, gating `conversion_failure_human` — failures are
 /// reported on stderr, so that's the stream whose terminal-ness decides
 /// whether its `✗` and colour appear.
 pub fn stderr_styled() -> bool {
-    std::io::stderr().is_terminal()
+    styled(std::io::stderr().is_terminal(), ansi_supported())
 }
 
 fn green_bold() -> Style {
@@ -393,6 +431,41 @@ mod tests {
 
     fn only_ascii(s: &str) -> bool {
         s.is_ascii()
+    }
+
+    // --- styling gate (F163) --------------------------------------------------
+
+    /// Being a terminal is not enough on Windows: conhost is a real terminal
+    /// that prints ANSI escapes literally until virtual-terminal processing
+    /// is enabled. Both conditions are required, and neither alone suffices —
+    /// this is the whole content of the F163 fix, stated as a truth table so
+    /// it can be checked without a console.
+    #[test]
+    fn styling_needs_both_a_terminal_and_a_console_that_reads_ansi() {
+        assert!(styled(true, true));
+        // A real terminal that shows escapes literally (conhost, VT off).
+        assert!(!styled(true, false));
+        // Piped or redirected: no styling regardless of console capability.
+        assert!(!styled(false, true));
+        assert!(!styled(false, false));
+    }
+
+    /// `ansi_supported` is a cached, process-wide side effect (it *enables*
+    /// VT on Windows), so it must answer the same way every time it is asked
+    /// — `stdout_styled` and `stderr_styled` each call it, and a batch calls
+    /// it again to decide whether to draw a progress bar.
+    #[test]
+    fn ansi_support_is_decided_once_and_stays_decided() {
+        assert_eq!(ansi_supported(), ansi_supported());
+    }
+
+    /// Off Windows there is nothing to enable, so the answer is
+    /// unconditionally yes; the `unwrap_or(true)` in `ansi_supported` is what
+    /// makes the Windows-only call a no-op everywhere else.
+    #[test]
+    #[cfg(not(windows))]
+    fn ansi_is_always_supported_off_windows() {
+        assert!(ansi_supported());
     }
 
     // --- human_size / human_elapsed -----------------------------------------

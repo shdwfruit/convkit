@@ -232,6 +232,7 @@ name = "convkit"
 version = "0.1.0"
 dependencies = [
  "anstyle",
+ "anstyle-query",
  "assert_cmd",
  "clap",
  "convkit-core",

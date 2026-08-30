@@ -34,6 +34,12 @@ indicatif = "0.17"
 # -- used directly here (Part 2) for the same ANSI styling machinery, gated
 # on `std::io::IsTerminal`, rather than adding a new styling dependency.
 anstyle = "1"
+# Windows consoles do not interpret ANSI escapes unless
+# `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is turned on explicitly; this crate is
+# the call that turns it on and reports whether it took (see
+# `render::ansi_supported`). Already in the tree via clap/anstream, which is
+# why `--help` rendered correctly on conhost while conv's own output did not.
+anstyle-query = "1"
 
 [dev-dependencies]
 assert_cmd = "2"
