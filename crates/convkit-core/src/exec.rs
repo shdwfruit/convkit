@@ -332,7 +332,19 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             // The placeholder occupies index 0 and is replaced above rather
             // than passed through, so the recorded positions -- which count
             // from the full argv -- shift down by one for this slice.
-            let shifted: Vec<usize> = step.path_args.iter().map(|i| i - 1).collect();
+            // `plan::build` shifts every position up by one when it inserts
+            // the placeholder, so none of them can be 0 here; `checked_sub`
+            // rather than `- 1` so a future change to that invariant degrades
+            // to "this path is not rewritten" instead of an underflow.
+            debug_assert!(
+                !step.path_args.contains(&0),
+                "the Soffice placeholder occupies index 0, so no path can"
+            );
+            let shifted: Vec<usize> = step
+                .path_args
+                .iter()
+                .filter_map(|i| i.checked_sub(1))
+                .collect();
             let rest =
                 substitute_backend_paths(&step.argv[1..], &shifted, verbatim_paths, resolver)?;
             cmd.args(&rest);
