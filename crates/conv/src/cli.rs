@@ -69,6 +69,9 @@ pub struct Cli {
     /// Use this ffmpeg binary instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     pub ffmpeg_path: Option<PathBuf>,
+    /// Use this ffprobe binary instead of the resolved one.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub ffprobe_path: Option<PathBuf>,
     /// Use this ImageMagick binary instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     pub magick_path: Option<PathBuf>,
@@ -148,8 +151,13 @@ impl Cli {
                 r.with_override(backend, p.clone());
             }
         }
-        // ffprobe ships beside ffmpeg; honour the same override directory.
-        if let Some(p) = &self.ffmpeg_path {
+        if let Some(p) = &self.ffprobe_path {
+            r.with_override(Backend::Ffprobe, p.clone());
+        } else if let Some(p) = &self.ffmpeg_path {
+            // ffprobe ships beside ffmpeg; honour the same override
+            // directory -- but only when the caller didn't pin ffprobe
+            // explicitly. An explicit --ffprobe-path must win over this
+            // inference, not the other way around.
             if let Some(dir) = p.parent() {
                 let probe = dir.join(if cfg!(windows) {
                     "ffprobe.exe"
@@ -160,5 +168,94 @@ impl Cli {
             }
         }
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use convkit_core::Source;
+
+    fn cli(ffmpeg_path: Option<PathBuf>, ffprobe_path: Option<PathBuf>) -> Cli {
+        Cli {
+            paths: vec![],
+            to: None,
+            dry_run: false,
+            json: false,
+            overwrite: false,
+            quiet: false,
+            yes: false,
+            no_install: false,
+            outdir: None,
+            jobs: None,
+            ffmpeg_path,
+            ffprobe_path,
+            magick_path: None,
+            pandoc_path: None,
+            soffice_path: None,
+            typst_path: None,
+            command: None,
+        }
+    }
+
+    /// An explicit `--ffprobe-path` must take precedence over the sibling
+    /// `--ffmpeg-path` otherwise infers from its own directory -- exactly
+    /// the scenario the fix brief calls out: pinning `--ffprobe-path` at a
+    /// nonexistent file to force the no-probe transcode path must not be
+    /// silently overridden by the ffmpeg-directory inference just because
+    /// `--ffmpeg-path` also happens to be set.
+    #[test]
+    fn explicit_ffprobe_path_wins_over_the_ffmpeg_sibling_inference() {
+        let ffmpeg = PathBuf::from(r"C:\tools\ffmpeg\bin\ffmpeg.exe");
+        let ffprobe = PathBuf::from(r"C:\elsewhere\my-ffprobe.exe");
+        let c = cli(Some(ffmpeg), Some(ffprobe.clone()));
+        let r = c.resolver();
+        let candidates = r.candidates(Backend::Ffprobe);
+        assert_eq!(
+            candidates.first(),
+            Some(&(ffprobe, Source::Override)),
+            "{candidates:?}"
+        );
+    }
+
+    /// With no explicit `--ffprobe-path`, `--ffmpeg-path` alone must still
+    /// infer the sibling in the same directory -- the pre-existing
+    /// behaviour this fix must not regress.
+    #[test]
+    fn ffmpeg_path_alone_still_infers_the_sibling_ffprobe() {
+        let ffmpeg = PathBuf::from(r"C:\tools\ffmpeg\bin\ffmpeg.exe");
+        let c = cli(Some(ffmpeg), None);
+        let r = c.resolver();
+        let candidates = r.candidates(Backend::Ffprobe);
+        let expected_probe = if cfg!(windows) {
+            r"C:\tools\ffmpeg\bin\ffprobe.exe"
+        } else {
+            r"C:\tools\ffmpeg\bin\ffprobe"
+        };
+        assert_eq!(
+            candidates.first(),
+            Some(&(PathBuf::from(expected_probe), Source::Override)),
+            "{candidates:?}"
+        );
+    }
+
+    /// `--ffprobe-path` alone (no `--ffmpeg-path` at all) still overrides
+    /// ffprobe, and must never accidentally also override ffmpeg itself.
+    #[test]
+    fn ffprobe_path_alone_overrides_only_ffprobe() {
+        let ffprobe = PathBuf::from(r"C:\elsewhere\my-ffprobe.exe");
+        let c = cli(None, Some(ffprobe.clone()));
+        let r = c.resolver();
+        assert_eq!(
+            r.candidates(Backend::Ffprobe).first(),
+            Some(&(ffprobe, Source::Override))
+        );
+        let ffmpeg_candidates = r.candidates(Backend::Ffmpeg);
+        assert!(
+            !ffmpeg_candidates
+                .first()
+                .is_some_and(|(_, source)| *source == Source::Override),
+            "--ffprobe-path must not also override ffmpeg: {ffmpeg_candidates:?}"
+        );
     }
 }

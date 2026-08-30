@@ -136,6 +136,7 @@ mod tests {
             outdir: None,
             jobs: None,
             ffmpeg_path: None,
+            ffprobe_path: None,
             magick_path: None,
             pandoc_path: None,
             soffice_path: None,

@@ -233,51 +233,133 @@ const VIDEO_TO_MP4: Recipe = Recipe {
 /// this is a literal alias, not independent argv that happens to match:
 /// diverging from `VIDEO_TO_MP4` here without a *reason* the mov muxer
 /// actually enforces would just be a copy that silently drifts out of sync.
+///
+/// Unlike `VIDEO_TO_MKV` (see its own docs), aliasing `-sn` along with
+/// everything else here is *not* the same bug: verified live against a real
+/// ffmpeg (9.0) by transcoding an `h264 + aac + aac + mov_text` mp4 source
+/// with no `-map`/`-c:s`/`-sn` at all, to both a bare `-f mp4` and a bare
+/// `-f mov` output -- the `Stream mapping:` ffmpeg prints was byte-identical
+/// between the two (`Stream #0:0 -> #0:0`, `Stream #0:1 -> #0:1`, nothing
+/// else), and both dropped the second audio track and the subtitle track
+/// the same way. Mapping a subtitle explicitly, the default codec ffmpeg
+/// picks for it is `mov_text` for both `-f mp4` and `-f mov` outputs too.
+/// mp4 and mov aren't just "the same muxer family" for the codecs they
+/// accept (already established above) -- they run the exact same default
+/// stream-selection and default-codec code, because it *is* the exact same
+/// muxer. mkv's problem was that its genuinely broader capabilities made
+/// mp4's constraints foreign to it; mov has no broader capabilities than
+/// mp4 to begin with, so there is nothing here for mp4's constraints to be
+/// foreign to.
 const VIDEO_TO_MOV: Recipe = VIDEO_TO_MP4;
+
+/// Shared argv for both mkv-transcode recipes below: `-map 0` carries every
+/// stream through the re-encode (not just the first video/audio track --
+/// the bug this pair of recipes replaces let mkv inherit mp4's "one audio
+/// track, no subtitles" default selection, which mkv itself never needed).
+/// Video and audio use the same quality anchors as `VIDEO_TO_MP4`, applied
+/// to *every* video/audio stream `-map 0` selects, not just the first of
+/// each. `-movflags` is never added, for the same reason `REMUX_MKV` never
+/// adds it: it is a private AVOption of the mov/mp4 muxer family that makes
+/// ffmpeg exit 1 against any other muxer -- see `REMUX_WEBM`'s docs, which
+/// hit the identical error against the webm muxer. The one thing that
+/// varies between the two consts below is `$sub_codec`, spliced into
+/// `-c:s`; see each const's own docs for which sources get which.
+macro_rules! video_to_mkv_recipe {
+    ($sub_codec:expr) => {
+        step!(
+            Backend::Ffmpeg,
+            [
+                Arg::Lit("-i"),
+                Arg::Input,
+                Arg::Lit("-map"),
+                Arg::Lit("0"),
+                Arg::Lit("-c:v"),
+                Arg::Lit("libx264"),
+                Arg::Lit("-crf"),
+                Arg::Lit(CRF),
+                Arg::Lit("-preset"),
+                Arg::Lit("medium"),
+                Arg::Lit("-pix_fmt"),
+                Arg::Lit("yuv420p"),
+                Arg::Lit("-c:a"),
+                Arg::Lit("aac"),
+                Arg::Lit("-b:a"),
+                Arg::Lit(AUDIO_BITRATE),
+                Arg::Lit("-c:s"),
+                Arg::Lit($sub_codec),
+                Arg::Lit("-y"),
+                Arg::Output,
+            ]
+        )
+    };
+}
 
 /// Transcode fallback for `* -> mkv` when the source codecs don't fit even
 /// matroska's own broad compatibility table (see `MKV_COMPATIBLE_VIDEO`/
-/// `MKV_COMPATIBLE_AUDIO`) or no probe was available to check. Mirrors
-/// `VIDEO_TO_MP4`'s codec choices and quality anchors; the one thing that
-/// changes is dropping `-movflags`, an AVOption private to the mov/mp4
-/// muxer family that makes ffmpeg exit 1 against any other muxer -- see
-/// `REMUX_WEBM`'s docs, which hit the identical error against the webm
-/// muxer.
+/// `MKV_COMPATIBLE_AUDIO`) or no probe was available to check -- reachable
+/// whenever ffprobe is unavailable or the probe fails, so it is a static
+/// choice, never one made from a live `MediaProbe`. This is the copy-subs
+/// variant: `-c:s copy` for whatever subtitle codec the source already
+/// carries. That is safe for every source this recipe is actually
+/// registered for (`video_to_mkv_recipe_for` below sends `mp4`/`mov` -- the
+/// one case where it would not be safe -- to `VIDEO_TO_MKV_SRT_SUBS`
+/// instead), and a no-op when there is no subtitle stream at all.
 ///
-/// `-sn` stays, for the same reason `VIDEO_TO_MP4` needs it: matroska's own
-/// default subtitle codec is text-based (ASS), so a source with a bitmap
-/// (PGS) subtitle track hits the same "bitmap can't encode to text" ffmpeg
-/// failure `VIDEO_TO_MP4`'s doc comment describes, just against a
-/// different default codec -- matroska's broad *muxing* compatibility
-/// doesn't change ffmpeg's default transcode target when the video/audio
-/// codecs already force a real transcode. `REMUX_MKV` is the recipe that
-/// actually delivers on mkv's promise to keep every stream; this is only
-/// the fallback for when a plain stream copy isn't on the table.
+/// This used to carry `-sn` and a matching "subtitles and extra audio
+/// tracks are dropped" warning, copied verbatim from `VIDEO_TO_MP4`. That
+/// was a real bug: `-sn` disables subtitle selection because *mp4* cannot
+/// hold most subtitle codecs, and the old argv's lack of `-map 0` meant
+/// ffmpeg's automatic selection also silently dropped every audio track
+/// past the first -- both are mp4-specific limitations mkv does not share
+/// (see `REMUX_MKV`'s own docs for why mkv is worth adding as a target at
+/// all). `-map 0` plus a per-stream-type codec for every type now carries
+/// everything through, so nothing is lost -- just re-encoded (video, audio)
+/// or copied untouched (subtitles) -- and there is no warning here for the
+/// same reason `REMUX_MKV` and `VIDEO_TO_WEBM` (also a full transcode) have
+/// none: a warning describing a loss that no longer happens is worse than
+/// no warning at all.
 const VIDEO_TO_MKV: Recipe = Recipe {
-    steps: &[step!(
-        Backend::Ffmpeg,
-        [
-            Arg::Lit("-i"),
-            Arg::Input,
-            Arg::Lit("-c:v"),
-            Arg::Lit("libx264"),
-            Arg::Lit("-crf"),
-            Arg::Lit(CRF),
-            Arg::Lit("-preset"),
-            Arg::Lit("medium"),
-            Arg::Lit("-pix_fmt"),
-            Arg::Lit("yuv420p"),
-            Arg::Lit("-c:a"),
-            Arg::Lit("aac"),
-            Arg::Lit("-b:a"),
-            Arg::Lit(AUDIO_BITRATE),
-            Arg::Lit("-sn"),
-            Arg::Lit("-y"),
-            Arg::Output,
-        ]
-    )],
-    warnings: &["Subtitle tracks and any audio tracks beyond the first are dropped."],
+    steps: &[video_to_mkv_recipe!("copy")],
+    warnings: &[],
 };
+
+/// `VIDEO_TO_MKV`'s sibling for the two sources whose subtitle codec, if
+/// they carry one at all, is guaranteed to be `mov_text`: mp4 and mov. That
+/// is a structural fact about those two containers, not something that
+/// varies per file -- `REMUX_MKV_SRT_SUBS`'s docs record the live-verified
+/// error a plain `-c:s copy` of `mov_text` hits against matroska ("Subtitle
+/// codec mov_text (94213) is not supported"), and matroska still has no
+/// codec ID for it here. Because the fact is about the *container*, not a
+/// particular file, `video_to_mkv_recipe_for` below can select this recipe
+/// from `from` alone, with no probe involved -- which matters specifically
+/// because this recipe only ever runs on the no-probe-available path (see
+/// `VIDEO_TO_MKV`'s own docs): there is no `MediaProbe` here to consult even
+/// if the choice needed one.
+///
+/// Unlike `REMUX_MKV_SRT_SUBS`, video and audio are genuinely re-encoded on
+/// this path, not stream-copied, so the warning says that plainly instead
+/// of reusing wording that would no longer be true here.
+const VIDEO_TO_MKV_SRT_SUBS: Recipe = Recipe {
+    steps: &[video_to_mkv_recipe!("srt")],
+    warnings: &[
+        "Subtitle tracks stored as MP4/MOV's mov_text are re-encoded to SRT text; \
+         matroska has no codec for mov_text itself. Video and audio are also \
+         re-encoded (libx264/AAC) on this transcode path, not stream-copied.",
+    ],
+};
+
+/// Picks between `VIDEO_TO_MKV` and `VIDEO_TO_MKV_SRT_SUBS` for a `* ->
+/// mkv` transcode, purely from the source format -- see
+/// `VIDEO_TO_MKV_SRT_SUBS`'s docs for why `from` alone is enough. The only
+/// reader is `insert_media_family`, at table-construction time; this is
+/// deliberately not shaped like `mkv_remux_for(probe: &MediaProbe)` because
+/// there is no probe on this path for it to take.
+fn video_to_mkv_recipe_for(from: Format) -> Recipe {
+    match from {
+        Format::Mp4 | Format::Mov => VIDEO_TO_MKV_SRT_SUBS,
+        _ => VIDEO_TO_MKV,
+    }
+}
 
 /// `-row-mt 1` enables libvpx's row-based multithreading and `-threads 0`
 /// lets it use every core. libvpx does not enable row multithreading by
@@ -731,7 +813,7 @@ fn insert_media_family(t: &mut Table) {
             t.insert((from, Format::Mov), VIDEO_TO_MOV);
         }
         if from != Format::Mkv {
-            t.insert((from, Format::Mkv), VIDEO_TO_MKV);
+            t.insert((from, Format::Mkv), video_to_mkv_recipe_for(from));
         }
         if from != Format::Webm {
             t.insert((from, Format::Webm), VIDEO_TO_WEBM);
@@ -1340,14 +1422,111 @@ mod tests {
     fn video_to_mkv_uses_the_spec_quality_anchors_and_omits_movflags() {
         let r = lookup(Format::Mkv, Format::Mkv);
         assert!(r.is_none(), "mkv must never convert to itself");
-        let r = lookup(Format::Mov, Format::Mkv).unwrap();
-        let argv = r.steps[0].render(&[Path::new("in.mov")], Path::new("out.mkv"));
+        // webm has no mov_text problem, so mkv's target picks the plain
+        // copy-subs variant: `VIDEO_TO_MKV`.
+        let r = lookup(Format::Webm, Format::Mkv).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.webm")], Path::new("out.mkv"));
         assert!(argv.windows(2).any(|w| w == ["-crf", "20"]), "{argv:?}");
         assert!(argv.windows(2).any(|w| w == ["-b:a", "160k"]), "{argv:?}");
         assert!(
             !argv.contains(&"-movflags".to_string()),
             "mkv is not part of the mov/mp4 muxer family: {argv:?}"
         );
+    }
+
+    /// The defect this whole recipe pair exists to fix: `VIDEO_TO_MKV` used
+    /// to be a byte-for-byte copy of `VIDEO_TO_MP4`'s stream handling --
+    /// `-sn` and a "subtitles and extra audio tracks are dropped" warning --
+    /// even though matroska (unlike mp4) can hold every subtitle codec and
+    /// every audio track a source carries. `-map 0` plus a per-stream codec
+    /// must now carry everything through, with no lossy warning.
+    #[test]
+    fn video_to_mkv_preserves_every_stream_and_carries_no_lossy_warning() {
+        let r = lookup(Format::Webm, Format::Mkv).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.webm")], Path::new("out.mkv"));
+        assert_eq!(
+            argv,
+            vec![
+                "-i", "in.webm", "-map", "0", "-c:v", "libx264", "-crf", "20", "-preset", "medium",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-c:s", "copy", "-y",
+                "out.mkv",
+            ]
+        );
+        assert!(
+            !argv.contains(&"-sn".to_string()),
+            "mkv can hold any subtitle codec, so it must not disable subtitle \
+             stream selection: {argv:?}"
+        );
+        assert_eq!(
+            r.warnings.len(),
+            0,
+            "nothing is lost on this path any more, so it must not carry a \
+             lossy-conversion warning: {:?}",
+            r.warnings
+        );
+    }
+
+    /// `avi` gets the same copy-subs treatment as `webm`: neither source's
+    /// subtitle codec (if any) is `mov_text`.
+    #[test]
+    fn avi_to_mkv_also_uses_the_copy_subs_variant() {
+        let r = lookup(Format::Avi, Format::Mkv).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.avi")], Path::new("out.mkv"));
+        assert!(argv.windows(2).any(|w| w == ["-c:s", "copy"]), "{argv:?}");
+        assert_eq!(r.warnings.len(), 0, "{:?}", r.warnings);
+    }
+
+    /// mp4 and mov's *only* subtitle codec is `mov_text`, which matroska has
+    /// no codec ID for (see `REMUX_MKV_SRT_SUBS`'s live-verified error), so
+    /// both sources must route to the SRT-subs variant -- unlike `webm`/
+    /// `avi` above, and unlike `mkv_remux_for`, this needs no probe: it is
+    /// decided purely from the source format, since a probe is never
+    /// available on the path that reaches this recipe at all.
+    #[test]
+    fn mp4_and_mov_to_mkv_use_the_srt_subs_variant() {
+        for (from, ext) in [(Format::Mp4, "mp4"), (Format::Mov, "mov")] {
+            let r = lookup(from, Format::Mkv).unwrap();
+            let argv = r.steps[0].render(&[Path::new(&format!("in.{ext}"))], Path::new("out.mkv"));
+            assert_eq!(
+                argv,
+                vec![
+                    "-i",
+                    &format!("in.{ext}"),
+                    "-map",
+                    "0",
+                    "-c:v",
+                    "libx264",
+                    "-crf",
+                    "20",
+                    "-preset",
+                    "medium",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "160k",
+                    "-c:s",
+                    "srt",
+                    "-y",
+                    "out.mkv",
+                ],
+                "{from:?}"
+            );
+            assert!(!argv.contains(&"-sn".to_string()), "{from:?}: {argv:?}");
+            assert_eq!(r.warnings.len(), 1, "{from:?}: {:?}", r.warnings);
+            assert!(
+                r.warnings[0].contains("mov_text"),
+                "{from:?}: {:?}",
+                r.warnings
+            );
+            assert!(
+                r.warnings[0].contains("re-encoded"),
+                "the warning must not claim video/audio are stream-copied on \
+                 this transcode path: {from:?}: {:?}",
+                r.warnings
+            );
+        }
     }
 
     #[test]

@@ -946,6 +946,7 @@ fn subcommand_help_still_lists_the_genuinely_global_flags() {
             "--yes",
             "--no-install",
             "--ffmpeg-path",
+            "--ffprobe-path",
             "--magick-path",
             "--pandoc-path",
             "--soffice-path",
