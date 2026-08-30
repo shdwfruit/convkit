@@ -6,7 +6,9 @@ use std::sync::LazyLock;
 use crate::{Arg, Backend, Format, OutputMode, Recipe, Step};
 
 /// JPEG/WebP/AVIF quality. Visually transparent without bloat; see spec §7.4.
-const IMAGE_QUALITY: &str = "92";
+/// `pub` so `conv capabilities <format>` can state the default it is
+/// documenting; overridable per run via `Arg::Quality`'s tuning slot.
+pub const IMAGE_QUALITY: &str = "92";
 /// DPI used when rasterising vectors. 384 gives a crisp result at 4x a 96dpi
 /// nominal size without producing an absurd bitmap.
 const SVG_DENSITY: &str = "384";
@@ -37,8 +39,10 @@ const IMG_LOSSY: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::TuneResize,
+            Arg::TuneColors,
             Arg::Lit("-quality"),
-            Arg::Lit(IMAGE_QUALITY),
+            Arg::Quality(IMAGE_QUALITY),
             Arg::Output,
         ]
     )],
@@ -64,8 +68,10 @@ const IMG_TO_JPG: Recipe = Recipe {
             Arg::Lit("remove"),
             Arg::Lit("-alpha"),
             Arg::Lit("off"),
+            Arg::TuneResize,
+            Arg::TuneColors,
             Arg::Lit("-quality"),
-            Arg::Lit(IMAGE_QUALITY),
+            Arg::Quality(IMAGE_QUALITY),
             Arg::Output,
         ]
     )],
@@ -81,7 +87,13 @@ const IMG_TO_JPG: Recipe = Recipe {
 const IMG_LOSSLESS: Recipe = Recipe {
     steps: &[step!(
         Backend::Magick,
-        [Arg::Input, Arg::Lit("-auto-orient"), Arg::Output]
+        [
+            Arg::Input,
+            Arg::Lit("-auto-orient"),
+            Arg::TuneResize,
+            Arg::TuneColors,
+            Arg::Output,
+        ]
     )],
     warnings: &[],
 };
@@ -93,7 +105,13 @@ const IMG_LOSSLESS: Recipe = Recipe {
 const IMG_LOSSLESS_SINGLE_FRAME: Recipe = Recipe {
     steps: &[step!(
         Backend::Magick,
-        [Arg::InputFirstFrame, Arg::Lit("-auto-orient"), Arg::Output]
+        [
+            Arg::InputFirstFrame,
+            Arg::Lit("-auto-orient"),
+            Arg::TuneResize,
+            Arg::TuneColors,
+            Arg::Output,
+        ]
     )],
     warnings: &[
         "Only the first frame/page of a multi-frame source is kept; this target \
@@ -121,8 +139,10 @@ const SVG_TO_LOSSY: Recipe = Recipe {
             Arg::Lit("-alpha"),
             Arg::Lit("off"),
             Arg::Lit("-flatten"),
+            Arg::TuneResize,
+            Arg::TuneColors,
             Arg::Lit("-quality"),
-            Arg::Lit(IMAGE_QUALITY),
+            Arg::Quality(IMAGE_QUALITY),
             Arg::Output,
         ]
     )],
@@ -138,6 +158,8 @@ const SVG_TO_LOSSLESS: Recipe = Recipe {
             Arg::Lit("-background"),
             Arg::Lit("none"),
             Arg::Input,
+            Arg::TuneResize,
+            Arg::TuneColors,
             Arg::Output,
         ]
     )],
@@ -155,10 +177,11 @@ const IMG_TO_PDF: Recipe = Recipe {
         [
             Arg::Inputs,
             Arg::Lit("-auto-orient"),
+            Arg::TuneResize,
             Arg::Lit("-compress"),
             Arg::Lit("jpeg"),
             Arg::Lit("-quality"),
-            Arg::Lit(IMAGE_QUALITY),
+            Arg::Quality(IMAGE_QUALITY),
             Arg::Output,
         ]
     )],

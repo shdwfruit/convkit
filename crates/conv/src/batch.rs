@@ -129,6 +129,7 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                         inputs: job.inputs.clone(),
                         output: job.output.clone(),
                         overwrite: cli.overwrite,
+                        tuning: cli.tuning(),
                     };
                     // I8: the `Event` channel used to be threaded all the
                     // way through with a no-op consumer everywhere —
@@ -282,6 +283,9 @@ mod tests {
             overwrite: false,
             quiet: true,
             verbose: false,
+            resize: None,
+            quality: None,
+            colors: None,
             yes: false,
             no_install: false,
             outdir: None,

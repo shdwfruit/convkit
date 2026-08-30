@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use convkit_core::Resolver;
+use convkit_core::{Resolver, Tuning};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -49,6 +49,24 @@ pub struct Cli {
     /// machine interface (that's --json's `backend_output`).
     #[arg(short = 'v', long, conflicts_with = "quiet")]
     pub verbose: bool,
+
+    /// Fit the image within this geometry, aspect preserved: `1600x900`,
+    /// `1600x` (width), `x900` (height), or `50%`. Image conversions only.
+    ///
+    /// Not `global` -- see `dry_run`'s doc comment; likewise the two flags
+    /// below.
+    #[arg(long, value_name = "GEOMETRY", value_parser = parse_resize_geometry)]
+    pub resize: Option<String>,
+
+    /// Quality 1-100 for lossy image targets (jpg/webp/avif) and
+    /// image -> pdf [default: 92].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub quality: Option<u8>,
+
+    /// Reduce the palette to at most N colors (2-256). Raster image
+    /// targets only.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(2..=256))]
+    pub colors: Option<u16>,
 
     /// Assume yes when prompted to install a missing backend — for a script
     /// that wants the install-then-retry behaviour without a TTY to answer
@@ -104,8 +122,14 @@ pub enum Command {
     Doctor,
     /// Download and verify a managed backend.
     Install { backend: String },
-    /// List every supported conversion.
-    Capabilities,
+    /// List every supported conversion; with a FORMAT, show that format's
+    /// pairs, baked-in defaults, and which tuning flags apply.
+    Capabilities {
+        /// A format extension, e.g. `jpg` — shows what converts to and
+        /// from it, the defaults its recipes use, and the applicable
+        /// tuning flags (--resize/--quality/--colors).
+        format: Option<String>,
+    },
     /// Update managed backends to the versions this convkit pins.
     #[command(long_about = "\
 Brings managed backends (ffmpeg, ffprobe, pandoc, typst) in line with the \
@@ -146,7 +170,41 @@ changes nothing, and exits non-zero if anything is.")]
     },
 }
 
+/// Validates `--resize` down to the five geometry forms convkit supports:
+/// `W`, `WxH`, `Wx`, `xH`, `N%`. Strictly digits plus one `x` or a
+/// trailing `%` — ImageMagick's own geometry grammar also accepts `@`,
+/// `!`, `<`, `>` and `^` operators, and letting those through would make
+/// the flag a side-channel into magick semantics this help text never
+/// promised.
+fn parse_resize_geometry(s: &str) -> Result<String, String> {
+    let all_digits = |t: &str| t.chars().all(|c| c.is_ascii_digit());
+    let ok = if let Some(pct) = s.strip_suffix('%') {
+        !pct.is_empty() && all_digits(pct)
+    } else if let Some((w, h)) = s.split_once('x') {
+        (!w.is_empty() || !h.is_empty()) && all_digits(w) && all_digits(h)
+    } else {
+        !s.is_empty() && all_digits(s)
+    };
+    if ok {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "geometry must be W, WxH, Wx, xH, or N% (e.g. 1600x900, 50%), got {s:?}"
+        ))
+    }
+}
+
 impl Cli {
+    /// The tuning this invocation asked for — empty (registry defaults)
+    /// unless one of `--resize`/`--quality`/`--colors` was passed.
+    pub fn tuning(&self) -> Tuning {
+        Tuning {
+            resize: self.resize.clone(),
+            quality: self.quality,
+            colors: self.colors,
+        }
+    }
+
     /// Builds the `Resolver` every conversion, `doctor`, and `update` run
     /// through, from whichever `--<backend>-path` flags were passed. The
     /// actual override-application and ffprobe-sibling-inference logic
@@ -183,6 +241,9 @@ mod tests {
             overwrite: false,
             quiet: false,
             verbose: false,
+            resize: None,
+            quality: None,
+            colors: None,
             yes: false,
             no_install: false,
             outdir: None,

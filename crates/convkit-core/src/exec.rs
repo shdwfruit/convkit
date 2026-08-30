@@ -24,6 +24,10 @@ pub struct Request {
     /// inherited that silent overwrite. `false` refuses; `true` permits it,
     /// matching `-y/--overwrite`.
     pub overwrite: bool,
+    /// User tuning (`--resize`/`--quality`/`--colors`), defaulting to the
+    /// registry's own anchors. Validated against the selected recipe's
+    /// slots by `plan::build_tuned`.
+    pub tuning: crate::Tuning,
 }
 
 #[derive(Debug, Clone)]
@@ -409,13 +413,14 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     })?;
     let temp_final = scratch.join(final_name);
 
-    let built = plan::build(
+    let built = plan::build_tuned(
         req.from,
         req.to,
         &req.inputs,
         &temp_final,
         probed.as_ref(),
         available.as_ref(),
+        &req.tuning,
     )?;
     let first_step = built
         .steps
@@ -1235,6 +1240,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: dir.path().join("out.jpg"),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
@@ -1279,6 +1285,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input.clone()],
             output: dir.path().join("out.jpg"),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         let mut events: Vec<Event> = Vec::new();
@@ -1318,6 +1325,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: dir.path().join("out.jpg"),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         let mut reports: Vec<String> = Vec::new();
@@ -1350,6 +1358,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: dir.path().join("out.jpg"),
             overwrite: false,
+            tuning: Default::default(),
         };
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::ConversionFailed);
@@ -1372,6 +1381,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: output.clone(),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         let outcome = run(&req, &r, &mut |_| {}).unwrap();
@@ -1407,6 +1417,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: output.clone(),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
@@ -1439,6 +1450,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: output.clone(),
             overwrite: true,
+            tuning: Default::default(),
         };
 
         run(&req, &r, &mut |_| {}).unwrap();
@@ -1459,6 +1471,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: dir.path().join("out.jpg"),
             overwrite: false,
+            tuning: Default::default(),
         };
         run(&req, &r, &mut |_| {}).unwrap();
 
@@ -1509,6 +1522,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: output.clone(),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         let outcome = run(&req, &r, &mut |_| {}).unwrap();
@@ -1554,6 +1568,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: dir.path().join("out.pdf"),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
@@ -1732,6 +1747,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: dir.path().join("out.pdf"),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         run(&req, &r, &mut |_| {}).unwrap();
@@ -1908,6 +1924,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: dir.path().join("out.pdf"),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         let outcome = run(&req, &r, &mut |_| {}).unwrap();
@@ -1983,6 +2000,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             inputs: vec![input],
             output: dir.path().join("out.pdf"),
             overwrite: false,
+            tuning: Default::default(),
         };
 
         let e = run(&req, &r, &mut |_| {}).unwrap_err();

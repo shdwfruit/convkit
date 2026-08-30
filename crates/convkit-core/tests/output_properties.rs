@@ -98,6 +98,7 @@ fn convert_path(input: &Path, to_ext: &str) -> (PathBuf, exec::Outcome) {
         inputs: vec![input.to_path_buf()],
         output: output.clone(),
         overwrite: false,
+        tuning: Default::default(),
     };
     let outcome = exec::run(&req, &resolver, &mut |_| {})
         .unwrap_or_else(|e| panic!("{} -> {to_ext} failed: {e}", input.display()));
@@ -506,6 +507,7 @@ fn md_to_pdf_succeeds_in_a_destination_that_approaches_max_path() {
         inputs: vec![input],
         output: output.clone(),
         overwrite: false,
+        tuning: Default::default(),
     };
     exec::run(&req, &resolver, &mut |_| {}).unwrap_or_else(|e| {
         panic!(
@@ -546,6 +548,7 @@ fn docx_to_pdf_succeeds_in_a_deep_destination_directory() {
         inputs: vec![input],
         output: output.clone(),
         overwrite: false,
+        tuning: Default::default(),
     };
     exec::run(&req, &resolver, &mut |_| {})
         .unwrap_or_else(|e| panic!("docx -> pdf into a deep destination directory failed: {e}"));
@@ -614,6 +617,7 @@ fn mp4_to_mkv_with_no_probe_available_transcodes_and_preserves_every_stream() {
         inputs: vec![src.clone()],
         output: out.clone(),
         overwrite: false,
+        tuning: Default::default(),
     };
     let outcome = exec::run(&req, &forced, &mut |_| {})
         .unwrap_or_else(|e| panic!("mp4 -> mkv transcode failed: {e}"));

@@ -4,11 +4,49 @@ use serde::Serialize;
 
 use crate::Backend;
 
+/// User-facing tuning for one invocation — the first parameter surface in
+/// a DSL that deliberately had none. Every field is optional and `None`
+/// renders *exactly* the registry's static default, so an untuned run's
+/// argv is byte-identical to the snapshot table; the fields only exist
+/// where a recipe declares a matching slot (`Arg::Quality`,
+/// `Arg::TuneResize`, `Arg::TuneColors`), and `plan::build_tuned` refuses
+/// a flag whose slot the selected recipe doesn't carry rather than
+/// silently ignoring it.
+///
+/// Values arrive pre-validated by the CLI (geometry charset, numeric
+/// ranges); this struct is dumb data, not a validator.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tuning {
+    /// ImageMagick-style geometry: `W`, `WxH` (fits within, aspect
+    /// preserved), `Wx`, `xH`, or `N%`.
+    pub resize: Option<String>,
+    /// 1–100, for lossy image targets and image→PDF.
+    pub quality: Option<u8>,
+    /// 2–256, palette reduction on raster targets.
+    pub colors: Option<u16>,
+}
+
+impl Tuning {
+    pub fn is_empty(&self) -> bool {
+        self.resize.is_none() && self.quality.is_none() && self.colors.is_none()
+    }
+}
+
 /// A single argument slot in a backend invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arg {
     /// A literal flag or value, passed through verbatim.
     Lit(&'static str),
+    /// The quality value: the user's `--quality` override when given, the
+    /// carried registry default otherwise. Spelled with its default so the
+    /// number stays authored next to the recipe (`Arg::Quality("92")`),
+    /// not buried in the renderer.
+    Quality(&'static str),
+    /// `-resize <geometry>` when `--resize` was given; renders *nothing*
+    /// otherwise, keeping untuned argv byte-identical to the static table.
+    TuneResize,
+    /// `-colors <n>` when `--colors` was given; renders nothing otherwise.
+    TuneColors,
     /// The first (usually only) input path.
     Input,
     /// The first input path with ImageMagick's `[0]` frame selector
@@ -98,7 +136,7 @@ impl Step {
     /// public entry point every caller goes through, which rejects empty
     /// inputs with a typed `ConvError` before any `Step` is ever rendered.
     pub fn render(&self, inputs: &[&Path], output: &Path) -> Vec<String> {
-        self.render_full(inputs, output).argv
+        self.render_full(inputs, output, &Tuning::default()).argv
     }
 
     /// `render` plus the positions of the tokens that are filesystem paths.
@@ -108,12 +146,28 @@ impl Step {
     /// line alone, which is why `render` stays the short spelling and
     /// delegates here rather than the two walking `args` separately and
     /// drifting apart.
-    pub fn render_full(&self, inputs: &[&Path], output: &Path) -> Rendered {
+    pub fn render_full(&self, inputs: &[&Path], output: &Path, tuning: &Tuning) -> Rendered {
         let mut argv = Vec::with_capacity(self.args.len());
         let mut path_args = Vec::new();
         for arg in self.args {
             match arg {
                 Arg::Lit(s) => argv.push((*s).to_string()),
+                Arg::Quality(default) => argv.push(match tuning.quality {
+                    Some(q) => q.to_string(),
+                    None => (*default).to_string(),
+                }),
+                Arg::TuneResize => {
+                    if let Some(g) = &tuning.resize {
+                        argv.push("-resize".to_string());
+                        argv.push(g.clone());
+                    }
+                }
+                Arg::TuneColors => {
+                    if let Some(n) = tuning.colors {
+                        argv.push("-colors".to_string());
+                        argv.push(n.to_string());
+                    }
+                }
                 Arg::Input => {
                     path_args.push(argv.len());
                     argv.push(inputs[0].to_string_lossy().into_owned());
@@ -194,7 +248,11 @@ mod tests {
 
     #[test]
     fn renders_positional_input_and_output() {
-        let r = GIF.render_full(&[Path::new("in.mp4")], Path::new("out.gif"));
+        let r = GIF.render_full(
+            &[Path::new("in.mp4")],
+            Path::new("out.gif"),
+            &Tuning::default(),
+        );
         assert_eq!(r.argv, vec!["-i", "in.mp4", "-y", "out.gif"]);
         assert_eq!(
             r.path_args,
@@ -211,7 +269,11 @@ mod tests {
             output: OutputMode::OutDir,
             intermediate_ext: None,
         };
-        let r = step.render_full(&[Path::new("a/in.docx")], Path::new("b/out.pdf"));
+        let r = step.render_full(
+            &[Path::new("a/in.docx")],
+            Path::new("b/out.pdf"),
+            &Tuning::default(),
+        );
         assert_eq!(r.argv, vec!["--outdir", "b", "a/in.docx"]);
         assert_eq!(r.path_args, vec![1, 2], "the out-dir and the input");
     }
@@ -224,7 +286,11 @@ mod tests {
             output: OutputMode::OutDir,
             intermediate_ext: None,
         };
-        let r = step.render_full(&[Path::new("in.docx")], Path::new("out.pdf"));
+        let r = step.render_full(
+            &[Path::new("in.docx")],
+            Path::new("out.pdf"),
+            &Tuning::default(),
+        );
         assert_eq!(r.argv, vec!["."]);
         assert_eq!(r.path_args, vec![0]);
     }
@@ -269,5 +335,65 @@ mod tests {
             Path::new("out.pdf"),
         );
         assert_eq!(argv, vec!["a.png", "b.png", "out.pdf"]);
+    }
+
+    // --- Tuning slots: the first parameter surface in the DSL ------------
+
+    const TUNABLE: Step = Step {
+        backend: Backend::Magick,
+        args: &[
+            Arg::Input,
+            Arg::TuneResize,
+            Arg::TuneColors,
+            Arg::Lit("-quality"),
+            Arg::Quality("92"),
+            Arg::Output,
+        ],
+        output: OutputMode::Path,
+        intermediate_ext: None,
+    };
+
+    /// The load-bearing property: an empty `Tuning` renders *byte-identical*
+    /// argv to the static table — TuneResize/TuneColors vanish, Quality
+    /// falls back to its carried default. This is what keeps the 115-pair
+    /// snapshot stable.
+    #[test]
+    fn empty_tuning_renders_exactly_the_static_default_argv() {
+        let argv = TUNABLE.render(&[Path::new("in.png")], Path::new("out.jpg"));
+        assert_eq!(argv, vec!["in.png", "-quality", "92", "out.jpg"]);
+    }
+
+    #[test]
+    fn tuning_fills_its_slots_and_only_its_slots() {
+        let tuning = Tuning {
+            resize: Some("1600x900".into()),
+            quality: Some(70),
+            colors: Some(64),
+        };
+        let r = TUNABLE.render_full(&[Path::new("in.png")], Path::new("out.jpg"), &tuning);
+        assert_eq!(
+            r.argv,
+            vec!["in.png", "-resize", "1600x900", "-colors", "64", "-quality", "70", "out.jpg"]
+        );
+    }
+
+    /// Path positions must stay correct when tune slots expand: the output
+    /// token's recorded index shifts with the inserted pairs.
+    #[test]
+    fn path_positions_track_tune_slot_expansion() {
+        let tuning = Tuning {
+            resize: Some("50%".into()),
+            ..Tuning::default()
+        };
+        let r = TUNABLE.render_full(&[Path::new("in.png")], Path::new("out.jpg"), &tuning);
+        for &i in &r.path_args {
+            assert!(
+                r.argv[i] == "in.png" || r.argv[i] == "out.jpg",
+                "position {i} points at non-path token {:?} in {:?}",
+                r.argv[i],
+                r.argv
+            );
+        }
+        assert_eq!(r.path_args.len(), 2, "{:?}", r.path_args);
     }
 }

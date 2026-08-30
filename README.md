@@ -413,13 +413,47 @@ Document:
 treat `conv capabilities`/`conv capabilities --json` as the source of truth,
 not the number in this paragraph.
 
+With a format, `conv capabilities <format>` shows that format's own view:
+what converts to and from it, the defaults its recipes bake in, and which
+tuning flags apply per target:
+
+```console
+$ conv capabilities jpg
+jpg (Image)
+
+  as source, converts to:
+    jpg -> png      [--resize --colors]
+    jpg -> webp     [--resize --quality --colors]
+    ...
+  as target, accepts: heic heif png webp avif tiff bmp svg
+  tuning flags when writing jpg: --resize --quality --colors
+
+  defaults: quality 92 (override with --quality)
+```
+
 ## Flags
 
-`-o/--outdir`, `-j/--jobs` (batch parallelism, defaults to the core count),
+Three tuning knobs for image conversions — the first knobs in a tool whose
+defaults are the product, so each one overrides a named default rather than
+opening a passthrough:
+
+- `--resize <GEOMETRY>` — fit within `1600x900` (aspect preserved), `1600x`
+  (width), `x900` (height), or `50%`. Image conversions only.
+- `--quality <1-100>` — lossy image targets (jpg/webp/avif) and image → pdf;
+  the default is 92.
+- `--colors <2-256>` — palette reduction on raster targets.
+
+A flag that doesn't apply to the pair you asked for is refused with the
+reason (`png is lossless; --quality applies to jpg/webp/avif targets and
+image -> pdf`) — never silently ignored. `conv capabilities <format>` lists
+which flags apply where; video/GIF knobs (fps, CRF) are not implemented yet.
+
+The rest: `-o/--outdir`, `-j/--jobs` (batch parallelism, defaults to the core count),
 `-y/--overwrite` (refused by default — a batch collision skips that one file
 and reports it rather than aborting the run), `-q/--quiet`, `--json`,
 `--dry-run` (inert: it never probes a non-file input and never creates `-o`'s
-directory), `--yes`/`--no-install` (see [Installing a missing backend on the
+directory), `-v/--verbose` (the exact spawned commands and each backend's
+full output, on stderr), `--yes`/`--no-install` (see [Installing a missing backend on the
 fly](#installing-a-missing-backend-on-the-fly)), and one `--<backend>-path`
 override per backend: `--ffmpeg-path`, `--ffprobe-path`, `--magick-path`,
 `--pandoc-path`, `--soffice-path`, `--typst-path`.

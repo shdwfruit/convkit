@@ -52,6 +52,7 @@ pub fn convert_and_inspect(
         inputs: vec![input.to_path_buf()],
         output: output_path.clone(),
         overwrite: true,
+        tuning: Default::default(),
     };
     let outcome = exec::run(&req, backends.resolver, &mut |_| {}).map_err(|e| e.message)?;
 

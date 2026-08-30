@@ -179,13 +179,14 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
         .map(|job| {
             let probed = probed_for(&resolver, job);
             let available = available_for(&resolver, job);
-            plan::build(
+            plan::build_tuned(
                 job.from,
                 job.to,
                 &job.inputs,
                 &job.output,
                 probed.as_ref(),
                 available.as_ref(),
+                &cli.tuning(),
             )
         })
         .collect();

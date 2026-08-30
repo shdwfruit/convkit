@@ -1166,3 +1166,108 @@ fn a_name_that_merely_starts_with_a_device_word_is_still_converted() {
         .success()
         .stdout(contains("conx.gif"));
 }
+
+// --- Tuning knobs: --resize/--quality/--colors ---------------------------
+
+/// The knobs surface in the exact command: a tuned dry-run must show the
+/// overridden quality and the resize pair, and an untuned one must show
+/// the registry default untouched.
+#[test]
+fn tuning_flags_appear_in_the_dry_run_command() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args([
+            "a.png",
+            "a.jpg",
+            "--dry-run",
+            "--quality",
+            "70",
+            "--resize",
+            "1600x900",
+            "--colors",
+            "64",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("-quality 70"), "{stdout}");
+    assert!(stdout.contains("-resize 1600x900"), "{stdout}");
+    assert!(stdout.contains("-colors 64"), "{stdout}");
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "--dry-run"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("-quality 92"), "{stdout}");
+    assert!(!stdout.contains("-resize"), "{stdout}");
+}
+
+/// A flag whose slot the recipe lacks is refused with the reason — never
+/// silently ignored.
+#[test]
+fn tuning_without_a_slot_is_refused_with_the_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.heic"), b"x").unwrap();
+    std::fs::write(dir.path().join("in.mp4"), b"x").unwrap();
+
+    conv()
+        .current_dir(dir.path())
+        .args(["a.heic", "a.png", "--dry-run", "--quality", "70"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains("lossless"));
+
+    conv()
+        .current_dir(dir.path())
+        .args(["in.mp4", "out.mp3", "--dry-run", "--resize", "50%"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains("--resize"));
+}
+
+/// The geometry mini-grammar is strict: magick's operator suffixes are not
+/// smuggled through.
+#[test]
+fn resize_geometry_rejects_magick_operators() {
+    for bad in ["800!", "800@", "800>", "a800", "80x0x8"] {
+        conv()
+            .args(["a.png", "a.jpg", "--resize", bad])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(predicates::str::contains("geometry"));
+    }
+}
+
+/// Discovery: `conv capabilities jpg` names the applicable tuning flags
+/// and the overridable default.
+#[test]
+fn capabilities_with_a_format_lists_tuning_flags_and_defaults() {
+    let assert = conv().args(["capabilities", "jpg"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("--resize"), "{stdout}");
+    assert!(stdout.contains("--quality"), "{stdout}");
+    assert!(stdout.contains("quality 92"), "{stdout}");
+
+    let assert = conv()
+        .args(["capabilities", "jpg", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert!(v["sources"].as_array().unwrap().len() > 3, "{v}");
+
+    conv()
+        .args(["capabilities", "jppg"])
+        .assert()
+        .failure()
+        .code(2);
+}

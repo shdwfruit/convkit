@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::media;
 use crate::probe::MediaProbe;
 use crate::resolve::AvailableBackends;
-use crate::{registry, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe};
+use crate::{registry, Arg, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe, Tuning};
 
 /// The first argv element `build` inserts for every `Soffice` step, in
 /// place of the real `-env:UserInstallation=<url>` `exec::run` actually
@@ -59,8 +59,10 @@ pub struct ConversionPlan {
     pub warnings: Vec<String>,
 }
 
-/// Chooses a recipe and renders it. Pure: no filesystem, no process spawning,
-/// no executable resolution.
+/// Chooses a recipe and renders it with default tuning. Pure: no
+/// filesystem, no process spawning, no executable resolution. The
+/// canonical spelling for every caller that has no user tuning to apply;
+/// `build_tuned` is the full entry point.
 pub fn build(
     from: Format,
     to: Format,
@@ -68,6 +70,30 @@ pub fn build(
     output: &Path,
     probe: Option<&MediaProbe>,
     available: Option<&AvailableBackends>,
+) -> Result<ConversionPlan> {
+    build_tuned(
+        from,
+        to,
+        inputs,
+        output,
+        probe,
+        available,
+        &Tuning::default(),
+    )
+}
+
+/// `build` plus user tuning. A tuning flag whose slot the selected recipe
+/// does not carry is a hard `InvalidInvocation` naming the flag and why —
+/// never a silent no-op: a user who asked for `--resize` and got an
+/// unresized file would have every right to stop trusting the tool.
+pub fn build_tuned(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    output: &Path,
+    probe: Option<&MediaProbe>,
+    available: Option<&AvailableBackends>,
+    tuning: &Tuning,
 ) -> Result<ConversionPlan> {
     if inputs.is_empty() {
         return Err(ConvError::new(
@@ -93,6 +119,7 @@ pub fn build(
             let dynamic = media::stream_mapped_invocation(to, p, &inputs[0], output)
                 .or_else(|| media::audio_copy_invocation(from, to, p, &inputs[0], output));
             if let Some(m) = dynamic {
+                validate_tuning_for_dynamic_media(from, to, tuning)?;
                 // Every invocation `media.rs` builds opens with
                 // `-i <input>` and closes with the output path, so the
                 // path positions (for the Windows long-path rewriter) are
@@ -120,6 +147,7 @@ pub fn build(
 
     let recipe =
         select(from, to, probe, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
+    validate_tuning(&recipe, from, to, tuning)?;
 
     let last = recipe.steps.len() - 1;
 
@@ -150,7 +178,7 @@ pub fn build(
         let crate::recipe::Rendered {
             mut argv,
             mut path_args,
-        } = step.render_full(&inputs_here, &step_outputs[i]);
+        } = step.render_full(&inputs_here, &step_outputs[i], tuning);
         if step.backend == Backend::Soffice {
             // See `USER_INSTALLATION_PLACEHOLDER`'s docs: every real
             // Soffice invocation gets this flag from `exec::run`, so the
@@ -182,6 +210,77 @@ pub fn build(
         steps,
         warnings: recipe.warnings.iter().map(|w| (*w).to_string()).collect(),
     })
+}
+
+/// Refuses tuning on the probe-selected stream-copy/audio-copy paths:
+/// those are ffmpeg invocations with no image knobs, and silently
+/// ignoring a flag is worse than refusing it.
+fn validate_tuning_for_dynamic_media(from: Format, to: Format, tuning: &Tuning) -> Result<()> {
+    if tuning.is_empty() {
+        return Ok(());
+    }
+    let flag = if tuning.resize.is_some() {
+        "--resize"
+    } else if tuning.quality.is_some() {
+        "--quality"
+    } else {
+        "--colors"
+    };
+    Err(ConvError::new(
+        ErrorCode::InvalidInvocation,
+        format!(
+            "{flag} does not apply to {} -> {}: tuning flags cover image conversions (for now)",
+            from.ext(),
+            to.ext(),
+        ),
+    ))
+}
+
+/// Refuses any tuning flag whose slot the selected recipe does not carry.
+/// Per-flag, so `--quality` on a lossless target gets the honest "png is
+/// lossless" answer while `--resize` on the same invocation still works.
+fn validate_tuning(recipe: &Recipe, from: Format, to: Format, tuning: &Tuning) -> Result<()> {
+    if tuning.is_empty() {
+        return Ok(());
+    }
+    let has_slot =
+        |wanted: fn(&Arg) -> bool| recipe.steps.iter().any(|s| s.args.iter().any(&wanted));
+    if tuning.resize.is_some() && !has_slot(|a| matches!(a, Arg::TuneResize)) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--resize does not apply to {} -> {}: tuning flags cover image conversions (for now)",
+                from.ext(),
+                to.ext(),
+            ),
+        ));
+    }
+    if tuning.quality.is_some() && !has_slot(|a| matches!(a, Arg::Quality(_))) {
+        let why = if matches!(to, Format::Png | Format::Bmp | Format::Tiff) {
+            format!(
+                "{} is lossless; --quality applies to jpg/webp/avif targets and image -> pdf",
+                to.ext()
+            )
+        } else {
+            format!(
+                "--quality does not apply to {} -> {}: it tunes lossy image targets and image -> pdf",
+                from.ext(),
+                to.ext(),
+            )
+        };
+        return Err(ConvError::new(ErrorCode::InvalidInvocation, why));
+    }
+    if tuning.colors.is_some() && !has_slot(|a| matches!(a, Arg::TuneColors)) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--colors does not apply to {} -> {}: it tunes raster image targets",
+                from.ext(),
+                to.ext(),
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Chooses among the *static* recipes; the probe-aware stream-mapping
@@ -781,5 +880,143 @@ mod tests {
             "{:?}",
             plan.warnings
         );
+    }
+
+    // --- Tuning: slots fill through the full build path, and a flag with
+    // no slot is refused, never silently ignored -------------------------
+
+    fn tuned(resize: Option<&str>, quality: Option<u8>, colors: Option<u16>) -> Tuning {
+        Tuning {
+            resize: resize.map(str::to_owned),
+            quality,
+            colors,
+        }
+    }
+
+    #[test]
+    fn build_tuned_fills_the_image_recipe_slots() {
+        let plan = build_tuned(
+            Format::Heic,
+            Format::Jpg,
+            &[p("in.heic")],
+            Path::new("out.jpg"),
+            None,
+            None,
+            &tuned(Some("1600x900"), Some(70), Some(64)),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w == ["-resize", "1600x900"]),
+            "{argv:?}"
+        );
+        assert!(argv.windows(2).any(|w| w == ["-colors", "64"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-quality", "70"]), "{argv:?}");
+        assert!(!argv.contains(&"92".to_string()), "{argv:?}");
+    }
+
+    #[test]
+    fn build_without_tuning_is_byte_identical_to_the_static_table() {
+        let untuned = build(
+            Format::Heic,
+            Format::Jpg,
+            &[p("in.heic")],
+            Path::new("out.jpg"),
+            None,
+            None,
+        )
+        .unwrap();
+        let default_tuned = build_tuned(
+            Format::Heic,
+            Format::Jpg,
+            &[p("in.heic")],
+            Path::new("out.jpg"),
+            None,
+            None,
+            &Tuning::default(),
+        )
+        .unwrap();
+        assert_eq!(untuned, default_tuned);
+        assert!(
+            untuned.steps[0]
+                .argv
+                .windows(2)
+                .any(|w| w == ["-quality", "92"]),
+            "{:?}",
+            untuned.steps[0].argv
+        );
+    }
+
+    /// `--quality` on a lossless target: refused with the honest reason,
+    /// while `--resize` alone on the same pair still works.
+    #[test]
+    fn quality_on_a_lossless_target_is_refused_but_resize_works() {
+        let e = build_tuned(
+            Format::Heic,
+            Format::Png,
+            &[p("in.heic")],
+            Path::new("out.png"),
+            None,
+            None,
+            &tuned(None, Some(70), None),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("lossless"), "{}", e.message);
+
+        let plan = build_tuned(
+            Format::Heic,
+            Format::Png,
+            &[p("in.heic")],
+            Path::new("out.png"),
+            None,
+            None,
+            &tuned(Some("50%"), None, None),
+        )
+        .unwrap();
+        assert!(
+            plan.steps[0]
+                .argv
+                .windows(2)
+                .any(|w| w == ["-resize", "50%"]),
+            "{:?}",
+            plan.steps[0].argv
+        );
+    }
+
+    /// Tuning on non-image pairs is refused on both the static-transcode
+    /// path and the probe-selected stream-copy path.
+    #[test]
+    fn tuning_on_media_pairs_is_refused_on_both_paths() {
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Mp3,
+            &[p("in.mp4")],
+            Path::new("out.mp3"),
+            None,
+            None,
+            &tuned(Some("50%"), None, None),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("--resize"), "{}", e.message);
+
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            audio_codecs: vec!["aac".into()],
+            ..MediaProbe::default()
+        };
+        let e = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &tuned(None, Some(50), None),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("--quality"), "{}", e.message);
     }
 }
