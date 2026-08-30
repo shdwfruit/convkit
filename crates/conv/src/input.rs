@@ -893,6 +893,7 @@ mod tests {
             json: false,
             overwrite: false,
             quiet: true,
+            verbose: false,
             yes: false,
             no_install: false,
             outdir,

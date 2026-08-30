@@ -41,6 +41,15 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub quiet: bool,
 
+    /// Show each backend command as it is spawned (resolved program, final
+    /// argv) and the backend's full output afterwards, on stderr.
+    ///
+    /// Not `global` -- see `dry_run`'s doc comment. In a parallel batch the
+    /// lines from different jobs interleave; this is a debugging aid, not a
+    /// machine interface (that's --json's `backend_output`).
+    #[arg(short = 'v', long, conflicts_with = "quiet")]
+    pub verbose: bool,
+
     /// Assume yes when prompted to install a missing backend — for a script
     /// that wants the install-then-retry behaviour without a TTY to answer
     /// the interactive prompt. Contradicts `--no-install`, which asks the
@@ -173,6 +182,7 @@ mod tests {
             json: false,
             overwrite: false,
             quiet: false,
+            verbose: false,
             yes: false,
             no_install: false,
             outdir: None,

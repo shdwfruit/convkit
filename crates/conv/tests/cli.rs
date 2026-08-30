@@ -688,6 +688,49 @@ fn successful_conversion_prints_result_line_and_the_absolute_output_path() {
     assert!(stdout.contains(&abs.display().to_string()), "{stdout}");
 }
 
+/// `-v` prints the exact spawned command (resolved program, final argv) to
+/// stderr, prefixed `+ `, while stdout keeps the ordinary result shape —
+/// the debugging channel must never contaminate the one scripts read.
+#[test]
+fn verbose_prints_the_spawned_command_line_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = write_magick_stub(dir.path());
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "-v", "--magick-path"])
+        .arg(&stub)
+        .assert()
+        .success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.starts_with("OK "), "{stdout}");
+    let stub_name = stub.file_name().unwrap().to_string_lossy();
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l.starts_with("+ ") && l.contains(stub_name.as_ref())),
+        "stderr must carry the `+ <resolved program> …` line: {stderr}"
+    );
+    assert!(
+        stderr.contains("a.png"),
+        "the spawned argv includes the input: {stderr}"
+    );
+}
+
+/// `-v` and `-q` ask for opposite things; passing both is a usage error,
+/// same as `--yes --no-install`.
+#[test]
+fn verbose_and_quiet_together_is_a_usage_error() {
+    conv()
+        .args(["a.png", "a.jpg", "-v", "-q"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
 #[test]
 fn quiet_suppresses_success_output_entirely() {
     let dir = tempfile::tempdir().unwrap();

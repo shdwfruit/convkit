@@ -33,6 +33,26 @@ pub enum Event {
         total: usize,
         backend: Backend,
     },
+    /// The exact process about to be spawned: the resolved program and the
+    /// final argv — backend paths substituted, the per-run soffice profile
+    /// injected, Windows long-path rewrites applied. This is what
+    /// `--verbose` prints; it can differ from the `--dry-run` preview in
+    /// exactly those run-time-only tokens.
+    StepSpawned {
+        index: usize,
+        program: PathBuf,
+        argv: Vec<String>,
+    },
+    /// One step's full captured diagnostic output (stderr, plus stdout for
+    /// soffice), tail-capped like `Outcome::backend_output`. Emitted after
+    /// the step ran, on success and failure alike — so `--verbose` can
+    /// show the whole transcript even when the run fails and no `Outcome`
+    /// ever materialises. Empty output emits nothing.
+    StepReport {
+        index: usize,
+        backend: Backend,
+        report: String,
+    },
     StepFinished {
         index: usize,
     },
@@ -483,6 +503,15 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             cmd.args(&argv);
         }
 
+        on_event(Event::StepSpawned {
+            index: i,
+            program: resolved.path.clone(),
+            argv: cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
+        });
+
         let out = cmd.output().map_err(|e| {
             ConvError::new(
                 ErrorCode::ConversionFailed,
@@ -526,6 +555,14 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                 }
                 step_report.push_str(&stdout);
             }
+        }
+
+        if !step_report.trim().is_empty() {
+            on_event(Event::StepReport {
+                index: i,
+                backend: step.backend,
+                report: tail_str(&step_report, 16 * 1024).to_string(),
+            });
         }
 
         if !out.status.success() || !is_non_empty(&produced) {
@@ -1221,6 +1258,80 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             !e.message.contains("line-one"),
             "only the last three lines should be kept: {}",
             e.message
+        );
+    }
+
+    /// `--verbose`'s data source: a run must emit `StepSpawned` with the
+    /// resolved program and the final argv (after every substitution),
+    /// bracketed by `StepStarted`/`StepFinished` in that order.
+    #[test]
+    fn run_emits_step_spawned_with_the_resolved_program_and_final_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_creates_its_output(dir.path());
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub.clone());
+
+        let input = dir.path().join("a.png");
+        std::fs::write(&input, b"x").unwrap();
+        let req = Request {
+            from: Format::Png,
+            to: Format::Jpg,
+            inputs: vec![input.clone()],
+            output: dir.path().join("out.jpg"),
+            overwrite: false,
+        };
+
+        let mut events: Vec<Event> = Vec::new();
+        run(&req, &r, &mut |e| events.push(e)).unwrap();
+
+        let spawned_at = events
+            .iter()
+            .position(|e| matches!(e, Event::StepSpawned { .. }))
+            .expect("a StepSpawned event must be emitted");
+        assert!(matches!(events.first(), Some(Event::StepStarted { .. })));
+        assert!(spawned_at > 0, "spawned after started");
+        let Event::StepSpawned { program, argv, .. } = &events[spawned_at] else {
+            unreachable!()
+        };
+        assert_eq!(program, &stub);
+        assert!(
+            argv.iter().any(|a| a.contains("a.png")),
+            "final argv must carry the input: {argv:?}"
+        );
+    }
+
+    /// The transcript must reach `--verbose` even when the run *fails* and
+    /// no `Outcome` ever materialises — `StepReport` carries it out of
+    /// band, before the error returns.
+    #[test]
+    fn run_emits_step_report_with_the_backend_transcript_even_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_that_fails_with_ordered_multiline_stderr(dir.path());
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub);
+
+        let input = dir.path().join("a.png");
+        std::fs::write(&input, b"x").unwrap();
+        let req = Request {
+            from: Format::Png,
+            to: Format::Jpg,
+            inputs: vec![input],
+            output: dir.path().join("out.jpg"),
+            overwrite: false,
+        };
+
+        let mut reports: Vec<String> = Vec::new();
+        let err = run(&req, &r, &mut |e| {
+            if let Event::StepReport { report, .. } = e {
+                reports.push(report);
+            }
+        });
+        assert!(err.is_err());
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(
+            reports[0].contains("line-one") && reports[0].contains("line-four"),
+            "the report carries the FULL transcript, not a tail of 3: {}",
+            reports[0]
         );
     }
 

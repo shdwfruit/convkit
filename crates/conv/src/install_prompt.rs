@@ -131,6 +131,7 @@ mod tests {
             json,
             overwrite: false,
             quiet,
+            verbose: false,
             yes,
             no_install,
             outdir: None,

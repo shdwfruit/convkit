@@ -80,6 +80,30 @@ pub fn plan_human(plan: &ConversionPlan) -> String {
     s
 }
 
+/// One resolved command line for `--verbose`: the program and argv exactly
+/// as spawned, shell-quoted the same way `plan_human` quotes a preview so
+/// the line is honest about what ran *and* pastable.
+pub fn command_line_human(program: &str, argv: &[String]) -> String {
+    let mut s = shell_quote(program);
+    for a in argv {
+        s.push(' ');
+        s.push_str(&shell_quote(a));
+    }
+    s
+}
+
+/// One step's full backend transcript for `--verbose`, indented under a
+/// header naming the backend so interleaved parallel jobs stay legible.
+pub fn verbose_report_human(backend_name: &str, report: &str) -> String {
+    let mut s = format!("--- {backend_name} output ---\n");
+    for line in report.lines() {
+        s.push_str("  ");
+        s.push_str(line);
+        s.push('\n');
+    }
+    s
+}
+
 pub fn error_human(e: &ConvError) -> String {
     let mut s = format!("error: {}\n", e.message);
     if let Some(r) = &e.remediation {

@@ -25,6 +25,19 @@ fn num_cpus_or_one() -> usize {
         .unwrap_or(1)
 }
 
+/// A `--verbose` line to stderr, routed through whichever live progress
+/// indicator exists so the print isn't overdrawn by the next tick.
+fn print_verbose(
+    spinner: &Option<indicatif::ProgressBar>,
+    bar: &Option<indicatif::ProgressBar>,
+    line: &str,
+) {
+    match spinner.as_ref().or(bar.as_ref()) {
+        Some(pb) => pb.suspend(|| eprintln!("{line}")),
+        None => eprintln!("{line}"),
+    }
+}
+
 /// A spinner labelled with whichever backend is currently running, shown
 /// only for a single-job run (I8) — `bar` below already covers the
 /// multi-job case, one tick per *completed* job, but that leaves a lone
@@ -120,18 +133,21 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                     // I8: the `Event` channel used to be threaded all the
                     // way through with a no-op consumer everywhere —
                     // `exec::run`'s signature promised progress reporting
-                    // that nothing ever rendered. This is the one real
-                    // consumer: labels `spinner` with the currently
-                    // running backend (and which step, for a multi-step
-                    // recipe like `md -> pdf`) as each one starts.
-                    let mut on_event = |e: exec::Event| {
-                        let Some(pb) = &spinner else { return };
-                        if let exec::Event::StepStarted {
+                    // that nothing ever rendered. This consumer labels
+                    // `spinner` with the currently running backend (and
+                    // which step, for a multi-step recipe like `md ->
+                    // pdf`) as each one starts, and under `--verbose`
+                    // prints the exact spawned command line and each
+                    // step's full transcript to stderr. `suspend` keeps
+                    // those prints from being overdrawn by the live
+                    // spinner/bar.
+                    let mut on_event = |e: exec::Event| match e {
+                        exec::Event::StepStarted {
                             backend,
                             index,
                             total,
-                        } = e
-                        {
+                        } => {
+                            let Some(pb) = &spinner else { return };
                             let name = backend.exe_name();
                             if total > 1 {
                                 pb.set_message(format!(
@@ -142,6 +158,26 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                                 pb.set_message(format!("running {name}…"));
                             }
                         }
+                        exec::Event::StepSpawned { program, argv, .. } if cli.verbose => {
+                            let line = format!(
+                                "+ {}",
+                                crate::render::command_line_human(
+                                    &program.to_string_lossy(),
+                                    &argv
+                                )
+                            );
+                            print_verbose(&spinner, &bar, &line);
+                        }
+                        exec::Event::StepReport {
+                            backend, report, ..
+                        } if cli.verbose => {
+                            let text = crate::render::verbose_report_human(
+                                backend.exe_name(),
+                                &report,
+                            );
+                            print_verbose(&spinner, &bar, text.trim_end());
+                        }
+                        _ => {}
                     };
                     exec::run(&req, &resolver, &mut on_event)
                 };
@@ -247,6 +283,7 @@ mod tests {
             json: false,
             overwrite: false,
             quiet: true,
+            verbose: false,
             yes: false,
             no_install: false,
             outdir: None,
