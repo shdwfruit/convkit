@@ -1335,3 +1335,133 @@ fn scan_json_reports_each_file_with_its_targets() {
         "{v}"
     );
 }
+
+/// A path that is not there is a mistake to report, not a file to describe.
+/// Before this, `conv scan missing.heic` printed `image -> jpg png ...` and
+/// exited 0 -- a confident answer about a file that does not exist, while
+/// the conversion path for the same argument says "input not found".
+#[test]
+fn scan_reports_a_missing_path_instead_of_describing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist.heic");
+
+    let assert = conv()
+        .args(["scan", missing.to_str().unwrap()])
+        .assert()
+        .code(2);
+    let output = assert.get_output();
+    assert_eq!(
+        output.stdout, b"",
+        "nothing may be claimed about a file that is not there"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not found"), "{stderr}");
+}
+
+/// One bad argument must not discard the rest of the answer: the files that
+/// were found are still listed, and the exit code still reports the problem.
+#[test]
+fn scan_still_lists_what_it_found_alongside_a_missing_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("photo.heic");
+    std::fs::write(&real, b"x").unwrap();
+    let missing = dir.path().join("nope.heic");
+
+    let assert = conv()
+        .args(["scan", real.to_str().unwrap(), missing.to_str().unwrap()])
+        .assert()
+        .code(2);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("photo.heic"), "{stdout}");
+}
+
+/// `--quiet` is documented as silencing success output, and a listing is
+/// nothing but success output. Worth stating plainly rather than assuming:
+/// `doctor` and `capabilities` never read `cli.quiet`, so honouring it here
+/// is the exception. It is what the flag's own documentation promises, and
+/// those two commands are the ones out of step.
+#[test]
+fn scan_honours_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("photo.heic"), b"x").unwrap();
+
+    let assert = conv()
+        .args(["scan", dir.path().to_str().unwrap(), "--quiet"])
+        .assert()
+        .success();
+    assert_eq!(assert.get_output().stdout, b"");
+}
+
+/// The `--json` envelope must never claim success while the exit code says
+/// otherwise. The first version of the missing-path fix printed
+/// `{"ok": true, "files": []}` on stdout, a bare line on stderr that no JSON
+/// consumer would see, and exited 2.
+#[test]
+fn scan_json_reports_failure_in_the_envelope_not_only_the_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope.heic");
+
+    let assert = conv()
+        .args(["scan", missing.to_str().unwrap(), "--json"])
+        .assert()
+        .code(2);
+    // On stderr, not stdout: that is where this binary already puts a
+    // top-level `--json` failure (see
+    // `update_check_json_envelope_lands_on_stderr_when_something_is_missing`),
+    // so stdout stays clean for the listing a consumer is parsing.
+    let v: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stderr).expect("stderr must be valid JSON");
+    assert_eq!(v["ok"], false, "{v}");
+    assert!(v["error"].is_object(), "{v}");
+}
+
+/// `kind` is `Kind`'s own serde spelling, not a third vocabulary invented
+/// for this command. (`conv capabilities --json` emits `{:?}` -- "Image" --
+/// which predates this and is left alone rather than silently changing a
+/// published envelope.)
+#[test]
+fn scan_json_uses_the_types_own_kind_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("photo.heic"), b"x").unwrap();
+
+    let assert = conv()
+        .args(["scan", dir.path().to_str().unwrap(), "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["files"][0]["kind"], "image", "{v}");
+}
+
+/// A name longer than the column cap is ellipsized rather than allowed to
+/// run on and push its own row's later columns out of alignment.
+#[test]
+fn scan_truncates_an_overlong_name_instead_of_breaking_the_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let long = format!("{}.heic", "z".repeat(60));
+    std::fs::write(dir.path().join(&long), b"x").unwrap();
+    std::fs::write(dir.path().join("s.heic"), b"x").unwrap();
+
+    let assert = conv()
+        .args(["scan", dir.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains('\u{2026}'),
+        "expected an ellipsis: {stdout}"
+    );
+    // Char offsets, not `find`'s byte offsets: the ellipsis is three bytes,
+    // so byte positions differ between a truncated row and a short one even
+    // when the columns line up perfectly on screen.
+    let widths: Vec<usize> = stdout
+        .lines()
+        .map(|l| {
+            let byte = l.find("image").expect("every row names its kind");
+            l[..byte].chars().count()
+        })
+        .collect();
+    assert!(
+        widths.windows(2).all(|w| w[0] == w[1]),
+        "the kind column must start at the same offset on every row: {widths:?}"
+    );
+}
