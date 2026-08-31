@@ -178,11 +178,11 @@ become:
 ```console
 $ conv scan
 README       --
-already.jpg  image   -> png webp avif tiff bmp pdf
+already.jpg  Image   -> png webp avif tiff bmp pdf
 archive.zip  --
-clip.mp4     video   -> mov mkv webm mp3 m4a wav flac gif
-notes.md     doc     -> pdf docx html
-photo.heic   image   -> jpg png webp avif tiff bmp pdf
+clip.mp4     Video   -> mov mkv webm mp3 m4a wav flac gif
+notes.md     Doc     -> pdf docx html
+photo.heic   Image   -> jpg png webp avif tiff bmp pdf
 ```
 
 It is a pure lookup on the file extension: nothing is opened, decoded or

@@ -1294,6 +1294,13 @@ fn scan_lists_convertible_files_with_their_targets() {
         stdout.contains("archive.zip"),
         "an unrecognised file must be listed, not hidden: {stdout}"
     );
+    // Capitalised, matching `conv capabilities`' own `Video:`/`(Image)`
+    // vocabulary -- the human column and that listing are the two places a
+    // reader meets these names.
+    assert!(
+        stdout.contains("Image"),
+        "the kind column is capitalised like capabilities': {stdout}"
+    );
 }
 
 /// Needs no backend at all: this is registry lookup, not conversion. If it
@@ -1456,13 +1463,24 @@ fn scan_truncates_an_overlong_name_instead_of_breaking_the_columns() {
     let widths: Vec<usize> = stdout
         .lines()
         .map(|l| {
-            let byte = l.find("image").expect("every row names its kind");
+            let byte = l.find("Image").expect("every row names its kind");
             l[..byte].chars().count()
         })
         .collect();
     assert!(
         widths.windows(2).all(|w| w[0] == w[1]),
         "the kind column must start at the same offset on every row: {widths:?}"
+    );
+    // The extension survives the cut: it is what every other column on the
+    // row is derived from, so truncating it away leaves the reader unable to
+    // check the row's only claim.
+    let long_row = stdout
+        .lines()
+        .find(|l| l.contains('\u{2026}'))
+        .expect("the long name is the truncated one");
+    assert!(
+        long_row.contains("\u{2026}.heic"),
+        "the extension must outlive the truncation: {long_row}"
     );
 }
 

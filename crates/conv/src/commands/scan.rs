@@ -164,16 +164,23 @@ fn row_for(path: &Path, pairs: &[(Format, Format)]) -> Row {
     }
 }
 
-/// The short word shown in the kind column. Deliberately not `Kind`'s own
-/// `Debug` spelling: this is user-facing text, and rendering a Rust enum's
-/// name into output is how a listing starts saying `Document` where a person
-/// expects `doc`.
+/// The short word shown in the kind column. Capitalised to match the other
+/// place a person meets these names -- `conv capabilities` heads its
+/// sections `Video:`/`Document:` and labels a format `jpg (Image)` -- so the
+/// two commands do not spell one concept two ways at the same reader.
+///
+/// Hand-written rather than `Kind`'s `Debug`, because `Document` is two
+/// characters wider than the column and would push the arrow out of line on
+/// exactly the rows that use it; `Doc` is the abbreviation the column can
+/// afford. The machine-readable spelling is a separate question, settled in
+/// `print_json`: there both commands emit `Kind`'s own lowercase
+/// `Serialize`.
 fn kind_label(kind: Kind) -> &'static str {
     match kind {
-        Kind::Video => "video",
-        Kind::Audio => "audio",
-        Kind::Image => "image",
-        Kind::Document => "doc",
+        Kind::Video => "Video",
+        Kind::Audio => "Audio",
+        Kind::Image => "Image",
+        Kind::Document => "Doc",
     }
 }
 
@@ -188,8 +195,22 @@ fn truncate_name(s: &str, width: usize) -> String {
     if s.chars().count() <= width {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(width.saturating_sub(1)).collect();
+    // The extension is the last thing to drop, because in this listing it is
+    // the whole answer: every other column on the row is derived from it, so
+    // a name cut to `verylongname…` left the reader unable to check the one
+    // claim the row makes. Truncate the middle instead and keep `….ext`.
+    //
+    // An extension so long that no stem would survive falls back to a plain
+    // cut -- a row that is all suffix identifies the file no better than one
+    // that is all prefix, and this way the width still holds.
+    let tail: String = match Path::new(s).extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.chars().count() + 2 < width => format!(".{ext}"),
+        _ => String::new(),
+    };
+    let keep = width.saturating_sub(tail.chars().count() + 1);
+    let mut out: String = s.chars().take(keep).collect();
     out.push('\u{2026}');
+    out.push_str(&tail);
     out
 }
 
