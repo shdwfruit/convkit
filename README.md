@@ -10,7 +10,7 @@ ever touch the network.
 ```console
 $ conv clip.mkv clip.mp4
 OK clip.mp4 - 55 KB - 0.1s - stream copy, no re-encode
-  /home/rick/Videos/clip.mp4
+  /home/user/Videos/clip.mp4
 ```
 
 When the source codecs already fit the target container, convkit remuxes
@@ -52,8 +52,8 @@ $ cd convkit
 $ cargo install --path crates/conv
 ```
 
-convkit does no encoding itself — see [Backends](#backends), or just run a
-conversion and let `conv` offer to install what's missing.
+convkit performs no encoding itself — see [Backends](#backends). Running a
+conversion also prompts to install whichever backend it needs.
 
 ## Quick start
 
@@ -63,6 +63,7 @@ conv in.mp4 .gif                 # same basename, new extension
 conv *.heic --to jpg             # batch; globs expanded by conv itself, so this works on Windows too
 conv ./photos --to jpg -o ./out  # folder input, non-recursive, outputs redirected
 conv a.png b.png out.pdf         # merge two or more images into one PDF
+conv scan                        # list the files here and what each can become
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -71,7 +72,7 @@ result landed at:
 ```console
 $ conv clip.mp4 clip.gif
 OK clip.gif - 492 KB - 0.2s
-  /home/rick/Videos/clip.gif
+  /home/user/Videos/clip.gif
   note  The whole filtered stream is buffered in memory for palette generation, so very long inputs are slow and memory-hungry rather than being silently truncated.
 ```
 
@@ -136,7 +137,7 @@ FAIL in.jpg -> png
 Video/GIF knobs (fps, CRF) are not implemented yet. `conv capabilities
 <format>` lists which flags apply to which pair.
 
-## Discovering what it can do
+## Discovering formats and capabilities
 
 `conv capabilities` lists every registered pair and the backend(s) behind it:
 
@@ -170,10 +171,9 @@ jpg (Image)
   defaults: quality 92 (override with --quality)
 ```
 
-`conv scan` turns the same question around: instead of what convkit can do
-in general, what can it do with what is in front of you right now? It lists
-the files in a directory (the current one by default) and what each could
-become:
+`conv scan` answers the same question contextually rather than globally: it
+lists the files in a directory (the current one by default) and the formats
+each could be converted into.
 
 ```console
 $ conv scan
@@ -217,7 +217,7 @@ failures still print in full, on stderr:
 ```console
 $ conv ./photos --to jpg -o ./out
 OK 2 converted - 0 skipped - 0 failed - 0.1s
-  /home/rick/out
+  /home/user/out
 ```
 
 Existing outputs are never overwritten by default — a collision skips that
@@ -287,7 +287,7 @@ install it and retry (interactive sessions only, never under `--json`/
 `--quiet`); `--yes` pre-answers the prompt for scripts, `--no-install`
 always fails with the structured `backend_missing` error instead.
 
-## The update story
+## Updating backends
 
 `conv update` brings managed backends to the versions this build of convkit
 pins — "up to date" means matching the pin, never "newest upstream."
