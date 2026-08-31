@@ -130,6 +130,20 @@ pub enum Command {
         /// tuning flags (--resize/--quality/--colors).
         format: Option<String>,
     },
+    /// List the files here and what each one could be converted into.
+    #[command(
+        long_about = "Lists the files in PATHS (the current directory by default) and, for each, the formats convkit could convert it into.
+
+This is the contextual companion to `conv capabilities`, which answers the same question globally (every pair convkit knows) or per format (`conv capabilities heic`). Neither tells you what is actually in front of you, and the alternative inverted the question: `conv <dir> --to jpg --dry-run` makes you name a target before it tells you anything, when choosing the target is what you wanted help with.
+
+Pure lookup on the file extension. Nothing is opened, decoded or probed, and no backend is run -- so this reports what convkit SUPPORTS, not what this machine can currently run. For that, see `conv doctor`.
+
+Files convkit does not recognise are listed with `--` rather than hidden, so a missing file is never a silent omission. Directories are listed one level deep, matching how a directory argument already behaves when converting."
+    )]
+    Scan {
+        /// Files or directories to list. Defaults to the current directory.
+        paths: Vec<std::path::PathBuf>,
+    },
     /// Update managed backends to the versions this convkit pins.
     #[command(long_about = "\
 Brings managed backends (ffmpeg, ffprobe, pandoc, typst) in line with the \
