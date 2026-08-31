@@ -1,7 +1,7 @@
-# Defaults calibration (Task 15)
+# Defaults calibration
 
 This records real measurements of convkit's six output defaults ("The six
-defaults that constitute the product", spec §7), taken on this
+defaults that constitute the product", design §7), taken on this
 development machine (Windows 10). `ffmpeg`/`ffprobe` and `pandoc` are
 installed via convkit's own managed install directory
 (`%LOCALAPPDATA%\convkit\bin` -- `ffmpeg`/`ffprobe` 9.0.1-essentials,
@@ -17,8 +17,8 @@ noted here for reproducibility, not because I expect it to change any
 number below. `magick` and `soffice` were **not** installed on this
 machine at the time of these original measurements, so items 3, 4 (JPEG
 only), and 5 could not be measured locally then; items 4 (JPEG) and 5
-remain recorded as pending CI verification (Task 16 runs the full backend
-matrix on Ubuntu). Item 3 (HEIC) was subsequently measured out of band,
+remain recorded as pending CI verification (the backend matrix job runs
+on Ubuntu). Item 3 (HEIC) was subsequently measured out of band,
 once ImageMagick became available and a real HEIC photo was supplied --
 see §3, whose "pending" status this note no longer reflects.
 
@@ -55,9 +55,9 @@ dithering) are supposed to matter most.
 
 ---
 
-## 1. Auto-remux (spec §7.1)
+## 1. Auto-remux (design §7.1)
 
-**Spec claim (`docs/superpowers/specs/2026-08-29-convkit-design.md:231`):**
+**Spec claim (`docs/design.md:231`):**
 "roughly 100x faster" than transcoding, when the source codecs already fit
 the target container (`plan::select` picks `REMUX_MP4`/`REMUX_WEBM`, a
 `-c copy` stream copy, over `VIDEO_TO_MP4`'s full transcode).
@@ -148,12 +148,9 @@ is not what the fixture demonstrates.
 
 There is no numeric code default to change here -- `-c copy` is already
 the fastest possible ffmpeg invocation; there's no dial to turn. What's
-wrong is the documentation claim itself. **I have not edited
-`docs/superpowers/specs/2026-08-29-convkit-design.md`** (Task 15's file
-list is `tests/`, `docs/defaults-calibration.md`, and the test crate; the
-design spec is a planning artifact I was told not to read in full, not a
-listed output of this task) -- the controller has confirmed they are
-correcting the spec on the strength of this finding separately. Suggested
+wrong is the documentation claim itself. The design document was left unedited by this measurement pass;
+[`docs/design.md`](design.md) is marked historical and records where it has
+been overtaken, this finding included. Suggested
 replacement language: *"a stream copy instead of a re-encode -- an order
 of magnitude or more faster for typical clips, and dramatically more for
 longer or higher-resolution ones, measured at 3-26x on clips from 2 to 30
@@ -166,7 +163,7 @@ regardless of this finding and passed for real on this machine.
 
 ---
 
-## 2. GIF via generated palette (spec §7.2)
+## 2. GIF via generated palette (design §7.2)
 
 **Recipe:** `TO_GIF` in `registry.rs` -- `fps=15,scale=w=min(640\,iw):h=-2`
 into a two-pass `palettegen=stats_mode=diff` / `paletteuse=dither=bayer`
@@ -254,12 +251,12 @@ worst-case output size on *longer or higher-resolution* real source video
 under both limits -- there's nothing for them to cap). **Recommendation:**
 re-run this same naive-vs-tuned comparison against representative
 real-world footage (a screen recording or handheld phone clip, which is
-what GIF conversion is mostly used for) in Task 16 CI or a follow-up,
+what GIF conversion is mostly used for) in backend CI or a follow-up,
 where the frame-rate/width caps have room to actually bind.
 
 ---
 
-## 3. HEIC handled correctly (spec §7.3) -- measured
+## 3. HEIC handled correctly (design §7.3) -- measured
 
 **Recipe:** `IMG_LOSSY` in `registry.rs` -- the same generic
 raster-to-lossy recipe every `*->jpg`/`webp`/`avif` pair uses -- `magick
@@ -312,7 +309,7 @@ ignores the embedded profile (rare, but not nonexistent) would render this
 image's colours as more saturated than intended. The good news this
 correction actually confirms: the profile survives the conversion completely
 unchanged, which is a *stronger* result for "preserve the ICC colour
-profile" (design spec §7.3) than the original, mislabelled "sRGB" verdict
+profile" (design §7.3) than the original, mislabelled "sRGB" verdict
 implied -- convkit isn't reinterpreting or discarding the source's colour
 information, it's carrying it through byte-for-byte.
 
@@ -358,7 +355,7 @@ CI's `integration` job runs it unconditionally alongside the other three.
 
 ---
 
-## 4. Quality anchors (spec §7.4): CRF 20 / AAC 160k, and JPEG quality 92
+## 4. Quality anchors (design §7.4): CRF 20 / AAC 160k, and JPEG quality 92
 
 Spec §7.4 bundles two anchors under one item; measured status differs
 between them.
@@ -428,7 +425,7 @@ the natural sensor noise this fixture doesn't have. I am not treating a
 0.28-point VMAF gap on adversarially-easy content as grounds to change a
 quality anchor the spec set for real-world (phone/camera) footage --
 that would be overfitting the default to the one fixture I happened to
-generate. **Recommendation for Task 16 or a follow-up:** re-run this same
+generate. **Recommendation for a follow-up:** re-run this same
 VMAF comparison against a real handheld/phone clip (with natural grain)
 before drawing a conclusion either way; if CRF 20 still buys negligible
 VMAF over CRF 23 on real footage, that would be a real reason to
@@ -451,12 +448,12 @@ JPEG-quality-92 comparison since -- so "ImageMagick unavailable" above and
 this document's history, not a live contradiction about the current state of
 this machine. This section is left as originally measured (i.e., not
 measured) rather than quietly back-filled with a number nobody actually
-produced; closing it for real is still open work for Task 16/CI or a
+produced; closing it for real is still open work for CI or a
 follow-up.
 
 ---
 
-## 5. PDF -> DOCX honesty (spec §7.5)
+## 5. PDF -> DOCX honesty (design §7.5)
 
 Spec §7.5 is specifically about the *fidelity warning* on this
 conversion, not just the conversion itself: "attach a `fidelity` warning
@@ -487,7 +484,7 @@ not new to this task):**
   through (see also `TO_GIF`'s and `VIDEO_TO_MP4`'s warnings, exercised
   the same way).
 
-**What is NOT measured here, pending Task 16 CI:** an actual `soffice`
+**What is NOT measured here, pending backend CI:** an actual `soffice`
 run converting a real PDF to DOCX, and confirming by hand that the result
 genuinely is positioned text boxes (i.e. that the warning describes real
 behaviour, not just that the string exists). `soffice` is not installed
@@ -498,7 +495,7 @@ soffice`.
 
 ---
 
-## 6. Atomic output (spec §7.6)
+## 6. Atomic output (design §7.6)
 
 **Not a numeric default -- a behavioural guarantee, and not something
 this task measures with a command.** Spec §7.6: "Temp file plus rename,
@@ -518,7 +515,7 @@ baseline, not new to this task):
   left behind after a clean run.
 - `a_backend_that_writes_nothing_is_a_failure_even_on_exit_zero` -- the
   "stat and treat zero-byte as failure regardless of exit code" invariant
-  explicitly named in spec §5.5 (load-bearing for `soffice`, which exits 0
+  explicitly named in design §5.5 (load-bearing for `soffice`, which exits 0
   on failure).
 - `outdir_recipe_never_touches_a_decoy_already_in_the_destination_directory`
   -- the scratch directory (not the user's real destination) is what
@@ -554,7 +551,7 @@ this task's real-backend measurements would close.
 
 **Historical record, from before `tests/fixtures/photo.heic` was
 committed.** The transcript immediately below is unchanged from the
-original Task 15/16 calibration run, taken on a machine with only ffmpeg
+original calibration run, taken on a machine with only ffmpeg
 on `PATH` and no committed HEIC fixture -- that is why the HEIC test fails
 on a missing-fixture panic here, not a backend-missing one. See "Update:
 fixture now committed" after the bullets below for the current, passing
@@ -609,7 +606,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
 
 The default, non-`--ignored` run stays green with all four `#[ignore]`d:
 `cargo test --workspace` is 133 passed, 0 failed, 4 ignored -- unchanged
-from the Task 15 baseline plus the four new ignored tests.
+from the original baseline plus the four new ignored tests.
 
 **Update: fixture now committed.** `tests/fixtures/photo.heic` (1.58 MB,
 see "Fixtures" below and §3's provenance note) is committed to this

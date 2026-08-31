@@ -1,7 +1,7 @@
 # convkit — Design
 
 **Date:** 2026-08-29
-**Status:** Historical — superseded by implementation; see [README.md](../../../README.md).
+**Status:** Historical — superseded by implementation; see [README.md](../README.md).
 **Binary:** `conv` · **Crate/package:** `convkit`
 
 This document is preserved as-written (planning rationale, prior art, and the

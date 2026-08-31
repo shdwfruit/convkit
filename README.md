@@ -346,8 +346,9 @@ manual package-manager command, in plain output and in `--json`.
 
 - [`docs/defaults-calibration.md`](docs/defaults-calibration.md) — every
   default, measured, with the exact commands to reproduce each figure.
-- [`docs/superpowers/specs/2026-08-29-convkit-design.md`](docs/superpowers/specs/2026-08-29-convkit-design.md) —
-  the original design rationale: prior art, why Rust, the non-goals list.
+- [`docs/design.md`](docs/design.md) — the original design rationale: prior
+  art, why Rust, and the non-goals list. Marked historical: it records where
+  the implementation has since diverged from it.
 
 ## License
 
