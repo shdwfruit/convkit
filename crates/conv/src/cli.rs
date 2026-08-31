@@ -138,7 +138,7 @@ This is the contextual companion to `conv capabilities`, which answers the same 
 
 Pure lookup on the file extension. Nothing is opened, decoded or probed, and no backend is run -- so this reports what convkit SUPPORTS, not what this machine can currently run. For that, see `conv doctor`.
 
-Files convkit does not recognise are listed with `--` rather than hidden, so a missing file is never a silent omission. Directories are listed one level deep, matching how a directory argument already behaves when converting."
+Files convkit does not recognise are listed with `--` rather than hidden, so an unconvertible file is never a silent omission. Only regular files are listed: a directory argument is read one level deep, and subdirectories inside it are neither descended into nor shown. A path that does not exist is reported as an error rather than described, and exits 2."
     )]
     Scan {
         /// Files or directories to list. Defaults to the current directory.

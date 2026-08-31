@@ -170,6 +170,32 @@ jpg (Image)
   defaults: quality 92 (override with --quality)
 ```
 
+`conv scan` turns the same question around: instead of what convkit can do
+in general, what can it do with what is in front of you right now? It lists
+the files in a directory (the current one by default) and what each could
+become:
+
+```console
+$ conv scan
+README       --
+already.jpg  image   -> png webp avif tiff bmp pdf
+archive.zip  --
+clip.mp4     video   -> mov mkv webm mp3 m4a wav flac gif
+notes.md     doc     -> pdf docx html
+photo.heic   image   -> jpg png webp avif tiff bmp pdf
+```
+
+It is a pure lookup on the file extension: nothing is opened, decoded or
+probed, and no backend runs, so it stays instant on a large directory. That
+also means it reports what convkit *supports*, not what this machine can
+currently run -- for that, see `conv doctor`.
+
+Files convkit does not recognise are listed with `--` rather than hidden, so
+an unconvertible file is never a silent omission. Only regular files are
+listed: a directory is read one level deep, and subdirectories inside it are
+neither descended into nor shown. A path that does not exist is reported as
+an error rather than described, and exits 2.
+
 `--dry-run` prints the real backend command without running anything — it
 never probes inputs or creates directories. `-v/--verbose` streams each
 spawned command and the backend's full output to stderr as a job runs.
@@ -273,7 +299,7 @@ a newer convkit is what advances the pinned backend versions.
 
 `--json` works on every command and emits exactly one JSON document: an
 `"ok"` boolean plus one command-specific plural key (`results`, `plans`,
-`backends`, `pairs`). A conversion writes every job — success or failure —
+`backends`, `pairs`, `files`). A conversion writes every job — success or failure —
 into a single `"results"` array on stdout, so a half-failed batch is still
 one parseable document; the exit code signals pass/fail. A success element:
 

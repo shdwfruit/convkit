@@ -294,7 +294,7 @@ fn has_unexpanded_wildcard(token: &str) -> bool {
 /// Matches are sorted in the same natural order directory expansion uses
 /// (`p2` before `p10`), which matters because the image-to-PDF recipe merges
 /// its inputs in the order given.
-fn expand_globs(paths: &[PathBuf], globbable: usize) -> Vec<PathBuf> {
+pub(crate) fn expand_globs(paths: &[PathBuf], globbable: usize) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::with_capacity(paths.len());
     for (i, path) in paths.iter().enumerate() {
         let pattern = path.to_str();
