@@ -188,7 +188,7 @@ photo.heic   image   -> jpg png webp avif tiff bmp pdf
 It is a pure lookup on the file extension: nothing is opened, decoded or
 probed, and no backend runs, so it stays instant on a large directory. That
 also means it reports what convkit *supports*, not what this machine can
-currently run -- for that, see `conv doctor`.
+currently run — for that, see `conv doctor`.
 
 Files convkit does not recognise are listed with `--` rather than hidden, so
 an unconvertible file is never a silent omission. Only regular files are
