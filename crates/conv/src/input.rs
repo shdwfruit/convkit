@@ -103,7 +103,7 @@ fn collision_key(output: &Path) -> PathBuf {
 /// is the ordering `plan_jobs` sorts a directory's expanded entries into
 /// (I4); lexicographic would be the minimum bar, but natural order is what
 /// actually matches how someone names a folder of scanned pages.
-fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     let mut ac = a.chars().peekable();

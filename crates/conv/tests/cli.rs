@@ -1271,3 +1271,67 @@ fn capabilities_with_a_format_lists_tuning_flags_and_defaults() {
         .failure()
         .code(2);
 }
+
+/// `conv scan` answers the one question the tool could not: what is in front
+/// of me, and what could it become. `capabilities` answers it globally and
+/// per-format; the only contextual alternative was `conv <dir> --to jpg
+/// --dry-run`, which makes you name a target before it tells you anything.
+#[test]
+fn scan_lists_convertible_files_with_their_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("photo.heic"), b"x").unwrap();
+    std::fs::write(dir.path().join("archive.zip"), b"x").unwrap();
+
+    let assert = conv()
+        .args(["scan", dir.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    assert!(stdout.contains("photo.heic"), "{stdout}");
+    assert!(stdout.contains("jpg"), "{stdout}");
+    assert!(
+        stdout.contains("archive.zip"),
+        "an unrecognised file must be listed, not hidden: {stdout}"
+    );
+}
+
+/// Needs no backend at all: this is registry lookup, not conversion. If it
+/// ever starts needing one, it has stopped being the cheap orienting command
+/// it exists to be.
+#[test]
+fn scan_needs_no_backends() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("clip.mp4"), b"x").unwrap();
+
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.args(["scan", dir.path().to_str().unwrap()])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(contains("clip.mp4"));
+}
+
+#[test]
+fn scan_json_reports_each_file_with_its_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("photo.heic"), b"x").unwrap();
+
+    let assert = conv()
+        .args(["scan", dir.path().to_str().unwrap(), "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["ok"], true);
+    let file = &v["files"][0];
+    assert_eq!(file["format"], "heic");
+    assert_eq!(file["convertible"], true);
+    assert!(
+        file["targets"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("jpg")),
+        "{v}"
+    );
+}
