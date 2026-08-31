@@ -87,6 +87,25 @@ impl ConvError {
         )
     }
 
+    /// An output extension convkit can read but not write (see
+    /// `Format::is_read_only_ext`). Distinct from `unknown_format`, because
+    /// the format *is* known -- convkit simply refuses to hand the backend a
+    /// name whose coder it does not have, which would write the wrong bytes
+    /// under the requested name rather than fail.
+    pub fn read_only_format(ext: &str, canonical: &str) -> Self {
+        ConvError {
+            code: ErrorCode::InvalidInvocation,
+            message: format!(
+                "{ext:?} can be read but not written; convkit writes this format as {canonical:?}"
+            ),
+            backend: None,
+            remediation: Some(Remediation {
+                managed: None,
+                manual: Some(format!("use a .{canonical} output path")),
+            }),
+        }
+    }
+
     pub fn unknown_format(ext: &str) -> Self {
         let msg = match Format::suggest(ext) {
             Some(f) => format!("unknown format {ext:?} — did you mean {:?}?", f.ext()),

@@ -45,9 +45,7 @@ fn resolve_pair(paths: &[PathBuf]) -> Result<(PathBuf, PathBuf), ConvError> {
     let t = target.to_string_lossy();
     if let Some(rest) = t.strip_prefix('.') {
         if is_bare_extension_shorthand(rest) {
-            if Format::from_ext(rest).is_none() {
-                return Err(ConvError::unknown_format(rest));
-            }
+            output_format_of_ext(rest)?;
             return Ok((input.clone(), input.with_extension(rest)));
         }
     }
@@ -57,6 +55,23 @@ fn resolve_pair(paths: &[PathBuf]) -> Result<(PathBuf, PathBuf), ConvError> {
 fn format_of(p: &Path) -> Result<Format, ConvError> {
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
     Format::from_ext(ext).ok_or_else(|| ConvError::unknown_format(ext))
+}
+
+/// `format_of` for a slot that will be *written*. Same lookup, plus the one
+/// refusal `format_of` must not make: an extension convkit can only read
+/// (`.jfif`) names a format we know, so it parses fine as an input, but
+/// handing it to a backend as an output produces a file whose bytes do not
+/// match its name. Rejecting it here keeps that from ever being planned.
+fn output_format_of_ext(ext: &str) -> Result<Format, ConvError> {
+    let fmt = Format::from_ext(ext).ok_or_else(|| ConvError::unknown_format(ext))?;
+    if Format::is_read_only_ext(ext) {
+        return Err(ConvError::read_only_format(ext, fmt.ext()));
+    }
+    Ok(fmt)
+}
+
+fn output_format_of(p: &Path) -> Result<Format, ConvError> {
+    output_format_of_ext(p.extension().and_then(|e| e.to_str()).unwrap_or(""))
 }
 
 /// The key two planned outputs are compared on to decide they'd land on the
@@ -173,7 +188,7 @@ pub fn jobs_from(
     outdir: Option<&Path>,
 ) -> Result<Vec<Job>, ConvError> {
     if let Some(to_str) = to {
-        let to_fmt = Format::from_ext(to_str).ok_or_else(|| ConvError::unknown_format(to_str))?;
+        let to_fmt = output_format_of_ext(to_str)?;
         let mut jobs = Vec::with_capacity(paths.len());
         // Two inputs that differ only in extension (`a.jpg a.png --to webp`)
         // — or, where the filesystem is case-insensitive, only in letter
@@ -247,7 +262,7 @@ pub fn jobs_from(
 
     let (input, output) = resolve_pair(paths)?;
     let from_fmt = format_of(&input)?;
-    let to_fmt = format_of(&output)?;
+    let to_fmt = output_format_of(&output)?;
     Ok(vec![Job {
         inputs: vec![input],
         output,
@@ -618,6 +633,37 @@ mod tests {
     fn parent_relative_path_is_not_bare_extension_shorthand() {
         let (_, output) = resolve_pair(&[p("in.mp4"), p(r"..\out.gif")]).unwrap();
         assert_eq!(output, p(r"..\out.gif"));
+    }
+
+    // --- read-only extensions: readable as input, refused as output -----
+
+    /// `.jfif` is a JPEG by another name, so it plans like one on the way in.
+    #[test]
+    fn a_read_only_extension_is_accepted_as_an_input() {
+        let jobs = jobs_from(&v(&["photo.jfif"]), Some("png"), None).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].from, Format::Jpg);
+        assert_eq!(jobs[0].to, Format::Png);
+    }
+
+    /// Every slot that names an output refuses it, because ImageMagick has
+    /// no JFIF coder and would write the input's bytes under that name. The
+    /// error names the spelling convkit does write.
+    #[test]
+    fn a_read_only_extension_is_refused_in_every_output_slot() {
+        // the explicit pair
+        let e = jobs_from(&v(&["a.png", "b.jfif"]), None, None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("jpg"), "{}", e.message);
+
+        // the `.ext` shorthand
+        let e = jobs_from(&v(&["a.png", ".jfif"]), None, None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+
+        // and --to
+        let e = jobs_from(&v(&["a.png"]), Some("jfif"), None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.remediation.is_some(), "every refusal carries a fix");
     }
 
     #[test]

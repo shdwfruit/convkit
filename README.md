@@ -196,6 +196,13 @@ listed: a directory is read one level deep, and subdirectories inside it are
 neither descended into nor shown. A path that does not exist is reported as
 an error rather than described, and exits 2.
 
+Common extension aliases resolve to the same format, so `photo.jpeg`,
+`photo.jpe` and `photo.jfif` are all JPEGs, `scan.tif` is a TIFF, and
+`page.htm` is HTML. A few of those are read-only: ImageMagick has no JFIF
+coder, so convkit reads `.jfif` but writes JPEGs as `.jpg`, and asking for a
+`.jfif` output says so rather than writing a file whose bytes do not match
+its name.
+
 `--dry-run` prints the real backend command without running anything — it
 never probes inputs or creates directories. `-v/--verbose` streams each
 spawned command and the backend's full output to stderr as a job runs.
