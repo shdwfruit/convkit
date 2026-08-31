@@ -1465,3 +1465,105 @@ fn scan_truncates_an_overlong_name_instead_of_breaking_the_columns() {
         "the kind column must start at the same offset on every row: {widths:?}"
     );
 }
+
+/// The partial-failure case the human path already got right: a listing
+/// that found something and failed on something else must still deliver
+/// what it found. The envelope carries `ok: false` for the failure, but a
+/// consumer parsing stdout gets its rows -- dropping them meant one
+/// mistyped argument silently discarded the answer for every other one.
+#[test]
+fn scan_json_keeps_the_listing_when_one_path_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("photo.heic");
+    std::fs::write(&real, b"x").unwrap();
+    let missing = dir.path().join("nope.heic");
+
+    let assert = conv()
+        .args([
+            "scan",
+            real.to_str().unwrap(),
+            missing.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(2);
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("stdout must still carry the listing envelope");
+    assert_eq!(v["ok"], false, "{v}");
+    let files = v["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 1, "the found row survives: {v}");
+    assert!(
+        files[0]["path"].as_str().unwrap().ends_with("photo.heic"),
+        "{v}"
+    );
+    // The failure detail still reaches stderr, as every other command's
+    // top-level error does.
+    let e: serde_json::Value = serde_json::from_slice(&assert.get_output().stderr)
+        .expect("stderr must carry the error envelope");
+    assert_eq!(e["ok"], false, "{e}");
+}
+
+/// `conv scan --json | head` is the one invocation in this binary that
+/// reliably writes more than a pipe buffer before the reader goes away.
+/// `println!` panics there (exit 101, panic banner); the human path was
+/// taught to stop quietly and the JSON path has to match. Simulated by
+/// closing the read end while the child is still writing.
+#[test]
+fn scan_json_survives_a_closed_pipe() {
+    use std::process::{Command as StdCommand, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    // Enough rows that the serialised envelope cannot fit in a pipe buffer
+    // (64 KiB on Linux, 8-64 KiB elsewhere) before the first write blocks.
+    for i in 0..2000 {
+        std::fs::write(dir.path().join(format!("f{i}.heic")), b"x").unwrap();
+    }
+
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("conv"))
+        .args(["scan", dir.path().to_str().unwrap(), "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Drop the read end: every subsequent write from the child fails the
+    // way it does under `| head`.
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+
+    assert_ne!(
+        out.status.code(),
+        Some(101),
+        "a closed pipe must not panic: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("panicked"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// One enum, one spelling. `capabilities --json` rendered `Kind`'s `Debug`
+/// name ("Image") while `scan --json` used the type's own `Serialize`
+/// (`rename_all = "lowercase"`, so "image") -- the same field name carrying
+/// two vocabularies across two commands.
+#[test]
+fn capabilities_and_scan_agree_on_the_kind_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("photo.heic"), b"x").unwrap();
+
+    let caps = conv()
+        .args(["capabilities", "heic", "--json"])
+        .assert()
+        .success();
+    let caps: serde_json::Value = serde_json::from_slice(&caps.get_output().stdout).unwrap();
+
+    let scan = conv()
+        .args(["scan", dir.path().to_str().unwrap(), "--json"])
+        .assert()
+        .success();
+    let scan: serde_json::Value = serde_json::from_slice(&scan.get_output().stdout).unwrap();
+
+    assert_eq!(caps["kind"], "image", "{caps}");
+    assert_eq!(caps["kind"], scan["files"][0]["kind"], "{caps} vs {scan}");
+}

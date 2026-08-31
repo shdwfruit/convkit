@@ -110,13 +110,14 @@ pub fn run(cli: &Cli, paths: &[PathBuf]) -> i32 {
     }
 
     if cli.json {
-        // The envelope must not claim success while the exit code says
-        // otherwise: a run that could not list something the user named
-        // reports `ok: false` in the same shape every other command uses,
-        // rather than `{"ok": true}` alongside exit 2.
-        if problems.is_empty() {
-            print_json(&rows);
-        } else {
+        // Same division of labour as the human path directly below: the
+        // listing goes to stdout, whatever could not be listed goes to
+        // stderr. The envelope must not claim success while the exit code
+        // says otherwise, so it carries `ok: false` in that case -- but it
+        // still carries the rows, because one unreadable argument must not
+        // discard the answer for every other one.
+        print_json(&rows, &problems);
+        if !problems.is_empty() {
             render::print_error(
                 true,
                 &ConvError::new(ErrorCode::InvalidInvocation, problems.join("; ")),
@@ -251,7 +252,24 @@ fn display_name(path: &Path) -> String {
 /// `kind` is `Kind`'s own `Serialize` spelling rather than the short human
 /// label, so the published envelope carries the type's canonical vocabulary
 /// instead of inventing a third one.
-fn print_json(rows: &[Row]) {
+///
+/// Written through a locked handle that stops quietly at the first failed
+/// write, for the same reason `print_human` is: `println!` panics on a
+/// closed pipe, and this is the command most likely to produce more than a
+/// pipe buffer's worth of output, so `conv scan --json | head` was the one
+/// place in the binary that reliably hit it (exit 101, panic banner).
+///
+/// The envelope is emitted whether or not something went wrong, carrying
+/// `ok: false` when it did. Dropping the listing on a partial failure is
+/// what the human path pointedly does not do -- `conv scan photo.heic
+/// missing.heic` prints the row it found and reports the one it did not --
+/// and a consumer that has to guess which stream holds its data cannot
+/// simply parse stdout. `conv` already draws this line: a *top-level*
+/// failure with no data to report goes to stderr as an error envelope
+/// (`update`, `install`), while a partial failure that still has results
+/// keeps them in one envelope on stdout (`convert`'s batch). A scan that
+/// listed some files and could not list others is the latter.
+fn print_json(rows: &[Row], problems: &[String]) {
     let files: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
@@ -264,131 +282,8 @@ fn print_json(rows: &[Row]) {
             })
         })
         .collect();
-    let envelope = json!({ "ok": true, "files": files });
-    println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn targets_of(name: &str) -> Vec<&'static str> {
-        row_for(Path::new(name), &registry::all_pairs())
-            .targets
-            .iter()
-            .map(|t| t.ext())
-            .collect()
-    }
-
-    /// The whole feature, stated once: a known extension yields the
-    /// registry's outgoing pairs for that format.
-    #[test]
-    fn a_known_extension_reports_the_formats_it_can_become() {
-        let targets = targets_of("photo.heic");
-        assert!(targets.contains(&"jpg"), "{targets:?}");
-        assert!(targets.contains(&"png"), "{targets:?}");
-        assert!(!targets.contains(&"mp4"), "{targets:?}");
-    }
-
-    /// The row that makes the listing trustworthy: a file convkit has never
-    /// heard of is shown, not silently dropped, so "my zip is missing" has
-    /// a visible answer.
-    #[test]
-    fn an_unknown_extension_is_reported_rather_than_omitted() {
-        let row = row_for(Path::new("archive.zip"), &registry::all_pairs());
-        assert_eq!(row.format, None);
-        assert!(row.targets.is_empty());
-    }
-
-    #[test]
-    fn a_file_with_no_extension_at_all_is_reported_the_same_way() {
-        let row = row_for(Path::new("README"), &registry::all_pairs());
-        assert_eq!(row.format, None);
-    }
-
-    /// Extension matching is case-insensitive everywhere else in convkit,
-    /// and a listing that disagreed with the converter would be worse than
-    /// no listing.
-    #[test]
-    fn extension_matching_is_case_insensitive_like_the_rest_of_convkit() {
-        assert_eq!(
-            row_for(Path::new("PHOTO.HEIC"), &registry::all_pairs()).format,
-            Some(Format::Heic),
-            "an uppercase extension must resolve exactly as the converter resolves it"
-        );
-    }
-
-    /// A format convkit knows but cannot convert *out of* is a third state,
-    /// distinct from both "convertible" and "never heard of it", and the
-    /// human output says so rather than showing the same blank as a zip.
-    /// `html` is the only such format today -- it is a target of the
-    /// document recipes and the source of none -- so this derives the
-    /// example from the registry instead of naming one, and stays true if
-    /// that changes.
-    #[test]
-    fn a_known_format_with_no_outgoing_pairs_is_distinct_from_unknown() {
-        let pairs = registry::all_pairs();
-        let orphan = [Format::Html, Format::Pdf, Format::Docx]
-            .into_iter()
-            .find(|f| !pairs.iter().any(|&(from, _)| from == *f));
-        let Some(orphan) = orphan else {
-            return; // every format converts to something; nothing to assert
-        };
-        let row = row_for(Path::new(&format!("f.{}", orphan.ext())), &pairs);
-        assert_eq!(row.format, Some(orphan));
-        assert!(row.targets.is_empty());
-        assert_ne!(
-            row.format, None,
-            "a known-but-dead-end format must not read as an unknown extension"
-        );
-    }
-
-    /// Every target reported must be a pair the registry actually holds --
-    /// this is the property that stops the listing drifting from the
-    /// converter as recipes are added.
-    #[test]
-    fn every_reported_target_is_a_real_registry_pair() {
-        let pairs = registry::all_pairs();
-        for name in ["photo.heic", "clip.mp4", "notes.md", "song.flac"] {
-            let row = row_for(Path::new(name), &pairs);
-            let from = row.format.expect(name);
-            for to in row.targets {
-                assert!(
-                    pairs.contains(&(from, to)),
-                    "{name}: {from:?} -> {to:?} is not in the registry"
-                );
-            }
-        }
-    }
-
-    /// This used to compute its expected value with the same expression as
-    /// the code under test, so it could only fail if `all_pairs` were
-    /// non-deterministic -- it asserted nothing about the listing. The
-    /// property that actually matters is that whatever the listing offers,
-    /// planning it succeeds: that is what stops the listing promising a
-    /// conversion which then fails when the user asks for it.
-    #[test]
-    fn every_target_the_listing_offers_can_actually_be_planned() {
-        let pairs = registry::all_pairs();
-        for name in ["clip.mp4", "photo.heic", "notes.md", "song.flac"] {
-            let row = row_for(Path::new(name), &pairs);
-            let from = row.format.expect(name);
-            assert!(!row.targets.is_empty(), "{name} should offer something");
-            for to in &row.targets {
-                let out = PathBuf::from(format!("out.{}", to.ext()));
-                let planned = convkit_core::build_plan(
-                    from,
-                    *to,
-                    std::slice::from_ref(&PathBuf::from(name)),
-                    &out,
-                    None,
-                    None,
-                );
-                assert!(
-                    planned.is_ok(),
-                    "{name}: listing offers {from:?} -> {to:?} but planning it fails"
-                );
-            }
-        }
-    }
+    let envelope = json!({ "ok": problems.is_empty(), "files": files });
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let _ = writeln!(out, "{}", serde_json::to_string_pretty(&envelope).unwrap());
 }

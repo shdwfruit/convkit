@@ -113,7 +113,12 @@ fn format_detail(cli: &Cli, ext: &str) -> i32 {
         let envelope = json!({
             "ok": true,
             "format": fmt,
-            "kind": format!("{:?}", fmt.kind()),
+            // `Kind`'s own `Serialize` spelling (it declares
+            // `rename_all = "lowercase"`), not `Debug`. Rendering the Rust
+            // variant name here made the published envelope say "Image"
+            // while `conv scan --json` said "image" -- two spellings of one
+            // enum across two commands, from the same field name.
+            "kind": fmt.kind(),
             "sources": sources,
             "targets": target_rows,
             "defaults": { "quality": registry::IMAGE_QUALITY },
