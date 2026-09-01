@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "convkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anstyle",
  "anstyle-query",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "convkit-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "insta",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "convkit-diff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "convkit-core",

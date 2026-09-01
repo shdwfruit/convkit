@@ -9,5 +9,15 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell", "homebrew", "msi"]
+# The tap `publish-jobs = ["homebrew"]` below pushes each release's
+# generated formula to. Without both keys, dist builds `convkit.rb` as a
+# release asset and stops there -- which is what shipped v0.1.0, whose
+# formula had to be copied into the tap by hand. `brew upgrade convkit`
+# only ever sees a new version once the tap itself is updated, so the two
+# keys below are what make Homebrew a real update path rather than a
+# one-time install. The publish job authenticates with a `HOMEBREW_TAP_TOKEN`
+# secret on THIS repo (not on the tap).
+tap = "shdwfruit/homebrew-tap"
+publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]

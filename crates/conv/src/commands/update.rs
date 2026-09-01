@@ -12,10 +12,12 @@
 //!
 //! This deliberately never replaces the running `conv` binary. Downloading
 //! and swapping the executable that is currently running is a real,
-//! platform-specific security surface, and today there is nothing
-//! published to fetch anyway (see `conv_self_report`'s own docs). Instead
-//! this detects how `conv` was installed, purely from its own executable
-//! path, and prints the command that would upgrade it.
+//! platform-specific security surface, and one convkit's pinned-and-
+//! verified install design has no honest answer for: the SHA-256 of a
+//! release that does not exist yet cannot be pinned in the build that
+//! would have to verify it. Instead this detects how `conv` was installed,
+//! from its own executable path plus the presence of a cargo-dist install
+//! receipt, and prints the command that would upgrade it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,16 +79,15 @@ struct BackendReport {
 
 /// How this build of `conv` was installed, detected from its own running
 /// executable's path -- no network call, no external command run -- plus,
-/// for `Dist`, the presence of an install receipt on disk. `Dist` is
-/// checked first (see `detect_install_method_with_receipt_dir`): it's this
-/// project's actual documented primary install path (the README's curl/irm
-/// one-liners), and cargo-dist's shell/PowerShell installers default to
-/// installing into the exact same `~/.cargo/bin` a real `cargo install`
-/// uses, so path shape alone can't tell the two apart (review finding
-/// F225). The remaining detectors stay ordered the same as before --
-/// `Cargo` next, since it's the fallback for anyone who genuinely built
-/// from a checkout -- and are otherwise mutually exclusive in practice (a
-/// real install never lands in more than one of these locations at once).
+/// for `Dist`, the presence of an install receipt on disk. The order the
+/// detectors run in is load-bearing and documented on
+/// `detect_install_method_with_receipt_dir`: the two unambiguous path
+/// shapes (`Homebrew`, `Scoop`) are settled first, then the receipt
+/// separates `Dist` from `Cargo` -- the one genuinely ambiguous pair,
+/// since cargo-dist's shell/PowerShell installers default to the exact
+/// same `~/.cargo/bin` a real `cargo install` uses (review finding F225).
+/// Beyond that pair these are mutually exclusive in practice: a real
+/// install never lands in more than one of these locations at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InstallMethod {
     Dist,
@@ -126,24 +127,45 @@ impl InstallMethod {
                     UNIX_INSTALLER_ONE_LINER.to_string()
                 }
             }
-            // No crate is published on crates.io yet (see the README's own
-            // Install section), so `cargo install convkit` is offered as
-            // the eventual path, not the only one -- `--path <repo>` is
-            // what actually works today, for anyone who built from a
-            // checkout the way this binary itself was built.
-            InstallMethod::Cargo => {
-                "cargo install --path <repo> (or, once published: cargo install convkit)"
-                    .to_string()
-            }
-            // Review finding F225 part 3: no convkit tap or formula is
-            // published anywhere, so `brew upgrade convkit` has never been
-            // a command that could work -- offering it was actively wrong
-            // advice for a `/usr/local/Cellar` install that, per the
-            // README, must have arrived some other way (or by hand).
-            InstallMethod::Homebrew => format!(
-                "no convkit formula or tap is published yet -- grab the latest release from {RELEASES_PAGE}"
-            ),
-            InstallMethod::Scoop => "scoop update conv".to_string(),
+            // Supersedes the previous "no crate is published yet, so use
+            // `--path <repo>`" advice: `convkit` is now published on
+            // crates.io, so one command upgrades a cargo install from
+            // anywhere, with no source checkout required. Plain `cargo
+            // install` already replaces an out-of-date copy in place --
+            // `--force` would only add a pointless rebuild when the user
+            // is already current -- so the one flag worth printing is
+            // `--locked`, which pins the exact dependency set this release
+            // was built and tested against rather than whatever resolves
+            // on the day.
+            //
+            // This hint is only true once the crate is actually published:
+            // it must not ship in a tagged release ahead of the
+            // corresponding `cargo publish`.
+            InstallMethod::Cargo => "cargo install convkit --locked".to_string(),
+            // Supersedes review finding F225 part 3, whose premise -- that
+            // no convkit tap or formula existed anywhere -- no longer
+            // holds: `shdwfruit/homebrew-tap` now ships
+            // `Formula/convkit.rb`, and the release workflow publishes a
+            // fresh formula to it on every tag. The bare name is
+            // deliberate and sufficient: Homebrew maps an installed
+            // formula back to the tap it came from, so a user who ran
+            // `brew install shdwfruit/tap/convkit` does not need to repeat
+            // the tap prefix here. `brew upgrade` also self-documents the
+            // no-op case ("already installed"), where a bare `brew
+            // install` would instead misdirect the user to `brew
+            // reinstall`.
+            InstallMethod::Homebrew => "brew upgrade convkit".to_string(),
+            // No scoop manifest for convkit is published in any bucket,
+            // and `dist` cannot generate one, so `scoop update conv` was
+            // never a command that could work -- doubly so for naming the
+            // *binary* (`conv`) where scoop wants the *package*
+            // (`convkit`). A scoop-shaped path can therefore only be a
+            // copy someone placed there by hand, for whom the release page
+            // is the honest answer. The variant itself is kept rather than
+            // folded into `Unknown`: `install_method: "scoop"` in `--json`
+            // still records *where* the binary was found, which is worth
+            // knowing in a bug report even when the remedy is the same.
+            InstallMethod::Scoop => format!("download the latest release from {RELEASES_PAGE}"),
             InstallMethod::Unknown => {
                 format!("download the latest release from {RELEASES_PAGE}")
             }
@@ -233,23 +255,18 @@ fn detect_install_method(exe: &Path) -> InstallMethod {
 /// testable on every host regardless of what that host's real environment
 /// happens to contain.
 fn detect_install_method_with_receipt_dir(exe: &Path, receipt_dir: Option<&Path>) -> InstallMethod {
-    // Checked first, before any path-shape heuristic at all (review
-    // finding F225 part 1): cargo-dist's shell/PowerShell installers --
-    // the README's curl/irm one-liners, this project's actual documented
-    // primary install path -- default to installing into `~/.cargo/bin`,
-    // the exact same directory a real `cargo install` uses. Without this
-    // receipt check first, every dist install was misclassified as
-    // `Cargo` and told to `cargo install --path <repo>`, advice that
-    // assumes a Rust toolchain and a source checkout a dist-installed user
-    // is never expected to have.
-    if receipt_dir.is_some_and(has_receipt_in) {
-        return InstallMethod::Dist;
-    }
-
-    if has_adjacent_components(exe, ".cargo", "bin") {
-        return InstallMethod::Cargo;
-    }
-
+    // Homebrew and scoop are checked ahead of the receipt because their
+    // path shapes are *unambiguous*: no cargo-dist installer ever writes
+    // into a Homebrew prefix or a scoop directory, so a match here settles
+    // the question on its own. The receipt cannot settle it, because it is
+    // a stray file in a config directory that outlives the install it
+    // describes -- someone who ran the curl one-liner once and later moved
+    // to `brew install` still has `convkit-receipt.json` sitting in
+    // `~/.config/convkit`. Checking it first (as this function originally
+    // did) handed that user the installer one-liner in place of `brew
+    // upgrade convkit`: advice that would install a *second*, competing
+    // copy into `~/.cargo/bin` rather than upgrading the one they run.
+    //
     // Review finding F225 part 2: canonicalize before the Homebrew prefix
     // checks -- see `canonical_path_starts_with_any`'s own docs for why.
     if canonical_path_starts_with_any(exe, HOMEBREW_PREFIXES) {
@@ -258,6 +275,24 @@ fn detect_install_method_with_receipt_dir(exe: &Path, receipt_dir: Option<&Path>
 
     if has_component(exe, "scoop") {
         return InstallMethod::Scoop;
+    }
+
+    // The receipt keeps its precedence over precisely the case review
+    // finding F225 part 1 introduced it for, and no more: cargo-dist's
+    // shell/PowerShell installers -- the README's curl/irm one-liners,
+    // this project's actual documented primary install path -- default to
+    // installing into `~/.cargo/bin`, the exact same directory a real
+    // `cargo install` uses, so path shape alone cannot tell those two
+    // apart. Without the receipt deciding it, every dist install was
+    // misclassified as `Cargo`. It also still answers for a dist install
+    // that landed somewhere else entirely (a custom `CARGO_HOME`), which
+    // no path heuristic below would recognise.
+    if receipt_dir.is_some_and(has_receipt_in) {
+        return InstallMethod::Dist;
+    }
+
+    if has_adjacent_components(exe, ".cargo", "bin") {
+        return InstallMethod::Cargo;
     }
 
     InstallMethod::Unknown
@@ -1357,6 +1392,45 @@ mod tests {
         );
     }
 
+    /// The bound on the test above: the receipt wins over `~/.cargo/bin`,
+    /// and *only* over `~/.cargo/bin`. A receipt is a stray file in a
+    /// config directory that outlives the install it describes, so someone
+    /// who ran the curl one-liner once and later switched to `brew
+    /// install` still has one on disk. Letting it win there would tell a
+    /// Homebrew user to re-run the installer -- which installs a second,
+    /// competing copy into `~/.cargo/bin` instead of upgrading the one
+    /// they actually run.
+    #[test]
+    fn a_stale_receipt_never_overrides_a_homebrew_path() {
+        let xdg_config_home = tempfile::tempdir().unwrap();
+        let receipt_dir = xdg_config_home.path().join("convkit");
+        std::fs::create_dir_all(&receipt_dir).unwrap();
+        std::fs::write(receipt_dir.join("convkit-receipt.json"), "{}").unwrap();
+
+        let exe = PathBuf::from("/opt/homebrew/Cellar/convkit/0.1.0/bin/conv");
+        assert_eq!(
+            detect_install_method_with_receipt_dir(&exe, Some(&receipt_dir)),
+            InstallMethod::Homebrew
+        );
+    }
+
+    /// The same bound for scoop, whose path shape is equally unambiguous:
+    /// no cargo-dist installer ever writes into a scoop directory.
+    #[cfg(windows)]
+    #[test]
+    fn a_stale_receipt_never_overrides_a_scoop_path() {
+        let localappdata = tempfile::tempdir().unwrap();
+        let receipt_dir = localappdata.path().join("convkit");
+        std::fs::create_dir_all(&receipt_dir).unwrap();
+        std::fs::write(receipt_dir.join("convkit-receipt.json"), "{}").unwrap();
+
+        let exe = PathBuf::from(r"C:\Users\rick\scoop\shims\conv.exe");
+        assert_eq!(
+            detect_install_method_with_receipt_dir(&exe, Some(&receipt_dir)),
+            InstallMethod::Scoop
+        );
+    }
+
     #[test]
     fn no_receipt_file_falls_through_to_the_ordinary_path_based_detection() {
         let receipt_dir = tempfile::tempdir().unwrap(); // exists, but empty
@@ -1383,13 +1457,44 @@ mod tests {
         }
     }
 
-    /// Review finding F225 part 3: no convkit tap or formula exists, so
-    /// `brew upgrade convkit` was never a command that could actually
-    /// work.
+    /// Supersedes review finding F225 part 3, which asserted the exact
+    /// opposite on the then-correct premise that no convkit tap existed.
+    /// `shdwfruit/homebrew-tap` now ships `Formula/convkit.rb` and the
+    /// release workflow republishes it on every tag, so `brew upgrade` is
+    /// the honest answer and the releases-page fallback would now be the
+    /// wrong one. The bare formula name is asserted deliberately: Homebrew
+    /// resolves an installed formula back to its own tap, so requiring the
+    /// `shdwfruit/tap/` prefix here would be noise.
     #[test]
-    fn homebrew_update_hint_no_longer_claims_a_brew_upgrade_command_works() {
+    fn homebrew_update_hint_is_the_brew_upgrade_command_now_that_a_tap_exists() {
         let hint = InstallMethod::Homebrew.update_hint();
-        assert!(!hint.contains("brew upgrade"), "{hint}");
+        assert_eq!(hint, "brew upgrade convkit");
+        assert!(!hint.contains(RELEASES_PAGE), "{hint}");
+    }
+
+    /// `convkit` is published on crates.io, so the hint is one command
+    /// that needs no source checkout -- superseding the older `cargo
+    /// install --path <repo>` advice. `--force` is deliberately absent:
+    /// plain `cargo install` already replaces an out-of-date copy, so
+    /// forcing would only buy a redundant rebuild for a user who is
+    /// already current.
+    #[test]
+    fn cargo_update_hint_installs_the_published_crate_with_a_locked_dependency_set() {
+        let hint = InstallMethod::Cargo.update_hint();
+        assert_eq!(hint, "cargo install convkit --locked");
+        assert!(!hint.contains("--path"), "{hint}");
+        assert!(!hint.contains("--force"), "{hint}");
+    }
+
+    /// No scoop manifest for convkit is published in any bucket and `dist`
+    /// cannot generate one, so the old `scoop update conv` named a package
+    /// that does not exist (under the binary's name, at that). A
+    /// scoop-shaped path can only be a hand-placed copy, for whom the
+    /// release page is the honest answer -- the same one `Unknown` gets.
+    #[test]
+    fn scoop_update_hint_points_at_the_release_page_not_a_nonexistent_package() {
+        let hint = InstallMethod::Scoop.update_hint();
+        assert!(!hint.contains("scoop"), "{hint}");
         assert!(hint.contains(RELEASES_PAGE), "{hint}");
     }
 

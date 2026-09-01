@@ -158,10 +158,11 @@ convkit ships a newer manifest, and `conv update` then brings your \
 backends in line with it.
 
 This never replaces the conv binary itself. Self-replacement is a \
-platform-specific security surface, and today there is nothing published \
-to fetch anyway -- so instead this detects how conv was installed and \
-prints the exact command to upgrade it, alongside the version currently \
-running.
+platform-specific security surface, and one this pinned-and-verified \
+design has no honest answer for -- the checksum of a release that does \
+not exist yet cannot be pinned in the build that would verify it. So \
+instead this detects how conv was installed and prints the exact command \
+to upgrade it, alongside the version currently running.
 
 Unmanaged backends (magick/ImageMagick, soffice/LibreOffice) are only \
 ever reported -- installed version, and the package-manager command that \

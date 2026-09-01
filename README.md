@@ -43,8 +43,16 @@ An MSI (`convkit-x86_64-pc-windows-msvc.msi`) is also attached to each
 release. The Windows binaries are not code-signed, so SmartScreen warns on
 first run.
 
-From source — requires Rust 1.85+ and a C toolchain on every platform (the
-HTTPS downloader's `ring` dependency compiles C at build time):
+```console
+# Cargo (any platform, builds from source)
+$ cargo install convkit --locked
+```
+
+Building from source — which `cargo install` does — requires Rust 1.85+ and
+a C toolchain on every platform (the HTTPS downloader's `ring` dependency
+compiles C at build time). On Windows that toolchain is the MSVC C++ build
+tools rustup already requires, so nothing extra is needed beyond a working
+Rust install. From a checkout:
 
 ```console
 $ git clone https://github.com/shdwfruit/convkit
@@ -287,6 +295,27 @@ install it and retry (interactive sessions only, never under `--json`/
 `--quiet`); `--yes` pre-answers the prompt for scripts, `--no-install`
 always fails with the structured `backend_missing` error instead.
 
+## Updating convkit
+
+Whichever way convkit was installed, one command updates it:
+
+| Installed with | Update with |
+| --- | --- |
+| Homebrew | `brew upgrade convkit` |
+| Cargo | `cargo install convkit --locked` |
+| The `curl`/`irm` installer | Re-run the same one-liner from [Install](#install) |
+| The Windows MSI | Download and run the newer MSI — it replaces the old install |
+
+`conv update` prints the right one of these for the copy you are actually
+running, alongside its version, so you never have to remember which. Plain
+`cargo install` already replaces an out-of-date copy in place — `--force` is
+only needed to rebuild a version you already have — and `brew upgrade`
+reports "already installed" when there is nothing to do.
+
+If `conv --version` still reports the old version after an upgrade, you have
+two copies on `PATH`; `conv update` reports the absolute path of the one that
+ran, and `which -a conv` (`where conv` on Windows) lists the rest.
+
 ## Updating backends
 
 `conv update` brings managed backends to the versions this build of convkit
@@ -299,8 +328,9 @@ Copies that resolve from `PATH`, an env var, or an override are reported as
 matter how far they sit from the pin. `magick` and `soffice` are reported
 with the package-manager command that would update them, but `conv update`
 never runs a package manager. It never replaces `conv` itself either — it
-prints the command that would, based on how `conv` was installed. Installing
-a newer convkit is what advances the pinned backend versions.
+prints the command that would, based on how `conv` was installed (see
+[Updating convkit](#updating-convkit)). Installing a newer convkit is what
+advances the pinned backend versions.
 
 ## Machine-readable output
 
