@@ -12,6 +12,7 @@ mod procutil;
 pub mod recipe;
 pub mod registry;
 pub mod resolve;
+mod video;
 pub mod winpath;
 
 pub use backend::{Backend, PackageManager};
@@ -24,3 +25,4 @@ pub use plan::{ConversionPlan, PlannedStep};
 pub use probe::MediaProbe;
 pub use recipe::{Arg, OutputMode, Recipe, Step, Tuning};
 pub use resolve::{AvailableBackends, ResolvedBackend, Resolver, Source};
+pub use video::{resolve as resolve_video, ResolvedVideo};
