@@ -24,11 +24,25 @@ pub struct Tuning {
     pub quality: Option<u8>,
     /// 2–256, palette reduction on raster targets.
     pub colors: Option<u16>,
+    /// Frame-rate cap for video and GIF targets: `24`, `29.97`, or
+    /// `30000/1001`. A cap, never a floor -- see `video::resolve`.
+    ///
+    /// Held as the user's own string, not a parsed rational: the exact
+    /// text reaches ffmpeg, so `30000/1001` stays exact in the argv.
+    pub fps: Option<String>,
+    /// Constant-quality anchor for video targets. Unlike the two geometry
+    /// knobs this is not clamped against the source: it is an anchor, not
+    /// a bound.
+    pub crf: Option<u8>,
 }
 
 impl Tuning {
     pub fn is_empty(&self) -> bool {
-        self.resize.is_none() && self.quality.is_none() && self.colors.is_none()
+        self.resize.is_none()
+            && self.quality.is_none()
+            && self.colors.is_none()
+            && self.fps.is_none()
+            && self.crf.is_none()
     }
 }
 
@@ -406,6 +420,8 @@ mod tests {
             resize: Some("1600x900".into()),
             quality: Some(70),
             colors: Some(64),
+            fps: None,
+            crf: None,
         };
         let r = TUNABLE.render_full(&[Path::new("in.png")], Path::new("out.jpg"), &tuning);
         assert_eq!(
@@ -432,5 +448,47 @@ mod tests {
             );
         }
         assert_eq!(r.path_args.len(), 2, "{:?}", r.path_args);
+    }
+
+    #[test]
+    fn every_tuning_field_on_its_own_makes_the_struct_non_empty() {
+        // is_empty() is the early-return guard in BOTH validators
+        // (plan.rs:219, :243). A field missing from it does not weaken
+        // validation for that field -- it disables validation entirely,
+        // turning a refusal into the silent no-op the project refuses.
+        // This test is the only thing standing between a new field and
+        // that bug; the compiler will not object.
+        let each: Vec<Tuning> = vec![
+            Tuning {
+                resize: Some("640x480".into()),
+                ..Default::default()
+            },
+            Tuning {
+                quality: Some(80),
+                ..Default::default()
+            },
+            Tuning {
+                colors: Some(64),
+                ..Default::default()
+            },
+            Tuning {
+                fps: Some("24".into()),
+                ..Default::default()
+            },
+            Tuning {
+                crf: Some(28),
+                ..Default::default()
+            },
+        ];
+        assert!(Tuning::default().is_empty());
+        for t in &each {
+            assert!(!t.is_empty(), "is_empty() does not know about {t:?}");
+        }
+        // If a field is added without extending this list, this catches it.
+        assert_eq!(
+            each.len(),
+            5,
+            "Tuning gained a field; add it to `each` and to is_empty()"
+        );
     }
 }

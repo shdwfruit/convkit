@@ -217,6 +217,8 @@ impl Cli {
             resize: self.resize.clone(),
             quality: self.quality,
             colors: self.colors,
+            fps: None,
+            crf: None,
         }
     }
 

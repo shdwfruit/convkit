@@ -890,6 +890,8 @@ mod tests {
             resize: resize.map(str::to_owned),
             quality,
             colors,
+            fps: None,
+            crf: None,
         }
     }
 
