@@ -35,6 +35,19 @@ pub struct MediaProbe {
     /// How many attachment streams (fonts in mkv).
     pub attachment_streams: usize,
     pub color_transfer: Option<String>,
+    /// Stored width of the first real video stream. *Stored*, not
+    /// displayed: ffmpeg autorotates before the user filter chain, so a
+    /// cap must be decided against `display_dimensions()` instead.
+    pub width: Option<u32>,
+    /// Stored height, with the same caveat as `width`.
+    pub height: Option<u32>,
+    /// Display-matrix rotation in degrees, when the source carries one.
+    pub rotation: Option<i32>,
+    /// Frame rate as a rational, never a float: `MediaProbe` derives `Eq`,
+    /// which a float member would stop deriving, and ffprobe reports
+    /// `30000/1001` as a rational already — the float would be the lossy
+    /// form. `None` when neither reported rate is usable.
+    pub frame_rate: Option<(u32, u32)>,
 }
 
 impl MediaProbe {
@@ -64,6 +77,27 @@ impl MediaProbe {
             Some("smpte2084") | Some("arib-std-b67")
         )
     }
+
+    /// The dimensions the filter chain will actually see. ffmpeg applies a
+    /// display matrix before user filters, so a portrait clip stored as
+    /// 1280x720 arrives at `scale` as 720x1280 — and a cap decided against
+    /// the stored pair caps the wrong axis.
+    pub fn display_dimensions(&self) -> Option<(u32, u32)> {
+        let (w, h) = (self.width?, self.height?);
+        match self.rotation.map(|r| r.rem_euclid(360)) {
+            Some(90) | Some(270) => Some((h, w)),
+            _ => Some((w, h)),
+        }
+    }
+}
+
+/// Parses one ffprobe `N/D` rate. `0/0`, `N/A` and an absent value all
+/// yield `None` rather than a zero tuple, which would divide by zero at
+/// every comparison site.
+fn parse_rate(s: Option<&str>) -> Option<(u32, u32)> {
+    let (n, d) = s?.split_once('/')?;
+    let (n, d) = (n.parse::<u32>().ok()?, d.parse::<u32>().ok()?);
+    (n != 0 && d != 0).then_some((n, d))
 }
 
 /// Parses `ffprobe -show_streams` JSON. Any malformed input yields an empty
@@ -105,6 +139,36 @@ pub fn parse(json: &str) -> MediaProbe {
                             .get("color_transfer")
                             .and_then(|f| f.as_str())
                             .map(str::to_owned);
+                        p.width = s.get("width").and_then(|w| w.as_u64()).map(|w| w as u32);
+                        p.height = s.get("height").and_then(|h| h.as_u64()).map(|h| h as u32);
+                        p.rotation = s
+                            .get("side_data_list")
+                            .and_then(|l| l.as_array())
+                            .and_then(|l| l.iter().find_map(|d| d.get("rotation")))
+                            .and_then(|r| r.as_i64())
+                            .map(|r| r as i32);
+                        // r_frame_rate is the LCM of frame durations, not
+                        // the source rate: on VFR phone footage it reads
+                        // 600/1 against a true ~27.6 fps. Taking the lower
+                        // of the two keeps a cap from ever raising a rate.
+                        let r = parse_rate(s.get("r_frame_rate").and_then(|f| f.as_str()));
+                        let a = parse_rate(s.get("avg_frame_rate").and_then(|f| f.as_str()));
+                        p.frame_rate = match (r, a) {
+                            (Some(r), Some(a)) => {
+                                let lower = |x: (u32, u32), y: (u32, u32)| {
+                                    if u64::from(x.0) * u64::from(y.1)
+                                        <= u64::from(y.0) * u64::from(x.1)
+                                    {
+                                        x
+                                    } else {
+                                        y
+                                    }
+                                };
+                                Some(lower(r, a))
+                            }
+                            (Some(r), None) => Some(r),
+                            (None, a) => a,
+                        };
                     }
                 }
             }
@@ -242,5 +306,80 @@ mod tests {
         );
         assert_eq!(p.audio_codecs, vec!["unknown", "pcm_s16le"]);
         assert_eq!(p.audio_codec(), Some("unknown"));
+    }
+
+    #[test]
+    fn a_video_stream_yields_dimensions_and_a_rational_frame_rate() {
+        let p = parse(
+            r#"{"streams":[{"codec_type":"video","codec_name":"h264",
+                "width":1920,"height":1080,
+                "r_frame_rate":"30000/1001","avg_frame_rate":"30000/1001"}]}"#,
+        );
+        assert_eq!(p.width, Some(1920));
+        assert_eq!(p.height, Some(1080));
+        assert_eq!(p.frame_rate, Some((30000, 1001)));
+        assert_eq!(p.rotation, None);
+    }
+
+    #[test]
+    fn the_lower_of_the_two_reported_rates_wins() {
+        // r_frame_rate is the LCM of frame durations on a VFR source: 600/1
+        // against a true ~27.6 fps. Capping against it would let --fps 60
+        // duplicate frames, which is the one thing a cap must never do.
+        let p = parse(
+            r#"{"streams":[{"codec_type":"video","codec_name":"h264",
+                "width":1280,"height":720,
+                "r_frame_rate":"600/1","avg_frame_rate":"2500/90"}]}"#,
+        );
+        assert_eq!(p.frame_rate, Some((2500, 90)));
+    }
+
+    #[test]
+    fn an_unusable_frame_rate_is_none_not_a_zero_tuple() {
+        // A (0, 0) tuple divides by zero at every comparison site.
+        for rate in [r#""0/0""#, r#""N/A""#, r#""""#] {
+            let json = format!(
+                r#"{{"streams":[{{"codec_type":"video","codec_name":"h264",
+                    "width":640,"height":480,
+                    "r_frame_rate":{rate},"avg_frame_rate":{rate}}}]}}"#
+            );
+            assert_eq!(parse(&json).frame_rate, None, "rate {rate}");
+        }
+    }
+
+    #[test]
+    fn a_rotated_source_reports_stored_dimensions_and_displayed_ones_separately() {
+        let p = parse(
+            r#"{"streams":[{"codec_type":"video","codec_name":"h264",
+                "width":1280,"height":720,
+                "r_frame_rate":"30/1","avg_frame_rate":"30/1",
+                "side_data_list":[{"side_data_type":"Display Matrix","rotation":-90}]}]}"#,
+        );
+        assert_eq!((p.width, p.height), (Some(1280), Some(720)));
+        assert_eq!(p.rotation, Some(-90));
+        // ffmpeg autorotates before the user filter chain, so iw/ih are these.
+        assert_eq!(p.display_dimensions(), Some((720, 1280)));
+    }
+
+    #[test]
+    fn an_unrotated_source_displays_as_it_is_stored() {
+        let p = parse(
+            r#"{"streams":[{"codec_type":"video","codec_name":"h264",
+                "width":1280,"height":720,"r_frame_rate":"30/1"}]}"#,
+        );
+        assert_eq!(p.display_dimensions(), Some((1280, 720)));
+    }
+
+    #[test]
+    fn cover_art_contributes_no_dimensions() {
+        // Cover art is not the file's video track; it must not set width.
+        let p = parse(
+            r#"{"streams":[
+                {"codec_type":"video","codec_name":"mjpeg","width":600,"height":600,
+                 "disposition":{"attached_pic":1}},
+                {"codec_type":"audio","codec_name":"aac"}]}"#,
+        );
+        assert_eq!(p.width, None);
+        assert_eq!(p.frame_rate, None);
     }
 }
