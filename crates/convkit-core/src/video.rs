@@ -83,11 +83,21 @@ fn scale_filter(geometry: &str) -> String {
 /// Whether a geometry would leave a source of these displayed dimensions
 /// untouched, so the caller can say so rather than leaving the user to
 /// wonder why the file looks the same.
+///
+/// `parse_resize_geometry` (in `conv`'s CLI layer) validates only that the
+/// digits are non-empty ASCII, with no length cap, so a value here can
+/// overflow `u32::parse` -- `--resize 99999999999` reaches this function
+/// still a string. An overflowing value names a number past 4.29 billion,
+/// which is larger than any real dimension or any sane percentage, so it
+/// can never be the smaller side of a `min()` clamp: treating it as
+/// `u32::MAX` (rather than defaulting the comparison's own outcome) keeps
+/// the "does it fit" question answered in one place and gets the only
+/// correct answer -- it does not bind.
 fn geometry_binds(geometry: &str, (w, h): (u32, u32)) -> bool {
     if let Some(pct) = geometry.strip_suffix('%') {
-        return pct.parse::<u32>().map(|p| p < 100).unwrap_or(true);
+        return pct.parse::<u32>().unwrap_or(u32::MAX) < 100;
     }
-    let fits = |v: &str, against: u32| v.parse::<u32>().map(|n| n < against).unwrap_or(true);
+    let fits = |v: &str, against: u32| v.parse::<u32>().unwrap_or(u32::MAX) < against;
     match geometry.split_once('x') {
         Some((v, "")) => fits(v, w),
         Some(("", v)) => fits(v, h),
@@ -267,6 +277,50 @@ mod tests {
         assert_eq!(
             r.notes,
             vec!["Source is 640x480; --resize 1920x1080 left it unchanged.".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_asymmetric_wxh_binds_when_either_axis_would_shrink() {
+        // force_original_aspect_ratio=decrease is a no-op iff BOTH W>=iw
+        // AND H>=ih; geometry_binds negates that with fits(a,w)||fits(b,h),
+        // so either axis alone shrinking is enough to bind. Cover both
+        // directions against a 1920x1080 source.
+        let wide = resolve(
+            &tuning_resize("3000x500"),
+            Some(&probe_at(1920, 1080, (30, 1))),
+        );
+        assert!(
+            wide.notes.is_empty(),
+            "500 < 1080 should bind: {:?}",
+            wide.notes
+        );
+
+        let tall = resolve(
+            &tuning_resize("500x3000"),
+            Some(&probe_at(1920, 1080, (30, 1))),
+        );
+        assert!(
+            tall.notes.is_empty(),
+            "500 < 1920 should bind: {:?}",
+            tall.notes
+        );
+    }
+
+    #[test]
+    fn an_overflowing_dimension_cannot_bind() {
+        // parse_resize_geometry only checks "non-empty ASCII digits", with
+        // no length cap, so a value that overflows u32 reaches
+        // geometry_binds as a string. It names a number past 4.29 billion,
+        // larger than any real source, so it can never bind -- the note
+        // must still fire.
+        let r = resolve(
+            &tuning_resize("99999999999"),
+            Some(&probe_at(640, 480, (30, 1))),
+        );
+        assert_eq!(
+            r.notes,
+            vec!["Source is 640x480; --resize 99999999999 left it unchanged.".to_string()]
         );
     }
 
