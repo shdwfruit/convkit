@@ -249,8 +249,13 @@ fn insert_image_family(t: &mut Table) {
 // --- Media family ------------------------------------------------------------
 
 /// Constant-quality anchor for H.264. Visually transparent at normal viewing
-/// distance; see spec §7.4.
-const CRF: &str = "20";
+/// distance; see spec §7.4. `pub` for the same reason `IMAGE_QUALITY` is:
+/// `conv capabilities` prints it, and a private copy would drift.
+pub const CRF: &str = "20";
+/// libvpx-vp9's own anchor. VP9's CRF scale runs 0-63 and is not comparable
+/// to libx264's 0-51, so it is a separate number, not a conversion of the
+/// one above.
+pub const WEBM_CRF: &str = "32";
 pub(crate) const AUDIO_BITRATE: &str = "160k";
 /// Opus bitrate for webm targets, shared with the probe-aware hybrid
 /// path in `media.rs` for the same drift-prevention reason as
@@ -316,7 +321,7 @@ const VIDEO_TO_MP4: Recipe = Recipe {
             Arg::Lit("-c:v"),
             Arg::Lit("libx264"),
             Arg::Lit("-crf"),
-            Arg::Lit(CRF),
+            Arg::Crf(CRF),
             Arg::Lit("-preset"),
             Arg::Lit("medium"),
             Arg::Lit("-pix_fmt"),
@@ -389,7 +394,7 @@ macro_rules! video_to_mkv_recipe {
                 Arg::Lit("-c:v"),
                 Arg::Lit("libx264"),
                 Arg::Lit("-crf"),
-                Arg::Lit(CRF),
+                Arg::Crf(CRF),
                 Arg::Lit("-preset"),
                 Arg::Lit("medium"),
                 Arg::Lit("-pix_fmt"),
@@ -485,7 +490,7 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
             Arg::Lit("-c:v"),
             Arg::Lit("libvpx-vp9"),
             Arg::Lit("-crf"),
-            Arg::Lit("32"),
+            Arg::Crf(WEBM_CRF),
             Arg::Lit("-b:v"),
             Arg::Lit("0"),
             Arg::Lit("-row-mt"),
@@ -616,7 +621,7 @@ const GIF_TO_MP4: Recipe = Recipe {
             Arg::Lit("-c:v"),
             Arg::Lit("libx264"),
             Arg::Lit("-crf"),
-            Arg::Lit(CRF),
+            Arg::Crf(CRF),
             Arg::Lit("-pix_fmt"),
             Arg::Lit("yuv420p"),
             Arg::Lit("-movflags"),

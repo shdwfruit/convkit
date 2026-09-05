@@ -6,7 +6,9 @@ use crate::error::Result;
 use crate::media;
 use crate::probe::MediaProbe;
 use crate::resolve::AvailableBackends;
-use crate::{registry, Arg, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe, Tuning};
+use crate::{
+    registry, Arg, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe, ResolvedVideo, Tuning,
+};
 
 /// The first argv element `build` inserts for every `Soffice` step, in
 /// place of the real `-env:UserInstallation=<url>` `exec::run` actually
@@ -178,7 +180,12 @@ pub fn build_tuned(
         let crate::recipe::Rendered {
             mut argv,
             mut path_args,
-        } = step.render_full(&inputs_here, &step_outputs[i], tuning);
+        } = step.render_full(
+            &inputs_here,
+            &step_outputs[i],
+            tuning,
+            &ResolvedVideo::default(),
+        );
         if step.backend == Backend::Soffice {
             // See `USER_INSTALLATION_PLACEHOLDER`'s docs: every real
             // Soffice invocation gets this flag from `exec::run`, so the

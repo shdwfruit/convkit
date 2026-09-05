@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::video::ResolvedVideo;
 use crate::Backend;
 
 /// User-facing tuning for one invocation — the first parameter surface in
@@ -56,6 +57,11 @@ pub enum Arg {
     /// number stays authored next to the recipe (`Arg::Quality("92")`),
     /// not buried in the renderer.
     Quality(&'static str),
+    /// The CRF value: the user's `--crf` override when given, the carried
+    /// registry anchor otherwise. Spelled with its anchor for the same
+    /// reason `Quality` is -- the number stays authored beside the recipe
+    /// (`Arg::Crf("20")`) rather than buried in the renderer.
+    Crf(&'static str),
     /// `-resize <geometry>` when `--resize` was given; renders *nothing*
     /// otherwise, keeping untuned argv byte-identical to the static table.
     TuneResize,
@@ -150,7 +156,13 @@ impl Step {
     /// public entry point every caller goes through, which rejects empty
     /// inputs with a typed `ConvError` before any `Step` is ever rendered.
     pub fn render(&self, inputs: &[&Path], output: &Path) -> Vec<String> {
-        self.render_full(inputs, output, &Tuning::default()).argv
+        self.render_full(
+            inputs,
+            output,
+            &Tuning::default(),
+            &ResolvedVideo::default(),
+        )
+        .argv
     }
 
     /// `render` plus the positions of the tokens that are filesystem paths.
@@ -160,7 +172,13 @@ impl Step {
     /// line alone, which is why `render` stays the short spelling and
     /// delegates here rather than the two walking `args` separately and
     /// drifting apart.
-    pub fn render_full(&self, inputs: &[&Path], output: &Path, tuning: &Tuning) -> Rendered {
+    pub fn render_full(
+        &self,
+        inputs: &[&Path],
+        output: &Path,
+        tuning: &Tuning,
+        _video: &ResolvedVideo,
+    ) -> Rendered {
         let mut argv = Vec::with_capacity(self.args.len());
         let mut path_args = Vec::new();
         for arg in self.args {
@@ -168,6 +186,10 @@ impl Step {
                 Arg::Lit(s) => argv.push((*s).to_string()),
                 Arg::Quality(default) => argv.push(match tuning.quality {
                     Some(q) => q.to_string(),
+                    None => (*default).to_string(),
+                }),
+                Arg::Crf(default) => argv.push(match tuning.crf {
+                    Some(n) => n.to_string(),
                     None => (*default).to_string(),
                 }),
                 Arg::TuneResize => {
@@ -278,6 +300,7 @@ mod tests {
             &[Path::new("in.mp4")],
             Path::new("out.gif"),
             &Tuning::default(),
+            &ResolvedVideo::default(),
         );
         assert_eq!(r.argv, vec!["-i", "in.mp4", "-y", "out.gif"]);
         assert_eq!(
@@ -303,6 +326,7 @@ mod tests {
             &[Path::new("photo.heic")],
             Path::new("out.jpg"),
             &Tuning::default(),
+            &ResolvedVideo::default(),
         );
         assert_eq!(r.argv[0], "photo.heic[0]");
         assert_eq!(
@@ -324,6 +348,7 @@ mod tests {
             &[Path::new("a/in.docx")],
             Path::new("b/out.pdf"),
             &Tuning::default(),
+            &ResolvedVideo::default(),
         );
         assert_eq!(r.argv, vec!["--outdir", "b", "a/in.docx"]);
         assert_eq!(r.path_args, vec![1, 2], "the out-dir and the input");
@@ -341,6 +366,7 @@ mod tests {
             &[Path::new("in.docx")],
             Path::new("out.pdf"),
             &Tuning::default(),
+            &ResolvedVideo::default(),
         );
         assert_eq!(r.argv, vec!["."]);
         assert_eq!(r.path_args, vec![0]);
@@ -423,7 +449,12 @@ mod tests {
             fps: None,
             crf: None,
         };
-        let r = TUNABLE.render_full(&[Path::new("in.png")], Path::new("out.jpg"), &tuning);
+        let r = TUNABLE.render_full(
+            &[Path::new("in.png")],
+            Path::new("out.jpg"),
+            &tuning,
+            &ResolvedVideo::default(),
+        );
         assert_eq!(
             r.argv,
             vec!["in.png", "-resize", "1600x900", "-colors", "64", "-quality", "70", "out.jpg"]
@@ -438,7 +469,12 @@ mod tests {
             resize: Some("50%".into()),
             ..Tuning::default()
         };
-        let r = TUNABLE.render_full(&[Path::new("in.png")], Path::new("out.jpg"), &tuning);
+        let r = TUNABLE.render_full(
+            &[Path::new("in.png")],
+            Path::new("out.jpg"),
+            &tuning,
+            &ResolvedVideo::default(),
+        );
         for &i in &r.path_args {
             assert!(
                 r.argv[i] == "in.png" || r.argv[i] == "out.jpg",
@@ -490,5 +526,42 @@ mod tests {
             5,
             "Tuning gained a field; add it to `each` and to is_empty()"
         );
+    }
+
+    #[test]
+    fn an_untuned_crf_slot_renders_its_authored_anchor() {
+        let step = Step {
+            backend: Backend::Ffmpeg,
+            args: &[Arg::Lit("-crf"), Arg::Crf("20")],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let out = step.render_full(
+            &[Path::new("in.mp4")],
+            Path::new("out.mp4"),
+            &Tuning::default(),
+            &ResolvedVideo::default(),
+        );
+        assert_eq!(out.argv, vec!["-crf".to_string(), "20".to_string()]);
+    }
+
+    #[test]
+    fn a_tuned_crf_slot_renders_the_users_value() {
+        let step = Step {
+            backend: Backend::Ffmpeg,
+            args: &[Arg::Lit("-crf"), Arg::Crf("20")],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let out = step.render_full(
+            &[Path::new("in.mp4")],
+            Path::new("out.mp4"),
+            &Tuning {
+                crf: Some(28),
+                ..Default::default()
+            },
+            &ResolvedVideo::default(),
+        );
+        assert_eq!(out.argv, vec!["-crf".to_string(), "28".to_string()]);
     }
 }
