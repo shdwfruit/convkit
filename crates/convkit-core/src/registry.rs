@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
+use crate::recipe::{ScaleStyle, VideoChainSpec};
 use crate::{Arg, Backend, Format, OutputMode, Recipe, Step};
 
 /// JPEG/WebP/AVIF quality. Visually transparent without bloat; see spec §7.4.
@@ -277,29 +278,79 @@ const EVEN_SCALE: &str = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
 /// Shared with the probe-aware hybrid path in `media.rs`.
 pub(crate) const OPUS_CHANNEL_LAYOUTS: &str = "aformat=channel_layouts=7.1|5.1|stereo|mono";
 
-/// GIF frame rate and maximum width, each spelled once and spliced into
-/// `GIF_FILTER` via `concat!`. `concat!` requires every argument to expand to
-/// a literal token; a zero-arg macro satisfies that, a path to a `const` item
-/// does not — hence macros here instead of `const GIF_FPS`/`GIF_MAX_W`.
-/// Capped, never upscaled.
-macro_rules! gif_fps {
-    () => {
-        "15"
-    };
-}
-macro_rules! gif_max_w {
-    () => {
-        "640"
-    };
-}
+/// GIF frame rate and maximum width, each spelled once. Composed into a
+/// `-vf` value at render time by `VideoChainSpec::compose`, so unlike the
+/// filter text below these are ordinary consts -- `concat!`'s "every
+/// argument must be a literal token" restriction only bound the two now-gone
+/// macros this replaced, not a runtime `String` build. Capped, never
+/// upscaled.
+const GIF_FPS: &str = "15";
+const GIF_MAX_W: &str = "640";
+/// Everything after the tuned head in the GIF chain, verbatim.
+const GIF_TAIL: &str = concat!(
+    "split[a][b];",
+    "[a]palettegen=stats_mode=diff[p];",
+    "[b][p]paletteuse=dither=bayer:bayer_scale=3"
+);
+
+/// The one `-vf` value every libx264 transcode composes: untuned, this is
+/// exactly `EVEN_SCALE`.
+pub(crate) const TRANSCODE_CHAIN: VideoChainSpec = VideoChainSpec {
+    prefix: "",
+    fps: None,
+    scale: ScaleStyle::Guarded,
+    tail: EVEN_SCALE,
+};
+
+/// The one `-vf` value `TO_GIF` composes: untuned, this is exactly
+/// `GIF_FILTER` (below, kept for the byte-identity tests to compare
+/// against).
+pub const TO_GIF_CHAIN: VideoChainSpec = VideoChainSpec {
+    prefix: "",
+    fps: Some(GIF_FPS),
+    scale: ScaleStyle::CappedLanczos {
+        default_width: GIF_MAX_W,
+    },
+    tail: GIF_TAIL,
+};
+
+/// `TO_GIF_CHAIN` with an HDR->SDR mapping prefixed: convert the source's
+/// BT.2020 PQ/HLG signal to BT.709 with perceptual intent, then run the
+/// ordinary GIF chain. Without this, HDR code values are written straight
+/// into an sRGB GIF, so default iPhone 12+ / HDR-YouTube footage comes out
+/// grey and hue-shifted. Uses the core `scale` filter's color management
+/// (ffmpeg >= 8's rebuilt swscale) rather than the traditional
+/// zscale+tonemap chain deliberately: zscale needs libzimg, which common
+/// system builds (Homebrew's, verified on this machine) omit, while the
+/// managed pins are all >= 8-capable. On an older system ffmpeg this fails
+/// loudly with the option named in the error -- a hard failure over silent
+/// garbage, with `conv install ffmpeg` as the escape hatch.
+///
+/// Differs from `TO_GIF_CHAIN` in `prefix` and in nothing else, which is
+/// what the old strict-suffix test was protecting and is now true by
+/// construction: the `..TO_GIF_CHAIN` functional update below cannot copy
+/// `fps`/`scale`/`tail` from anywhere else. `registry.rs`'s own tests still
+/// assert the two shared fields match, so that claim keeps being checked
+/// even if this struct literal is ever rewritten by hand.
+pub const TO_GIF_TONEMAP_CHAIN: VideoChainSpec = VideoChainSpec {
+    prefix: concat!(
+        "scale=out_color_matrix=bt709:out_primaries=bt709:",
+        "out_transfer=bt709:intent=perceptual,",
+        "format=yuv420p,"
+    ),
+    ..TO_GIF_CHAIN
+};
 
 /// Escaped comma is required: ffmpeg's filter parser splits unescaped commas
 /// into separate filters. No shell is involved, so the backslash is literal.
+///
+/// Kept only as the oracle `an_untuned_gif_chain_is_byte_identical_to_the_old_constant`
+/// compares `TO_GIF_CHAIN.compose(...)` against; nothing outside `mod tests`
+/// reads this any more; `Arg::VideoChain(&TO_GIF_CHAIN)` composes the same
+/// text at render time instead.
+#[cfg(test)]
 const GIF_FILTER: &str = concat!(
-    "fps=",
-    gif_fps!(),
-    ",scale=w=min(",
-    gif_max_w!(),
+    "fps=15,scale=w=min(640",
     r"\,iw):h=-2:flags=lanczos,split[a][b];",
     "[a]palettegen=stats_mode=diff[p];",
     "[b][p]paletteuse=dither=bayer:bayer_scale=3"
@@ -317,7 +368,7 @@ const VIDEO_TO_MP4: Recipe = Recipe {
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-vf"),
-            Arg::Lit(EVEN_SCALE),
+            Arg::VideoChain(&TRANSCODE_CHAIN),
             Arg::Lit("-c:v"),
             Arg::Lit("libx264"),
             Arg::Lit("-crf"),
@@ -390,7 +441,7 @@ macro_rules! video_to_mkv_recipe {
                 Arg::Lit("-map"),
                 Arg::Lit("-0:d"),
                 Arg::Lit("-vf"),
-                Arg::Lit(EVEN_SCALE),
+                Arg::VideoChain(&TRANSCODE_CHAIN),
                 Arg::Lit("-c:v"),
                 Arg::Lit("libx264"),
                 Arg::Lit("-crf"),
@@ -517,7 +568,7 @@ const TO_GIF: Recipe = Recipe {
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-vf"),
-            Arg::Lit(GIF_FILTER),
+            Arg::VideoChain(&TO_GIF_CHAIN),
             Arg::Lit("-loop"),
             Arg::Lit("0"),
             Arg::Lit("-y"),
@@ -531,26 +582,14 @@ const TO_GIF: Recipe = Recipe {
     ],
 };
 
-/// `GIF_FILTER` with an HDR→SDR mapping prefixed: convert the source's
-/// BT.2020 PQ/HLG signal to BT.709 with perceptual intent, then run the
-/// ordinary GIF chain. Without this, HDR code values are written straight
-/// into an sRGB GIF, so default iPhone 12+ / HDR-YouTube footage comes out
-/// grey and hue-shifted. Uses the core `scale` filter's color management
-/// (ffmpeg ≥ 8's rebuilt swscale) rather than the traditional
-/// zscale+tonemap chain deliberately: zscale needs libzimg, which common
-/// system builds (Homebrew's, verified on this machine) omit, while the
-/// managed pins are all ≥ 8-capable. On an older system ffmpeg this fails
-/// loudly with the option named in the error — a hard failure over silent
-/// garbage, with `conv install ffmpeg` as the escape hatch. Must stay a
-/// strict suffix match with `GIF_FILTER` (tested), so the two chains can
-/// never drift apart.
+/// `GIF_FILTER` with the HDR->SDR mapping prefixed. Kept only as the oracle
+/// the drift tests below compare `TO_GIF_TONEMAP_CHAIN.compose(...)`
+/// against; nothing outside `mod tests` reads this any more.
+#[cfg(test)]
 const GIF_FILTER_TONEMAP: &str = concat!(
     "scale=out_color_matrix=bt709:out_primaries=bt709:out_transfer=bt709:intent=perceptual,",
     "format=yuv420p,",
-    "fps=",
-    gif_fps!(),
-    ",scale=w=min(",
-    gif_max_w!(),
+    "fps=15,scale=w=min(640",
     r"\,iw):h=-2:flags=lanczos,split[a][b];",
     "[a]palettegen=stats_mode=diff[p];",
     "[b][p]paletteuse=dither=bayer:bayer_scale=3"
@@ -565,7 +604,7 @@ pub const TO_GIF_TONEMAP: Recipe = Recipe {
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-vf"),
-            Arg::Lit(GIF_FILTER_TONEMAP),
+            Arg::VideoChain(&TO_GIF_TONEMAP_CHAIN),
             Arg::Lit("-loop"),
             Arg::Lit("0"),
             Arg::Lit("-y"),
@@ -617,7 +656,7 @@ const GIF_TO_MP4: Recipe = Recipe {
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-vf"),
-            Arg::Lit("scale=trunc(iw/2)*2:trunc(ih/2)*2"),
+            Arg::VideoChain(&TRANSCODE_CHAIN),
             Arg::Lit("-c:v"),
             Arg::Lit("libx264"),
             Arg::Lit("-crf"),
@@ -1155,6 +1194,7 @@ pub(crate) fn compat_tables(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::ResolvedVideo;
 
     #[test]
     fn heic_to_jpg_auto_orients_and_sets_quality() {
@@ -1288,16 +1328,19 @@ mod tests {
         assert!(joined.contains("-quality 92"), "{joined}");
     }
 
-    /// The tonemap chain must stay a strict prefix + the ordinary GIF
-    /// chain, so the two can never drift apart.
+    /// The tonemap chain must stay the plain GIF chain with a prefix, so the
+    /// two can never drift apart.
     #[test]
-    fn gif_tonemap_filter_is_the_gif_filter_with_a_tonemap_prefix() {
+    fn an_untuned_tonemap_chain_still_ends_with_the_plain_gif_chain() {
+        let plain = TO_GIF_CHAIN.compose(&ResolvedVideo::default());
+        let tonemapped = TO_GIF_TONEMAP_CHAIN.compose(&ResolvedVideo::default());
         assert!(
-            GIF_FILTER_TONEMAP.ends_with(GIF_FILTER),
-            "GIF_FILTER_TONEMAP must end with GIF_FILTER"
+            tonemapped.ends_with(&plain),
+            "the two chains must never drift apart:\n  {tonemapped}\n  {plain}"
         );
-        assert!(GIF_FILTER_TONEMAP.starts_with("scale=out_color_matrix=bt709"));
-        assert!(GIF_FILTER_TONEMAP.contains("intent=perceptual"));
+        // And the reason they cannot: they differ only in `prefix`.
+        assert_eq!(TO_GIF_CHAIN.fps, TO_GIF_TONEMAP_CHAIN.fps);
+        assert_eq!(TO_GIF_CHAIN.tail, TO_GIF_TONEMAP_CHAIN.tail);
     }
 
     /// `gif_recipe_for` picks the tonemap sibling exactly for PQ/HLG
@@ -1805,5 +1848,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_untuned_transcode_chain_is_exactly_the_even_scale_guard() {
+        let spec = VideoChainSpec {
+            prefix: "",
+            fps: None,
+            scale: ScaleStyle::Guarded,
+            tail: EVEN_SCALE,
+        };
+        assert_eq!(spec.compose(&ResolvedVideo::default()), EVEN_SCALE);
+    }
+
+    #[test]
+    fn an_untuned_gif_chain_is_byte_identical_to_the_old_constant() {
+        // This is the property that keeps the snapshot green. It is not a
+        // coincidence to be checked afterwards -- it is why the struct is
+        // shaped head + tail.
+        assert_eq!(TO_GIF_CHAIN.compose(&ResolvedVideo::default()), GIF_FILTER);
+    }
+
+    #[test]
+    fn an_untuned_tonemap_chain_is_byte_identical_to_the_old_constant() {
+        // GIF_FILTER's sibling oracle: the hardcoded HDR->SDR prefix was
+        // verified against a real ffmpeg (see TO_GIF_TONEMAP_CHAIN's doc
+        // comment); this pins that exact text against silent drift.
+        assert_eq!(
+            TO_GIF_TONEMAP_CHAIN.compose(&ResolvedVideo::default()),
+            GIF_FILTER_TONEMAP
+        );
+    }
+
+    #[test]
+    fn a_tuned_fps_overrides_the_recipes_authored_default() {
+        let r = ResolvedVideo {
+            fps: Some("10".into()),
+            ..Default::default()
+        };
+        assert!(TO_GIF_CHAIN.compose(&r).starts_with("fps=10,"));
+        assert!(!TO_GIF_CHAIN.compose(&r).contains("fps=15"));
+    }
+
+    #[test]
+    fn a_tuned_scale_on_a_gif_keeps_the_lanczos_scaler() {
+        // The recipe chose lanczos for a reason; a user width must not
+        // silently downgrade the resampler to ffmpeg's default.
+        let r = ResolvedVideo {
+            scale: Some(r"scale=w=min(320\,iw):h=-2".into()),
+            ..Default::default()
+        };
+        let out = TO_GIF_CHAIN.compose(&r);
+        assert!(
+            out.contains(r"scale=w=min(320\,iw):h=-2:flags=lanczos,"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("min(640"),
+            "the authored width must be replaced: {out}"
+        );
+    }
+
+    #[test]
+    fn a_tuned_scale_on_a_transcode_still_ends_with_the_even_guard() {
+        // libx264 with -pix_fmt yuv420p rejects odd dimensions outright,
+        // and force_divisible_by is a no-op without
+        // force_original_aspect_ratio -- measured: min(801,iw):h=-2 with it
+        // produced 801x450. The trailing guard is what makes every form
+        // safe.
+        let spec = VideoChainSpec {
+            prefix: "",
+            fps: None,
+            scale: ScaleStyle::Guarded,
+            tail: EVEN_SCALE,
+        };
+        let r = ResolvedVideo {
+            scale: Some(r"scale=w=min(801\,iw):h=-2".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            spec.compose(&r),
+            format!(r"scale=w=min(801\,iw):h=-2,{EVEN_SCALE}")
+        );
+    }
+
+    #[test]
+    fn a_tuned_value_lands_before_the_palette_split() {
+        // Appended after `split[a][b]` it would be inside the palettegen
+        // graph and produce a default web-palette GIF.
+        let r = ResolvedVideo {
+            fps: Some("12".into()),
+            ..Default::default()
+        };
+        let out = TO_GIF_CHAIN.compose(&r);
+        assert!(
+            out.find("fps=12").unwrap() < out.find("split[a][b]").unwrap(),
+            "{out}"
+        );
     }
 }

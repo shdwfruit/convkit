@@ -47,6 +47,73 @@ impl Tuning {
     }
 }
 
+/// How a recipe spells its width cap, and what it scales with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScaleStyle {
+    /// No authored scale. A tuned cap composes in front of `tail`, which
+    /// for every libx264 target is the even-dimension guard.
+    Guarded,
+    /// GIF's capped lanczos downscale, whose width the tuning overrides.
+    /// Needs no even guard, for one reason and not two: GIF has no
+    /// yuv420p constraint at all. (`h=-2` appears in only one of the four
+    /// geometry forms, so it cannot be the reason.)
+    CappedLanczos { default_width: &'static str },
+}
+
+/// The parts of one `-vf` value, so it can be composed at render time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoChainSpec {
+    /// Filters that must run before the tuned head. Empty for every recipe
+    /// but the GIF tonemap sibling, whose HDR->SDR mapping has to see the
+    /// source signal before anything decimates or resamples it. Carries its
+    /// own trailing comma.
+    pub prefix: &'static str,
+    /// The frame-rate cap this recipe authored. GIF authors "15"; the
+    /// transcodes carry the source rate and author `None`.
+    pub fps: Option<&'static str>,
+    /// How this recipe spells a width cap.
+    pub scale: ScaleStyle,
+    /// Everything after the tuned head, verbatim.
+    pub tail: &'static str,
+}
+
+impl VideoChainSpec {
+    /// Builds the one `-vf` value.
+    ///
+    /// Untuned, this reproduces byte for byte the constant the
+    /// `Arg::VideoChain` variant replaced -- which is not a property to be
+    /// checked afterwards but the reason the struct is shaped head + tail.
+    /// It is what keeps `tests/recipes.rs`'s snapshot green.
+    pub fn compose(&self, resolved: &ResolvedVideo) -> String {
+        let mut out = String::from(self.prefix);
+        if let Some(f) = resolved.fps.as_deref().or(self.fps) {
+            out.push_str("fps=");
+            out.push_str(f);
+            out.push(',');
+        }
+        match (&resolved.scale, &self.scale) {
+            // A user width must not silently downgrade the resampler the
+            // recipe chose.
+            (Some(s), ScaleStyle::CappedLanczos { .. }) => {
+                out.push_str(s);
+                out.push_str(":flags=lanczos,");
+            }
+            (Some(s), ScaleStyle::Guarded) => {
+                out.push_str(s);
+                out.push(',');
+            }
+            (None, ScaleStyle::CappedLanczos { default_width }) => {
+                out.push_str(&format!(
+                    r"scale=w=min({default_width}\,iw):h=-2:flags=lanczos,"
+                ));
+            }
+            (None, ScaleStyle::Guarded) => {}
+        }
+        out.push_str(self.tail);
+        out
+    }
+}
+
 /// A single argument slot in a backend invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arg {
@@ -62,6 +129,13 @@ pub enum Arg {
     /// reason `Quality` is -- the number stays authored beside the recipe
     /// (`Arg::Crf("20")`) rather than buried in the renderer.
     Crf(&'static str),
+    /// The `-vf` value, composed at render time.
+    ///
+    /// ffmpeg keeps a single filter chain per output stream, so a second
+    /// `-vf` replaces the first rather than chaining onto it; a knob cannot
+    /// append its own filter, and every chain must be built as one string.
+    /// Holds a reference because `Arg` is `Copy`.
+    VideoChain(&'static VideoChainSpec),
     /// `-resize <geometry>` when `--resize` was given; renders *nothing*
     /// otherwise, keeping untuned argv byte-identical to the static table.
     TuneResize,
@@ -177,7 +251,7 @@ impl Step {
         inputs: &[&Path],
         output: &Path,
         tuning: &Tuning,
-        _video: &ResolvedVideo,
+        video: &ResolvedVideo,
     ) -> Rendered {
         let mut argv = Vec::with_capacity(self.args.len());
         let mut path_args = Vec::new();
@@ -192,6 +266,7 @@ impl Step {
                     Some(n) => n.to_string(),
                     None => (*default).to_string(),
                 }),
+                Arg::VideoChain(spec) => argv.push(spec.compose(video)),
                 Arg::TuneResize => {
                     if let Some(g) = &tuning.resize {
                         argv.push("-resize".to_string());
