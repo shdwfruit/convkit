@@ -50,10 +50,11 @@ pub struct Cli {
     #[arg(short = 'v', long, conflicts_with = "quiet")]
     pub verbose: bool,
 
-    /// Fit the image within this geometry, aspect preserved: `1600x900`,
-    /// `1600x` (width), `x900` (height), or `50%`. Image conversions only.
+    /// Fit within this geometry, aspect preserved: `1600x900`, `1600x`
+    /// (width), `x900` (height), or `50%`. On video and GIF targets this is
+    /// a cap: a source already smaller is left alone.
     ///
-    /// Not `global` -- see `dry_run`'s doc comment; likewise the two flags
+    /// Not `global` -- see `dry_run`'s doc comment; likewise the four flags
     /// below.
     #[arg(long, value_name = "GEOMETRY", value_parser = parse_resize_geometry)]
     pub resize: Option<String>,
@@ -67,6 +68,19 @@ pub struct Cli {
     /// targets only.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(2..=256))]
     pub colors: Option<u16>,
+
+    /// Cap the frame rate of video and GIF targets; slower sources are
+    /// left alone. Video conversions only.
+    ///
+    /// Not `global` -- see `dry_run`'s doc comment, as with the three
+    /// flags above.
+    #[arg(long, value_name = "RATE", value_parser = parse_frame_rate)]
+    pub fps: Option<String>,
+
+    /// Constant-quality anchor for video targets: 0-51 for mp4/mov/mkv,
+    /// 0-63 for webm. Lower is better.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=63))]
+    pub crf: Option<u8>,
 
     /// Assume yes when prompted to install a missing backend — for a script
     /// that wants the install-then-retry behaviour without a TTY to answer
@@ -126,8 +140,8 @@ pub enum Command {
     /// pairs, baked-in defaults, and which tuning flags apply.
     Capabilities {
         /// A format extension, e.g. `jpg` — shows what converts to and
-        /// from it, the defaults its recipes use, and the applicable
-        /// tuning flags (--resize/--quality/--colors).
+        /// from it, the defaults its recipes use, and which tuning flags
+        /// (resize, quality, colors, fps, crf) apply to each pair.
         format: Option<String>,
     },
     /// List the files here and what each one could be converted into.
@@ -185,6 +199,13 @@ changes nothing, and exits non-zero if anything is.")]
     },
 }
 
+/// A dimension past this is not a size any real raster or frame reaches --
+/// JPEG's own dimension fields are 16 bits and top out at 65535, and
+/// nothing else convkit targets goes further. Refusing it here, rather than
+/// letting it reach the `u32` parse downstream, keeps the error at the edge,
+/// where the message can still name the forms this flag accepts.
+const MAX_GEOMETRY_VALUE: u32 = 65_535;
+
 /// Validates `--resize` down to the five geometry forms convkit supports:
 /// `W`, `WxH`, `Wx`, `xH`, `N%`. Strictly digits plus one `x` or a
 /// trailing `%` — ImageMagick's own geometry grammar also accepts `@`,
@@ -193,12 +214,28 @@ changes nothing, and exits non-zero if anything is.")]
 /// promised.
 fn parse_resize_geometry(s: &str) -> Result<String, String> {
     let all_digits = |t: &str| t.chars().all(|c| c.is_ascii_digit());
+    // A dimension of zero passes `all_digits` but is not a size. magick and
+    // ffmpeg each do something different and surprising with it, and
+    // neither is what was asked for. A dimension over MAX_GEOMETRY_VALUE
+    // passes `all_digits` too, and would otherwise overflow `u32::parse`
+    // downstream.
+    let positive = |t: &str| {
+        !t.is_empty()
+            && all_digits(t)
+            && t.chars().any(|c| c != '0')
+            && t.parse::<u32>().is_ok_and(|n| n <= MAX_GEOMETRY_VALUE)
+    };
     let ok = if let Some(pct) = s.strip_suffix('%') {
-        !pct.is_empty() && all_digits(pct)
+        positive(pct)
     } else if let Some((w, h)) = s.split_once('x') {
-        (!w.is_empty() || !h.is_empty()) && all_digits(w) && all_digits(h)
+        match (w.is_empty(), h.is_empty()) {
+            (true, true) => false,
+            (true, false) => positive(h),
+            (false, true) => positive(w),
+            (false, false) => positive(w) && positive(h),
+        }
     } else {
-        !s.is_empty() && all_digits(s)
+        positive(s)
     };
     if ok {
         Ok(s.to_string())
@@ -209,16 +246,49 @@ fn parse_resize_geometry(s: &str) -> Result<String, String> {
     }
 }
 
+/// Validates `--fps` down to the three forms convkit supports: an integer,
+/// a decimal, or an `N/D` rational. ffmpeg's `fps` filter accepts a great
+/// deal more -- expressions, `source_fps`, constants -- and letting those
+/// through would make the flag a side-channel into ffmpeg's filter grammar
+/// this help text never promised, exactly as `parse_resize_geometry`
+/// refuses magick's `@ ! < > ^`.
+///
+/// Zero is refused at both ends: a zero rate is not a slower rate, and a
+/// zero denominator divides by zero wherever the cap is compared.
+fn parse_frame_rate(s: &str) -> Result<String, String> {
+    let bad =
+        || format!("frame rate must be N, N.N, or N/D (e.g. 24, 29.97, 30000/1001), got {s:?}");
+    let positive = |t: &str| -> bool {
+        !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) && t.chars().any(|c| c != '0')
+    };
+    let ok = if let Some((n, d)) = s.split_once('/') {
+        positive(n) && positive(d)
+    } else if let Some((w, f)) = s.split_once('.') {
+        !f.is_empty()
+            && f.chars().all(|c| c.is_ascii_digit())
+            && w.chars().all(|c| c.is_ascii_digit())
+            && (positive(w) || f.chars().any(|c| c != '0'))
+    } else {
+        positive(s)
+    };
+    if ok {
+        Ok(s.to_string())
+    } else {
+        Err(bad())
+    }
+}
+
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
-    /// unless one of `--resize`/`--quality`/`--colors` was passed.
+    /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf` was
+    /// passed.
     pub fn tuning(&self) -> Tuning {
         Tuning {
             resize: self.resize.clone(),
             quality: self.quality,
             colors: self.colors,
-            fps: None,
-            crf: None,
+            fps: self.fps.clone(),
+            crf: self.crf,
         }
     }
 
@@ -261,6 +331,8 @@ mod tests {
             resize: None,
             quality: None,
             colors: None,
+            fps: None,
+            crf: None,
             yes: false,
             no_install: false,
             outdir: None,

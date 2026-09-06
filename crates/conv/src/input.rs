@@ -940,6 +940,8 @@ mod tests {
             resize: None,
             quality: None,
             colors: None,
+            fps: None,
+            crf: None,
             yes: false,
             no_install: false,
             outdir,

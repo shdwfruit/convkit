@@ -1035,23 +1035,35 @@ fn update_help_explains_the_pinned_not_latest_design_and_no_self_replace() {
 // --- CLI help papercut: conversion-only flags must not leak into every
 // subcommand's --help -------------------------------------------------------
 //
-// `--dry-run`, `-y/--overwrite`, `-o/--outdir`, and `-j/--jobs` only mean
-// something for the implicit conversion path (no subcommand) -- `conv
-// update --outdir` is meaningless. They used to be `global = true` in
-// `cli.rs`, which made clap attach them to every subcommand, including ones
-// (`doctor`, `install`, `capabilities`, `update`) that can never read them.
+// `--dry-run`, `-y/--overwrite`, `-o/--outdir`, `-j/--jobs`, and the five
+// tuning flags (`--resize`, `--quality`, `--colors`, `--fps`, `--crf`) only
+// mean something for the implicit conversion path (no subcommand) -- `conv
+// update --outdir` is meaningless. They used to be (or, for the tuning
+// flags, would naively become) `global = true` in `cli.rs`, which made clap
+// attach them to every subcommand, including ones (`doctor`, `install`,
+// `capabilities`, `update`) that can never read them.
 // `--json`, `--quiet`, `--yes`/`--no-install`, and the per-backend
 // `--<x>-path` overrides genuinely do mean something on every subcommand
 // (several of them can install a missing backend), so those stay global.
 
-/// None of the four conversion-only flags should appear in `--help` for any
+/// None of the nine conversion-only flags should appear in `--help` for any
 /// subcommand that can never read them.
 #[test]
 fn subcommand_help_never_lists_conversion_only_flags() {
     for subcommand in ["doctor", "install", "capabilities", "update"] {
         let out = conv().args([subcommand, "--help"]).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
-        for flag in ["--dry-run", "--overwrite", "--outdir", "--jobs"] {
+        for flag in [
+            "--dry-run",
+            "--overwrite",
+            "--outdir",
+            "--jobs",
+            "--resize",
+            "--quality",
+            "--colors",
+            "--fps",
+            "--crf",
+        ] {
             assert!(
                 !stdout.contains(flag),
                 "`conv {subcommand} --help` must not list {flag}: {stdout}"
@@ -1584,4 +1596,38 @@ fn capabilities_and_scan_agree_on_the_kind_spelling() {
 
     assert_eq!(caps["kind"], "image", "{caps}");
     assert_eq!(caps["kind"], scan["files"][0]["kind"], "{caps} vs {scan}");
+}
+
+#[test]
+fn a_frame_rate_accepts_integers_decimals_and_rationals() {
+    for good in ["24", "30", "29.97", "60", "30000/1001"] {
+        conv()
+            .args(["--fps", good, "--dry-run", "in.mp4", "out.mp4"])
+            .assert()
+            .stderr(predicates::str::contains("must be").not());
+    }
+}
+
+#[test]
+fn a_nonsense_frame_rate_is_refused_with_the_forms_named() {
+    for bad in ["0", "-5", "abc", "30/0", "24fps", ""] {
+        conv()
+            .args(["--fps", bad, "in.mp4", "out.mp4"])
+            .assert()
+            .failure()
+            .code(2);
+    }
+}
+
+#[test]
+fn a_zero_dimension_geometry_is_refused() {
+    // all_digits accepts these today; they reach the backend as degenerate
+    // geometry with backend-specific results, none of which is what was asked.
+    for bad in ["0", "0%", "x0", "0x0"] {
+        conv()
+            .args(["--resize", bad, "in.png", "out.jpg"])
+            .assert()
+            .failure()
+            .code(2);
+    }
 }
