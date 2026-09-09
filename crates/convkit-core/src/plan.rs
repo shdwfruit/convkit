@@ -6,9 +6,7 @@ use crate::error::Result;
 use crate::media;
 use crate::probe::MediaProbe;
 use crate::resolve::AvailableBackends;
-use crate::{
-    registry, Arg, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe, ResolvedVideo, Tuning,
-};
+use crate::{registry, Arg, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe, Tuning};
 
 /// The first argv element `build` inserts for every `Soffice` step, in
 /// place of the real `-env:UserInstallation=<url>` `exec::run` actually
@@ -104,6 +102,17 @@ pub fn build_tuned(
         ));
     }
 
+    // Resolved once, above every branch below, so the probe-aware dynamic
+    // path and the static-recipe path both render against the same value
+    // instead of the static path discarding it for `ResolvedVideo::default()`
+    // (the bug Task 8b fixes: `--fps`/`--resize` on `video -> gif` and
+    // `gif -> mp4` were accepted, exited 0, and did nothing, because neither
+    // pair ever took the dynamic branch below -- see `plan.rs`'s module docs
+    // history for `needs_probe`/`compat_tables(Gif)`). An empty `Tuning`
+    // resolves to `ResolvedVideo::default()` with no notes regardless of
+    // `probe`, which is what keeps the untuned argv snapshot byte-identical.
+    let resolved = crate::video::resolve(tuning, probe);
+
     // Probe-aware media paths first: a container change whose video codec
     // already fits the target gets a stream-mapped copy (or hybrid
     // copy-video/transcode-audio) invocation built from the probe, and an
@@ -116,7 +125,6 @@ pub fn build_tuned(
     // runs when a probe is in hand.
     if let Some(p) = probe {
         if registry::lookup(from, to).is_some() && registry::needs_probe(from, to) {
-            let resolved = crate::video::resolve(tuning, Some(p));
             // A video knob changes the picture, and ffmpeg refuses a filter
             // alongside -c:v copy -- so consult the tuning before choosing
             // the path, not after. Choosing first is why `select()` below
@@ -199,12 +207,7 @@ pub fn build_tuned(
         let crate::recipe::Rendered {
             mut argv,
             mut path_args,
-        } = step.render_full(
-            &inputs_here,
-            &step_outputs[i],
-            tuning,
-            &ResolvedVideo::default(),
-        );
+        } = step.render_full(&inputs_here, &step_outputs[i], tuning, &resolved);
         if step.backend == Backend::Soffice {
             // See `USER_INSTALLATION_PLACEHOLDER`'s docs: every real
             // Soffice invocation gets this flag from `exec::run`, so the
@@ -228,13 +231,19 @@ pub fn build_tuned(
         });
     }
 
+    let mut warnings: Vec<String> = recipe.warnings.iter().map(|w| (*w).to_string()).collect();
+    // Mirrors the dynamic branch above (`m.warnings.extend(resolved.notes...)`)
+    // -- a static recipe carrying an `Arg::VideoChain` slot gets the same
+    // honesty about a cap that did not bind or a probe that never ran.
+    warnings.extend(resolved.notes.iter().cloned());
+
     Ok(ConversionPlan {
         from,
         to,
         inputs: inputs.to_vec(),
         output: output.to_path_buf(),
         steps,
-        warnings: recipe.warnings.iter().map(|w| (*w).to_string()).collect(),
+        warnings,
     })
 }
 
@@ -1313,5 +1322,149 @@ mod tests {
         assert_eq!(err.code, crate::ErrorCode::InvalidInvocation);
         assert!(err.message.contains("--crf 60"), "{}", err.message);
         assert!(err.message.contains("out of range"), "{}", err.message);
+    }
+
+    // --- Task 8b: a video knob must reach a static recipe's chain too,
+    // not only the probe-selected dynamic path -------------------------
+
+    #[test]
+    fn a_video_knob_reaches_a_static_recipes_chain() {
+        // mp4 -> gif never takes the dynamic path: compat_tables(Gif) is
+        // None, so transcoded_invocation declines and control falls through
+        // to TO_GIF. The knob must still land in the chain.
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        let t = Tuning {
+            fps: Some("10".into()),
+            resize: Some("320x".into()),
+            ..Default::default()
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Gif,
+            &[p("in.mp4")],
+            Path::new("out.gif"),
+            Some(&probe),
+            None,
+            &t,
+        )
+        .expect("mp4 -> gif is a registered pair");
+        let vf = plan.steps[0].argv.join(" ");
+        assert!(
+            vf.contains("fps=10"),
+            "the authored fps=15 must be overridden: {vf}"
+        );
+        assert!(!vf.contains("fps=15"), "{vf}");
+        assert!(
+            vf.contains("min(320"),
+            "the authored width must be overridden: {vf}"
+        );
+        assert!(!vf.contains("min(640"), "{vf}");
+        // The palette chain must survive intact -- spliced after split[a][b]
+        // the tuned values would produce a default web-palette GIF.
+        assert!(
+            vf.find("fps=10").unwrap() < vf.find("split[a][b]").unwrap(),
+            "{vf}"
+        );
+    }
+
+    #[test]
+    fn an_untuned_static_recipe_is_unchanged_by_the_hoist() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        let a = build(
+            Format::Mp4,
+            Format::Gif,
+            &[p("in.mp4")],
+            Path::new("out.gif"),
+            Some(&probe),
+            None,
+        );
+        let b = build_tuned(
+            Format::Mp4,
+            Format::Gif,
+            &[p("in.mp4")],
+            Path::new("out.gif"),
+            Some(&probe),
+            None,
+            &Tuning::default(),
+        );
+        assert_eq!(a.unwrap().steps[0].argv, b.unwrap().steps[0].argv);
+    }
+
+    /// The other half of the bug: `gif -> mp4` never even reaches the
+    /// probe branch (`registry::needs_probe(Gif, Mp4)` is `false`), so the
+    /// hoist has to serve the static path unconditionally, not just when
+    /// the probe branch happens to run.
+    #[test]
+    fn a_video_knob_reaches_the_gif_to_mp4_static_recipe() {
+        let probe = MediaProbe {
+            video_codec: Some("gif".into()),
+            video_streams: 1,
+            width: Some(480),
+            height: Some(270),
+            frame_rate: Some((15, 1)),
+            ..MediaProbe::default()
+        };
+        let t = Tuning {
+            fps: Some("10".into()),
+            resize: Some("160x".into()),
+            ..Default::default()
+        };
+        let plan = build_tuned(
+            Format::Gif,
+            Format::Mp4,
+            &[p("in.gif")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &t,
+        )
+        .expect("gif -> mp4 is a registered pair");
+        let vf = plan.steps[0].argv.join(" ");
+        assert!(vf.contains("fps=10"), "{vf}");
+        assert!(vf.contains("min(160"), "{vf}");
+    }
+
+    /// A cap that cannot be resolved (no probe at all) must still leave a
+    /// note on the plan, now that `resolved` reaches the static path even
+    /// with `probe: None` -- this is the mechanism that lets a real run
+    /// with a failed probe say so too, not only `--dry-run`.
+    #[test]
+    fn an_unresolvable_cap_on_a_static_recipe_notes_it_was_applied_as_given() {
+        let t = Tuning {
+            fps: Some("24".into()),
+            ..Default::default()
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Gif,
+            &[p("in.mp4")],
+            Path::new("out.gif"),
+            None,
+            None,
+            &t,
+        )
+        .unwrap();
+        assert!(
+            plan.warnings.iter().any(|w| w.contains(
+                "Source frame rate could not be determined; --fps 24 was applied as given."
+            )),
+            "{:?}",
+            plan.warnings
+        );
+        assert!(plan.steps[0].argv.iter().any(|a| a.contains("fps=24")));
     }
 }
