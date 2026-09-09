@@ -381,7 +381,8 @@ fn audio_codec_args(
         warnings.push(format!(
             "All audio tracks re-encoded to opus: {} not supported by webm \
              (stream copy and the required channel-layout filter cannot mix). \
-             Video is stream-copied untouched.",
+             The video itself is untouched by this: stream-copied, or already \
+             transcoded if a video knob requested one.",
             offenders.join("/"),
         ));
         return;
@@ -406,7 +407,8 @@ fn audio_codec_args(
     }
     warnings.push(format!(
         "Audio {} re-encoded to aac ({} not supported by {}); every other track \
-         and the video are stream-copied untouched.",
+         is stream-copied untouched. The video is unaffected by this: it is \
+         stream-copied, or already transcoded if a video knob requested one.",
         reencoded.join(", "),
         offenders.join("/"),
         to.ext(),

@@ -201,7 +201,14 @@ impl Drop for ScratchGuard {
 }
 
 /// Whether a step's rendered argv performed a stream copy of the actual
-/// media -- what `Outcome::remuxed` reports. The stream-mapped invocations
+/// media -- what `Outcome::remuxed` reports. A filter argument settles this
+/// before any codec token is consulted: ffmpeg refuses a filter alongside
+/// `-c:v copy`, so an argv carrying one decoded and re-encoded regardless of
+/// what its codec tokens claim. That check has to run first because it is
+/// also what catches the mkv per-stream transcode, which spells both
+/// `-c:v copy` (for the other mapped video streams) and `-c:v:0 libx264`
+/// (for the stream actually being tuned) -- a codec-only check would read
+/// that as a remux. Absent a filter, the stream-mapped invocations
 /// `media.rs` builds spell copies per-stream (`-c:v copy -c:a copy`,
 /// possibly alongside a `-c:s` re-encode of a text subtitle), so the
 /// second arm is the *normal* remux shape, not an exception; bare
@@ -211,6 +218,12 @@ impl Drop for ScratchGuard {
 /// against a plain `argv` slice, without needing a real backend or
 /// filesystem.
 fn is_remux(argv: &[String]) -> bool {
+    if argv
+        .iter()
+        .any(|a| a == "-vf" || a.starts_with("-filter:v"))
+    {
+        return false;
+    }
     let has = |pair: [&str; 2]| argv.windows(2).any(|w| w == pair);
     has(["-c", "copy"])
         || (has(["-c:v", "copy"]) && has(["-c:a", "copy"]))
@@ -2187,5 +2200,81 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             .map(|s| s.to_string())
             .collect();
         assert!(!is_remux(&argv));
+    }
+
+    #[test]
+    fn a_transcoded_invocation_is_not_reported_as_a_stream_copy() {
+        // render.rs prints Outcome.remuxed as "stream copy, no re-encode",
+        // and the README's 71.7x figure is measured against the copy path.
+        // Reporting a re-encode as a copy is the tool lying about its own
+        // work.
+        let argv: Vec<String> = [
+            "-i",
+            "in.mkv",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-vf",
+            "fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+            "out.mp4",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(!is_remux(&argv), "{argv:?}");
+    }
+
+    #[test]
+    fn the_mkv_per_stream_transcode_is_also_not_a_stream_copy() {
+        // This argv contains "-c:v copy" *and* "-c:v:0 libx264": the copy
+        // applies to the other mapped video streams. Paired with the real
+        // invocation's "-c:a copy", a codec-only check (arm 2: both
+        // "-c:v copy" and "-c:a copy" present) would call this a remux.
+        let argv: Vec<String> = [
+            "-i",
+            "in.mp4",
+            "-map",
+            "0",
+            "-map",
+            "-0:d",
+            "-filter:v:0",
+            "fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v",
+            "copy",
+            "-c:v:0",
+            "libx264",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-y",
+            "out.mkv",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(!is_remux(&argv), "{argv:?}");
+    }
+
+    #[test]
+    fn a_genuine_stream_copy_is_still_reported_as_one() {
+        let argv: Vec<String> = [
+            "-i", "in.mkv", "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "copy", "-y",
+            "out.mp4",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(is_remux(&argv), "{argv:?}");
     }
 }
