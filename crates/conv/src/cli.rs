@@ -69,8 +69,8 @@ pub struct Cli {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(2..=256))]
     pub colors: Option<u16>,
 
-    /// Cap the frame rate of video and GIF targets; slower sources are
-    /// left alone. Video conversions only.
+    /// Cap the frame rate; slower sources are left alone. Video and GIF
+    /// targets only.
     ///
     /// Not `global` -- see `dry_run`'s doc comment, as with the three
     /// flags above.
@@ -141,7 +141,7 @@ pub enum Command {
     Capabilities {
         /// A format extension, e.g. `jpg` — shows what converts to and
         /// from it, the defaults its recipes use, and which tuning flags
-        /// (resize, quality, colors, fps, crf) apply to each pair.
+        /// apply.
         format: Option<String>,
     },
     /// List the files here and what each one could be converted into.

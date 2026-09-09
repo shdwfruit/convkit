@@ -1610,13 +1610,29 @@ fn a_frame_rate_accepts_integers_decimals_and_rationals() {
 
 #[test]
 fn a_nonsense_frame_rate_is_refused_with_the_forms_named() {
-    for bad in ["0", "-5", "abc", "30/0", "24fps", ""] {
+    for bad in ["0", "abc", "30/0", "24fps", ""] {
         conv()
             .args(["--fps", bad, "in.mp4", "out.mp4"])
             .assert()
             .failure()
-            .code(2);
+            .code(2)
+            .stderr(predicates::str::contains("frame rate must be"));
     }
+}
+
+/// `-5` never reaches `parse_frame_rate`: clap's own argument parser sees
+/// the leading dash and rejects it as an unknown flag before any value
+/// parser runs, so this is refused a layer earlier than the other bad
+/// values above, with a different message (`unexpected argument`, not
+/// `frame rate must be`). Still exit 2, still refused -- just not by the
+/// validator this file otherwise pins.
+#[test]
+fn a_negative_frame_rate_is_refused_by_the_argument_parser_before_the_validator() {
+    conv()
+        .args(["--fps", "-5", "in.mp4", "out.mp4"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -1628,6 +1644,7 @@ fn a_zero_dimension_geometry_is_refused() {
             .args(["--resize", bad, "in.png", "out.jpg"])
             .assert()
             .failure()
-            .code(2);
+            .code(2)
+            .stderr(predicates::str::contains("geometry must be"));
     }
 }
