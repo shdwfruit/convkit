@@ -1598,6 +1598,73 @@ fn capabilities_and_scan_agree_on_the_kind_spelling() {
     assert_eq!(caps["kind"], scan["files"][0]["kind"], "{caps} vs {scan}");
 }
 
+/// `conv capabilities mp4` used to print "defaults: quality 92 (override
+/// with --quality)" for a format where `plan.rs` refuses `--quality`
+/// outright: the default was global (one `IMAGE_QUALITY` constant), not
+/// scoped to what the target's own recipes actually carry.
+#[test]
+fn capabilities_no_longer_advertises_quality_for_video() {
+    let out = conv()
+        .args(["capabilities", "mp4", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert!(
+        v["defaults"].get("quality").is_none(),
+        "a key with no default is omitted, not null: {}",
+        v["defaults"]
+    );
+}
+
+/// `mp4 -> mkv` carries `Arg::VideoChain` (so both `--resize` and `--fps`
+/// apply) and `Arg::Crf` (so `--crf` does too) -- unlike `mp4 -> webm`
+/// (crf only, no chain) or `mp4 -> gif` (chain only, no crf), it is the
+/// mp4-family target that takes all three.
+#[test]
+fn capabilities_lists_the_video_knobs_for_a_video_target() {
+    let out = conv()
+        .args(["capabilities", "mp4", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let row = v["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["to"] == "mkv")
+        .expect("mp4 writes mp4-family targets");
+    let tuning = row["tuning"].as_array().unwrap();
+    for flag in ["--resize", "--fps", "--crf"] {
+        assert!(
+            tuning.iter().any(|t| t == flag),
+            "{flag} missing from {tuning:?}"
+        );
+    }
+}
+
+#[test]
+fn defaults_are_per_target_because_one_format_has_several() {
+    // mkv as a target bakes crf 20; mkv -> webm bakes 32; mkv -> gif bakes
+    // fps 15. One top-level key cannot hold three truths.
+    let out = conv()
+        .args(["capabilities", "mkv", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let by = |f: &str| {
+        v["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["to"] == f)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by("mp4")["defaults"]["crf"], "20");
+    assert_eq!(by("webm")["defaults"]["crf"], "32");
+    assert_eq!(by("gif")["defaults"]["fps"], "15");
+}
+
 #[test]
 fn a_frame_rate_accepts_integers_decimals_and_rationals() {
     for good in ["24", "30", "29.97", "60", "30000/1001"] {
