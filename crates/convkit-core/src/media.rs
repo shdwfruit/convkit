@@ -20,6 +20,7 @@
 use std::path::Path;
 
 use crate::probe::MediaProbe;
+use crate::video::ResolvedVideo;
 use crate::{registry, Format};
 
 /// A fully rendered single-step ffmpeg invocation plus the honesty that
@@ -68,23 +69,73 @@ fn push(argv: &mut Vec<String>, items: &[&str]) {
     argv.extend(items.iter().map(|s| (*s).to_string()));
 }
 
+/// What happens to the video stream. Everything else about the mapping --
+/// which audio tracks survive, which subtitles the muxer can hold, which
+/// attachments ride along -- is identical either way, which is why there is
+/// one function and not two.
+#[derive(Debug, Clone)]
+pub(crate) enum VideoDisposition<'a> {
+    /// `-c:v copy`. The fast path, and the reason this file exists.
+    Copy,
+    /// Re-encode: the composed filter chain, the target's encoder, and the
+    /// CRF to use.
+    Transcode {
+        chain: &'a str,
+        encoder: &'static str,
+        crf: String,
+        /// libx264 needs `-pix_fmt yuv420p`; libvpx-vp9 needs its own
+        /// companions instead.
+        companions: &'static [&'static str],
+    },
+}
+
+/// Emits the video codec and, for a transcode, its filter chain.
+///
+/// The mkv branch maps `-map 0` -- keep everything, carve out what the
+/// muxer rejects -- so `-map 0` selects every video stream, including
+/// attached-picture cover art that `probe.video_streams` deliberately does
+/// not count. A global `-c:v libx264` there would re-encode album art as a
+/// video track, so mkv scopes both the filter and the codec to stream 0 and
+/// leaves the rest copied.
+fn push_video_args(argv: &mut Vec<String>, to: Format, video: &VideoDisposition<'_>) {
+    match video {
+        VideoDisposition::Copy => push(argv, &["-c:v", "copy"]),
+        VideoDisposition::Transcode {
+            chain,
+            encoder,
+            crf,
+            companions,
+        } => {
+            if to == Format::Mkv {
+                push(argv, &["-filter:v:0", chain]);
+                push(argv, &["-c:v", "copy"]);
+                push(argv, &["-c:v:0", encoder]);
+            } else {
+                push(argv, &["-vf", chain]);
+                push(argv, &["-c:v", encoder]);
+            }
+            push(argv, &["-crf", crf.as_str()]);
+            push(argv, companions);
+        }
+    }
+}
+
 /// Builds the stream-mapped invocation for a container change, given a
-/// probe: a full stream copy when every stream fits the target, a hybrid
-/// that keeps the video copied and re-encodes only the audio tracks that
-/// don't fit, and `None` when the video itself has to be re-encoded (or
-/// was never seen) — the caller then falls back to the registry's static
-/// transcode recipe.
-pub(crate) fn stream_mapped_invocation(
+/// probe and a video disposition (stream-copy or transcode). Every stream
+/// is mapped explicitly, every stream the target can't carry is excluded
+/// deliberately and reported as a warning naming exactly what was lost or
+/// re-encoded. Shared by `stream_mapped_invocation` and
+/// `transcoded_invocation` so the mapping -- which audio tracks survive,
+/// which subtitles the muxer can hold, which attachments ride along -- is
+/// decided exactly once.
+fn mapped_invocation(
     to: Format,
     probe: &MediaProbe,
+    video: VideoDisposition<'_>,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
-    let (video_ok, audio_ok) = registry::compat_tables(to)?;
-    let video = probe.video_codec.as_deref()?;
-    if !video_ok.contains(&video) {
-        return None;
-    }
+    let (_, audio_ok) = registry::compat_tables(to)?;
 
     let audios = probe.all_audio();
     let subtitles = probe.all_subtitles();
@@ -112,7 +163,7 @@ pub(crate) fn stream_mapped_invocation(
             }
         }
 
-        push(&mut argv, &["-c:v", "copy"]);
+        push_video_args(&mut argv, to, &video);
         audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios);
 
         if any_mov_text {
@@ -176,7 +227,7 @@ pub(crate) fn stream_mapped_invocation(
             ));
         }
 
-        push(&mut argv, &["-c:v", "copy"]);
+        push_video_args(&mut argv, to, &video);
         audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios);
 
         if !kept_subs.is_empty() {
@@ -220,6 +271,82 @@ pub(crate) fn stream_mapped_invocation(
     argv.push(output.to_string_lossy().into_owned());
 
     Some(MediaInvocation { argv, warnings })
+}
+
+/// Builds the stream-mapped invocation for a container change, given a
+/// probe: a full stream copy when every stream fits the target, a hybrid
+/// that keeps the video copied and re-encodes only the audio tracks that
+/// don't fit, and `None` when the video itself has to be re-encoded (or
+/// was never seen) — the caller then falls back to the registry's static
+/// transcode recipe.
+pub(crate) fn stream_mapped_invocation(
+    to: Format,
+    probe: &MediaProbe,
+    input: &Path,
+    output: &Path,
+) -> Option<MediaInvocation> {
+    let (video_ok, _) = registry::compat_tables(to)?;
+    let video = probe.video_codec.as_deref()?;
+    if !video_ok.contains(&video) {
+        return None;
+    }
+    mapped_invocation(to, probe, VideoDisposition::Copy, input, output)
+}
+
+/// The same stream mapping, with the video re-encoded.
+///
+/// Reached when a video knob is given on a pair that would otherwise stream
+/// copy. ffmpeg refuses a filter alongside `-c:v copy` outright
+/// ("Filtering and streamcopy cannot be used together"), so honouring the
+/// knob means giving up the copy -- and giving it up here, rather than
+/// falling through to the static table, is what keeps the second audio
+/// track and the subtitles the static recipe would drop.
+///
+/// Not yet called from `plan.rs` -- wiring it into the dispatch (so a video
+/// knob actually reaches this instead of erroring) is the next task's job.
+#[allow(dead_code)]
+pub(crate) fn transcoded_invocation(
+    to: Format,
+    probe: &MediaProbe,
+    resolved: &ResolvedVideo,
+    crf: Option<u8>,
+    input: &Path,
+    output: &Path,
+) -> Option<MediaInvocation> {
+    registry::compat_tables(to)?;
+    probe.video_codec.as_deref()?;
+    let (encoder, anchor, companions): (&str, &str, &[&str]) = match to {
+        Format::Mp4 | Format::Mov | Format::Mkv => {
+            ("libx264", registry::CRF, &["-pix_fmt", "yuv420p"])
+        }
+        Format::Webm => (
+            "libvpx-vp9",
+            registry::WEBM_CRF,
+            &["-b:v", "0", "-row-mt", "1", "-threads", "0"],
+        ),
+        _ => return None,
+    };
+    let chain = registry::TRANSCODE_CHAIN.compose(resolved);
+    let mut m = mapped_invocation(
+        to,
+        probe,
+        VideoDisposition::Transcode {
+            chain: &chain,
+            encoder,
+            crf: crf
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| anchor.to_string()),
+            companions,
+        },
+        input,
+        output,
+    )?;
+    m.warnings.push(
+        "Re-encoded rather than stream-copied, because a video knob changes \
+         the picture; the copy path cannot filter."
+            .to_string(),
+    );
+    Some(m)
 }
 
 /// Emits the audio codec arguments: a plain `-c:a copy` when every track
@@ -690,5 +817,218 @@ mod tests {
             "{:?}",
             m.warnings
         );
+    }
+
+    // --- transcoded_invocation (video knobs) -----------------------------
+
+    fn probe_h264_with(audios: &[&str], subs: &[&str]) -> MediaProbe {
+        MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: audios.iter().map(|s| (*s).to_string()).collect(),
+            subtitle_codecs: subs.iter().map(|s| (*s).to_string()).collect(),
+            width: Some(1920),
+            height: Some(1080),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        }
+    }
+
+    fn chain() -> ResolvedVideo {
+        ResolvedVideo {
+            fps: Some("24".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_transcode_to_mp4_carries_an_encoder_and_a_pixel_format() {
+        let m = transcoded_invocation(
+            Format::Mp4,
+            &probe_h264_with(&["aac"], &[]),
+            &chain(),
+            None,
+            Path::new("in.mkv"),
+            Path::new("out.mp4"),
+        )
+        .expect("mp4 is a transcodable target");
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-c:v", "libx264"]),
+            "{:?}",
+            m.argv
+        );
+        // Without this, libx264 preserves a 10-bit source and emits High 10,
+        // which a large share of hardware decoders refuse.
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-pix_fmt", "yuv420p"]),
+            "{:?}",
+            m.argv
+        );
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-crf", "20"]),
+            "{:?}",
+            m.argv
+        );
+        // Not "no `copy` anywhere": an aac source into mp4 legitimately
+        // keeps `-c:a copy` (see the next test) -- copying a compatible
+        // audio stream is the whole point of the path this extends. Only
+        // the video codec must not be `copy`.
+        let c_v = m
+            .argv
+            .iter()
+            .position(|a| a == "-c:v")
+            .expect("-c:v present");
+        assert_ne!(
+            m.argv[c_v + 1],
+            "copy",
+            "video must not be copied: {:?}",
+            m.argv
+        );
+    }
+
+    #[test]
+    fn a_transcode_keeps_every_audio_track_the_copy_path_would_have_kept() {
+        // The cheap alternative -- falling through to VIDEO_TO_MP4 -- emits
+        // -sn and relies on default stream selection, dropping subtitles
+        // and every audio track past the first. That is the bug this file
+        // exists to prevent.
+        let m = transcoded_invocation(
+            Format::Mp4,
+            &probe_h264_with(&["aac", "ac3"], &["mov_text"]),
+            &chain(),
+            None,
+            Path::new("in.mkv"),
+            Path::new("out.mp4"),
+        )
+        .unwrap();
+        // The mp4/mov/webm branch maps every audio track as one group,
+        // `0:a?` -- the same wildcard `mp4_remux_maps_every_audio_track`
+        // (the copy path's own flagship-bug test) checks for, and both aac
+        // and ac3 are MP4_COMPATIBLE_AUDIO, so both ride under -c:a copy.
+        // The brief's original assertion here checked for per-index maps
+        // (-map 0:a:0 / -map 0:a:1), which this branch never emits even on
+        // the copy path; corrected to match the mapping this file actually
+        // produces.
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-map", "0:a?"]),
+            "{:?}",
+            m.argv
+        );
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-map", "0:s:0"]),
+            "{:?}",
+            m.argv
+        );
+        assert!(!m.argv.iter().any(|a| a == "-sn"), "{:?}", m.argv);
+    }
+
+    #[test]
+    fn a_transcode_to_mkv_tunes_only_the_first_video_stream() {
+        // The mkv branch maps `-map 0`, which selects attached-picture
+        // cover art that probe.video_streams deliberately does not count.
+        // A global -c:v libx264 would re-encode album art as a video track.
+        let m = transcoded_invocation(
+            Format::Mkv,
+            &probe_h264_with(&["aac"], &[]),
+            &chain(),
+            None,
+            Path::new("in.mp4"),
+            Path::new("out.mkv"),
+        )
+        .unwrap();
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-c:v", "copy"]),
+            "{:?}",
+            m.argv
+        );
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-c:v:0", "libx264"]),
+            "{:?}",
+            m.argv
+        );
+        assert!(m.argv.iter().any(|a| a == "-filter:v:0"), "{:?}", m.argv);
+        assert!(
+            !m.argv.iter().any(|a| a == "-vf"),
+            "mkv must scope the filter: {:?}",
+            m.argv
+        );
+    }
+
+    #[test]
+    fn a_transcode_to_webm_uses_vp9_and_its_own_anchor() {
+        let m = transcoded_invocation(
+            Format::Webm,
+            &probe_h264_with(&["aac"], &[]),
+            &chain(),
+            None,
+            Path::new("in.mp4"),
+            Path::new("out.webm"),
+        )
+        .unwrap();
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-c:v", "libvpx-vp9"]),
+            "{:?}",
+            m.argv
+        );
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-crf", "32"]),
+            "{:?}",
+            m.argv
+        );
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-b:v", "0"]),
+            "{:?}",
+            m.argv
+        );
+    }
+
+    #[test]
+    fn a_user_crf_overrides_the_anchor() {
+        let m = transcoded_invocation(
+            Format::Mp4,
+            &probe_h264_with(&["aac"], &[]),
+            &chain(),
+            Some(28),
+            Path::new("in.mkv"),
+            Path::new("out.mp4"),
+        )
+        .unwrap();
+        assert!(
+            m.argv.windows(2).any(|w| w == ["-crf", "28"]),
+            "{:?}",
+            m.argv
+        );
+    }
+
+    #[test]
+    fn a_target_with_no_encoder_declines() {
+        assert!(transcoded_invocation(
+            Format::Mp3,
+            &probe_h264_with(&["aac"], &[]),
+            &chain(),
+            None,
+            Path::new("in.mp4"),
+            Path::new("out.mp3"),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn the_argv_still_opens_with_the_input_and_closes_with_the_output() {
+        // plan.rs:127 hardcodes path_args = vec![1, argv.len() - 1] on this
+        // assumption; break it and the Windows verbatim-path rewriter
+        // targets the wrong token.
+        let m = transcoded_invocation(
+            Format::Mp4,
+            &probe_h264_with(&["aac"], &[]),
+            &chain(),
+            None,
+            Path::new("in.mkv"),
+            Path::new("out.mp4"),
+        )
+        .unwrap();
+        assert_eq!(m.argv[0], "-i");
+        assert_eq!(m.argv[1], "in.mkv");
+        assert_eq!(m.argv.last().unwrap(), "out.mp4");
     }
 }
