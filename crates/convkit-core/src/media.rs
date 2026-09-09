@@ -301,10 +301,6 @@ pub(crate) fn stream_mapped_invocation(
 /// knob means giving up the copy -- and giving it up here, rather than
 /// falling through to the static table, is what keeps the second audio
 /// track and the subtitles the static recipe would drop.
-///
-/// Not yet called from `plan.rs` -- wiring it into the dispatch (so a video
-/// knob actually reaches this instead of erroring) is the next task's job.
-#[allow(dead_code)]
 pub(crate) fn transcoded_invocation(
     to: Format,
     probe: &MediaProbe,

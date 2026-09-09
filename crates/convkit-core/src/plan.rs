@@ -116,12 +116,22 @@ pub fn build_tuned(
     // runs when a probe is in hand.
     if let Some(p) = probe {
         if registry::lookup(from, to).is_some() && registry::needs_probe(from, to) {
-            // Both constructors self-gate on target shape (compat tables /
-            // copyable codecs), so this is a plain preference chain.
-            let dynamic = media::stream_mapped_invocation(to, p, &inputs[0], output)
-                .or_else(|| media::audio_copy_invocation(from, to, p, &inputs[0], output));
-            if let Some(m) = dynamic {
+            let resolved = crate::video::resolve(tuning, Some(p));
+            // A video knob changes the picture, and ffmpeg refuses a filter
+            // alongside -c:v copy -- so consult the tuning before choosing
+            // the path, not after. Choosing first is why `select()` below
+            // used to be unreachable for every tuned media pair.
+            let wants_video =
+                tuning.fps.is_some() || tuning.resize.is_some() || tuning.crf.is_some();
+            let dynamic = if wants_video {
+                media::transcoded_invocation(to, p, &resolved, tuning.crf, &inputs[0], output)
+            } else {
+                media::stream_mapped_invocation(to, p, &inputs[0], output)
+                    .or_else(|| media::audio_copy_invocation(from, to, p, &inputs[0], output))
+            };
+            if let Some(mut m) = dynamic {
                 validate_tuning_for_dynamic_media(from, to, tuning)?;
+                m.warnings.extend(resolved.notes.iter().cloned());
                 // Every invocation `media.rs` builds opens with
                 // `-i <input>` and closes with the output path, so the
                 // path positions (for the Windows long-path rewriter) are
@@ -219,28 +229,56 @@ pub fn build_tuned(
     })
 }
 
-/// Refuses tuning on the probe-selected stream-copy/audio-copy paths:
-/// those are ffmpeg invocations with no image knobs, and silently
-/// ignoring a flag is worse than refusing it.
+/// Refuses the image knobs on the probe-selected media paths. The video
+/// knobs are honoured there now (see `media::transcoded_invocation`), so
+/// this is a per-flag table rather than the old three-way if/else whose
+/// final `else` said "--colors" unconditionally -- a shape in which any new
+/// field reported itself under the wrong name, with nothing at compile time
+/// to object.
 fn validate_tuning_for_dynamic_media(from: Format, to: Format, tuning: &Tuning) -> Result<()> {
     if tuning.is_empty() {
         return Ok(());
     }
-    let flag = if tuning.resize.is_some() {
-        "--resize"
-    } else if tuning.quality.is_some() {
-        "--quality"
-    } else {
-        "--colors"
-    };
-    Err(ConvError::new(
-        ErrorCode::InvalidInvocation,
-        format!(
-            "{flag} does not apply to {} -> {}: tuning flags cover image conversions (for now)",
-            from.ext(),
-            to.ext(),
-        ),
-    ))
+    let image_only: [(&str, bool); 2] = [
+        ("--quality", tuning.quality.is_some()),
+        ("--colors", tuning.colors.is_some()),
+    ];
+    for (flag, given) in image_only {
+        if given {
+            return Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "{flag} does not apply to {} -> {}: it tunes image conversions",
+                    from.ext(),
+                    to.ext(),
+                ),
+            ));
+        }
+    }
+    // A real `--crf` reaching this far means `transcoded_invocation` already
+    // accepted the pair -- this dynamic path has no slot check to make, only
+    // the range convkit itself imposes.
+    check_crf_range(to, tuning)
+}
+
+/// libx264 takes 0-51; libvpx-vp9 takes 0-63. The bound is convkit's own:
+/// libx264 accepts far more than 51 without complaint. Shared by both
+/// validators -- a probe-selected media pair reaches `transcoded_invocation`
+/// (and so `validate_tuning_for_dynamic_media`) just as often as the static
+/// table reaches `validate_tuning`, and the range is the same either way.
+fn check_crf_range(to: Format, tuning: &Tuning) -> Result<()> {
+    if let Some(n) = tuning.crf {
+        if !matches!(to, Format::Webm) && n > 51 {
+            return Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "--crf {n} is out of range for {}; libx264 takes 0-51, lower is better",
+                    to.ext(),
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Refuses any tuning flag whose slot the selected recipe does not carry.
@@ -252,11 +290,11 @@ fn validate_tuning(recipe: &Recipe, from: Format, to: Format, tuning: &Tuning) -
     }
     let has_slot =
         |wanted: fn(&Arg) -> bool| recipe.steps.iter().any(|s| s.args.iter().any(&wanted));
-    if tuning.resize.is_some() && !has_slot(|a| matches!(a, Arg::TuneResize)) {
+    if tuning.resize.is_some() && !has_slot(|a| matches!(a, Arg::TuneResize | Arg::VideoChain(_))) {
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
             format!(
-                "--resize does not apply to {} -> {}: tuning flags cover image conversions (for now)",
+                "--resize does not apply to {} -> {}: it tunes image, video and GIF targets",
                 from.ext(),
                 to.ext(),
             ),
@@ -287,7 +325,27 @@ fn validate_tuning(recipe: &Recipe, from: Format, to: Format, tuning: &Tuning) -
             ),
         ));
     }
-    Ok(())
+    if tuning.fps.is_some() && !has_slot(|a| matches!(a, Arg::VideoChain(_))) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--fps does not apply to {} -> {}; it tunes video and GIF targets",
+                from.ext(),
+                to.ext(),
+            ),
+        ));
+    }
+    if tuning.crf.is_some() && !has_slot(|a| matches!(a, Arg::Crf(_))) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--crf does not apply to {} -> {}; it tunes video targets",
+                from.ext(),
+                to.ext(),
+            ),
+        ));
+    }
+    check_crf_range(to, tuning)
 }
 
 /// Chooses among the *static* recipes; the probe-aware stream-mapping
@@ -1027,5 +1085,202 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
         assert!(e.message.contains("--quality"), "{}", e.message);
+    }
+
+    // --- Task 8: the dispatch consults the tuning before choosing the
+    // path, so a video knob on a media pair transcodes instead of always
+    // being refused --------------------------------------------------------
+
+    // The brief's snippets call an `all_available()` helper that does not
+    // exist anywhere in this module; every existing dynamic-media test above
+    // passes `None` for `available` instead (it only matters to `select`,
+    // never to the probe-aware branch these tests exercise), so these follow
+    // that convention rather than inventing a new helper.
+
+    #[test]
+    fn a_video_knob_on_a_remuxable_pair_transcodes_instead_of_refusing() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: vec!["aac".into()],
+            width: Some(1920),
+            height: Some(1080),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        let t = Tuning {
+            fps: Some("24".into()),
+            ..Default::default()
+        };
+        let plan = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &t,
+        )
+        .expect("a video knob must not refuse a pair the user expects to work");
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w == ["-c:v", "libx264"]),
+            "{argv:?}"
+        );
+        assert!(argv.iter().any(|a| a.contains("fps=24")), "{argv:?}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.contains("Re-encoded rather than stream-copied")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn an_image_knob_on_a_media_pair_is_still_refused_by_its_own_name() {
+        // The old validator's final else said "--colors" unconditionally,
+        // so a new field would have reported itself as --colors.
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            ..MediaProbe::default()
+        };
+        let t = Tuning {
+            quality: Some(80),
+            ..Default::default()
+        };
+        let err = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &t,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--quality"), "{err}");
+        assert!(!err.to_string().contains("--colors"), "{err}");
+    }
+
+    #[test]
+    fn no_refusal_message_says_for_now_any_more() {
+        // "(for now)" became false the day --fps shipped, in the very
+        // message a user sees when a video knob is refused.
+        let t = Tuning {
+            fps: Some("24".into()),
+            ..Default::default()
+        };
+        let err = build_tuned(
+            Format::Png,
+            Format::Jpg,
+            &[p("in.png")],
+            Path::new("out.jpg"),
+            None,
+            None,
+            &t,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--fps"), "{err}");
+        assert!(!err.to_string().contains("for now"), "{err}");
+    }
+
+    #[test]
+    fn an_untuned_plan_is_byte_identical_to_the_untuned_builder() {
+        // This is the assertion in `build_without_tuning_is_byte_identical_
+        // to_the_static_table` above, re-run against the probe-aware
+        // dynamic-media branch this task inverts; it must keep holding.
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: vec!["aac".into()],
+            ..MediaProbe::default()
+        };
+        let a = build(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+        );
+        let b = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &Tuning::default(),
+        );
+        assert_eq!(a.unwrap().steps[0].argv, b.unwrap().steps[0].argv);
+    }
+
+    #[test]
+    fn a_cap_that_does_not_bind_reaches_the_plans_warnings() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: vec!["aac".into()],
+            width: Some(1920),
+            height: Some(1080),
+            frame_rate: Some((24, 1)),
+            ..MediaProbe::default()
+        };
+        let t = Tuning {
+            fps: Some("30".into()),
+            ..Default::default()
+        };
+        let plan = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &t,
+        )
+        .unwrap();
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "Source is 24 fps; --fps 30 left it unchanged."),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// A brief-verification finding: the 0-51 `--crf` bound in
+    /// `validate_tuning` only ever ran on the *static* table. Once a video
+    /// knob routes a probe-selected pair through `transcoded_invocation`
+    /// instead, that check never ran and `--crf 60` on an mp4 target sailed
+    /// through unrefused. `check_crf_range` is now shared by both
+    /// validators so the bound holds on whichever path actually fires.
+    #[test]
+    fn crf_out_of_range_is_refused_on_the_probe_selected_path_too() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: vec!["aac".into()],
+            ..MediaProbe::default()
+        };
+        let t = Tuning {
+            crf: Some(60),
+            ..Default::default()
+        };
+        let err = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &t,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, crate::ErrorCode::InvalidInvocation);
+        assert!(err.message.contains("--crf 60"), "{}", err.message);
+        assert!(err.message.contains("out of range"), "{}", err.message);
     }
 }
