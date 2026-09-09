@@ -374,8 +374,10 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         ));
     }
 
-    // Probe only when a stream copy is even possible for this pair.
-    let probed = if registry::needs_probe(req.from, req.to) {
+    // Probe when a stream copy is even possible for this pair, or when a
+    // video knob needs a source to cap against (gif -> mp4 carries a
+    // filter chain but no stream-copy possibility of its own).
+    let probed = if registry::needs_probe_tuned(req.from, req.to, &req.tuning) {
         resolver
             .resolve(Backend::Ffprobe)
             .ok()

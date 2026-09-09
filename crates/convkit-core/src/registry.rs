@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::recipe::{ScaleStyle, VideoChainSpec};
-use crate::{Arg, Backend, Format, OutputMode, Recipe, Step};
+use crate::{Arg, Backend, Format, OutputMode, Recipe, Step, Tuning};
 
 /// JPEG/WebP/AVIF quality. Visually transparent without bloat; see spec §7.4.
 /// `pub` so `conv capabilities <format>` can state the default it is
@@ -330,7 +330,7 @@ pub const TO_GIF_CHAIN: VideoChainSpec = VideoChainSpec {
 /// what the old strict-suffix test was protecting and is now true by
 /// construction: the `..TO_GIF_CHAIN` functional update below cannot copy
 /// `fps`/`scale`/`tail` from anywhere else. `registry.rs`'s own tests still
-/// assert the two shared fields match, so that claim keeps being checked
+/// assert the three shared fields match, so that claim keeps being checked
 /// even if this struct literal is ever rewritten by hand.
 pub const TO_GIF_TONEMAP_CHAIN: VideoChainSpec = VideoChainSpec {
     prefix: concat!(
@@ -1175,6 +1175,30 @@ pub fn needs_probe(from: Format, to: Format) -> bool {
     (container_change || audio_extract || gif_target) && from != to
 }
 
+/// `needs_probe`, plus the pairs a knob forces a probe on.
+///
+/// A cap is decided against the source, so `--fps` and `--resize` cannot be
+/// resolved without one -- and `gif -> mp4` carries a filter chain while
+/// answering `false` to `needs_probe`, because `Format::Gif` is in no arm's
+/// `video_source` set. Untuned conversions still pay nothing, which is the
+/// property `needs_probe` was written to protect.
+pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
+    if needs_probe(from, to) {
+        return true;
+    }
+    if tuning.fps.is_none() && tuning.resize.is_none() {
+        return false;
+    }
+    // Only where the knob can actually be honoured: a pair with no video
+    // chain refuses the flag in `validate_tuning` instead, and probing it
+    // would be a wasted spawn before an error.
+    lookup(from, to).is_some_and(|r| {
+        r.steps
+            .iter()
+            .any(|s| s.args.iter().any(|a| matches!(a, Arg::VideoChain(_))))
+    })
+}
+
 /// The verified codec-compatibility tables for a remuxable target
 /// container, `None` for any other format. The single lookup both the
 /// probe-aware stream mapping (`media.rs`) and any future caller share, so
@@ -1340,6 +1364,7 @@ mod tests {
         );
         // And the reason they cannot: they differ only in `prefix`.
         assert_eq!(TO_GIF_CHAIN.fps, TO_GIF_TONEMAP_CHAIN.fps);
+        assert_eq!(TO_GIF_CHAIN.scale, TO_GIF_TONEMAP_CHAIN.scale);
         assert_eq!(TO_GIF_CHAIN.tail, TO_GIF_TONEMAP_CHAIN.tail);
     }
 
@@ -1709,6 +1734,40 @@ mod tests {
         assert!(needs_probe(Format::Mp4, Format::Mkv));
         assert!(needs_probe(Format::Mov, Format::Mkv));
         assert!(needs_probe(Format::Mkv, Format::Mov));
+    }
+
+    #[test]
+    fn an_untuned_pair_probes_exactly_as_it_did_before() {
+        // The whole value of needs_probe is that untuned conversions pay
+        // nothing. Every pair must answer identically with an empty tuning.
+        for (from, to) in all_pairs() {
+            assert_eq!(
+                needs_probe(from, to),
+                needs_probe_tuned(from, to, &Tuning::default()),
+                "{from:?} -> {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_video_knob_makes_a_pair_probe_that_otherwise_would_not() {
+        // gif -> mp4 has a filter chain but no probe: Format::Gif is not in
+        // the video_source set, so every arm of needs_probe is false.
+        assert!(!needs_probe(Format::Gif, Format::Mp4));
+        let t = Tuning {
+            fps: Some("12".into()),
+            ..Default::default()
+        };
+        assert!(needs_probe_tuned(Format::Gif, Format::Mp4, &t));
+    }
+
+    #[test]
+    fn an_image_knob_does_not_make_a_pair_probe() {
+        let t = Tuning {
+            quality: Some(80),
+            ..Default::default()
+        };
+        assert!(!needs_probe_tuned(Format::Png, Format::Jpg, &t));
     }
 
     #[test]

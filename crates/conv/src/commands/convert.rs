@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use convkit_core::{
     plan, probe, registry, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe, Outcome,
-    Resolver,
+    Resolver, Tuning,
 };
 use serde_json::json;
 
@@ -114,14 +114,15 @@ fn failed_on_missing_backend(result: &Result<Outcome, ConvError>, backend: Backe
 }
 
 /// Probes the input when, and only when, this pair might be satisfiable by a
-/// stream copy — mirrors `exec::run`'s own gate exactly (`registry::
-/// needs_probe`), so `--dry-run` and the real run it previews always agree
-/// on whether a probe happens at all. `ffprobe` missing, or the probe itself
-/// failing, is swallowed into `None` here exactly as it is in `exec::run`:
-/// both conservatively fall back to a transcode preview rather than turning
-/// "no ffprobe" into its own dry-run failure mode.
-fn probed_for(resolver: &Resolver, job: &input::Job) -> Option<MediaProbe> {
-    if !registry::needs_probe(job.from, job.to) {
+/// stream copy, or a video knob needs a source to cap against — mirrors
+/// `exec::run`'s own gate exactly (`registry::needs_probe_tuned`), so
+/// `--dry-run` and the real run it previews always agree on whether a probe
+/// happens at all. `ffprobe` missing, or the probe itself failing, is
+/// swallowed into `None` here exactly as it is in `exec::run`: both
+/// conservatively fall back to a transcode preview rather than turning "no
+/// ffprobe" into its own dry-run failure mode.
+fn probed_for(resolver: &Resolver, job: &input::Job, tuning: &Tuning) -> Option<MediaProbe> {
+    if !registry::needs_probe_tuned(job.from, job.to, tuning) {
         return None;
     }
     // `--dry-run` is documented as inert, but ffprobe honours URLs and
@@ -159,35 +160,56 @@ fn available_for(resolver: &Resolver, job: &input::Job) -> Option<AvailableBacke
 /// human mode. A bad job among several others never erases the preview for
 /// the rest, the same tolerance `batch::run` gives a real execution.
 ///
-/// C3: probes first on any pair that might remux (`probed_for`, gated on
-/// `registry::needs_probe` exactly like `exec::run`), so the preview shown
-/// here is the *exact* command a real run would use — not the conservative
-/// transcode `plan::build` falls back to with no probe. `plan::build`
-/// itself stays pure; the probe runs here, in the caller, and its result is
-/// passed in, the same split `exec::run` already uses between itself and
-/// `plan::build`.
+/// C3: probes first on any pair that might remux, or that a video knob
+/// needs a source to cap against (`probed_for`, gated on
+/// `registry::needs_probe_tuned` exactly like `exec::run`), so the preview
+/// shown here is the *exact* command a real run would use — not the
+/// conservative transcode `plan::build` falls back to with no probe.
+/// `plan::build` itself stays pure; the probe runs here, in the caller, and
+/// its result is passed in, the same split `exec::run` already uses between
+/// itself and `plan::build`.
 ///
 /// Task 2 applies the identical lesson to backend availability: a docx/odt
 /// -> pdf dry-run must preview the pandoc+typst command when soffice is
 /// absent, not the (unusable) soffice one — `available_for` (gated on
 /// `registry::has_fallback` exactly like `exec::run`'s own check) is what
 /// makes that true.
+///
+/// Task 9: a knob that wanted a probe but did not get one (`ffprobe`
+/// missing, the probe itself failing, or the input not being a real file)
+/// leaves the cap unresolved — the preview falls back to the plain,
+/// unresolved chain, and a note says so rather than letting the printed
+/// command imply it is the one that would actually run.
 fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
     let resolver = cli.resolver();
+    let tuning = cli.tuning();
     let results: Vec<_> = jobs
         .iter()
         .map(|job| {
-            let probed = probed_for(&resolver, job);
+            let probed = probed_for(&resolver, job, &tuning);
             let available = available_for(&resolver, job);
-            plan::build_tuned(
+            let cap_unresolved = probed.is_none()
+                && tuning.fps.is_some()
+                && registry::needs_probe_tuned(job.from, job.to, &tuning);
+            let mut result = plan::build_tuned(
                 job.from,
                 job.to,
                 &job.inputs,
                 &job.output,
                 probed.as_ref(),
                 available.as_ref(),
-                &cli.tuning(),
-            )
+                &tuning,
+            );
+            if cap_unresolved {
+                if let Ok(p) = &mut result {
+                    p.warnings.push(
+                        "The frame-rate cap is resolved against the source at run time; \
+                         this command shows the requested value."
+                            .to_string(),
+                    );
+                }
+            }
+            result
         })
         .collect();
 
@@ -403,7 +425,7 @@ mod tests {
             from: convkit_core::Format::Mkv,
             to: convkit_core::Format::Mp4,
         };
-        let probed = probed_for(&r, &j).expect("must probe a remuxable pair");
+        let probed = probed_for(&r, &j, &Tuning::default()).expect("must probe a remuxable pair");
         assert_eq!(probed.video_codec.as_deref(), Some("h264"));
         assert_eq!(probed.audio_codec(), Some("aac"));
     }
@@ -426,7 +448,10 @@ mod tests {
                 input,
                 "out.mp4",
             );
-            assert!(probed_for(&r, &j).is_none(), "{input} must not be probed");
+            assert!(
+                probed_for(&r, &j, &Tuning::default()).is_none(),
+                "{input} must not be probed"
+            );
         }
     }
 
@@ -442,7 +467,7 @@ mod tests {
             "in.pdf",
             "out.docx",
         );
-        assert!(probed_for(&r, &j).is_none());
+        assert!(probed_for(&r, &j, &Tuning::default()).is_none());
     }
 
     // --- Task 2: available_for -----------------------------------------------
