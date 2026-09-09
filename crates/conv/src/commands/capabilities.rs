@@ -86,6 +86,15 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     if has(|a| matches!(a, Arg::Crf(_))) {
         push_flag(&mut flags, "--crf");
     }
+    // VIDEO_TO_WEBM's static recipe carries no `-vf` slot -- vp9 needs no
+    // even-dimension workaround, so one was never authored. But virtually
+    // every real invocation has a probe, and `media::transcoded_invocation`
+    // composes TRANSCODE_CHAIN for a webm target unconditionally, whatever
+    // the static recipe declares. Advertise what actually runs.
+    if to == Format::Webm {
+        push_flag(&mut flags, "--resize");
+        push_flag(&mut flags, "--fps");
+    }
     flags
 }
 

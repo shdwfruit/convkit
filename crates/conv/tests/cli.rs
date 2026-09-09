@@ -1665,6 +1665,37 @@ fn defaults_are_per_target_because_one_format_has_several() {
     assert_eq!(by("gif")["defaults"]["fps"], "15");
 }
 
+/// `VIDEO_TO_WEBM`'s static recipe carries no `Arg::VideoChain` slot -- vp9
+/// needs no even-dimension workaround, so one was never authored -- but
+/// `media::transcoded_invocation` composes `TRANSCODE_CHAIN` for a webm
+/// target unconditionally whenever a probe succeeds, exactly as it does for
+/// mp4/mov/mkv. `--fps`/`--resize` demonstrably work on `* -> webm`
+/// (verified against a real dry run), so the static table's declared slots
+/// are not what actually runs, and advertising only what the static table
+/// declares hides a flag that works.
+#[test]
+fn capabilities_advertises_the_video_chain_flags_for_webm_targets() {
+    let out = conv()
+        .args(["capabilities", "mkv", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let webm = v["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["to"] == "webm")
+        .cloned()
+        .unwrap();
+    let tuning = webm["tuning"].as_array().unwrap();
+    for flag in ["--resize", "--fps", "--crf"] {
+        assert!(
+            tuning.iter().any(|t| t == flag),
+            "{flag} missing from {tuning:?}"
+        );
+    }
+}
+
 #[test]
 fn a_frame_rate_accepts_integers_decimals_and_rationals() {
     for good in ["24", "30", "29.97", "60", "30000/1001"] {
