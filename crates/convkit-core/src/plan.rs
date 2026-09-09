@@ -121,8 +121,17 @@ pub fn build_tuned(
             // alongside -c:v copy -- so consult the tuning before choosing
             // the path, not after. Choosing first is why `select()` below
             // used to be unreachable for every tuned media pair.
+            //
+            // Keyed on `resolved`, not `tuning`, for fps/scale: a `--fps`
+            // that does not bind (the cap is above the source rate) resolves
+            // to `None` and must fall through to the stream copy, not force
+            // a re-encode that changes nothing but the file's size. `--crf`
+            // stays a `tuning` check -- it retargets the encoder rather than
+            // the filter chain, so `resolved` carries no signal for it, and
+            // dropping this term would let `--crf` fall through to a copy
+            // and silently discard the flag.
             let wants_video =
-                tuning.fps.is_some() || tuning.resize.is_some() || tuning.crf.is_some();
+                resolved.fps.is_some() || resolved.scale.is_some() || tuning.crf.is_some();
             let dynamic = if wants_video {
                 media::transcoded_invocation(to, p, &resolved, tuning.crf, &inputs[0], output)
             } else {
@@ -329,7 +338,7 @@ fn validate_tuning(recipe: &Recipe, from: Format, to: Format, tuning: &Tuning) -
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
             format!(
-                "--fps does not apply to {} -> {}; it tunes video and GIF targets",
+                "--fps does not apply to {} -> {}: it tunes video and GIF targets",
                 from.ext(),
                 to.ext(),
             ),
@@ -339,7 +348,7 @@ fn validate_tuning(recipe: &Recipe, from: Format, to: Format, tuning: &Tuning) -
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
             format!(
-                "--crf does not apply to {} -> {}; it tunes video targets",
+                "--crf does not apply to {} -> {}: it tunes video targets",
                 from.ext(),
                 to.ext(),
             ),
@@ -1247,6 +1256,28 @@ mod tests {
                 .iter()
                 .any(|w| w == "Source is 24 fps; --fps 30 left it unchanged."),
             "{:?}",
+            plan.warnings
+        );
+        // A cap that does not bind must take the stream-copy path, not pay
+        // for a full re-encode that changes nothing but the file's size:
+        // asserting only that the note is present passed under both the
+        // buggy `tuning.fps.is_some()` predicate and the fixed
+        // `resolved.fps.is_some()` one, so it could not catch a regression
+        // back to the former.
+        assert!(
+            !plan.steps[0]
+                .argv
+                .windows(2)
+                .any(|w| w == ["-c:v", "libx264"]),
+            "a non-binding cap must not force a re-encode: {:?}",
+            plan.steps[0].argv
+        );
+        assert!(
+            !plan
+                .warnings
+                .iter()
+                .any(|w| w.contains("Re-encoded rather than stream-copied")),
+            "a non-binding cap must not claim a re-encode that never happened: {:?}",
             plan.warnings
         );
     }
