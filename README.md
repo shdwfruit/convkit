@@ -146,8 +146,86 @@ FAIL in.jpg -> png
   png is lossless; --quality applies to jpg/webp/avif targets and image -> pdf
 ```
 
-Video/GIF knobs (fps, CRF) are not implemented yet. `conv capabilities
-<format>` lists which flags apply to which pair.
+`--fps` and `--crf` override two more named defaults on video and GIF
+conversions; `--resize` above widens to both as well:
+
+- `--fps <RATE>` — cap the frame rate; a source already slower is left
+  unchanged.
+- `--crf <N>` — constant-quality anchor for the encoder: 0-51 for
+  mp4/mov/mkv, 0-63 for webm; the default is 20. The 0-51 bound is
+  convkit's own, not libx264's, which accepts far more without
+  complaint.
+
+On video and GIF, `--resize` caps rather than scales up: a source
+already smaller than the geometry is left unchanged. This diverges
+from what `--resize` does to an image — measured: `magick -resize
+1600x900` on a 320x240 source produces 1200x900 — it scales up.
+Upscaling an image is cheap and occasionally wanted; upscaling video
+invents no detail and pays for the invention in every frame.
+
+```console
+$ conv --fps 24 --resize 1280x720 sample.mkv out.mp4
+OK out.mp4 - 62 KB - 0.3s
+  /home/user/Videos/out.mp4
+  note  Re-encoded rather than stream-copied, because a video knob changes the picture; the copy path cannot filter.
+```
+
+Binding any video or GIF knob gives up convkit's auto-remux stream
+copy — ffmpeg refuses a filter alongside `-c:v copy`, so honouring the
+knob means re-encoding — and the note above says so. A cap that does
+not actually bind keeps the copy:
+
+```console
+$ conv --fps 30 slow24.mp4 slow24.mkv
+OK slow24.mkv - 17 KB - 0.2s - stream copy, no re-encode
+  /home/user/Videos/slow24.mkv
+  note  Source is 24 fps; --fps 30 left it unchanged.
+```
+
+An out-of-range `--crf` is refused rather than passed through to the
+encoder:
+
+```console
+$ conv --crf 60 sample.mkv out.mp4
+FAIL sample.mkv -> mp4
+  --crf 60 is out of range for mp4; libx264 takes 0-51, lower is better
+```
+
+A flag that doesn't apply to the requested pair is refused with the
+reason, never silently ignored, on video exactly as on images:
+
+```console
+$ conv --fps 24 photo.png out.jpg
+FAIL photo.png -> jpg
+  --fps does not apply to png -> jpg: it tunes video and GIF targets
+```
+
+`conv capabilities <format>` lists which flags apply to which pair,
+and each pair's own defaults:
+
+```console
+$ conv capabilities mp4
+mp4 (Video)
+
+  as source, converts to:
+    mp4 -> mov      [--resize --fps --crf]
+    mp4 -> mkv      [--resize --fps --crf]
+    mp4 -> webm     [--crf --resize --fps]
+    mp4 -> mp3   
+    mp4 -> m4a   
+    mp4 -> wav   
+    mp4 -> flac  
+    mp4 -> gif      [--resize --fps]
+
+  as target, accepts: mov mkv webm avi gif
+  tuning flags when writing mp4: --resize --fps --crf
+
+  defaults: crf 20 (override with --crf)
+  note: Subtitle tracks and any audio tracks beyond the first are dropped.
+  note: A looping GIF becomes a single play in MP4; there is no container-level loop flag to carry it over.
+
+  full pair list: conv capabilities; exact command preview: conv <in> <out> --dry-run
+```
 
 ## Discovering formats and capabilities
 

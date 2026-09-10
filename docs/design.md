@@ -101,6 +101,31 @@ problem or a scope multiplier:
 - Any cloud or API-key-based conversion path
 - A GUI
 
+### 3.1 Video and GIF knob non-goals
+
+Decided later, during the video-tuning-knobs work that added `--fps` and
+`--crf` and widened `--resize` to video — recorded here rather than left
+in one session's notes, which is how a decision gets silently
+re-litigated:
+
+- **No frame interpolation.** `minterpolate` is enormously expensive and
+  invents motion that was never recorded — warped edges, artefacts
+  around occlusion. `--fps` only ever removes frames; interpolation, if
+  ever wanted, is a different flag with a different name, so nobody
+  reaches for it by accident.
+- **No exact frame rate.** `--fps` is a cap. Forcing a slow source up to
+  a declared rate duplicates frames to no benefit.
+- **`--pad` deferred, not dropped.** It is the operation nearest the
+  crop-and-distort family this project refuses — `--resize` always fits
+  within the target geometry with aspect preserved, never cropping to
+  it or stretching to it — so `--pad` needs its own rationale before it
+  needs an implementation. Until now this deferral existed only in one
+  session's notes.
+- **Video `--resize` caps where image `--resize` scales up.** Measured:
+  `magick -resize 1600x900` on a 320x240 source produces 1200x900.
+  Upscaling an image is cheap and occasionally wanted; upscaling video
+  invents no detail and pays for the invention in every frame.
+
 ## 4. Product shape
 
 One sentence: *the file conversion command you should have typed, that works
