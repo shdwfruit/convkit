@@ -19,7 +19,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use convkit_core::{exec, registry, Backend, Format, Resolver};
+use convkit_core::{exec, registry, Backend, Format, MediaProbe, Resolver, Tuning};
 
 // --- Fixtures ----------------------------------------------------------
 
@@ -54,6 +54,21 @@ fn scratch_output(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// A private scratch directory for one whole end-to-end test: a source
+/// plus every output it produces, cleaned up automatically when the
+/// returned `TempDir` drops at the end of the test function. Unlike
+/// `scratch_output` above (which deliberately leaks a directory per call
+/// because its caller reads the file back well after the helper returns),
+/// the tests below build several files under one shared directory and
+/// hold it for the test's whole lifetime, so a plain, non-leaking guard is
+/// the right shape here.
+fn tmp() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("convkit-output-properties-e2e-")
+        .tempdir()
+        .unwrap()
+}
+
 // --- Backend resolution --------------------------------------------------
 
 /// Resolves `backend` against the real, unmodified `Resolver` and panics
@@ -82,27 +97,42 @@ fn require_backend(resolver: &Resolver, backend: Backend) {
 /// `require_backend` so a missing one fails with a clear message before any
 /// subprocess is even spawned.
 fn convert_path(input: &Path, to_ext: &str) -> (PathBuf, exec::Outcome) {
+    let output = scratch_output(&format!("out.{to_ext}"));
+    let outcome = convert_tuned(input, &output, &Tuning::default())
+        .unwrap_or_else(|e| panic!("{} -> {to_ext} failed: {e}", input.display()));
+    (output, outcome)
+}
+
+/// `convert_path`'s sibling: the same real `exec::run` path, but for a
+/// caller that already knows its own output path and wants a specific
+/// `Tuning` honoured rather than the untuned default. `convert_path` is
+/// expressed in terms of this rather than duplicating the `Request`
+/// construction, so there is one code path building a conversion request
+/// here, not two that can silently drift apart.
+fn convert_tuned(
+    input: &Path,
+    output: &Path,
+    tuning: &Tuning,
+) -> convkit_core::Result<exec::Outcome> {
     let from = Format::from_path(input)
         .unwrap_or_else(|| panic!("no known format for {}", input.display()));
-    let to = Format::from_ext(to_ext).unwrap_or_else(|| panic!("no known format {to_ext:?}"));
+    let to = Format::from_path(output)
+        .unwrap_or_else(|| panic!("no known format for {}", output.display()));
 
     let resolver = Resolver::new();
     for backend in registry::backends_for(from, to) {
         require_backend(&resolver, backend);
     }
 
-    let output = scratch_output(&format!("out.{to_ext}"));
     let req = exec::Request {
         from,
         to,
         inputs: vec![input.to_path_buf()],
-        output: output.clone(),
+        output: output.to_path_buf(),
         overwrite: false,
-        tuning: Default::default(),
+        tuning: tuning.clone(),
     };
-    let outcome = exec::run(&req, &resolver, &mut |_| {})
-        .unwrap_or_else(|e| panic!("{} -> {to_ext} failed: {e}", input.display()));
-    (output, outcome)
+    exec::run(&req, &resolver, &mut |_| {})
 }
 
 fn convert_fixture(name: &str, to_ext: &str) -> PathBuf {
@@ -183,6 +213,154 @@ fn build_multi_stream_mp4_fixture(resolver: &Resolver) -> PathBuf {
     assert!(
         result.status.success(),
         "building the multi-stream mp4 fixture failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    out
+}
+
+/// Synthesises a `w`x`h` @ `fps` h264 source with `ffmpeg`'s `testsrc`
+/// lavfi generator, written as `.mov` -- deliberately never `.mp4`: the
+/// registry has no `mp4 -> mp4` pair (converting a container to itself
+/// isn't a real conversion), and every video-knob test below targets
+/// `.mp4`, so the source has to live in a different container to reach a
+/// real `Mov -> Mp4` recipe. Two seconds is enough for a constant frame
+/// rate to be unambiguous without making these backend-heavy `--ignored`
+/// tests slow; `-preset ultrafast` keeps the encode itself cheap.
+fn synth_video(dir: &tempfile::TempDir, w: u32, h: u32, fps: u32) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+
+    let out = dir.path().join("src.mov");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size={w}x{h}:rate={fps}:duration=2"),
+        ])
+        .args([
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "building the synthetic video fixture failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    out
+}
+
+/// `synth_video`'s 10-bit sibling: the same `testsrc` source, encoded
+/// `yuv420p10le`/High 10 rather than the ordinary 8-bit `yuv420p` --
+/// exactly the source `a_ten_bit_source_comes_out_eight_bit` needs:
+/// without a forced `-pix_fmt yuv420p` on the tuned conversion, libx264
+/// preserves this bit depth and emits High 10 straight through (verified
+/// by hand against this machine's real ffmpeg while writing this test --
+/// see that test's own docs).
+fn synth_video_10bit(dir: &tempfile::TempDir, w: u32, h: u32, fps: u32) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+
+    let out = dir.path().join("src10.mov");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size={w}x{h}:rate={fps}:duration=2"),
+        ])
+        .args([
+            "-pix_fmt",
+            "yuv420p10le",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high10",
+            "-preset",
+            "ultrafast",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "building the 10-bit synthetic video fixture failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    out
+}
+
+/// An mkv source carrying two AAC audio tracks and one SubRip subtitle
+/// track alongside its h264 video. Exists purely for
+/// `a_transcode_keeps_the_tracks_the_static_recipe_would_drop`: the static
+/// `VIDEO_TO_MP4` registry recipe hardcodes `-sn` (no subtitles at all)
+/// and relies on ffmpeg's default stream selection (one video, one
+/// audio), so only `media::transcoded_invocation`'s probe-driven mapping
+/// -- reached because a video knob forces a re-encode -- can carry both
+/// audio tracks and the subtitle through. Same construction approach as
+/// `build_multi_stream_mp4_fixture` above, deliberately not through any
+/// convkit-core recipe, for the same reason that function documents.
+///
+/// A tiny 64x64 frame, like `build_multi_stream_mp4_fixture`'s -- not
+/// because the test cares about dimensions (only stream counts), but
+/// because a needlessly large/long encode here bought nothing and cost a
+/// great deal on a loaded machine: a full 1280x720@30fps two-second
+/// version of this fixture was observed to make ffmpeg's newer threaded
+/// scheduler stall for minutes under concurrent system load, while this
+/// tiny version and the pre-existing sibling fixture never have. 30fps
+/// (not the sibling's 10) so the test's own `--fps 24` genuinely caps
+/// something and exercises the re-encode path its name promises, rather
+/// than a rate the source was already under.
+fn synth_mkv_two_audio_one_subtitle(dir: &tempfile::TempDir) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+
+    let srt = dir.path().join("fixture.srt");
+    std::fs::write(&srt, "1\n00:00:00,000 --> 00:00:01,000\nhello\n").unwrap();
+
+    let out = dir.path().join("src.mkv");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", "testsrc=size=64x64:rate=30:duration=1"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=880:duration=1"])
+        .arg("-i")
+        .arg(&srt)
+        .args([
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "2:a",
+            "-map",
+            "3:s",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-c:s",
+            "srt",
+            "-shortest",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "building the two-audio/one-subtitle mkv fixture failed: {}",
         String::from_utf8_lossy(&result.stderr)
     );
     out
@@ -297,15 +475,124 @@ fn run_identify(magick: &Path, args: &[&str]) -> String {
 
 // --- Inspection helpers ----------------------------------------------------
 
-fn ffprobe_video_codec(path: &Path) -> String {
+/// `convkit_core::probe::run` against the real, resolved `ffprobe` --
+/// exactly the probe `plan::build_tuned` itself consults when deciding how
+/// to honour a video knob, so every property test below reads back what
+/// the production code path actually based its own decisions on.
+fn probe_media(path: &Path) -> MediaProbe {
     let resolver = Resolver::new();
     require_backend(&resolver, Backend::Ffprobe);
     let ffprobe = resolver.resolve(Backend::Ffprobe).unwrap().path;
-    let probe = convkit_core::probe::run(&ffprobe, path)
-        .unwrap_or_else(|e| panic!("ffprobe failed on {}: {e}", path.display()));
-    probe
+    convkit_core::probe::run(&ffprobe, path)
+        .unwrap_or_else(|e| panic!("ffprobe failed on {}: {e}", path.display()))
+}
+
+fn ffprobe_video_codec(path: &Path) -> String {
+    probe_media(path)
         .video_codec
         .unwrap_or_else(|| panic!("no video stream in {}", path.display()))
+}
+
+/// The first video stream's frame rate, as `MediaProbe` reports it --
+/// `(numerator, denominator)`, never a lossy float. See `MediaProbe::
+/// frame_rate`'s own docs for why a rational.
+fn probe_rate(path: &Path) -> (u32, u32) {
+    probe_media(path)
+        .frame_rate
+        .unwrap_or_else(|| panic!("no frame rate for {}", path.display()))
+}
+
+/// The first video stream's stored `(width, height)`. Stored, not
+/// displayed -- fine here, since none of these synthetic fixtures carry a
+/// rotation; see `MediaProbe::display_dimensions` for the distinction that
+/// would matter if one did.
+fn probe_dims(path: &Path) -> (u32, u32) {
+    let p = probe_media(path);
+    (
+        p.width
+            .unwrap_or_else(|| panic!("no width for {}", path.display())),
+        p.height
+            .unwrap_or_else(|| panic!("no height for {}", path.display())),
+    )
+}
+
+/// How many audio streams ffprobe sees, in the same order
+/// `media::transcoded_invocation`'s own per-index mapping would count them.
+fn probe_audio_count(path: &Path) -> usize {
+    probe_media(path).audio_codecs.len()
+}
+
+/// How many subtitle streams ffprobe sees.
+fn probe_subtitle_count(path: &Path) -> usize {
+    probe_media(path).subtitle_codecs.len()
+}
+
+/// The first video stream's `pix_fmt`. Not part of `MediaProbe` -- core has
+/// no need of it for any plan decision yet -- so this reads it straight
+/// from raw `ffprobe -show_streams` JSON via `probe_streams_json` below,
+/// the same helper the override-authority test elsewhere in this file
+/// already uses for the same reason.
+fn probe_pix_fmt(path: &Path) -> String {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffprobe);
+    let ffprobe = resolver.resolve(Backend::Ffprobe).unwrap().path;
+    probe_streams_json(&ffprobe, path)
+        .iter()
+        .find(|s| s["codec_type"] == "video")
+        .and_then(|s| s["pix_fmt"].as_str())
+        .unwrap_or_else(|| panic!("no pix_fmt for {}", path.display()))
+        .to_string()
+}
+
+/// Reads a GIF's global colour table straight out of its own bytes -- no
+/// backend needed. Per the GIF87a/89a spec: signature, a 7-byte logical
+/// screen descriptor, then -- when the packed byte's top bit is set -- a
+/// table of `2^(size+1)` consecutive `(r, g, b)` triples, where `size` is
+/// the packed byte's low 3 bits.
+fn gif_global_color_table(path: &Path) -> Vec<(u8, u8, u8)> {
+    let data =
+        std::fs::read(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    assert!(
+        data.len() > 13 && &data[0..3] == b"GIF",
+        "not a GIF: {}",
+        path.display()
+    );
+    let packed = data[10];
+    assert!(
+        packed & 0x80 != 0,
+        "GIF has no global colour table: {}",
+        path.display()
+    );
+    let n = 1usize << (((packed & 0x07) as u32) + 1);
+    let start = 13;
+    let end = start + 3 * n;
+    data[start..end]
+        .chunks_exact(3)
+        .map(|c| (c[0], c[1], c[2]))
+        .collect()
+}
+
+/// ffmpeg's built-in GIF encoder, given no explicit palette at all, falls
+/// back to a fixed, content-independent 256-entry "systematic" table: 8
+/// levels each of red and green (step 36) by 4 levels of blue (step 85) --
+/// entry `i` is `(36*(i%8), 36*((i/8)%8), 85*(i/64))`. Verified by hand
+/// against this machine's real ffmpeg 9.0.1 while writing this test
+/// (`ffmpeg -f lavfi -i testsrc=... plain.gif`, no palettegen involved at
+/// all, reads back exactly this table). convkit's own GIF chain always
+/// runs `palettegen`/`paletteuse` first (`TO_GIF_CHAIN` in registry.rs);
+/// any GIF whose table matches this systematic formula exactly never went
+/// through that chain -- the defect
+/// `a_tuned_gif_still_has_an_optimised_palette` exists to catch, whether
+/// the cause is the palette chain being dropped outright or a probe-driven
+/// path bypassing the static GIF recipe altogether.
+fn is_default_web_palette(path: &Path) -> bool {
+    let table = gif_global_color_table(path);
+    table.len() == 256
+        && table.iter().enumerate().all(|(i, &(r, g, b))| {
+            r == (36 * (i % 8)) as u8
+                && g == (36 * ((i / 8) % 8)) as u8
+                && b == (85 * (i / 64)) as u8
+        })
 }
 
 /// `identify -format "%k" <file>[0]` (see `identify_command` for how the
@@ -725,6 +1012,151 @@ fn mp4_to_mkv_with_no_probe_available_transcodes_and_preserves_every_stream() {
     // -c:s srt) -- text re-encoded to a different text codec, matroska's
     // own well-supported one, not the mov_text matroska has no codec for.
     assert_eq!(src_streams[3]["codec_name"], "mov_text", "{src_streams:#?}");
+}
+
+// --- Properties: video knobs against real backends -----------------------
+//
+// Everything above this section asserts on argv: the command convkit built,
+// never the file it produced. That is blind to a whole class of failure --
+// a chain that is well-formed and wrong -- and two defects of exactly that
+// shape shipped past a fully green suite on this branch: `--fps`/`--resize`
+// reaching the rendered command for a transcode pair but not for any static
+// recipe (so `video -> gif` accepted the flags, exited 0, and did nothing),
+// and a tuned `mp4 -> mkv` re-encoding while still reporting "stream copy,
+// no re-encode". The five tests below probe the actual output file instead.
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn fps_caps_and_never_raises() {
+    let dir = tmp();
+    let src = synth_video(&dir, 1280, 720, 30);
+    let out = dir.path().join("capped.mp4");
+    convert_tuned(
+        &src,
+        &out,
+        &Tuning {
+            fps: Some("15".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(probe_rate(&out), (15, 1));
+
+    let up = dir.path().join("unchanged.mp4");
+    convert_tuned(
+        &src,
+        &up,
+        &Tuning {
+            fps: Some("60".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(probe_rate(&up), (30, 1), "a cap must never raise a rate");
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn resize_caps_and_lands_on_even_dimensions() {
+    let dir = tmp();
+    let src = synth_video(&dir, 1280, 720, 30);
+    for (geometry, expected) in [
+        ("640x360", (640, 360)),
+        ("801x", (800, 450)), // odd request, even result
+        ("50%", (640, 360)),
+        ("200%", (1280, 720)), // capped, not doubled
+        ("4000x3000", (1280, 720)),
+    ] {
+        let out = dir
+            .path()
+            .join(format!("r{geometry}.mp4").replace(['%', 'x'], "_"));
+        convert_tuned(
+            &src,
+            &out,
+            &Tuning {
+                resize: Some(geometry.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (w, h) = probe_dims(&out);
+        assert_eq!((w, h), expected, "geometry {geometry}");
+        assert_eq!((w % 2, h % 2), (0, 0), "libx264 rejects odd dimensions");
+    }
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_ten_bit_source_comes_out_eight_bit() {
+    // The failure no argv snapshot catches: without -pix_fmt yuv420p,
+    // libx264 preserves the source and emits High 10, which a large
+    // share of hardware decoders refuse.
+    let dir = tmp();
+    let src = synth_video_10bit(&dir, 1280, 720, 30);
+    let out = dir.path().join("eight.mp4");
+    convert_tuned(
+        &src,
+        &out,
+        &Tuning {
+            fps: Some("24".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(probe_pix_fmt(&out), "yuv420p");
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_transcode_keeps_the_tracks_the_static_recipe_would_drop() {
+    let dir = tmp();
+    let src = synth_mkv_two_audio_one_subtitle(&dir);
+    let out = dir.path().join("kept.mp4");
+    convert_tuned(
+        &src,
+        &out,
+        &Tuning {
+            fps: Some("24".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        probe_audio_count(&out),
+        2,
+        "the second audio track must survive"
+    );
+    assert_eq!(probe_subtitle_count(&out), 1);
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_tuned_gif_still_has_an_optimised_palette() {
+    // Spliced after split[a][b] the value lands inside the palettegen
+    // graph and produces a default web-palette GIF -- which still opens,
+    // still animates, and looks wrong.
+    let dir = tmp();
+    let src = synth_video(&dir, 1280, 720, 30);
+    let out = dir.path().join("tuned.gif");
+    convert_tuned(
+        &src,
+        &out,
+        &Tuning {
+            fps: Some("10".into()),
+            resize: Some("320x".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (w, _) = probe_dims(&out);
+    assert_eq!(w, 320);
+    assert_eq!(probe_rate(&out).0 / probe_rate(&out).1, 10);
+    // A default web palette is exactly 256 evenly-spaced colours; an
+    // optimised one is not.
+    assert!(
+        !is_default_web_palette(&out),
+        "the palette chain was bypassed"
+    );
 }
 
 // --- Unit tests: identify_command ------------------------------------------
