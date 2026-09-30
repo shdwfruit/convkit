@@ -1697,7 +1697,8 @@ fn capabilities_advertises_the_video_chain_flags_for_webm_targets() {
 }
 
 /// `--max-size` sizes the four video targets and nothing else, so it is
-/// listed for mp4 and webm and not for gif, which refuses it by name.
+/// listed for mp4, mov and webm (mkv is the source here) and not for gif or
+/// an audio target, which refuse it by name.
 #[test]
 fn capabilities_lists_max_size_for_video_targets_only() {
     let assert = conv()
@@ -1717,8 +1718,10 @@ fn capabilities_lists_max_size_for_video_targets_only() {
             .clone()
     };
     assert!(row("mp4").iter().any(|f| f == "--max-size"));
+    assert!(row("mov").iter().any(|f| f == "--max-size"));
     assert!(row("webm").iter().any(|f| f == "--max-size"));
     assert!(!row("gif").iter().any(|f| f == "--max-size"));
+    assert!(!row("mp3").iter().any(|f| f == "--max-size"));
 }
 
 #[test]

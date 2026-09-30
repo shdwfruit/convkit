@@ -244,20 +244,26 @@ tight target trims a little from everything rather than all of one thing:
 a 144 fps clip loses frame rate long before it drops to 360p. The size is a
 ceiling: `10mb` means 10,000,000 bytes, which also fits a limit enforced as
 10 MiB. `kb`, `mb` and `gb` are decimal; write `kib`, `mib` or `gib` for
-binary units.
+binary units. The targets are mp4, mov, mkv and webm; any other target
+refuses the flag by name.
 
 It encodes in two passes and checks the result. If the file comes out over,
 conv plans again with a smaller budget and runs both passes again, three
-attempts at most. If the encoder could not reach the rate it was asked for
-at that picture size, which very detailed footage makes it do, the retry
+attempts at most. Very detailed footage can stop the encoder short of the
+rate it was asked for at a given picture size; when that happens, the retry
 also steps down to a smaller picture. A result still over after the last
-attempt is kept and flagged, never thrown away. A file already under the
-target is copied, or stream-copied into another container, rather than
-re-encoded, unless a `--resize` or `--fps` limit would change it.
+attempt is kept and flagged, never thrown away, and the exit code stays 0;
+a script reads `over_target` in `--json`. A file already under the target
+is copied rather than re-encoded, or stream-copied into another container
+where that container can hold its video (an H.264 mp4 going to webm is
+re-encoded). A `--resize` or `--fps` limit that would change the file
+forces the encode.
 
 With one file and no output name, conv keeps the format and adds the size
-to the name (`clip-10mb.mp4`). Name an output, or use `--to` for a batch,
-as usual; an output that is the input itself is refused, even with `-y`:
+to the name (`clip-10mb.mp4`), but only when the output would otherwise
+land on the input: with `-o` to another directory the name is kept. Name an
+output, or use `--to` for a batch, as usual; an output that is the input
+itself is refused, even with `-y`:
 
 ```console
 conv clip.mov small.mp4 --max-size 25mb   # name the output
@@ -307,9 +313,13 @@ to extreme compression on its own: without `--yes` (or a `y`), an
 over-target result is kept and flagged, with a note naming `--yes` and a
 size to try.
 
+`--json` and `--quiet` also refuse an extreme conversion without `--yes`,
+even on a terminal. A batch asks once for all its extreme files, and a no
+converts none of them.
+
 `--dry-run` probes the file and prints both passes of the first attempt.
 `--json` adds a `sizing` object to each result: the choice it made, the
-number of attempts, and whether the result is `over_target`.
+number of attempts, and `over_target`.
 
 ## Discovering formats and capabilities
 
@@ -377,9 +387,11 @@ coder, so convkit reads `.jfif` but writes JPEGs as `.jpg`, and asking for a
 `.jfif` output says so rather than writing a file whose bytes do not match
 its name.
 
-`--dry-run` prints the real backend command without running anything — it
-never probes inputs or creates directories. `-v/--verbose` streams each
-spawned command and the backend's full output to stderr as a job runs.
+`--dry-run` prints the real backend command without running the conversion —
+it never creates directories, and it probes the input only where the plan
+depends on its streams, such as a container change, a GIF target, a video
+knob or `--max-size`. `-v/--verbose` streams each spawned command and the
+backend's full output to stderr as a job runs.
 
 ## Batch conversion
 

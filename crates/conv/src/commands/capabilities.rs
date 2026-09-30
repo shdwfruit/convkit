@@ -60,7 +60,7 @@ pub fn run(cli: &Cli, format: Option<&str>) -> i32 {
 ///
 /// Most are scanned from the recipe's own args: the same slots
 /// `plan::build_tuned` validates against, so those entries cannot drift
-/// from what actually works. Two are keyed on the target instead, because
+/// from what actually works. Some are keyed on the target instead, because
 /// nothing in the recipe carries them: webm's `--resize` and `--fps`
 /// (its chain is composed at run time) and `--max-size` (a policy over a
 /// whole video conversion, not a slot in one recipe).
