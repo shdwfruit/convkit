@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod backend_overrides;
+pub mod budget;
 pub mod error;
 pub mod exec;
 pub mod format;
