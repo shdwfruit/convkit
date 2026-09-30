@@ -454,14 +454,6 @@ pub(crate) fn transcoded_invocation(
 /// video, so its pass 1 is built from the same mapping as pass 2, with the
 /// audio copied and the output discarded; the video then lands on the same
 /// index in both passes and pass 2 finds the log pass 1 wrote.
-// Nothing outside the tests calls this yet, which also leaves the `TwoPass`,
-// `Reencode` and `Copy` variants it builds unconstructed. Once the sized
-// planner calls it this expectation goes unmet, which is the compiler's cue
-// to delete it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the sized planner is its only caller")
-)]
 #[allow(clippy::too_many_arguments)] // each is a distinct input to one argv
 pub(crate) fn two_pass_invocations(
     to: Format,

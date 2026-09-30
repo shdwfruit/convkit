@@ -1207,9 +1207,16 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
 /// filter slot (vp9 needs no even-dimension guard, so none was authored,
 /// and adding one would put a `-vf` into every untuned webm transcode), so
 /// only `media::transcoded_invocation` can apply `--fps` or `--resize`
-/// there, and it needs the probe to map the streams.
+/// there, and it needs the probe to map the streams. And any `--max-size`
+/// conversion to a video target, which needs the duration to set a bitrate
+/// at all.
 pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
-    to == Format::Webm && needs_probe(from, to) && (tuning.fps.is_some() || tuning.resize.is_some())
+    // --max-size needs the duration and the picture; there is no fallback.
+    let sized = tuning.max_size.is_some() && crate::sized::is_video_target(to);
+    let webm_knob = to == Format::Webm
+        && needs_probe(from, to)
+        && (tuning.fps.is_some() || tuning.resize.is_some());
+    sized || webm_knob
 }
 
 /// The verified codec-compatibility tables for a remuxable target

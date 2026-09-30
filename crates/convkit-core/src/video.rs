@@ -106,6 +106,54 @@ fn geometry_binds(geometry: &str, (w, h): (u32, u32)) -> bool {
     }
 }
 
+/// The largest dimensions a `--resize` geometry allows for a source of
+/// these displayed dimensions: aspect preserved, never larger than the
+/// source. `--max-size` treats this as a ceiling it may go under. Digit
+/// strings too long for a number are unbounded, as in `geometry_binds`.
+pub(crate) fn fit_within(geometry: &str, (w, h): (u32, u32)) -> (u32, u32) {
+    let num = |v: &str| v.parse::<u128>().unwrap_or(u128::MAX);
+    let (w128, h128) = (u128::from(w), u128::from(h));
+    let (bw, bh) = if let Some(pct) = geometry.strip_suffix('%') {
+        let p = num(pct).min(100);
+        ((w128 * p / 100).max(1), (h128 * p / 100).max(1))
+    } else {
+        match geometry.split_once('x') {
+            Some((a, "")) => (num(a), u128::MAX),
+            Some(("", b)) => (u128::MAX, num(b)),
+            Some((a, b)) => (num(a), num(b)),
+            None => (num(geometry), u128::MAX),
+        }
+    };
+    if bw >= w128 && bh >= h128 {
+        return (w, h);
+    }
+    let (nw, nh) = if bw.saturating_mul(h128) <= bh.saturating_mul(w128) {
+        (bw, h128 * bw / w128)
+    } else {
+        (w128 * bh / h128, bh)
+    };
+    (nw.max(2) as u32, nh.max(2) as u32)
+}
+
+/// Parses a `--fps` value (`24`, `29.97`, `30000/1001`) into an exact
+/// rational: `29.97` is `2997/100`, not a float.
+pub(crate) fn parse_rate(s: &str) -> Option<(u32, u32)> {
+    let (n, d) = if let Some((n, d)) = s.split_once('/') {
+        (n.parse::<u32>().ok()?, d.parse::<u32>().ok()?)
+    } else if let Some((whole, frac)) = s.split_once('.') {
+        if frac.is_empty() || frac.len() > 6 {
+            return None;
+        }
+        (
+            format!("{whole}{frac}").parse::<u32>().ok()?,
+            10u32.pow(frac.len() as u32),
+        )
+    } else {
+        (s.parse::<u32>().ok()?, 1)
+    };
+    (n != 0 && d != 0).then_some((n, d))
+}
+
 /// Resolves the video knobs against a source.
 pub fn resolve(tuning: &Tuning, probe: Option<&MediaProbe>) -> ResolvedVideo {
     let mut r = ResolvedVideo::default();
@@ -344,5 +392,29 @@ mod tests {
     fn an_empty_tuning_resolves_to_nothing_at_all() {
         let r = resolve(&Tuning::default(), Some(&probe_at(1920, 1080, (30, 1))));
         assert_eq!(r, ResolvedVideo::default());
+    }
+
+    #[test]
+    fn fit_within_preserves_aspect_and_never_grows() {
+        assert_eq!(fit_within("1280x720", (1920, 1080)), (1280, 720));
+        assert_eq!(fit_within("640x", (1920, 1080)), (640, 360));
+        assert_eq!(fit_within("x480", (1920, 1080)), (853, 480));
+        assert_eq!(fit_within("50%", (1920, 1080)), (960, 540));
+        assert_eq!(fit_within("4000x3000", (1920, 1080)), (1920, 1080));
+        assert_eq!(fit_within("1280x720", (1080, 1920)), (405, 720));
+        assert_eq!(
+            fit_within("99999999999999999999x", (1920, 1080)),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn parse_rate_keeps_rates_exact() {
+        assert_eq!(parse_rate("24"), Some((24, 1)));
+        assert_eq!(parse_rate("29.97"), Some((2997, 100)));
+        assert_eq!(parse_rate("30000/1001"), Some((30000, 1001)));
+        assert_eq!(parse_rate("0"), None);
+        assert_eq!(parse_rate("1/0"), None);
+        assert_eq!(parse_rate("abc"), None);
     }
 }

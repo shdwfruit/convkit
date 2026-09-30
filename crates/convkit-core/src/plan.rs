@@ -108,6 +108,12 @@ pub fn build_tuned(
         ));
     }
 
+    // A size target is a policy, not a knob: it chooses the knob values
+    // itself, so it takes the whole conversion (sized.rs).
+    if let Some(max) = &tuning.max_size {
+        return crate::sized::plan(from, to, inputs, output, probe, tuning, max);
+    }
+
     // Resolved once, above every branch below, so the probe-aware dynamic
     // path and the static-recipe path both render against the same value
     // instead of the static path discarding it for `ResolvedVideo::default()`
