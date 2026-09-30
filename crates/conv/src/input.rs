@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use convkit_core::size::MaxSize;
 use convkit_core::{ConvError, ErrorCode, Format, Kind, Remediation};
 
 use crate::cli::Cli;
@@ -271,6 +272,77 @@ pub fn jobs_from(
     }])
 }
 
+/// `conv clip.mp4 --max-size 10mb`: the input's own container, beside the
+/// input (or in `-o`); `name_sized_outputs` adds the suffix.
+fn sized_single_job(input: &Path, outdir: Option<&Path>) -> Result<Job, ConvError> {
+    let from = format_of(input)?;
+    if !convkit_core::sized::is_video_target(from) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--max-size keeps {}'s own format, and {} is not one it can size; add --to mp4",
+                input.display(),
+                from.ext()
+            ),
+        ));
+    }
+    let output = match outdir {
+        Some(dir) => {
+            let name = input.file_name().ok_or_else(|| {
+                ConvError::new(
+                    ErrorCode::InvalidInvocation,
+                    format!("input has no file name: {}", input.display()),
+                )
+            })?;
+            dir.join(name)
+        }
+        None => input.to_path_buf(),
+    };
+    Ok(Job {
+        inputs: vec![input.to_path_buf()],
+        output,
+        from,
+        to: from,
+    })
+}
+
+/// A sized conversion may target its own container, so an output can land
+/// on its input. A derived output gets the size in its name
+/// (`clip-10mb.mp4`); an explicit one is refused. (An output landing on
+/// *another* job's input needs no check here: that job's own output is its
+/// input path until this renames it, so `jobs_from`'s collision check has
+/// already refused the pair.)
+fn name_sized_outputs(
+    mut jobs: Vec<Job>,
+    max: &MaxSize,
+    explicit_output: bool,
+) -> Result<Vec<Job>, ConvError> {
+    for job in &mut jobs {
+        if collision_key(&job.output) == collision_key(&job.inputs[0]) {
+            if explicit_output {
+                return Err(ConvError::new(
+                    ErrorCode::InvalidInvocation,
+                    format!(
+                        "output is the input: {}; name a different output",
+                        job.output.display()
+                    ),
+                ));
+            }
+            job.output = sized_name(&job.output, &max.spelling);
+        }
+    }
+    Ok(jobs)
+}
+
+/// `clip.mp4` + `10mb` -> `clip-10mb.mp4`, keeping the extension's case.
+fn sized_name(path: &Path, spelling: &str) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    match path.extension() {
+        Some(ext) => path.with_file_name(format!("{stem}-{spelling}.{}", ext.to_string_lossy())),
+        None => path.with_file_name(format!("{stem}-{spelling}")),
+    }
+}
+
 /// Whether a positional still carries a wildcard that nobody expanded.
 ///
 /// `[` is deliberately not counted. `wild` treats it as a character class and
@@ -487,7 +559,23 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
             expanded.push(path.clone());
         }
     }
-    jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())
+    let Some(max) = &cli.max_size else {
+        return jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref());
+    };
+    // The one form --max-size adds: a lone path keeps its own container.
+    let jobs = match (cli.to.as_deref(), expanded.as_slice()) {
+        (None, [single]) => vec![sized_single_job(single, cli.outdir.as_deref())?],
+        _ => jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?,
+    };
+    // A typed-out OUT is the user's explicit choice and is never renamed;
+    // the `.ext` shorthand and every --to output are derived.
+    let explicit_output = cli.to.is_none()
+        && expanded.len() == 2
+        && !expanded[1]
+            .to_string_lossy()
+            .strip_prefix('.')
+            .is_some_and(is_bare_extension_shorthand);
+    name_sized_outputs(jobs, max, explicit_output)
 }
 
 #[cfg(test)]
@@ -942,6 +1030,7 @@ mod tests {
             colors: None,
             fps: None,
             crf: None,
+            max_size: None,
             yes: false,
             no_install: false,
             outdir,
@@ -1070,5 +1159,100 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].inputs, v(&["a.jpg"]));
         assert_eq!(jobs[0].output, PathBuf::from("a.jpg"));
+    }
+
+    fn sized(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+        let mut c = cli_for(paths, to, outdir);
+        c.max_size = Some(convkit_core::size::parse("10mb").unwrap());
+        c
+    }
+
+    #[test]
+    fn a_single_path_with_max_size_keeps_its_container_and_gains_a_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        let jobs = plan_jobs(&sized(vec![clip.clone()], None, None)).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].output, dir.path().join("clip-10mb.mp4"));
+        assert_eq!((jobs[0].from, jobs[0].to), (Format::Mp4, Format::Mp4));
+    }
+
+    #[test]
+    fn an_explicit_output_equal_to_the_input_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        let e = plan_jobs(&sized(vec![clip.clone(), clip], None, None)).unwrap_err();
+        assert!(
+            e.message.starts_with("output is the input"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn the_ext_shorthand_is_derived_and_so_is_suffixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        let jobs = plan_jobs(&sized(vec![clip, p(".mp4")], None, None)).unwrap();
+        assert_eq!(jobs[0].output, dir.path().join("clip-10mb.mp4"));
+    }
+
+    #[test]
+    fn a_fan_out_suffixes_only_the_outputs_that_would_land_on_their_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.mp4");
+        let b = dir.path().join("b.mov");
+        let jobs = plan_jobs(&sized(vec![a, b], Some("mp4"), None)).unwrap();
+        assert_eq!(jobs[0].output, dir.path().join("a-10mb.mp4"));
+        assert_eq!(jobs[1].output, dir.path().join("b.mp4"));
+    }
+
+    /// `a.mov -> a.mp4` would overwrite the input `a.mp4` while it is read;
+    /// jobs_from's collision check refuses it before any renaming.
+    #[test]
+    fn an_output_landing_on_another_inputs_path_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.mp4");
+        let b = dir.path().join("a.mov");
+        let e = plan_jobs(&sized(vec![a, b], Some("mp4"), None)).unwrap_err();
+        assert!(e.message.starts_with("outputs collide"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_single_path_whose_format_cannot_be_sized_names_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = plan_jobs(&sized(vec![dir.path().join("clip.avi")], None, None)).unwrap_err();
+        assert!(e.message.contains("add --to mp4"), "{}", e.message);
+    }
+
+    #[test]
+    fn with_an_outdir_elsewhere_the_name_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("small");
+        let jobs = plan_jobs(&sized(
+            vec![dir.path().join("clip.mp4")],
+            None,
+            Some(out.clone()),
+        ))
+        .unwrap();
+        assert_eq!(jobs[0].output, out.join("clip.mp4"));
+    }
+
+    #[test]
+    fn with_the_inputs_own_directory_as_outdir_the_name_is_suffixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        let jobs = plan_jobs(&sized(vec![clip], None, Some(dir.path().to_path_buf()))).unwrap();
+        assert_eq!(jobs[0].output, dir.path().join("clip-10mb.mp4"));
+    }
+
+    #[test]
+    fn without_max_size_a_single_path_is_still_an_incomplete_invocation() {
+        let e = plan_jobs(&cli_for(vec![p("clip.mp4")], None, None)).unwrap_err();
+        assert!(
+            e.message.contains("expected an input and an output"),
+            "{}",
+            e.message
+        );
     }
 }

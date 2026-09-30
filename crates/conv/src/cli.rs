@@ -82,6 +82,14 @@ pub struct Cli {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=63))]
     pub crf: Option<u8>,
 
+    /// Keep each output at or under this size, choosing resolution, frame
+    /// rate and bitrates to fit. Video targets only. SIZE is a number and a
+    /// unit: 500kb, 10mb, 1.5gb, 10mib.
+    ///
+    /// Not `global` -- see `dry_run`'s doc comment.
+    #[arg(long, value_name = "SIZE", value_parser = parse_max_size, conflicts_with = "crf")]
+    pub max_size: Option<convkit_core::size::MaxSize>,
+
     /// Assume yes when prompted to install a missing backend — for a script
     /// that wants the install-then-retry behaviour without a TTY to answer
     /// the interactive prompt. Contradicts `--no-install`, which asks the
@@ -278,10 +286,16 @@ fn parse_frame_rate(s: &str) -> Result<String, String> {
     }
 }
 
+/// The whole grammar lives in `convkit_core::size` so a library caller
+/// gets exactly the same answer; this only adapts it to clap.
+fn parse_max_size(s: &str) -> Result<convkit_core::size::MaxSize, String> {
+    convkit_core::size::parse(s)
+}
+
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
-    /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf` was
-    /// passed.
+    /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
+    /// `--max-size` was passed.
     pub fn tuning(&self) -> Tuning {
         Tuning {
             resize: self.resize.clone(),
@@ -289,8 +303,7 @@ impl Cli {
             colors: self.colors,
             fps: self.fps.clone(),
             crf: self.crf,
-            // `--max-size` is not wired to a flag yet.
-            max_size: None,
+            max_size: self.max_size.clone(),
         }
     }
 
@@ -318,6 +331,8 @@ impl Cli {
 mod tests {
     use std::path::Path;
 
+    use clap::Parser;
+
     use super::*;
     use convkit_core::Backend;
 
@@ -335,6 +350,7 @@ mod tests {
             colors: None,
             fps: None,
             crf: None,
+            max_size: None,
             yes: false,
             no_install: false,
             outdir: None,
@@ -382,5 +398,21 @@ mod tests {
                 "{backend:?}: wrong override made it through Cli::resolver()"
             );
         }
+    }
+
+    #[test]
+    fn max_size_parses_and_rejects_a_bare_number() {
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--max-size", "10MB"]).unwrap();
+        assert_eq!(c.max_size.as_ref().unwrap().bytes, 10_000_000);
+        assert_eq!(c.tuning().max_size, c.max_size);
+        let e = Cli::try_parse_from(["conv", "a.mp4", "--max-size", "10"]).unwrap_err();
+        assert!(e.to_string().contains("add a unit"), "{e}");
+    }
+
+    #[test]
+    fn max_size_and_crf_conflict() {
+        let e = Cli::try_parse_from(["conv", "a.mp4", "--max-size", "10mb", "--crf", "20"])
+            .unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

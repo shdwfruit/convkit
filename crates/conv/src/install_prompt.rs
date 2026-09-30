@@ -137,6 +137,7 @@ mod tests {
             colors: None,
             fps: None,
             crf: None,
+            max_size: None,
             yes,
             no_install,
             outdir: None,

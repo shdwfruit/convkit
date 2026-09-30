@@ -1767,3 +1767,21 @@ fn a_webm_knob_with_no_ffprobe_names_ffprobe_not_a_false_refusal() {
         "{stderr}"
     );
 }
+
+#[test]
+fn max_size_on_a_gif_target_is_refused_by_name() {
+    conv()
+        .args(["clip.mp4", "out.gif", "--max-size", "10mb", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("--max-size does not apply to mp4 -> gif"));
+}
+
+#[test]
+fn max_size_without_a_unit_is_a_usage_error() {
+    conv()
+        .args(["clip.mp4", "--max-size", "10", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("add a unit"));
+}
