@@ -80,7 +80,7 @@ fn optional_rational<S: Serializer>(
     s: S,
 ) -> std::result::Result<S::Ok, S::Error> {
     match r {
-        Some((n, d)) => s.serialize_str(&format!("{n}/{d}")),
+        Some(r) => s.serialize_str(&budget::lowest_terms(*r)),
         None => s.serialize_none(),
     }
 }
@@ -874,6 +874,22 @@ mod tests {
 
         let v = serde_json::to_value(sample_report(None)).unwrap();
         assert!(v.get("fps").is_some_and(|f| f.is_null()), "{v}");
+    }
+
+    /// A rate is chosen as a division of the source's, `60/2` or `144/144`,
+    /// but published in lowest terms.
+    #[test]
+    fn a_sizing_report_writes_its_rate_in_lowest_terms() {
+        for (fps, want) in [
+            ((60, 2), "30/1"),
+            ((144, 144), "1/1"),
+            ((144, 6), "24/1"),
+            ((30_000, 2002), "15000/1001"),
+            ((1799, 120), "1799/120"),
+        ] {
+            let v = serde_json::to_value(sample_report(Some(fps))).unwrap();
+            assert_eq!(v["fps"], want, "{fps:?}");
+        }
     }
 
     #[test]

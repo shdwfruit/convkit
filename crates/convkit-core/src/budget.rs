@@ -230,7 +230,20 @@ impl SizedChoice {
 }
 
 fn rational<S: Serializer>(r: &(u32, u32), s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&format!("{}/{}", r.0, r.1))
+    s.serialize_str(&lowest_terms(*r))
+}
+
+/// A rate as `N/D` in lowest terms, the way `--json` publishes it. A chosen
+/// rate is a division of the source's (`60/2`, `144/144`), exact but not
+/// reduced; the arithmetic keeps it that way, and only its spelling is
+/// reduced.
+pub(crate) fn lowest_terms((n, d): (u32, u32)) -> String {
+    let (mut a, mut b) = (n, d);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let g = a.max(1);
+    format!("{}/{}", n / g, d / g)
 }
 
 fn tenths<S: Serializer>(t: &u32, s: S) -> Result<S::Ok, S::Error> {
@@ -1306,6 +1319,17 @@ mod tests {
         // A file the audio alone accounts for carries no video rate at all.
         assert_eq!(achieved_video_bps(&src, 100_000, Format::Mp4, Some(160)), 0);
         assert!(achieved_video_bps(&src, u64::MAX, Format::Mp4, Some(160)) > 0);
+    }
+
+    /// `--json --dry-run` publishes the choice itself, so its rate is in
+    /// lowest terms too, while the choice keeps the exact division.
+    #[test]
+    fn a_choice_publishes_its_rate_in_lowest_terms() {
+        let src = source(1920, 1080, (144, 1), 20, &[Some(160_000)]);
+        let c = pick(&src, 300_000);
+        assert_eq!(c.fps, (144, 6), "{c:?}");
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["fps"], "24/1", "{v}");
     }
 
     #[test]
