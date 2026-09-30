@@ -233,7 +233,7 @@ mp4 (Video)
 
 ```console
 $ conv clip.mp4 --max-size 10mb
-OK clip-10mb.mp4 - 9.99 MB - 23.7s
+OK clip-10mb.mp4 - 9.99 MB - 23.6s
   /home/user/Videos/clip-10mb.mp4
   note  Sized to 1920x1080 at 30 fps, 3.76 Mb/s video, 128 kb/s audio; 2 passes.
 ```
@@ -306,11 +306,10 @@ $ echo $?
 2
 $ conv clip.mp4 --max-size 1mb --yes
 warning  Extreme compression: 1 MB for 20 s of 1080p will look poor (480p, 30 fps).
-         For a watchable result, try: conv clip.mp4 --max-size 2mb --yes
-OK clip-1mb.mp4 - 973.83 KB - 39.1s
+         For a watchable result, try: conv clip.mp4 --max-size 2mb
+OK clip-1mb.mp4 - 973.83 KB - 38.6s
   /home/user/Videos/clip-1mb.mp4
   note  Sized to 854x480 at 30 fps, 251 kb/s video, 128 kb/s audio; 4 passes (1 retry).
-warning  Extreme compression: 1 MB for 20 s of 1080p will look poor (480p, 30 fps).
 ```
 
 The last run needed a retry, which the note counts. A retry never escalates
