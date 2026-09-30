@@ -90,6 +90,9 @@ jobs:
   integration:
     name: integration (ubuntu, real backends)
     runs-on: ubuntu-latest
+    # A few minutes when healthy. A hung backend otherwise holds the job for
+    # GitHub's six-hour default, and its log only appears once the job ends.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -154,6 +157,8 @@ jobs:
     name: integration (windows, real backends)
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: windows-latest
+    # As on ubuntu; the LibreOffice install makes this one slower.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
