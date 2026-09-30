@@ -738,3 +738,324 @@ None of these four changes touch the CRF 20 / AAC 160k / JPEG-quality-92
 anchors §4 measured, or the auto-remux mechanism §1 measured — they're about
 alpha handling, frame selection, and HDR colour management, which is a
 different axis from the quality anchors themselves.
+
+---
+
+## Size targets (`--max-size`)
+
+Measured 2026-09-30 on an Apple Silicon Mac (Apple M2, 8 cores: 4
+performance and 4 efficiency; 8 GiB; macOS 26.6.2), with Homebrew's
+`ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers`
+(libx264 r3222, libvpx 1.17.0, `--enable-libvmaf`), and libvmaf 3.2.0.
+This section was measured later, and on a different machine, from the
+sections above, which are the Windows measurements the top of this
+document describes.
+
+`--max-size` (`crates/convkit-core/src/budget.rs`) picks a picture size, a
+frame rate and an audio rate that fit a byte budget, by scoring every
+combination on one 0-100 cost scale anchored to VMAF (the picture's cost is
+100 minus its predicted VMAF) and taking the cheapest. Some of its constants
+are measured, below; the rest are judgement, and are described as such in
+the last subsection.
+
+| Constants | What they are | Set by |
+|---|---|---|
+| `X264_FIT`, `VP9_FIT` | picture loss from resolution and bits per pixel, per codec | measured: VMAF of 180 encodes |
+| `MARGIN_PERMILLE`, `OVERHEAD_PERMILLE` | the reserve kept under the target | measured: size error of the same encodes |
+| `FPS_CURVE`, `AAC_LADDER`, `OPUS_LADDER` | what a lower frame rate or audio rate costs | authored |
+| `SUBTITLE_ALLOWANCE_BYTES`, `EXTREME_COST` | bytes per subtitle stream; where a choice needs confirmation | authored |
+
+### Corpus
+
+Xiph's uncompressed "derf" test clips: 1080p, 50 fps, 4:2:0 y4m. The first
+250 frames of each (5 s) were fetched by HTTP byte range, so the bytes and
+their checksums are reproducible. The SHA-256 is of exactly those bytes
+(780,716,003 of them: a 4,096-byte allowance for the header and 251 frames,
+one more than is used), not of the whole file:
+
+| Clip | URL | Bytes | SHA-256 |
+|---|---|---|---|
+| `crowd_run` | `https://media.xiph.org/video/derf/y4m/crowd_run_1080p50.y4m` | 0-780716002 | `65cf9f015562cab85f842b325ce9264a70020beda241d9e4042a97dd8caa1306` |
+| `in_to_tree` | `https://media.xiph.org/video/derf/y4m/in_to_tree_1080p50.y4m` | 0-780716002 | `228c41643fb8c41aa66d4ef85e1a233065ea9eee306cec4276c0cb447ee5f33b` |
+| `old_town_cross` | `https://media.xiph.org/video/derf/y4m/old_town_cross_1080p50.y4m` | 0-780716002 | `e31d3b8c7e59a5886b3fdadfa734bf8928625106eddefd999880668a5152afa9` |
+
+The same bytes come from `curl -r 0-780716002 -o in_to_tree.part.y4m
+https://media.xiph.org/video/derf/y4m/in_to_tree_1080p50.y4m`, whose
+`shasum -a 256` was checked against the `in_to_tree` row. (The clips are
+from Xiph, not from download.blender.org: that host answered scripted
+downloads with a bot-check 403 on 2026-09-29.)
+
+### Method
+
+Each excerpt is first decoded into an exact yuv420p reference:
+
+```
+ffmpeg -y -v error -i in_to_tree.part.y4m -frames:v 250 -pix_fmt yuv420p -f yuv4mpegpipe in_to_tree.ref.y4m
+```
+
+Every clip is then encoded two-pass, exactly as convkit emits it for a sized
+conversion, with both codecs at short sides 1080, 720, 540, 360 and 240
+(widths 1920, 1280, 960, 640 and 426) and target rates of 0.005, 0.01, 0.02,
+0.04, 0.08 and 0.16 bits per pixel per frame (`bits per second = bpp x
+width x height x 50`): 3 clips x 5 sizes x 6 rates = 90 encodes per codec,
+180 in all. One x264 cell in full, in\_to\_tree at 1280x720 and 0.04 bpp
+(1,843,200 bit/s):
+
+```
+ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libx264 -b:v 1843200 -pass 1 -passlogfile in_to_tree.x264.720.0.04.mp4.pass -pix_fmt yuv420p -an -sn -dn -f null -
+ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libx264 -b:v 1843200 -pass 2 -passlogfile in_to_tree.x264.720.0.04.mp4.pass -pix_fmt yuv420p -an -movflags +faststart in_to_tree.x264.720.0.04.partial.mp4
+```
+
+and the same cell in VP9 (the partial file is renamed when pass 2 finishes):
+
+```
+ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libvpx-vp9 -b:v 1843200 -pass 1 -passlogfile in_to_tree.vp9.720.0.04.webm.pass -row-mt 1 -threads 0 -an -sn -dn -f null -
+ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libvpx-vp9 -b:v 1843200 -pass 2 -passlogfile in_to_tree.vp9.720.0.04.webm.pass -row-mt 1 -threads 0 -an in_to_tree.vp9.720.0.04.partial.webm
+```
+
+At 1080p the first `scale` is left out, as convkit leaves it out at the
+source's own size. Apart from `-y -v error`, the 250-frame limit and the
+file names, these are the arguments `conv clip.mp4 --max-size 1mb --dry-run`
+and `conv clip.mp4 --to webm --max-size 1mb --dry-run` print (compared
+against both on 2026-09-30), less the audio.
+
+Each encode is scored against the reference with VMAF, every frame, the
+encode scaled back up to 1920x1080 with bicubic first, so that the loss from
+a smaller picture is counted. The model is libvmaf's default,
+`vmaf_v0.6.1` (the filter's own default; the script passes none):
+
+```
+ffmpeg -v error -i in_to_tree.x264.720.0.04.mp4 -i in_to_tree.ref.y4m -lavfi '[0:v]scale=1920:1080:flags=bicubic,setpts=PTS-STARTPTS[d];[1:v]setpts=PTS-STARTPTS[r];[d][r]libvmaf=log_fmt=json:log_path=in_to_tree.x264.720.0.04.mp4.vmaf.json:n_threads=8' -f null -
+```
+
+The mean VMAF over the 250 frames is the score of the encode. The script
+checks, before it downloads anything, that ffmpeg has the libvmaf filter and
+the two encoders, and it does not substitute another metric if it does not.
+
+The whole of it is one script, which also prints the constants to paste:
+
+```
+python3 scripts/calibrate-max-size.py --work "$HOME/convkit-calibration" --codecs x264,vp9 --vp9-clips crowd_run,in_to_tree,old_town_cross
+```
+
+`--work` names any empty directory whose path has no `:` or other character
+a filter graph reads (the run recorded here used one under a temporary path,
+with these arguments). The first run downloads about 2.3 GB and leaves about
+2.4 GB in the directory, every encode and VMAF log among it; it took about
+41 minutes, download included, for the x264 grid and VP9 on two clips, and
+about 14 more when VP9's third clip was added. Running it again on the same
+directory downloads and encodes nothing, finds every result in place, and
+only refits and prints (a few seconds); `--verbose` prints every ffmpeg
+command, quoted for a shell, to stderr. The refit that produced the
+constants below, run with `--verbose`, printed no ffmpeg command, so it
+encoded nothing. Every measurement is kept in `results-x264.csv` and
+`results-vp9.csv` in that directory.
+
+### Picture loss: `VideoFit`
+
+The model fitted is the one `video_loss` in `budget.rs` computes:
+`predicted VMAF = (100 - res_scale x log2(1/scale)^res_power) x
+(1 - artefact/100)`, where `scale` is the encoded short side over the
+source's and `artefact = 100 / (1 + (bpp / bpp_half)^bpp_slope)`. `bpp` is
+the bits per pixel each file actually came out at (its size over its
+duration over its pixels per second), not the rate it was asked for, so the
+size error below does not bias the fit. The script's `predict` is that
+function, and a change to one is a change to the other.
+
+The fit is an exhaustive least-squares search over a grid, per codec:
+`res_scale` 4-40 in steps of 1, `res_power` 1-3 in steps of 0.25,
+`bpp_half` 0.002-0.06 in 60 equal ratios, `bpp_slope` 0.4-2.2 in steps of
+0.1. A first fit on a narrower grid (`res_scale` 4-20, `bpp_slope` 0.8-2.2)
+ended on its edges for both codecs, so the grid was widened and the fit
+repeated; on this one the script prints a note for any constant on an edge of
+its range, and printed none. The result, over 90 encodes per codec:
+
+```
+pub const X264_FIT: VideoFit = VideoFit { res_scale: 30.0, res_power: 1.25, bpp_half: 0.01504, bpp_slope: 1.2 }; // rmse 16.32 VMAF over 90 encodes
+pub const VP9_FIT: VideoFit = VideoFit { res_scale: 24.0, res_power: 1.50, bpp_half: 0.00798, bpp_slope: 0.8 }; // rmse 19.08 VMAF over 90 encodes
+```
+
+| | `res_scale` | `res_power` | `bpp_half` | `bpp_slope` | rmse (VMAF) | rmse with one offset per clip |
+|---|---|---|---|---|---|---|
+| x264 | 30.0 | 1.25 | 0.01504 | 1.2 | 16.32 | 8.80 |
+| VP9 | 24.0 | 1.50 | 0.00798 | 0.8 | 19.08 | 9.14 |
+
+**An rmse of 16-19 VMAF is large, and most of it is the content, not the
+model.** At equal size and equal bits per pixel, the three clips are far
+apart: at 1080p and a target of 0.04 bpp, x264 scores `crowd_run` 50.35,
+`in_to_tree` 87.16 and `old_town_cross` 89.68, and at 0.16 bpp 86.64, 92.96
+and 93.02. The fit cannot follow that, because nothing in it knows what the
+picture contains: `crowd_run` needs about four times the bits of the other
+two for the same score at 1080p (86.64 at 0.16 bpp, against 87.16 and 89.68
+at 0.04). Giving each clip its own offset (its mean residual: `crowd_run`
+-20.1, `in_to_tree` +7.7, `old_town_cross` +10.1 for x264; -23.6, +11.3 and
++12.5 for VP9) roughly halves the error, to 8.80 and 9.14. The spread is not
+one constant offset either (for x264 at 1080p, the gap between the best and
+worst clip runs from 45 VMAF at 0.005 bpp to 63 at 0.01, 39 at 0.04 and 6 at
+0.16, by the per-encode lines the script prints), so even that overstates
+what a constant could remove. A model of picture size and bits per pixel
+alone cannot do better than this, however its constants are chosen; it is
+fitted to rank candidates for an average clip, not to predict one file's
+VMAF. Content-aware weighting is future work.
+
+### Size error: margin and overhead
+
+The ratio of each file's size to the size its rate promised (`bit/s x 5 s /
+8`) is measured for every encode. A file of a few kilobytes says nothing
+about the multi-megabyte files the budget is used for (the first frame and
+the container are most of it), so encodes under 256 KiB are left out: 57 of
+the 90 per codec remain. Then it matters where the overshoot is:
+
+| Target | x264: encodes, median, max | VP9: encodes, median, max |
+|---|---|---|
+| 0.005 bpp | 3, 1.2113, 1.2188 | 3, 1.0073, 1.7276 |
+| 0.01 bpp | 6, 1.1153, 1.1324 | 6, 1.0041, 1.1183 |
+| 0.02 bpp | 9, 1.0557, 1.0946 | 9, 1.0046, 1.0148 |
+| 0.04 bpp | 12, 1.0239, 1.0428 | 12, 1.0017, 1.0078 |
+| 0.08 bpp | 12, 1.0062, 1.0191 | 12, 1.0014, 1.0036 |
+| 0.16 bpp | 15, 0.9955, 1.0138 | 15, 1.0011, 1.0038 |
+
+The overshoot is concentrated in the deliberately starved cells, where the
+encoder saturates: it cannot reach the rate it was given (at 0.005 bpp the
+1080p encodes of `in_to_tree` and `old_town_cross` come out 21 and 22% over
+under x264, and VP9's `crowd_run` 73% over), and so every cell below 0.04
+bpp says more about the encoder's limit than about a bias the budget should
+reserve for on every file. When a starved encode happens anyway, the
+executor measures the file, sees its video run more than 5% over the rate it
+asked for, and plans again at a smaller picture (up to three attempts in
+all). The reserve is therefore sized from the operating region only, the
+encodes of at least 256 KiB aimed at 0.04 bpp or more (`--reserve-min-bpp`,
+default 0.04), 39 per codec:
+
+| | median | p90 | max |
+|---|---|---|---|
+| x264 | 1.0062 | 1.0287 | 1.0428 |
+| VP9 | 1.0012 | 1.0038 | 1.0078 |
+
+The reserve is the larger codec's p90 over the target, 28.7 per mille
+(rounded up to 29), and the script takes that codec's median as the
+container overhead and the rest as the safety margin:
+
+```
+pub const OVERHEAD_PERMILLE: u64 = 7; // x264 median size over target 1.0062
+pub const MARGIN_PERMILLE: u64 = 22; // x264 p90 1.0287, less the overhead
+```
+
+Both codecs share x264's reserve: the webm path is sized against a 2.9%
+reserve where VP9's own p90 (0.4% over) would have asked for less, so its
+files land a little further under the target, in return for one set of
+constants.
+
+By construction about one x264 encode in ten in the operating region ends
+over that reserve (three of 39 here: `crowd_run` at 1080p and 720p, and
+`in_to_tree` at 360p, all aimed at 0.04 bpp), and is expected to be measured
+over the target and planned again; below 0.04 bpp the retry is the rule (16
+of the 18 x264 encodes of 256 KiB or more below it came out over 2.9%). The
+ratios are of the video stream, which is less than all of a file that has
+audio, so the same overshoot is a smaller share of such a file: the reserve
+is, if anything, generous there, and unmeasured, because the corpus is
+silent.
+
+### What the constants do in practice
+
+For a 5 s 1080p 30 fps clip with one 160 kb/s AAC track, made by `ffmpeg -f
+lavfi -i testsrc2=size=1920x1080:rate=30:duration=5 -f lavfi -i
+sine=frequency=440:duration=5 -c:v libx264 -crf 20 -pix_fmt yuv420p -c:a aac
+-b:a 160k clip.mp4`, the dry run (`conv clip.mp4 --max-size SIZE
+--dry-run`, which only probes) plans:
+
+| `--max-size` | Picture | Video | Audio | Said |
+|---|---|---|---|---|
+| 600kb | 1280x720, 30 fps | 804 kb/s | 128 kb/s | extreme; "try --max-size 650kb" |
+| 1mb | 1280x720, 30 fps | 1.43 Mb/s | 128 kb/s | |
+| 2mb | 1920x1080, 30 fps | 2.98 Mb/s | 128 kb/s | |
+| 5mb | 1920x1080, 30 fps | 7.64 Mb/s | 128 kb/s | |
+
+The reserve at 1 MB is 29 kB.
+
+### Limits of the corpus
+
+- Three silent 50 fps 5-second excerpts from the start of three clips, all
+  1080p and 16:9. The budget's picture steps that were not measured (2160
+  and 1440 above, 480 between and 144 below the 1080-240 grid) are
+  interpolated or extrapolated from the fitted curve, and the loss per
+  halving of the picture is measured from a 1080p source, not a 2160p one.
+- The encodes are silent (`-an`): audio's own container overhead, and how
+  closely the AAC and Opus encoders hold their rates, are unmeasured.
+  Subtitles and attachments are unmeasured as well.
+- Every encode is at the source's 50 fps, so a reduced frame rate was not
+  exercised; the frame-rate cost is authored, below.
+- VP9 and x264 are both measured on all three clips: x264 at its default
+  preset, VP9 with the options shown above and no others.
+- VMAF is one metric, trained on a particular range of viewing conditions.
+  It says nothing about audio, and nothing about motion smoothness.
+
+### Authored curves
+
+The frame-rate curve (`FPS_CURVE`), the audio ladders (`AAC_LADDER`,
+`OPUS_LADDER`), the subtitle allowance and `EXTREME_COST` are judgement, not
+measurement. The curves and ladders score a setting; what a choice pays is
+the rise above the score at the source's own setting (or the user's
+`--fps` or audio ceiling), so keeping the source's frame rate or audio rate
+costs nothing whatever the curve says there. The reasoning for each:
+
+**`FPS_CURVE`.** VMAF compares frames one at a time, so it cannot price a
+frame rate, and the calibration above never changes one. The curve is
+written from what viewers see instead. Rates of 120 fps and above score 0,
+because displays rarely show the difference; 60 fps scores 2, 48 scores 4
+and 30 scores 8, the rate most web and phone video already has; 24 scores 12;
+then motion visibly stutters, 18 at 20 fps, 28 at 15 and 38 at 12; 10 fps
+scores 48, 5 fps 75 and 1 fps 100, a slideshow. So a 30 fps source halved to
+15 fps pays 20 (28 less 8). The curve is interpolated linearly in log2(fps),
+because a halving reads as the same step wherever it starts, and the
+candidates are the even divisions of the source rate, so the frames kept
+stay evenly spaced.
+
+**The curve is not convex at every point.** Its rise per octave of lost rate
+runs 2 (120 to 60 fps), 6.2 (60 to 48), 5.9 (48 to 30), 12.4, 22.8, 24.1,
+31.1 and 38.0 (12 to 10 fps), and then falls again, to 27.0 (10 to 5) and
+10.8 (5 to 1), because it is pinned to 100 at 1 fps. The dip at 48 to 30 fps
+is 5% and changes nothing in practice. The tail under 10 fps is where a cut is
+cheaper than the one before, the opposite of the shape the budget relies on
+to spread loss across the dials; but a source of 24 fps or more pays at least
+36 to reach 10 fps, so a choice that goes below it is extreme or all but,
+and asks for confirmation regardless. Above 10 fps the curve steepens as it
+falls.
+
+**`AAC_LADDER`.** Kilobits per second per track, against a score, for
+ffmpeg's native `aac` encoder, which is what convkit's recipes use. Rungs
+above the source's own rate are not offered. 160 kb/s is convkit's own
+anchor (§4) and scores 0; 128 scores 1, since most listeners cannot tell the
+two apart on most material; 96 scores 4 and 64 scores 12, where the loss
+becomes audible to a careful listener and then plain; 48 scores 22; 32 scores
+40, which from a 160 kb/s track is exactly `EXTREME_COST`, so with any
+picture loss added the bottom rung is extreme. The steps are not measured
+(no audio was scored here): they are chosen to steepen toward the bottom, as
+the picture's loss does, and to sit on the same 0-100 scale.
+
+**`OPUS_LADDER`.** The same for `libopus`, which the webm recipe uses and
+which is generally held to stay good at lower rates than AAC: 128 kb/s per
+track scores 0 and 96 scores 1; 64 scores 4, where Opus is still comfortably
+good; 48 scores 8, 32 scores 15 and 24 scores 25, degrading as speech-grade
+rates are approached; 16 scores 40, the same extreme bottom rung. The ladder
+scores lower than AAC's at every rate the two share, on purpose, and is
+judgement like the rest.
+
+**`SUBTITLE_ALLOWANCE_BYTES`, 100,000.** The bytes set aside for each
+subtitle stream passed through. A feature-length SRT track is 50-100 kB of
+text, so this is the top of that range: a stream that is too big costs a
+slightly smaller picture, and one that is too small costs a retry. No
+subtitle was in the corpus, and an image-based subtitle stream is larger than
+this figure covers. Attachments (mkv) are added at their probed size and are
+not estimated.
+
+**`EXTREME_COST`, 40.** Where a choice needs `--yes`, or a larger target. The
+cost scale is VMAF's, inverted, and 40 is a predicted VMAF of about 60 for
+the picture alone: on the rough five-point reading of VMAF (20 bad, 40 poor,
+60 fair, 80 good, 100 excellent), a picture whose artefacts are obvious at
+normal viewing distance. Each dial's cost adds to the others', so 40 in all
+can be reached by a moderate loss in each or by a large one in one: the bottom
+rung of each audio ladder, or a 60 fps source cut to 12 fps, sits at or near
+it on its own. It is a judgement, not a measured threshold: the fits above
+do not know the content, so a choice just under the line can still look worse
+than one just over it on a different clip.

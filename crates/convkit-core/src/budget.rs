@@ -25,10 +25,11 @@ use crate::Format;
 
 /// Aim this far under the target, per mille, so an encode that lands a
 /// little over its bitrate still fits. Calibrated.
-pub const MARGIN_PERMILLE: u64 = 30;
+pub const MARGIN_PERMILLE: u64 = 22;
 /// Container overhead, per mille of the target. Calibrated.
-pub const OVERHEAD_PERMILLE: u64 = 10;
-/// Bytes set aside for each subtitle stream passed through. Calibrated.
+pub const OVERHEAD_PERMILLE: u64 = 7;
+/// Bytes set aside for each subtitle stream passed through. Authored: the
+/// calibration corpus has no subtitles.
 pub const SUBTITLE_ALLOWANCE_BYTES: u64 = 100_000;
 /// Below this an encoder cannot hold a bitrate at all.
 pub const MIN_VIDEO_BPS: u64 = 16_000;
@@ -88,17 +89,17 @@ pub struct VideoFit {
 }
 
 pub const X264_FIT: VideoFit = VideoFit {
-    res_scale: 12.0,
-    res_power: 2.0,
-    bpp_half: 0.011,
-    bpp_slope: 1.4,
-};
+    res_scale: 30.0,
+    res_power: 1.25,
+    bpp_half: 0.01504,
+    bpp_slope: 1.2,
+}; // rmse 16.32 VMAF over 90 encodes
 pub const VP9_FIT: VideoFit = VideoFit {
-    res_scale: 12.0,
-    res_power: 2.0,
-    bpp_half: 0.008,
-    bpp_slope: 1.4,
-};
+    res_scale: 24.0,
+    res_power: 1.5,
+    bpp_half: 0.00798,
+    bpp_slope: 0.8,
+}; // rmse 19.08 VMAF over 90 encodes
 
 /// How much each dial's loss counts. All 1.0 today; the future
 /// `--prio-res`/`--prio-fps`/`--prio-audio` flags raise one of them.
@@ -1132,27 +1133,29 @@ mod tests {
 
     #[test]
     fn the_achieved_video_rate_is_the_file_less_its_audio_and_reserve() {
-        // 1% of the file for the container and 160 kb/s of audio for 6 s:
-        // (1_000_000 - 10_000) * 8 - 960_000 = 6_960_000 bits over 6 s.
+        // The container's share is taken of the file itself.
+        let container = |bytes: u64| bytes * OVERHEAD_PERMILLE / 1000;
+        // The container's share and 160 kb/s of audio for 6 s:
+        // (1_000_000 - container) * 8 - 960_000 bits over 6 s.
         let src = source(1280, 720, (30, 1), 6, &[Some(160_000)]);
         assert_eq!(
             achieved_video_bps(&src, 1_000_000, Format::Mp4, Some(160)),
-            1_160_000
+            ((1_000_000 - container(1_000_000)) * 8 - 960_000) / 6
         );
         // Every audio track counts, and so does a subtitle stream's
-        // allowance: (2_000_000 - 20_000 - 100_000) * 8 - 3 * 960_000
-        // = 12_160_000 bits over 6 s.
+        // allowance: (2_000_000 - container - 100_000) * 8 - 3 * 960_000
+        // bits over 6 s.
         let mut three = source(1280, 720, (30, 1), 6, &[Some(160_000); 3]);
         three.subtitle_tracks = 1;
         assert_eq!(
             achieved_video_bps(&three, 2_000_000, Format::Mkv, Some(160)),
-            2_026_666
+            ((2_000_000 - container(2_000_000) - SUBTITLE_ALLOWANCE_BYTES) * 8 - 3 * 960_000) / 6
         );
         // A silent source loses nothing to audio.
         let silent = source(1280, 720, (30, 1), 6, &[]);
         assert_eq!(
             achieved_video_bps(&silent, 1_000_000, Format::Mp4, None),
-            1_320_000
+            (1_000_000 - container(1_000_000)) * 8 / 6
         );
         // A file the audio alone accounts for carries no video rate at all.
         assert_eq!(achieved_video_bps(&src, 100_000, Format::Mp4, Some(160)), 0);

@@ -3041,7 +3041,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         let dir = tempfile::tempdir().unwrap();
         let r = stubbed(
             dir.path(),
-            &probe_json(5, 50_000_000),
+            &probe_json(2, 50_000_000),
             &[1_300_000, 1_200_000, 1_100_000],
         );
         let req = sized_request(dir.path(), "1mb", false);
@@ -3163,7 +3163,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         let dir = tempfile::tempdir().unwrap();
         let r = stubbed(
             dir.path(),
-            &probe_json(5, 50_000_000),
+            &probe_json(2, 50_000_000),
             &[1_100_000, 1_050_000, 1_020_000],
         );
         let req = sized_request(dir.path(), "1mb", false);
