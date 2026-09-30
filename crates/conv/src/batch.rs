@@ -76,8 +76,8 @@ fn step_message(name: &str, index: usize, total: usize, retry: Option<&str>) -> 
     format!("running {name}{detail}…")
 }
 
-/// Why pass 2 is running again: the attempt about to start and how far over
-/// its target the last one came out.
+/// Why a sized encode is running again: the attempt about to start and how
+/// far over its target the last one came out.
 fn retry_label(attempt: u32, measured: u64, target: u64) -> String {
     let over = (measured as f64 / target as f64 - 1.0) * 100.0;
     format!("retry {attempt}, over by {over:.1}%")
@@ -168,10 +168,10 @@ pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i
                     // spinner/bar.
                     //
                     // `retry` holds the label of a sized encode that came
-                    // out over. The core starts pass 2 again at once, so a
-                    // message set on the retry itself would be replaced
-                    // before anyone saw it; the label is folded into the
-                    // step message instead.
+                    // out over. The core starts both passes again at once,
+                    // so a message set on the retry itself would be replaced
+                    // before anyone saw it; the label is folded into each
+                    // step's message instead.
                     let mut retry: Option<String> = None;
                     let mut on_event = |e: exec::Event| match e {
                         exec::Event::StepStarted {

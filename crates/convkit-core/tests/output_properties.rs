@@ -1264,19 +1264,34 @@ fn convert_sized(
     )
 }
 
-/// The result is at or under `target`, and no further under it than the
-/// budget's own reserve (margin plus container overhead) explains, with ten
-/// percentage points to spare for the encoder's rate control. Derived from
-/// the budget's constants so a recalibration moves the test with it.
-fn assert_close_under(bytes: u64, target: u64) {
-    let reserve = MARGIN_PERMILLE + OVERHEAD_PERMILLE + 100;
-    let floor = target * 1000u64.saturating_sub(reserve) / 1000;
+/// The result is at or under `target`. Fitted first time, it is no further
+/// under it than the budget's own reserve (margin plus container overhead)
+/// explains, with ten percentage points to spare for the encoder's rate
+/// control; derived from the budget's constants so a recalibration moves
+/// the test with it. A retried result was planned against a budget cut by
+/// how far the earlier attempts ran over, and perhaps a smaller picture, so
+/// it need only be at least half the target.
+fn assert_close_under(bytes: u64, target: u64, attempts: u32) {
     assert!(bytes <= target, "{bytes} is over {target}");
-    assert!(
-        bytes >= floor,
-        "{bytes} is further under {target} than the {reserve} permille reserve allows \
-         (floor {floor})"
-    );
+    if attempts == 1 {
+        let reserve = MARGIN_PERMILLE + OVERHEAD_PERMILLE + 100;
+        let floor = target * 1000u64.saturating_sub(reserve) / 1000;
+        assert!(
+            bytes >= floor,
+            "{bytes} is further under {target} than the {reserve} permille reserve allows \
+             (floor {floor})"
+        );
+    } else {
+        assert!(
+            bytes >= target / 2,
+            "{bytes} is under half of {target} after {attempts} attempts"
+        );
+    }
+}
+
+/// How many encode attempts a sized outcome took.
+fn attempts(o: &exec::Outcome) -> u32 {
+    o.sizing.as_ref().expect("a sized outcome").attempts
 }
 
 #[test]
@@ -1286,7 +1301,11 @@ fn max_size_lands_under_the_target_and_close_to_it() {
     let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 1);
     let out = dir.path().join("small.mp4");
     let o = convert_sized(&src, &out, "1mb", false).unwrap();
-    assert_close_under(std::fs::metadata(&out).unwrap().len(), 1_000_000);
+    assert_close_under(
+        std::fs::metadata(&out).unwrap().len(),
+        1_000_000,
+        attempts(&o),
+    );
     assert!(!o.sizing.unwrap().over_target);
 }
 
@@ -1296,8 +1315,12 @@ fn max_size_works_for_webm_too() {
     let dir = tmp();
     let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 1);
     let out = dir.path().join("small.webm");
-    convert_sized(&src, &out, "1mb", false).unwrap();
-    assert_close_under(std::fs::metadata(&out).unwrap().len(), 1_000_000);
+    let o = convert_sized(&src, &out, "1mb", false).unwrap();
+    assert_close_under(
+        std::fs::metadata(&out).unwrap().len(),
+        1_000_000,
+        attempts(&o),
+    );
 }
 
 /// Every audio track survives a sized conversion, and the audio budget
@@ -1333,7 +1356,11 @@ fn an_audio_first_mkv_is_sized_without_losing_its_pass_log() {
     let o = convert_sized(&src, &out, "2mb", false).unwrap();
     assert_eq!(probe_audio_count(&out), 1);
     assert!(probe_media(&out).video_codec.is_some());
-    assert_close_under(std::fs::metadata(&out).unwrap().len(), 2_000_000);
+    assert_close_under(
+        std::fs::metadata(&out).unwrap().len(),
+        2_000_000,
+        attempts(&o),
+    );
     assert!(!o.sizing.unwrap().over_target);
 }
 
@@ -1347,14 +1374,17 @@ fn parallel_sized_jobs_keep_their_pass_logs_apart() {
     std::fs::create_dir(&spaced).unwrap();
     let a = synth_noisy(&spaced, "a.mkv", 1280, 720, 6, 1);
     let b = synth_noisy(&spaced, "b.mkv", 1280, 720, 6, 1);
-    std::thread::scope(|s| {
+    let outcomes = std::thread::scope(|s| {
         let ha = s.spawn(|| convert_sized(&a, &spaced.join("a.mp4"), "1mb", false));
         let hb = s.spawn(|| convert_sized(&b, &spaced.join("b.mp4"), "1mb", false));
-        ha.join().unwrap().unwrap();
-        hb.join().unwrap().unwrap();
+        [ha.join().unwrap().unwrap(), hb.join().unwrap().unwrap()]
     });
-    for n in ["a.mp4", "b.mp4"] {
-        assert_close_under(std::fs::metadata(spaced.join(n)).unwrap().len(), 1_000_000);
+    for (n, o) in ["a.mp4", "b.mp4"].into_iter().zip(&outcomes) {
+        assert_close_under(
+            std::fs::metadata(spaced.join(n)).unwrap().len(),
+            1_000_000,
+            attempts(o),
+        );
     }
 }
 

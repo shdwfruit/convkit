@@ -64,8 +64,9 @@ pub struct SizingReport {
     pub video_bps: Option<u64>,
     /// One entry per audio track, bits per second.
     pub audio_bps: Vec<u64>,
-    /// Pass-2 runs for an encode (1 = fitted first time); 1 for a remux;
-    /// 0 for a copy.
+    /// Encode attempts, each of them both passes (1 = fitted first time);
+    /// 1 for a remux; 0 for a copy. The settings above are the last
+    /// attempt's: the one that made the file.
     pub attempts: u32,
     pub cost: Option<f64>,
     pub over_target: bool,
@@ -89,8 +90,39 @@ pub fn is_video_target(to: Format) -> bool {
     matches!(to, Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm)
 }
 
-/// Pass 2 runs at most this many times.
+/// A sized encode runs at most this many times, both passes each time.
 pub const MAX_ATTEMPTS: u32 = 3;
+
+/// A retry aims this much further under the budget its result scaled to,
+/// per mille, so an encoder that ran over once has room to do so again.
+const RETRY_UNDER_PERMILLE: u64 = 20;
+/// An attempt whose video came out more than this far over the rate it
+/// asked for, per cent, is taken as one the encoder could not hold at its
+/// picture size.
+const SATURATION_PERCENT: u64 = 5;
+
+/// What one encode attempt is planned against. The first attempt aims at
+/// the user's target with every picture size open to it. A retry aims at a
+/// smaller budget and, once an attempt has shown the encoder cannot hold a
+/// rate at some picture size, at pictures below that size. Only the
+/// arithmetic moves: the target the user asked for, and every sentence
+/// about it, stays theirs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Aim {
+    /// The bytes the budget chooses the settings against.
+    pub budget_bytes: u64,
+    /// No picture whose short side is longer than this.
+    pub max_short: Option<u32>,
+}
+
+impl Aim {
+    pub(crate) fn first(target_bytes: u64) -> Aim {
+        Aim {
+            budget_bytes: target_bytes,
+            max_short: None,
+        }
+    }
+}
 
 /// Everything `encode` needs, validated once.
 struct Prepared<'a> {
@@ -150,23 +182,58 @@ pub(crate) fn plan(
             });
         }
     }
-    encode(&p, sizing)
+    encode(&p, sizing, Aim::first(max.bytes))
 }
 
-/// Always an encode: the executor's fallback when a remux of a source that
-/// looked small enough came out over.
-pub(crate) fn encode_plan(
+/// A sized conversion checked once and then planned as an encode, attempt
+/// by attempt: the executor's handle for its retries, and for the encode it
+/// falls back to when a remux of a source that looked small enough came out
+/// over.
+pub(crate) struct Encoder<'a>(Prepared<'a>);
+
+pub(crate) fn encoder<'a>(
     from: Format,
     to: Format,
-    inputs: &[PathBuf],
-    output: &Path,
-    probe: Option<&MediaProbe>,
+    inputs: &'a [PathBuf],
+    output: &'a Path,
+    probe: Option<&'a MediaProbe>,
     tuning: &Tuning,
-    max: &MaxSize,
-) -> Result<ConversionPlan> {
-    let p = prepare(from, to, inputs, output, probe, tuning, max)?;
-    let sizing = new_sizing(&p, Strategy::Encode);
-    encode(&p, sizing)
+    max: &'a MaxSize,
+) -> Result<Encoder<'a>> {
+    prepare(from, to, inputs, output, probe, tuning, max).map(Encoder)
+}
+
+impl Encoder<'_> {
+    /// Both passes of one attempt, chosen against `aim`. The plan's sizing
+    /// keeps the user's own target.
+    pub(crate) fn plan(&self, aim: Aim) -> Result<ConversionPlan> {
+        encode(&self.0, new_sizing(&self.0, Strategy::Encode), aim)
+    }
+
+    /// The attempt after one planned at `aim` that chose `last` and came out
+    /// at `measured` bytes, over the target: planned again from a budget
+    /// scaled by how far over it came out, and below its picture size when
+    /// its video ran over the rate it asked for. `None` when that plan asks
+    /// the encoder for no fewer bits than `last` did, since running it could
+    /// only repeat the result that came out over.
+    pub(crate) fn retry(
+        &self,
+        aim: Aim,
+        last: &SizedChoice,
+        measured: u64,
+    ) -> Result<Option<(Aim, ConversionPlan)>> {
+        let p = &self.0;
+        let achieved = budget::achieved_video_bps(&p.src, measured, p.to, last.audio_kbps);
+        let next = aim_after(aim, p.max.bytes, measured, last, achieved);
+        let plan = self.plan(next)?;
+        let tracks = p.src.audio_bitrates.len();
+        let less = plan
+            .sizing
+            .as_ref()
+            .and_then(|s| s.choice.as_ref())
+            .is_some_and(|c| requested_bps(c, tracks) < requested_bps(last, tracks));
+        Ok(less.then_some((next, plan)))
+    }
 }
 
 fn new_sizing(p: &Prepared<'_>, strategy: Strategy) -> SizingPlan {
@@ -295,8 +362,15 @@ fn gap_error(gap: SourceGap, input: &Path) -> ConvError {
     }
 }
 
-fn encode(p: &Prepared<'_>, mut sizing: SizingPlan) -> Result<ConversionPlan> {
-    let choice = budget::choose(&p.src, p.max.bytes, p.to, &p.limits, &SizePolicy::default());
+fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<ConversionPlan> {
+    let choice = budget::choose_capped(
+        &p.src,
+        aim.budget_bytes,
+        p.to,
+        &p.limits,
+        aim.max_short,
+        &SizePolicy::default(),
+    );
     let resolved = ResolvedVideo {
         fps: (choice.fps != p.src.fps).then(|| format!("{}/{}", choice.fps.0, choice.fps.1)),
         scale: ((choice.width, choice.height) != (p.src.width & !1, p.src.height & !1))
@@ -333,8 +407,12 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan) -> Result<ConversionPlan> {
     }
     if choice.extreme {
         sizing.warning = Some(extreme_sentence(&p.src, &sizing, &choice));
+        // The suggestion was found against this attempt's budget; the user
+        // types a target, which a retry's budget undershoots by the ratio
+        // between the two.
         sizing.suggested = choice
             .suggested_bytes
+            .map(|b| as_target(b, p.max.bytes, aim.budget_bytes))
             .map(|b| size::round_up(b, p.max.family).spelling);
     }
     sizing.choice = Some(choice);
@@ -426,35 +504,57 @@ pub fn confirmation_error(input: &Path, sizing: &SizingPlan) -> ConvError {
     )
 }
 
-/// The next pass-2 bitrate after a result of `measured` bytes: aim at the
-/// margin again, 2% lower for every attempt so far, never at or above the
-/// rate that overshot and never below the encoder's floor. `None` when no
-/// such rate exists, that is when `video_bps` is already at the floor, so a
-/// retry would only repeat the encode that overshot.
-pub(crate) fn retry_bitrate(
-    video_bps: u64,
-    target: u64,
-    measured: u64,
-    attempts: u32,
-) -> Option<u64> {
-    let ceiling = video_bps.saturating_sub(1);
-    if ceiling < budget::MIN_VIDEO_BPS {
-        return None;
-    }
-    let aim = target as f64
-        * (1.0 - budget::MARGIN_PERMILLE as f64 / 1000.0)
-        * (1.0 - 0.02 * f64::from(attempts));
-    let next = video_bps as f64 * aim / measured.max(1) as f64;
-    Some((next as u64).clamp(budget::MIN_VIDEO_BPS, ceiling))
+/// The budget for the attempt after one planned against `budget` whose
+/// result came out at `measured` bytes, over `target`: scaled by how far
+/// over it came out, and a further 2% under that. Always below `budget`
+/// when `measured` is over `target`.
+fn next_budget(budget: u64, target: u64, measured: u64) -> u64 {
+    // Two u64 factors fit a u128, and the quotient is at most `budget`, so
+    // neither step can overflow.
+    let scaled = u128::from(budget) * u128::from(target) / u128::from(measured.max(1));
+    let next = scaled * u128::from(1000 - RETRY_UNDER_PERMILLE) / 1000;
+    u64::try_from(next).unwrap_or(u64::MAX)
 }
 
-/// Pass 2 with its bitrate replaced; every other token unchanged.
-pub(crate) fn with_bitrate(step: &PlannedStep, bps: u64) -> PlannedStep {
-    let mut s = step.clone();
-    if let Some(i) = s.argv.iter().position(|a| a == "-b:v" || a == "-b:v:0") {
-        s.argv[i + 1] = bps.to_string();
+/// Whether an attempt's video came out more than `SATURATION_PERCENT` over
+/// the rate it asked for. A two-pass encode lands close to its rate when it
+/// can; one that runs well over could not go that low at that picture size
+/// (on noisy footage libx264 does this above a rate that falls as the
+/// picture grows), and asking the same picture for less does not converge.
+fn saturated(requested_bps: u64, achieved_bps: u64) -> bool {
+    u128::from(achieved_bps) * 100
+        > u128::from(requested_bps) * u128::from(100 + SATURATION_PERCENT)
+}
+
+/// The aim for the attempt after one planned at `aim` that chose `last`,
+/// whose file came out at `measured` bytes, over `target`, carrying
+/// `achieved_bps` of video. A saturated attempt caps every later one
+/// strictly below its own picture; a cap, once set, stays.
+fn aim_after(aim: Aim, target: u64, measured: u64, last: &SizedChoice, achieved_bps: u64) -> Aim {
+    let below = saturated(last.video_bps, achieved_bps)
+        .then(|| budget::next_short_side_below(last.width.min(last.height)))
+        .flatten();
+    Aim {
+        budget_bytes: next_budget(aim.budget_bytes, target, measured),
+        max_short: below.or(aim.max_short),
     }
-    s
+}
+
+/// Everything a choice asks the encoder for, in bits per second: the video
+/// and every audio track.
+fn requested_bps(c: &SizedChoice, tracks: usize) -> u64 {
+    let audio = u64::from(c.audio_kbps.unwrap_or(0))
+        .saturating_mul(1000)
+        .saturating_mul(tracks as u64);
+    c.video_bps.saturating_add(audio)
+}
+
+/// `bytes` found against a budget of `budget_bytes`, as the target that
+/// budget stands for: scaled up by `target / budget_bytes`, rounded up.
+fn as_target(bytes: u64, target: u64, budget_bytes: u64) -> u64 {
+    let budget = u128::from(budget_bytes.max(1));
+    let scaled = (u128::from(bytes) * u128::from(target)).div_ceil(budget);
+    u64::try_from(scaled).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn report(
@@ -543,11 +643,12 @@ pub(crate) fn summary_note(r: &SizingReport) -> String {
     if let Some(a) = r.audio_bps.first() {
         parts.push(format!("{} audio", bps_words(*a)));
     }
+    // Every attempt runs both passes.
     let passes = match r.attempts {
         0 | 1 => "2 passes".to_string(),
         n => format!(
             "{} passes ({} {})",
-            n + 1,
+            2 * n,
             n - 1,
             if n == 2 { "retry" } else { "retries" }
         ),
@@ -949,47 +1050,175 @@ mod tests {
     }
 
     #[test]
-    fn a_retry_aims_lower_and_never_below_the_floor() {
-        let next = retry_bitrate(1_000_000, 10_000_000, 10_500_000, 1).unwrap();
-        assert!(next < 1_000_000);
-        assert!(next > 800_000, "{next}");
-        assert_eq!(
-            retry_bitrate(20_000, 10_000_000, 90_000_000, 2),
-            Some(budget::MIN_VIDEO_BPS)
-        );
+    fn a_retry_budget_scales_by_the_overshoot_and_aims_two_percent_lower() {
+        // 25% over: 1 MB x 1/1.25 x 0.98.
+        assert_eq!(next_budget(1_000_000, 1_000_000, 1_250_000), 784_000);
+        // A later retry scales the budget it was given, not the target:
+        // 784_000 x 1/1.1 = 712_727, x 0.98 = 698_472.
+        assert_eq!(next_budget(784_000, 1_000_000, 1_100_000), 698_472);
+        // Even a result one byte over asks for less.
+        assert!(next_budget(1_000_000, 1_000_000, 1_000_001) < 1_000_000);
+        // No overflow at the top of the range.
+        assert!(next_budget(u64::MAX, u64::MAX - 1, u64::MAX) < u64::MAX);
     }
 
-    /// A retry that would land on the rate that just overshot is no retry:
-    /// at the encoder's floor there is nowhere lower to go.
     #[test]
-    fn a_retry_at_the_floor_has_nowhere_lower_to_go() {
-        let floor = budget::MIN_VIDEO_BPS;
-        assert_eq!(retry_bitrate(floor, 10_000_000, 90_000_000, 1), None);
-        assert_eq!(retry_bitrate(floor - 1, 10_000_000, 90_000_000, 1), None);
-        assert_eq!(retry_bitrate(0, 10_000_000, 90_000_000, 1), None);
-        // One step above the floor still has exactly one rate below it.
-        assert_eq!(
-            retry_bitrate(floor + 1, 10_000_000, 90_000_000, 1),
-            Some(floor)
+    fn an_attempt_saturates_when_its_video_runs_more_than_five_percent_over() {
+        assert!(!saturated(1_000_000, 900_000));
+        assert!(
+            !saturated(1_000_000, 1_050_000),
+            "5% over still holds the rate"
         );
-        for (bps, measured) in [(floor + 1, 1), (50_000, 10_000_001), (1_000_000, 1)] {
-            let next = retry_bitrate(bps, 10_000_000, measured, 1).unwrap();
-            assert!(floor <= next && next < bps, "{bps} -> {next}");
+        assert!(saturated(1_000_000, 1_050_001));
+        assert!(
+            saturated(1_115_000, 1_333_000),
+            "the case measured on noise"
+        );
+        assert!(!saturated(u64::MAX, u64::MAX));
+    }
+
+    fn choice_at(width: u32, height: u32, video_bps: u64) -> SizedChoice {
+        SizedChoice {
+            width,
+            height,
+            fps: (30, 1),
+            video_bps,
+            audio_kbps: Some(160),
+            cost_tenths: 100,
+            extreme: false,
+            over: None,
+            suggested_bytes: None,
         }
     }
 
     #[test]
-    fn with_bitrate_rewrites_exactly_the_rate_token() {
-        let plan = build(
-            Format::Mp4,
-            Format::Mp4,
-            &probe(60, 50_000_000),
-            &tuned("10mb"),
-        )
-        .unwrap();
-        let s = with_bitrate(&plan.steps[1], 123_456);
-        assert!(has(&s.argv, ["-b:v", "123456"]));
-        assert_eq!(s.argv.len(), plan.steps[1].argv.len());
+    fn a_saturated_attempt_caps_the_next_picture_below_its_own() {
+        let first = Aim::first(1_000_000);
+        let at_540 = choice_at(960, 540, 1_115_000);
+        // Held its rate: the budget shrinks and the picture is left to it.
+        let held = aim_after(first, 1_000_000, 1_080_000, &at_540, 1_120_000);
+        assert_eq!(
+            held,
+            Aim {
+                budget_bytes: next_budget(1_000_000, 1_000_000, 1_080_000),
+                max_short: None,
+            }
+        );
+        // Could not: the next picture is strictly smaller than this one.
+        let over = aim_after(first, 1_000_000, 1_080_000, &at_540, 1_333_000);
+        assert_eq!(over.max_short, Some(480));
+        assert_eq!(over.budget_bytes, held.budget_bytes);
+        // A portrait picture is capped on its short side too.
+        let portrait = choice_at(540, 960, 1_115_000);
+        let upright = aim_after(first, 1_000_000, 1_080_000, &portrait, 1_333_000);
+        assert_eq!(upright.max_short, Some(480));
+        // A cap, once set, holds for every later attempt.
+        let at_480 = choice_at(854, 480, 900_000);
+        let later = aim_after(over, 1_000_000, 1_020_000, &at_480, 910_000);
+        assert_eq!(later.max_short, Some(480));
+        // At the smallest picture there is nothing below; the cap stays.
+        let bottom = Aim {
+            budget_bytes: 50_000,
+            max_short: Some(144),
+        };
+        let at_144 = choice_at(256, 144, 16_000);
+        let still = aim_after(bottom, 1_000_000, 2_000_000, &at_144, 900_000);
+        assert_eq!(still.max_short, Some(144));
+    }
+
+    /// Everything a retry needs, over `in.mp4` into `/s/out.mp4`.
+    fn with_encoder<T>(p: &MediaProbe, size: &str, f: impl FnOnce(&Encoder<'_>) -> T) -> T {
+        let inputs = [PathBuf::from("in.mp4")];
+        let t = tuned(size);
+        let max = t.max_size.clone().unwrap();
+        let out = Path::new("/s/out.mp4");
+        let enc = encoder(Format::Mp4, Format::Mp4, &inputs, out, Some(p), &t, &max).unwrap();
+        f(&enc)
+    }
+
+    fn first_choice(enc: &Encoder<'_>, target: u64) -> SizedChoice {
+        enc.plan(Aim::first(target))
+            .unwrap()
+            .sizing
+            .unwrap()
+            .choice
+            .unwrap()
+    }
+
+    /// A retry chooses against a smaller budget, but the target stays the
+    /// user's: the plan's target, its label and its sentences never move.
+    #[test]
+    fn a_retry_plans_against_a_smaller_budget_but_keeps_the_users_target() {
+        with_encoder(&probe(5, 50_000_000), "1mb", |enc| {
+            let c1 = first_choice(enc, 1_000_000);
+            let (aim, next) = enc
+                .retry(Aim::first(1_000_000), &c1, 1_100_000)
+                .unwrap()
+                .expect("a retry that asks for less");
+            assert!(aim.budget_bytes < 1_000_000, "{aim:?}");
+            assert_eq!(next.steps.len(), 2, "both passes");
+            let s = next.sizing.unwrap();
+            assert_eq!(s.target_bytes, 1_000_000);
+            assert_eq!(s.target_label, "1 MB");
+            let c2 = s.choice.unwrap();
+            let pixels = |c: &SizedChoice| u64::from(c.width) * u64::from(c.height);
+            assert!(
+                c2.video_bps < c1.video_bps || pixels(&c2) < pixels(&c1),
+                "{c1:?} then {c2:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_retry_after_a_saturated_attempt_plans_a_smaller_picture() {
+        with_encoder(&probe(5, 50_000_000), "1mb", |enc| {
+            let c1 = first_choice(enc, 1_000_000);
+            // Twice the target: far more video than was asked for.
+            let (aim, next) = enc
+                .retry(Aim::first(1_000_000), &c1, 2_000_000)
+                .unwrap()
+                .unwrap();
+            let c2 = next.sizing.unwrap().choice.unwrap();
+            let short = |c: &SizedChoice| c.width.min(c.height);
+            assert_eq!(aim.max_short, budget::next_short_side_below(short(&c1)));
+            assert!(short(&c2) < short(&c1), "{c1:?} then {c2:?}");
+        });
+    }
+
+    /// 45 minutes at 5 MB is already the bottom of every dial at the
+    /// encoder's floor rate: a smaller budget chooses the same again, and a
+    /// retry that asks for no less is not planned at all.
+    #[test]
+    fn a_retry_that_would_ask_for_no_less_is_not_planned() {
+        with_encoder(&probe(45 * 60, 900_000_000), "5mb", |enc| {
+            let c1 = first_choice(enc, 5_000_000);
+            assert!(c1.over.is_some(), "{c1:?}");
+            let retry = enc.retry(Aim::first(5_000_000), &c1, 6_000_000).unwrap();
+            assert!(retry.is_none(), "{retry:?}");
+        });
+    }
+
+    /// A retry's budget can turn a choice extreme. Its suggestion is a size
+    /// for the user to type, so it is scaled back up from the retry's budget:
+    /// never at or below the target they already asked for.
+    #[test]
+    fn an_extreme_retry_says_so_and_suggests_more_than_the_target_tried() {
+        with_encoder(&probe(5, 50_000_000), "1mb", |enc| {
+            let c1 = first_choice(enc, 1_000_000);
+            assert!(!c1.extreme, "{c1:?}");
+            let (_, next) = enc
+                .retry(Aim::first(1_000_000), &c1, 20_000_000)
+                .unwrap()
+                .unwrap();
+            let s = next.sizing.unwrap();
+            assert!(s.choice.as_ref().unwrap().extreme, "{s:?}");
+            let w = s.warning.clone().unwrap();
+            assert!(w.starts_with("Extreme compression: 1 MB for 5 s"), "{w}");
+            let suggested = crate::size::parse(s.suggested.as_deref().unwrap())
+                .unwrap()
+                .bytes;
+            assert!(suggested > 1_000_000, "{s:?}");
+        });
     }
 
     #[test]
@@ -1010,7 +1239,7 @@ mod tests {
         };
         assert_eq!(
             summary_note(&r),
-            "Sized to 1280x720 at 29.97 fps, 1.19 Mb/s video, 96 kb/s audio; 3 passes (1 retry)."
+            "Sized to 1280x720 at 29.97 fps, 1.19 Mb/s video, 96 kb/s audio; 4 passes (1 retry)."
         );
         assert_eq!(duration_words(45 * 60 * 1000), "45 min");
         assert_eq!(duration_words(42_000), "42 s");
@@ -1032,20 +1261,13 @@ mod tests {
 
     #[test]
     fn a_source_that_fits_is_still_encoded_by_the_fallback_planner() {
-        let max = crate::size::parse("10mb").unwrap();
-        let plan = encode_plan(
-            Format::Mp4,
-            Format::Mp4,
-            &[PathBuf::from("in.mp4")],
-            Path::new("/s/out.mp4"),
-            Some(&probe(60, 6_000_000)),
-            &tuned("10mb"),
-            &max,
-        )
-        .unwrap();
+        let plan = with_encoder(&probe(60, 6_000_000), "10mb", |enc| {
+            enc.plan(Aim::first(10_000_000)).unwrap()
+        });
         assert_eq!(plan.sizing.as_ref().unwrap().strategy, Strategy::Encode);
         assert_eq!(plan.steps.len(), 2);
-        let refused = encode_plan(
+        let max = crate::size::parse("10mb").unwrap();
+        let refused = encoder(
             Format::Mp4,
             Format::Mp4,
             &[PathBuf::from("in.mp4")],
@@ -1054,7 +1276,8 @@ mod tests {
             &tuned("10mb"),
             &max,
         )
-        .unwrap_err();
+        .err()
+        .expect("no probe, no encoder");
         assert!(
             refused.message.contains("needs ffprobe"),
             "{}",
@@ -1133,9 +1356,6 @@ mod tests {
                 step.argv
             );
         }
-        let s = with_bitrate(&plan.steps[1], 77_000);
-        assert!(has(&s.argv, ["-b:v:0", "77000"]));
-        assert_eq!(s.argv.len(), plan.steps[1].argv.len());
     }
 
     #[test]
@@ -1312,7 +1532,7 @@ mod tests {
         };
         assert_eq!(
             summary_note(&three),
-            "Sized to 1280x720 at 24 fps, 900 kb/s video; 4 passes (2 retries)."
+            "Sized to 1280x720 at 24 fps, 900 kb/s video; 6 passes (2 retries)."
         );
     }
 
@@ -1379,15 +1599,6 @@ mod tests {
         let e = confirmation_error(Path::new("talk.mp4"), &bare);
         assert!(!e.message.contains("try --max-size"), "{}", e.message);
         assert!(!e.message.ends_with('.'), "error register: {}", e.message);
-    }
-
-    #[test]
-    fn a_retry_never_climbs_and_shrinks_with_each_attempt() {
-        let first = retry_bitrate(1_000_000, 10_000_000, 10_500_000, 1).unwrap();
-        let second = retry_bitrate(1_000_000, 10_000_000, 10_500_000, 2).unwrap();
-        assert!(second < first, "{second} < {first}");
-        // Even a result a whisker over never asks for the same rate again.
-        assert!(retry_bitrate(1_000_000, 10_000_000, 10_000_001, 1).unwrap() < 1_000_000);
     }
 
     #[test]

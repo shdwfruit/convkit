@@ -259,6 +259,29 @@ pub(crate) fn payload_bytes(src: &Source, target: u64, to: Format) -> u64 {
     u64::try_from(left).unwrap_or(u64::MAX)
 }
 
+/// The video rate a finished file of `bytes` actually carries, worked back
+/// the way the budget works forward: the file less the reserve for the
+/// container, subtitles and attachments (the container's share taken of the
+/// file itself, and no margin, which is headroom rather than content), less
+/// the audio at `audio_kbps` on every track, over the duration. Zero when
+/// the audio and the reserve account for the whole file.
+pub fn achieved_video_bps(src: &Source, bytes: u64, to: Format, audio_kbps: Option<u32>) -> u64 {
+    let content = u128::from(bytes).saturating_sub(reserve_bytes(src, bytes, to, true));
+    let audio_bits = u128::from(audio_kbps.unwrap_or(0))
+        * 1000
+        * src.audio_bitrates.len() as u128
+        * u128::from(src.duration_ms)
+        / 1000;
+    let video_bits = (content * 8).saturating_sub(audio_bits);
+    u64::try_from(video_bits * 1000 / u128::from(src.duration_ms.max(1))).unwrap_or(u64::MAX)
+}
+
+/// The next short-side step strictly below `short`, or `None` when `short`
+/// is already at or under the smallest.
+pub fn next_short_side_below(short: u32) -> Option<u32> {
+    SHORT_SIDES.iter().copied().find(|&s| s < short)
+}
+
 fn codec_for(to: Format) -> (&'static VideoFit, &'static [(u32, f64)]) {
     if to == Format::Webm {
         (&VP9_FIT, &OPUS_LADDER)
@@ -410,6 +433,7 @@ fn evaluate(
     target: u64,
     to: Format,
     limits: &Limits,
+    max_short: Option<u32>,
     policy: &SizePolicy,
 ) -> SizedChoice {
     let (fit, ladder) = codec_for(to);
@@ -417,12 +441,20 @@ fn evaluate(
     let payload_bits = payload_bytes(src, target, to) as f64 * 8.0;
     let tracks = src.audio_bitrates.len() as f64;
     let (audio, audio_ref) = audio_steps(src, ladder);
-    let resolutions = resolution_steps(src, limits);
+    let mut resolutions = resolution_steps(src, limits);
     let rates = fps_steps(src, limits);
     // Loss is measured from the top step of each dial: the source, or the
     // user's own ceiling where one binds, which is not a loss the budget chose.
+    // Taken before `max_short` removes any step: that cap is the budget's own.
     let top_short = f64::from(resolutions[0].0);
     let fps_ref = fps_curve(rate_value(rates[0]));
+    if let Some(cap) = max_short {
+        let smallest = *resolutions.last().expect("at least one resolution step");
+        resolutions.retain(|&(short, _, _)| short <= cap);
+        if resolutions.is_empty() {
+            resolutions.push(smallest);
+        }
+    }
 
     let mut best: Option<Candidate> = None;
     for &(short, width, height) in &resolutions {
@@ -514,9 +546,26 @@ pub fn choose(
     limits: &Limits,
     policy: &SizePolicy,
 ) -> SizedChoice {
-    let mut c = evaluate(src, target_bytes, to, limits, policy);
+    choose_capped(src, target_bytes, to, limits, None, policy)
+}
+
+/// `choose`, leaving out every picture whose short side is longer than
+/// `max_short`. That cap is one the sizing sets itself, after an encode
+/// that could not hold its rate at a larger picture, not one the user asked
+/// for: unlike `Limits`, it moves no reference, so the loss of a smaller
+/// picture is still measured from the source or the user's own ceiling.
+/// The suggested size, when extreme, is found under the same cap.
+pub fn choose_capped(
+    src: &Source,
+    target_bytes: u64,
+    to: Format,
+    limits: &Limits,
+    max_short: Option<u32>,
+    policy: &SizePolicy,
+) -> SizedChoice {
+    let mut c = evaluate(src, target_bytes, to, limits, max_short, policy);
     if c.extreme {
-        c.suggested_bytes = suggest_target(src, target_bytes, to, limits, policy);
+        c.suggested_bytes = suggest_target(src, target_bytes, to, limits, max_short, policy);
     }
     c
 }
@@ -529,9 +578,10 @@ fn suggest_target(
     target: u64,
     to: Format,
     limits: &Limits,
+    max_short: Option<u32>,
     policy: &SizePolicy,
 ) -> Option<u64> {
-    let fits = |bytes: u64| !evaluate(src, bytes, to, limits, policy).extreme;
+    let fits = |bytes: u64| !evaluate(src, bytes, to, limits, max_short, policy).extreme;
     let mut lo = target;
     let mut hi = target.max(1);
     let mut doublings = 0;
@@ -983,6 +1033,126 @@ mod tests {
         let c = pick(&src, 10_000_000);
         assert_eq!((c.width, c.height), (1920, 1080));
         assert!(!c.extreme);
+    }
+
+    #[test]
+    fn the_next_short_side_below_is_the_next_step_down() {
+        for (short, want) in [
+            (u32::MAX, Some(2160)),
+            (2160, Some(1440)),
+            (1080, Some(720)),
+            (1079, Some(720)),
+            (720, Some(540)),
+            (700, Some(540)),
+            (541, Some(540)),
+            (540, Some(480)),
+            (145, Some(144)),
+            (144, None),
+            (100, None),
+            (0, None),
+        ] {
+            assert_eq!(next_short_side_below(short), want, "{short}");
+        }
+    }
+
+    /// A cap the sizing sets itself leaves larger pictures out, but unlike
+    /// the user's own `--resize` it is charged as loss: loss is still
+    /// measured from the source.
+    #[test]
+    fn a_cap_leaves_out_larger_pictures_and_is_charged_as_loss() {
+        let src = source(1920, 1080, (30, 1), 60, &[Some(160_000)]);
+        let target = 500_000_000;
+        let policy = SizePolicy::default();
+        let open = pick(&src, target);
+        assert_eq!((open.width, open.height), (1920, 1080), "{open:?}");
+        let none = choose_capped(&src, target, Format::Mp4, &Limits::default(), None, &policy);
+        assert_eq!(none, open, "no cap, no change");
+
+        let capped = choose_capped(
+            &src,
+            target,
+            Format::Mp4,
+            &Limits::default(),
+            Some(720),
+            &policy,
+        );
+        assert_eq!((capped.width, capped.height), (1280, 720), "{capped:?}");
+        let asked = choose(
+            &src,
+            target,
+            Format::Mp4,
+            &Limits {
+                max_dims: Some((1280, 720)),
+                max_fps: None,
+            },
+            &policy,
+        );
+        assert_eq!((asked.width, asked.height), (1280, 720), "{asked:?}");
+        assert!(asked.cost() < 1.0, "the user's ceiling is free: {asked:?}");
+        assert!(
+            capped.cost() > asked.cost() + 1.0,
+            "the sizing's own cap is not: {capped:?} vs {asked:?}"
+        );
+    }
+
+    #[test]
+    fn no_capped_choice_is_larger_than_its_cap() {
+        let landscape = source(1920, 1080, (30, 1), 60, &[Some(160_000)]);
+        let portrait = source(1080, 1920, (30, 1), 60, &[Some(160_000)]);
+        for src in [&landscape, &portrait] {
+            for cap in [1080, 720, 700, 540, 480, 360, 240, 144] {
+                for target in [2_000_000, 10_000_000, 50_000_000, 500_000_000] {
+                    let c = choose_capped(
+                        src,
+                        target,
+                        Format::Mp4,
+                        &Limits::default(),
+                        Some(cap),
+                        &SizePolicy::default(),
+                    );
+                    assert!(c.width.min(c.height) <= cap, "{cap} {target}: {c:?}");
+                }
+            }
+            // A cap under every step still leaves the smallest one.
+            let c = choose_capped(
+                src,
+                50_000_000,
+                Format::Mp4,
+                &Limits::default(),
+                Some(100),
+                &SizePolicy::default(),
+            );
+            assert_eq!(c.width.min(c.height), 144, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn the_achieved_video_rate_is_the_file_less_its_audio_and_reserve() {
+        // 1% of the file for the container and 160 kb/s of audio for 6 s:
+        // (1_000_000 - 10_000) * 8 - 960_000 = 6_960_000 bits over 6 s.
+        let src = source(1280, 720, (30, 1), 6, &[Some(160_000)]);
+        assert_eq!(
+            achieved_video_bps(&src, 1_000_000, Format::Mp4, Some(160)),
+            1_160_000
+        );
+        // Every audio track counts, and so does a subtitle stream's
+        // allowance: (2_000_000 - 20_000 - 100_000) * 8 - 3 * 960_000
+        // = 12_160_000 bits over 6 s.
+        let mut three = source(1280, 720, (30, 1), 6, &[Some(160_000); 3]);
+        three.subtitle_tracks = 1;
+        assert_eq!(
+            achieved_video_bps(&three, 2_000_000, Format::Mkv, Some(160)),
+            2_026_666
+        );
+        // A silent source loses nothing to audio.
+        let silent = source(1280, 720, (30, 1), 6, &[]);
+        assert_eq!(
+            achieved_video_bps(&silent, 1_000_000, Format::Mp4, None),
+            1_320_000
+        );
+        // A file the audio alone accounts for carries no video rate at all.
+        assert_eq!(achieved_video_bps(&src, 100_000, Format::Mp4, Some(160)), 0);
+        assert!(achieved_video_bps(&src, u64::MAX, Format::Mp4, Some(160)) > 0);
     }
 
     #[test]
