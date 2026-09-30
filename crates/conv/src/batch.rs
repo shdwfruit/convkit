@@ -76,11 +76,14 @@ fn step_message(name: &str, index: usize, total: usize, retry: Option<&str>) -> 
     format!("running {name}{detail}…")
 }
 
-/// Why a sized encode is running again: the attempt about to start and how
-/// far over its target the last one came out.
+/// Why a sized encode is running again: the attempt about to start, out of
+/// how many at most, and how far over its target the last one came out.
 fn retry_label(attempt: u32, measured: u64, target: u64) -> String {
     let over = (measured as f64 / target as f64 - 1.0) * 100.0;
-    format!("retry {attempt}, over by {over:.1}%")
+    format!(
+        "attempt {attempt} of {}, over by {over:.1}%",
+        convkit_core::sized::MAX_ATTEMPTS
+    )
 }
 
 /// The batch exit-code rule: 0 if every job succeeded, the underlying
@@ -390,25 +393,27 @@ mod tests {
             "running ffmpeg (step 1/2)…"
         );
         assert_eq!(
-            step_message("ffmpeg", 1, 2, Some("retry 2, over by 10.0%")),
-            "running ffmpeg (step 2/2, retry 2, over by 10.0%)…"
+            step_message("ffmpeg", 1, 2, Some("attempt 2 of 3, over by 10.0%")),
+            "running ffmpeg (step 2/2, attempt 2 of 3, over by 10.0%)…"
         );
         assert_eq!(step_message("magick", 0, 1, None), "running magick…");
         assert_eq!(
-            step_message("ffmpeg", 0, 1, Some("retry 2, over by 1.5%")),
-            "running ffmpeg (retry 2, over by 1.5%)…"
+            step_message("ffmpeg", 0, 1, Some("attempt 2 of 3, over by 1.5%")),
+            "running ffmpeg (attempt 2 of 3, over by 1.5%)…"
         );
     }
 
+    /// The label counts attempts, as the result's note counts passes, so a
+    /// second attempt is never called "retry 2".
     #[test]
     fn the_retry_label_names_the_attempt_and_how_far_over() {
         assert_eq!(
             retry_label(2, 11_000_000, 10_000_000),
-            "retry 2, over by 10.0%"
+            "attempt 2 of 3, over by 10.0%"
         );
         assert_eq!(
             retry_label(3, 10_150_000, 10_000_000),
-            "retry 3, over by 1.5%"
+            "attempt 3 of 3, over by 1.5%"
         );
     }
 
