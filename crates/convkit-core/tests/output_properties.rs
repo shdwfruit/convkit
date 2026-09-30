@@ -1170,69 +1170,102 @@ fn a_tuned_gif_still_has_an_optimised_palette() {
 /// A clip noisy enough that the encoder has to spend the bits it is given:
 /// a clean test pattern compresses so well that a bitrate target is never
 /// reached, which would make "close to the target" untestable.
-fn synth_noisy(dir: &Path, name: &str, w: u32, h: u32, secs: u32, audio_tracks: usize) -> PathBuf {
-    synth_noisy_ordered(dir, name, w, h, secs, audio_tracks, false)
-}
-
-/// `synth_noisy`, with control over stream order: `audio_first` maps every
-/// audio track ahead of the video, so the container's first stream is audio.
-fn synth_noisy_ordered(
-    dir: &Path,
-    name: &str,
-    w: u32,
-    h: u32,
+#[derive(Debug, Clone, Copy)]
+struct Noisy {
+    width: u32,
+    height: u32,
     secs: u32,
     audio_tracks: usize,
+    /// Maps every audio track ahead of the video, so the container's first
+    /// stream is audio.
     audio_first: bool,
-) -> PathBuf {
-    let resolver = Resolver::new();
-    require_backend(&resolver, Backend::Ffmpeg);
-    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
-    let out = dir.join(name);
-    let mut cmd = Command::new(&ffmpeg);
-    cmd.args(["-y", "-hide_banner", "-loglevel", "error"])
-        .args([
-            "-f",
-            "lavfi",
-            "-i",
-            &format!("testsrc2=size={w}x{h}:rate=30:duration={secs}"),
-        ]);
-    for t in 0..audio_tracks {
+    /// The noise filter's strength. At 30 libx264 cannot hold a 1 MB rate
+    /// at the picture first chosen for this clip, so the encode retries; at
+    /// 10 it lands first time.
+    strength: u32,
+    /// The noise filter's seed, so that two clips differ; ffmpeg's own
+    /// default when `None`.
+    seed: Option<u32>,
+}
+
+impl Noisy {
+    /// 1280x720, 6 s, one audio track after the video, and noise strong
+    /// enough to make the encoder retry.
+    fn hd() -> Noisy {
+        Noisy {
+            width: 1280,
+            height: 720,
+            secs: 6,
+            audio_tracks: 1,
+            audio_first: false,
+            strength: 30,
+            seed: None,
+        }
+    }
+
+    fn synth(self, dir: &Path, name: &str) -> PathBuf {
+        let Noisy {
+            width: w,
+            height: h,
+            secs,
+            audio_tracks,
+            audio_first,
+            strength,
+            seed,
+        } = self;
+        let resolver = Resolver::new();
+        require_backend(&resolver, Backend::Ffmpeg);
+        let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+        let out = dir.join(name);
+        let mut cmd = Command::new(&ffmpeg);
+        cmd.args(["-y", "-hide_banner", "-loglevel", "error"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc2=size={w}x{h}:rate=30:duration={secs}"),
+            ]);
+        for t in 0..audio_tracks {
+            cmd.args([
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("sine=frequency={}:duration={secs}", 440 + 110 * t),
+            ]);
+        }
+        let seed = seed.map(|s| format!(":all_seed={s}")).unwrap_or_default();
         cmd.args([
-            "-f",
-            "lavfi",
-            "-i",
-            &format!("sine=frequency={}:duration={secs}", 440 + 110 * t),
+            "-filter_complex",
+            &format!("[0:v]noise=alls={strength}:allf=t{seed}[v]"),
         ]);
+        if !audio_first {
+            cmd.args(["-map", "[v]"]);
+        }
+        for t in 0..audio_tracks {
+            cmd.args(["-map", &format!("{}:a", t + 1)]);
+        }
+        if audio_first {
+            cmd.args(["-map", "[v]"]);
+        }
+        cmd.args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "12",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+        ])
+        .arg(&out);
+        let status = cmd.status().unwrap();
+        assert!(status.success(), "synthesising {name}");
+        out
     }
-    cmd.args(["-filter_complex", "[0:v]noise=alls=30:allf=t[v]"]);
-    if !audio_first {
-        cmd.args(["-map", "[v]"]);
-    }
-    for t in 0..audio_tracks {
-        cmd.args(["-map", &format!("{}:a", t + 1)]);
-    }
-    if audio_first {
-        cmd.args(["-map", "[v]"]);
-    }
-    cmd.args([
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "12",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
-    ])
-    .arg(&out);
-    let status = cmd.status().unwrap();
-    assert!(status.success(), "synthesising {name}");
-    out
 }
 
 fn convert_sized(
@@ -1298,7 +1331,7 @@ fn attempts(o: &exec::Outcome) -> u32 {
 #[ignore = "requires backends; run with --ignored"]
 fn max_size_lands_under_the_target_and_close_to_it() {
     let dir = tmp();
-    let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 1);
+    let src = Noisy::hd().synth(dir.path(), "src.mkv");
     let out = dir.path().join("small.mp4");
     let o = convert_sized(&src, &out, "1mb", false).unwrap();
     assert_close_under(
@@ -1313,14 +1346,29 @@ fn max_size_lands_under_the_target_and_close_to_it() {
 #[ignore = "requires backends; run with --ignored"]
 fn max_size_works_for_webm_too() {
     let dir = tmp();
-    let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 1);
+    let src = Noisy::hd().synth(dir.path(), "src.mkv");
     let out = dir.path().join("small.webm");
     let o = convert_sized(&src, &out, "1mb", false).unwrap();
-    assert_close_under(
-        std::fs::metadata(&out).unwrap().len(),
-        1_000_000,
-        attempts(&o),
-    );
+    assert_eq!(attempts(&o), 1, "{:?}", o.sizing);
+    assert_close_under(std::fs::metadata(&out).unwrap().len(), 1_000_000, 1);
+}
+
+/// On a clip libx264 can hold to its rate, the first attempt lands close
+/// under the target, with no retry: the budget's own accuracy, which the
+/// noisier clips above cannot show because they always retry.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn max_size_lands_close_under_the_target_first_time_with_x264() {
+    let dir = tmp();
+    let src = Noisy {
+        strength: 10,
+        ..Noisy::hd()
+    }
+    .synth(dir.path(), "src.mkv");
+    let out = dir.path().join("small.mp4");
+    let o = convert_sized(&src, &out, "1mb", false).unwrap();
+    assert_eq!(attempts(&o), 1, "{:?}", o.sizing);
+    assert_close_under(std::fs::metadata(&out).unwrap().len(), 1_000_000, 1);
 }
 
 /// Every audio track survives a sized conversion, and the audio budget
@@ -1329,11 +1377,19 @@ fn max_size_works_for_webm_too() {
 #[ignore = "requires backends; run with --ignored"]
 fn a_three_track_mkv_keeps_every_track() {
     let dir = tmp();
-    let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 3);
+    let src = Noisy {
+        audio_tracks: 3,
+        ..Noisy::hd()
+    }
+    .synth(dir.path(), "src.mkv");
     let out = dir.path().join("small.mkv");
-    convert_sized(&src, &out, "2mb", false).unwrap();
+    let o = convert_sized(&src, &out, "2mb", false).unwrap();
     assert_eq!(probe_audio_count(&out), 3);
-    assert!(std::fs::metadata(&out).unwrap().len() <= 2_000_000);
+    assert_close_under(
+        std::fs::metadata(&out).unwrap().len(),
+        2_000_000,
+        attempts(&o),
+    );
 }
 
 /// A source whose first stream is audio still gets its video rate applied
@@ -1343,7 +1399,11 @@ fn a_three_track_mkv_keeps_every_track() {
 #[ignore = "requires backends; run with --ignored"]
 fn an_audio_first_mkv_is_sized_without_losing_its_pass_log() {
     let dir = tmp();
-    let src = synth_noisy_ordered(dir.path(), "src.mkv", 1280, 720, 6, 1, true);
+    let src = Noisy {
+        audio_first: true,
+        ..Noisy::hd()
+    }
+    .synth(dir.path(), "src.mkv");
     let resolver = Resolver::new();
     require_backend(&resolver, Backend::Ffprobe);
     let ffprobe = resolver.resolve(Backend::Ffprobe).unwrap().path;
@@ -1365,15 +1425,25 @@ fn an_audio_first_mkv_is_sized_without_losing_its_pass_log() {
 }
 
 /// Two jobs at once in one directory, whose name has a space, must not
-/// share a pass log.
+/// share a pass log. The two sources are seeded apart, so statistics read
+/// from the other job's log would not match the encode they guided.
 #[test]
 #[ignore = "requires backends; run with --ignored"]
 fn parallel_sized_jobs_keep_their_pass_logs_apart() {
     let dir = tmp();
     let spaced = dir.path().join("with space");
     std::fs::create_dir(&spaced).unwrap();
-    let a = synth_noisy(&spaced, "a.mkv", 1280, 720, 6, 1);
-    let b = synth_noisy(&spaced, "b.mkv", 1280, 720, 6, 1);
+    let seeded = |seed| Noisy {
+        seed: Some(seed),
+        ..Noisy::hd()
+    };
+    let a = seeded(1).synth(&spaced, "a.mkv");
+    let b = seeded(2).synth(&spaced, "b.mkv");
+    assert_ne!(
+        std::fs::read(&a).unwrap(),
+        std::fs::read(&b).unwrap(),
+        "the two sources must differ"
+    );
     let outcomes = std::thread::scope(|s| {
         let ha = s.spawn(|| convert_sized(&a, &spaced.join("a.mp4"), "1mb", false));
         let hb = s.spawn(|| convert_sized(&b, &spaced.join("b.mp4"), "1mb", false));
@@ -1392,7 +1462,7 @@ fn parallel_sized_jobs_keep_their_pass_logs_apart() {
 #[ignore = "requires backends; run with --ignored"]
 fn an_extreme_target_converts_only_when_allowed() {
     let dir = tmp();
-    let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 1);
+    let src = Noisy::hd().synth(dir.path(), "src.mkv");
     let out = dir.path().join("tiny.mp4");
     let e = convert_sized(&src, &out, "30kb", false).unwrap_err();
     assert_eq!(e.code, convkit_core::ErrorCode::ConfirmationRequired);
@@ -1412,7 +1482,13 @@ fn an_extreme_target_converts_only_when_allowed() {
 #[ignore = "requires backends; run with --ignored"]
 fn a_source_already_under_the_target_is_copied_untouched() {
     let dir = tmp();
-    let src = synth_noisy(dir.path(), "src.mkv", 640, 360, 2, 1);
+    let src = Noisy {
+        width: 640,
+        height: 360,
+        secs: 2,
+        ..Noisy::hd()
+    }
+    .synth(dir.path(), "src.mkv");
     let out = dir.path().join("same.mkv");
     convert_sized(&src, &out, "50mb", false).unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&src).unwrap());

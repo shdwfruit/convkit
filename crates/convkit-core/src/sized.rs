@@ -506,12 +506,14 @@ pub fn confirmation_error(input: &Path, sizing: &SizingPlan) -> ConvError {
 
 /// The budget for the attempt after one planned against `budget` whose
 /// result came out at `measured` bytes, over `target`: scaled by how far
-/// over it came out, and a further 2% under that. Always below `budget`
-/// when `measured` is over `target`.
+/// over it came out, and a further 2% under that. Always below `budget`.
 fn next_budget(budget: u64, target: u64, measured: u64) -> u64 {
-    // Two u64 factors fit a u128, and the quotient is at most `budget`, so
+    // Only a result over the target is retried; one at or under it scales
+    // by 1, so the budget never grows. Two u64 factors fit a u128, and with
+    // `measured` at least `target` the quotient is at most `budget`, so
     // neither step can overflow.
-    let scaled = u128::from(budget) * u128::from(target) / u128::from(measured.max(1));
+    let over = measured.max(target).max(1);
+    let scaled = u128::from(budget) * u128::from(target) / u128::from(over);
     let next = scaled * u128::from(1000 - RETRY_UNDER_PERMILLE) / 1000;
     u64::try_from(next).unwrap_or(u64::MAX)
 }
@@ -684,7 +686,7 @@ pub fn dry_run_note(s: &SizingPlan) -> String {
                 .map(|k| format!(", {k} kb/s audio"))
                 .unwrap_or_default();
             format!(
-                "Would size to {}x{} at {} fps, {} video{audio}; a retry at a lower video bitrate \
+                "Would size to {}x{} at {} fps, {} video{audio}; a smaller, re-planned retry \
                  may follow if the first attempt comes out over.",
                 c.width,
                 c.height,
@@ -700,6 +702,15 @@ pub fn dry_run_note(s: &SizingPlan) -> String {
             "; the video would be stream-copied, and re-encoded only if the copy came out over.",
         ),
     }
+}
+
+/// Why a run stopped short of its target without an extreme retry it was
+/// not allowed to make, and how to allow one.
+pub(crate) fn retry_needs_consent_note(suggested: Option<&str>) -> String {
+    let hint = suggested
+        .map(|s| format!(", or try --max-size {s}"))
+        .unwrap_or_default();
+    format!("A retry would need extreme compression; pass --yes to allow it{hint}.")
 }
 
 pub(crate) fn measured_over_sentence(s: &SizingPlan, bytes: u64, attempts: u32) -> String {
@@ -1058,6 +1069,12 @@ mod tests {
         assert_eq!(next_budget(784_000, 1_000_000, 1_100_000), 698_472);
         // Even a result one byte over asks for less.
         assert!(next_budget(1_000_000, 1_000_000, 1_000_001) < 1_000_000);
+        // A result at or under the target, which is never retried, never
+        // raises the budget either.
+        assert_eq!(next_budget(1_000_000, 1_000_000, 500_000), 980_000);
+        // Nor, far under, does it overflow on the way.
+        let most = u64::try_from(u128::from(u64::MAX) * 980 / 1000).unwrap();
+        assert_eq!(next_budget(u64::MAX, u64::MAX, 1), most);
         // No overflow at the top of the range.
         assert!(next_budget(u64::MAX, u64::MAX - 1, u64::MAX) < u64::MAX);
     }
@@ -1161,28 +1178,52 @@ mod tests {
             assert_eq!(s.target_bytes, 1_000_000);
             assert_eq!(s.target_label, "1 MB");
             let c2 = s.choice.unwrap();
-            let pixels = |c: &SizedChoice| u64::from(c.width) * u64::from(c.height);
             assert!(
-                c2.video_bps < c1.video_bps || pixels(&c2) < pixels(&c1),
-                "{c1:?} then {c2:?}"
+                requested_bps(&c2, 1) < requested_bps(&c1, 1),
+                "asks for fewer bits: {c1:?} then {c2:?}"
             );
         });
     }
 
+    /// 10% over the target, the first attempt's video ran 15% over its
+    /// rate: saturated. The smaller budget alone would keep the picture, so
+    /// only the cap can be what moves the retry below it.
     #[test]
     fn a_retry_after_a_saturated_attempt_plans_a_smaller_picture() {
         with_encoder(&probe(5, 50_000_000), "1mb", |enc| {
+            let short = |c: &SizedChoice| c.width.min(c.height);
+            let choice_for = |aim: Aim| enc.plan(aim).unwrap().sizing.unwrap().choice.unwrap();
             let c1 = first_choice(enc, 1_000_000);
-            // Twice the target: far more video than was asked for.
             let (aim, next) = enc
-                .retry(Aim::first(1_000_000), &c1, 2_000_000)
+                .retry(Aim::first(1_000_000), &c1, 1_100_000)
                 .unwrap()
                 .unwrap();
-            let c2 = next.sizing.unwrap().choice.unwrap();
-            let short = |c: &SizedChoice| c.width.min(c.height);
             assert_eq!(aim.max_short, budget::next_short_side_below(short(&c1)));
+            let uncapped = choice_for(Aim {
+                budget_bytes: aim.budget_bytes,
+                max_short: None,
+            });
+            assert_eq!(
+                short(&uncapped),
+                short(&c1),
+                "precondition: the budget alone keeps the picture: {uncapped:?}"
+            );
+            let c2 = next.sizing.unwrap().choice.unwrap();
             assert!(short(&c2) < short(&c1), "{c1:?} then {c2:?}");
         });
+    }
+
+    #[test]
+    fn a_retry_held_back_for_consent_says_how_to_give_it() {
+        assert_eq!(
+            retry_needs_consent_note(Some("2mb")),
+            "A retry would need extreme compression; pass --yes to allow it, \
+             or try --max-size 2mb."
+        );
+        assert_eq!(
+            retry_needs_consent_note(None),
+            "A retry would need extreme compression; pass --yes to allow it."
+        );
     }
 
     /// 45 minutes at 5 MB is already the bottom of every dial at the
@@ -1878,7 +1919,9 @@ mod tests {
         let n = dry_run_note(&enc);
         assert!(n.starts_with("Would size to "), "{n}");
         assert!(
-            n.contains("a retry at a lower video bitrate may follow"),
+            n.ends_with(
+                "; a smaller, re-planned retry may follow if the first attempt comes out over."
+            ),
             "{n}"
         );
         let copy = build(

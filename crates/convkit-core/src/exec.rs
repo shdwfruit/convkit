@@ -505,9 +505,11 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             if sz.choice.as_ref().is_some_and(|c| c.extreme) && !req.allow_extreme {
                 return Err(sized::confirmation_error(&req.inputs[0], &sz));
             }
-            let (ran, sz, attempts) =
-                runner.run_sized(req, built, sz, probed.as_ref(), &temp_final)?;
-            (ran, Some((sz, attempts)))
+            let done = runner.run_sized(req, built, sz, probed.as_ref(), &temp_final)?;
+            (
+                done.plan,
+                Some((done.sizing, done.attempts, done.held_back)),
+            )
         }
     };
     let remuxed = ran.steps.first().is_some_and(|s| is_remux(&s.argv));
@@ -522,7 +524,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     std::fs::rename(&temp_final, &req.output).map_err(io_err)?;
 
     let mut warnings = ran.warnings;
-    let sizing = sizing.map(|(sz, attempts)| {
+    let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());
         let report = sized::report(&sz, bytes, attempts, tracks);
         match sz.strategy {
@@ -543,6 +545,8 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         if report.over_target && !predicted_over {
             notes.push(sized::measured_over_sentence(&sz, bytes, attempts));
         }
+        // Why the run stopped short: after the sentence saying it did.
+        notes.extend(held_back);
         report
     });
 
@@ -806,15 +810,16 @@ impl StepRunner<'_> {
         Ok(())
     }
 
-    /// Runs a sized plan and brings the result under its target. Returns the
-    /// plan that produced the file, its sizing, and the number of encode
-    /// attempts (0 for a copy, 1 for a remux).
+    /// Runs a sized plan and brings the result under its target.
     ///
     /// An encode that comes out over is planned again against a smaller
     /// budget, and both passes run again, so pass 1's statistics always
-    /// match the encode they guide. The user's target never changes, and a
-    /// retry needs no confirmation of its own: running this encode at all
-    /// was the user's consent to size it, extreme or not.
+    /// match the encode they guide. The user's target never changes. A retry
+    /// never escalates to an extreme choice without consent: when
+    /// `Request::allow_extreme` is false and the next plan would be extreme,
+    /// the run stops, keeps the last attempt (over the target, and flagged
+    /// so by the caller) and says how to allow the retry. With consent, an
+    /// extreme retry runs and its plan carries the extreme sentence.
     fn run_sized(
         &mut self,
         req: &Request,
@@ -822,10 +827,10 @@ impl StepRunner<'_> {
         sizing: SizingPlan,
         probed: Option<&MediaProbe>,
         temp_final: &Path,
-    ) -> Result<(ConversionPlan, SizingPlan, u32)> {
+    ) -> Result<SizedRun> {
         if sizing.strategy == Strategy::Copy {
             copy_fresh(&req.inputs[0], temp_final)?;
-            return Ok((built, sizing, 0));
+            return Ok(SizedRun::new(built, sizing, 0));
         }
         let target = sizing.target_bytes;
         let max = req
@@ -845,7 +850,7 @@ impl StepRunner<'_> {
         let (mut plan, mut sizing) = if sizing.strategy == Strategy::Remux {
             self.run_all(&built)?;
             if file_len(temp_final)? <= target {
-                return Ok((built, sizing, 1));
+                return Ok(SizedRun::new(built, sizing, 1));
             }
             // It looked small enough, but the copy came out over: encode.
             let plan = encoder.plan(sized::Aim::first(target))?;
@@ -877,6 +882,14 @@ impl StepRunner<'_> {
             let Some((next_aim, next)) = encoder.retry(aim, last, bytes)? else {
                 break;
             };
+            let next_sizing = next.sizing.clone().expect("an encode plan is sized");
+            if next_sizing.choice.as_ref().is_some_and(|c| c.extreme) && !req.allow_extreme {
+                let held_back = sized::retry_needs_consent_note(next_sizing.suggested.as_deref());
+                return Ok(SizedRun {
+                    held_back: Some(held_back),
+                    ..SizedRun::new(plan, sizing, attempts)
+                });
+            }
             (self.on_event)(Event::SizeRetry {
                 attempt: attempts + 1,
                 measured: bytes,
@@ -887,13 +900,35 @@ impl StepRunner<'_> {
             self.notes.truncate(notes_from);
             remove_if_present(temp_final)?;
             self.run_all(&next)?;
-            sizing = next.sizing.clone().expect("an encode plan is sized");
+            sizing = next_sizing;
             plan = next;
             aim = next_aim;
             attempts += 1;
             bytes = file_len(temp_final)?;
         }
-        Ok((plan, sizing, attempts))
+        Ok(SizedRun::new(plan, sizing, attempts))
+    }
+}
+
+/// What a sized run did: the plan that produced the file, its sizing, the
+/// number of encode attempts (0 for a copy, 1 for a remux), and, when it
+/// stopped short of its target for want of consent to an extreme retry, the
+/// note that says so.
+struct SizedRun {
+    plan: ConversionPlan,
+    sizing: SizingPlan,
+    attempts: u32,
+    held_back: Option<String>,
+}
+
+impl SizedRun {
+    fn new(plan: ConversionPlan, sizing: SizingPlan, attempts: u32) -> SizedRun {
+        SizedRun {
+            plan,
+            sizing,
+            attempts,
+            held_back: None,
+        }
     }
 }
 
@@ -2821,16 +2856,15 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     struct Asked {
         pass: u8,
         rate: u64,
+        /// `-b:a` per audio track, bits per second; 0 where audio is off.
+        audio: u64,
         chain: String,
         /// The picture's shorter side.
         short: u64,
-        /// Pixels per second: the picture at its frame rate.
-        pixel_rate: u64,
     }
 
-    /// Reads a logged pass: its `-b:v`, and the picture and frame rate of
-    /// its filter chain (the probe's 1920x1080 at 30 fps where the chain
-    /// changes neither).
+    /// Reads a logged pass: its `-b:v` and `-b:a`, and the picture its filter
+    /// chain scales to (the probe's 1920x1080 where it scales nothing).
     #[cfg(unix)]
     fn asked(call: &str) -> Asked {
         let t: Vec<&str> = call.split(' ').collect();
@@ -2842,18 +2876,14 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             w = a.parse().unwrap();
             h = b.split(':').next().unwrap().parse().unwrap();
         }
-        let (mut n, mut d) = (30u64, 1u64);
-        if let Some(f) = chain.split(',').find_map(|f| f.strip_prefix("fps=")) {
-            let (a, b) = f.split_once('/').unwrap();
-            n = a.parse().unwrap();
-            d = b.parse().unwrap();
-        }
         Asked {
             pass: after("-pass").unwrap().parse().unwrap(),
             rate: after("-b:v").unwrap().parse().unwrap(),
+            audio: after("-b:a").map_or(0, |k| {
+                k.strip_suffix('k').unwrap().parse::<u64>().unwrap() * 1000
+            }),
             chain,
             short: w.min(h),
-            pixel_rate: w * h * n / d,
         }
     }
 
@@ -2874,6 +2904,15 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
                 }
             })
             .collect()
+    }
+
+    impl Asked {
+        /// Everything the pass asks the encoder for, in bits per second: the
+        /// video and the one audio track the stub probe reports.
+        #[cfg(unix)]
+        fn total(&self) -> u64 {
+            self.rate + self.audio
+        }
     }
 
     #[cfg(unix)]
@@ -2988,14 +3027,14 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert_eq!(c.len(), 4, "both passes, twice: {c:?}");
         let tries = attempts_of(&c);
         assert!(
-            tries[1].rate < tries[0].rate || tries[1].pixel_rate < tries[0].pixel_rate,
-            "the retry asks for less: {tries:?}"
+            tries[1].total() < tries[0].total(),
+            "the retry asks for fewer bits: {tries:?}"
         );
         assert_eq!(o.sizing.unwrap().attempts, 2);
     }
 
-    /// Every retry asks the encoder for less than the attempt before it, by
-    /// a lower rate or a smaller picture, until the attempts run out.
+    /// Every retry asks the encoder for fewer bits in all, video and audio
+    /// together, than the attempt before it, until the attempts run out.
     #[cfg(unix)]
     #[test]
     fn each_retry_asks_for_less_than_the_last() {
@@ -3011,18 +3050,17 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         let tries = attempts_of(&c);
         assert_eq!(tries.len(), crate::sized::MAX_ATTEMPTS as usize, "{c:?}");
         for w in tries.windows(2) {
-            assert!(
-                w[1].rate < w[0].rate || w[1].pixel_rate < w[0].pixel_rate,
-                "{tries:?}"
-            );
+            assert!(w[1].total() < w[0].total(), "{tries:?}");
         }
         let s = o.sizing.unwrap();
         assert_eq!((s.attempts, s.over_target), (3, true));
     }
 
-    /// An attempt whose video came out far over the rate it asked for could
-    /// not be held at that picture size, so the next attempt uses a smaller
-    /// picture. The report describes the attempt that made the kept file.
+    /// An attempt whose video came out well over the rate it asked for
+    /// could not be held at that picture size, so the next attempt uses a
+    /// smaller picture. 10% over the target, the video ran 15% over its rate,
+    /// and the smaller budget alone would keep the picture: only the cap
+    /// moves it. The report describes the attempt that made the kept file.
     #[cfg(unix)]
     #[test]
     fn a_saturated_attempt_makes_the_next_picture_smaller() {
@@ -3030,7 +3068,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         let r = stubbed(
             dir.path(),
             &probe_json(5, 50_000_000),
-            &[2_000_000, 900_000],
+            &[1_100_000, 900_000],
         );
         let req = sized_request(dir.path(), "1mb", false);
         let o = run(&req, &r, &mut |_| {}).unwrap();
@@ -3049,12 +3087,12 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert_eq!(s.target_bytes, 1_000_000, "the target itself never moves");
     }
 
-    /// The first plan was not extreme, so it ran unconfirmed; a retry whose
-    /// smaller budget turns extreme keeps going (the user asked for this
-    /// size), and the outcome says the picture will look poor.
+    /// The first plan was not extreme, so it ran unconfirmed. A retry whose
+    /// smaller budget would turn extreme is not run without consent: the
+    /// last attempt is kept and flagged, and a note says how to allow it.
     #[cfg(unix)]
     #[test]
-    fn a_retry_that_turns_extreme_runs_on_and_says_so() {
+    fn a_retry_that_would_turn_extreme_waits_for_consent() {
         let dir = tempfile::tempdir().unwrap();
         let r = stubbed(
             dir.path(),
@@ -3062,6 +3100,48 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             &[20_000_000, 900_000],
         );
         let req = sized_request(dir.path(), "1mb", false);
+        let mut retries = 0;
+        let o = run(&req, &r, &mut |e| {
+            if matches!(e, Event::SizeRetry { .. }) {
+                retries += 1;
+            }
+        })
+        .unwrap();
+        assert_eq!(calls(dir.path()).len(), 2, "one attempt only");
+        assert_eq!(retries, 0, "no retry ran, so none was announced");
+        assert_eq!(o.bytes, 20_000_000, "the last attempt is kept");
+        let s = o.sizing.as_ref().unwrap();
+        assert_eq!((s.attempts, s.over_target), (1, true));
+        assert_eq!(s.suggested, None, "the kept attempt was not extreme");
+        assert_eq!(o.notes.len(), 2, "{:?}", o.notes);
+        assert_eq!(
+            o.notes[0],
+            "Could not get under 1 MB after 1 attempt: the result is 20.00 MB."
+        );
+        assert!(
+            o.notes[1].starts_with(
+                "A retry would need extreme compression; pass --yes to allow it, \
+                 or try --max-size "
+            ) && o.notes[1].ends_with("mb."),
+            "{:?}",
+            o.notes
+        );
+        assert!(!o.notes.iter().any(|n| n.starts_with("Extreme compression")));
+        assert_routed(&o);
+    }
+
+    /// With consent, the same retry runs, and the outcome says the picture
+    /// will look poor.
+    #[cfg(unix)]
+    #[test]
+    fn a_retry_that_turns_extreme_runs_with_consent_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(
+            dir.path(),
+            &probe_json(5, 50_000_000),
+            &[20_000_000, 900_000],
+        );
+        let req = sized_request(dir.path(), "1mb", true);
         let o = run(&req, &r, &mut |_| {}).unwrap();
         assert_eq!(o.bytes, 900_000);
         let s = o.sizing.as_ref().unwrap();
@@ -3073,6 +3153,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             "{:?}",
             o.notes
         );
+        assert!(!o.notes.iter().any(|n| n.starts_with("A retry would need")));
         assert_routed(&o);
     }
 

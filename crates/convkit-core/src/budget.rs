@@ -264,7 +264,11 @@ pub(crate) fn payload_bytes(src: &Source, target: u64, to: Format) -> u64 {
 /// container, subtitles and attachments (the container's share taken of the
 /// file itself, and no margin, which is headroom rather than content), less
 /// the audio at `audio_kbps` on every track, over the duration. Zero when
-/// the audio and the reserve account for the whole file.
+/// the audio and the reserve account for the whole file. Whatever the
+/// reserve model misses (audio spending more or less than its rate, a
+/// container heavier than its allowance) is counted as video, so a
+/// saturation check built on this can misjudge by one picture step either
+/// way: a bounded cost, since the file is measured again after.
 pub fn achieved_video_bps(src: &Source, bytes: u64, to: Format, audio_kbps: Option<u32>) -> u64 {
     let content = u128::from(bytes).saturating_sub(reserve_bytes(src, bytes, to, true));
     let audio_bits = u128::from(audio_kbps.unwrap_or(0))
