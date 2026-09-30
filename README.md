@@ -23,6 +23,21 @@ clip up to 71.7× on a 60-second 1080p one. On a real terminal `OK`/`FAIL`
 render as green/red `✓`/`✗`; piped or redirected output (CI, `| tee`) is
 plain ASCII with no escape codes.
 
+**Video file too large?** Give conv the limit and it compresses the file to
+fit under it, for an upload cap or an attachment limit:
+
+```console
+$ conv clip.mp4 --max-size 5mb
+OK clip-5mb.mp4 - 4.97 MB - 24.0s
+  /home/user/Videos/clip-5mb.mp4
+  note  Sized to 1280x720 at 30 fps, 1.81 Mb/s video, 128 kb/s audio; 2 passes.
+```
+
+conv trades resolution, frame rate and bitrate against each other, so the
+file looks as good as that size allows rather than losing everything from
+one of them, and it asks before a limit too tight to look good. More in
+[Size targets](#size-targets).
+
 ## Install
 
 Prebuilt binaries cover Windows x64, macOS x64/arm64, and Linux x64/arm64:
@@ -76,6 +91,7 @@ conv *.heic --to jpg             # batch; globs expanded by conv itself, so this
 conv ./photos --to jpg -o ./out  # folder input, non-recursive, outputs redirected
 conv a.png b.png out.pdf         # merge two or more images into one PDF
 conv scan                        # list the files here and what each can become
+conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -227,7 +243,7 @@ mp4 (Video)
   full pair list: conv capabilities; exact command preview: conv <in> <out> --dry-run
 ```
 
-### Size targets
+## Size targets
 
 `--max-size` makes a video fit a size, for upload limits and attachments:
 
