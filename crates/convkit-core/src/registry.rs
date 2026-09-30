@@ -1208,11 +1208,15 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
 /// and adding one would put a `-vf` into every untuned webm transcode), so
 /// only `media::transcoded_invocation` can apply `--fps` or `--resize`
 /// there, and it needs the probe to map the streams. And any `--max-size`
-/// conversion to a video target, which needs the duration to set a bitrate
-/// at all.
+/// conversion to a video target that convkit can convert to, which needs the
+/// duration to set a bitrate at all.
 pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     // --max-size needs the duration and the picture; there is no fallback.
-    let sized = tuning.max_size.is_some() && crate::sized::is_video_target(to);
+    // Only for a pair that can be converted at all, so an unsupported one is
+    // reported as that rather than as a missing ffprobe.
+    let sized = tuning.max_size.is_some()
+        && crate::sized::is_video_target(to)
+        && (from == to || lookup(from, to).is_some());
     let webm_knob = to == Format::Webm
         && needs_probe(from, to)
         && (tuning.fps.is_some() || tuning.resize.is_some());

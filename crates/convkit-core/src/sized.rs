@@ -23,8 +23,10 @@ pub enum Strategy {
     /// The source already fits and is the target's own container: copied
     /// byte for byte.
     Copy,
-    /// The source already fits and its streams suit the target container:
-    /// stream-copied, then re-encoded only if the copy comes out over.
+    /// The source already fits and its video suits the target container:
+    /// the video is stream-copied and any audio track the target cannot hold
+    /// is re-encoded; the whole file is then re-encoded only if the result
+    /// comes out over.
     Remux,
     /// Two-pass encode at the chosen settings, retried while over.
     Encode,
@@ -235,18 +237,34 @@ fn prepare<'a>(
         ConvError::new(
             ErrorCode::ConversionFailed,
             format!(
-                "--max-size needs ffprobe to read {}; no probe was made",
+                "--max-size needs ffprobe to read {}; install ffprobe or check that it runs",
                 input.display()
             ),
         )
     })?;
     let src = Source::from_probe(probe).map_err(|gap| gap_error(gap, input))?;
+    // A rate that cannot be held exactly is refused: dropping it would leave
+    // the conversion with no ceiling the user asked for.
+    let max_fps = tuning
+        .fps
+        .as_deref()
+        .map(|v| {
+            video::parse_rate(v).ok_or_else(|| {
+                ConvError::new(
+                    ErrorCode::InvalidInvocation,
+                    format!(
+                        "--fps {v} cannot be used with --max-size; write it as N/D, e.g. 24000/1001"
+                    ),
+                )
+            })
+        })
+        .transpose()?;
     let limits = Limits {
         max_dims: tuning
             .resize
             .as_deref()
             .map(|g| video::fit_within(g, (src.width, src.height))),
-        max_fps: tuning.fps.as_deref().and_then(video::parse_rate),
+        max_fps,
     };
     Ok(Prepared {
         from,
@@ -307,7 +325,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan) -> Result<ConversionPlan> {
         ConvError::new(
             ErrorCode::ConversionFailed,
             format!(
-                "cannot build a two-pass encode for {}",
+                "cannot build a two-pass encode for {}; the probe found no video codec to encode",
                 p.inputs[0].display()
             ),
         )
@@ -347,8 +365,14 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan) -> Result<ConversionPlan> {
 /// path.
 fn ffmpeg_step(argv: Vec<String>, mode: OutputMode, output: PathBuf) -> PlannedStep {
     let mut path_args = vec![1];
-    if let Some(i) = argv.iter().position(|a| a.starts_with("-passlogfile")) {
-        path_args.push(i + 1);
+    // Searched from argv[2]: argv[1] is the input, whose name may look like
+    // anything. mkv scopes the flag to the video stream.
+    let log_flag = argv
+        .iter()
+        .skip(2)
+        .position(|a| a == "-passlogfile" || a == "-passlogfile:v:0");
+    if let Some(i) = log_flag {
+        path_args.push(i + 3);
     }
     if mode == OutputMode::Path {
         path_args.push(argv.len() - 1);
@@ -411,20 +435,28 @@ pub fn confirmation_error(input: &Path, sizing: &SizingPlan) -> ConvError {
 
 /// The next pass-2 bitrate after a result of `measured` bytes: aim at the
 /// margin again, 2% lower for every attempt so far, never at or above the
-/// rate that overshot and never below the encoder's floor.
+/// rate that overshot and never below the encoder's floor. `None` when no
+/// such rate exists, that is when `video_bps` is already at the floor, so a
+/// retry would only repeat the encode that overshot.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "only the executor's sized run calls this")
 )]
-pub(crate) fn retry_bitrate(video_bps: u64, target: u64, measured: u64, attempts: u32) -> u64 {
+pub(crate) fn retry_bitrate(
+    video_bps: u64,
+    target: u64,
+    measured: u64,
+    attempts: u32,
+) -> Option<u64> {
+    let ceiling = video_bps.saturating_sub(1);
+    if ceiling < budget::MIN_VIDEO_BPS {
+        return None;
+    }
     let aim = target as f64
         * (1.0 - budget::MARGIN_PERMILLE as f64 / 1000.0)
         * (1.0 - 0.02 * f64::from(attempts));
     let next = video_bps as f64 * aim / measured.max(1) as f64;
-    (next as u64).clamp(
-        budget::MIN_VIDEO_BPS,
-        video_bps.saturating_sub(1).max(budget::MIN_VIDEO_BPS),
-    )
+    Some((next as u64).clamp(budget::MIN_VIDEO_BPS, ceiling))
 }
 
 /// Pass 2 with its bitrate replaced; every other token unchanged.
@@ -532,21 +564,21 @@ pub(crate) fn summary_note(r: &SizingReport) -> String {
     expect(dead_code, reason = "only the executor's sized run calls this")
 )]
 pub(crate) fn already_small_note(s: &SizingPlan) -> String {
+    // A remux keeps the video as it is but may re-encode an audio track the
+    // target cannot hold, so it never claims the whole file was copied; the
+    // stream mapping's own warnings name any track it re-encoded.
     let how = if s.strategy == Strategy::Copy {
-        "copied"
+        "copied without re-encoding"
     } else {
-        "stream-copied"
+        "the video was stream-copied, not re-encoded"
     };
     match s.source_bytes {
         Some(b) => format!(
-            "Already {}, under {}; {how} without re-encoding.",
+            "Already {}, under {}; {how}.",
             size::display(b, s.family),
             s.target_label
         ),
-        None => format!(
-            "Already under {}; {how} without re-encoding.",
-            s.target_label
-        ),
+        None => format!("Already under {}; {how}.", s.target_label),
     }
 }
 
@@ -855,13 +887,32 @@ mod tests {
 
     #[test]
     fn a_retry_aims_lower_and_never_below_the_floor() {
-        let next = retry_bitrate(1_000_000, 10_000_000, 10_500_000, 1);
+        let next = retry_bitrate(1_000_000, 10_000_000, 10_500_000, 1).unwrap();
         assert!(next < 1_000_000);
         assert!(next > 800_000, "{next}");
         assert_eq!(
             retry_bitrate(20_000, 10_000_000, 90_000_000, 2),
-            budget::MIN_VIDEO_BPS
+            Some(budget::MIN_VIDEO_BPS)
         );
+    }
+
+    /// A retry that would land on the rate that just overshot is no retry:
+    /// at the encoder's floor there is nowhere lower to go.
+    #[test]
+    fn a_retry_at_the_floor_has_nowhere_lower_to_go() {
+        let floor = budget::MIN_VIDEO_BPS;
+        assert_eq!(retry_bitrate(floor, 10_000_000, 90_000_000, 1), None);
+        assert_eq!(retry_bitrate(floor - 1, 10_000_000, 90_000_000, 1), None);
+        assert_eq!(retry_bitrate(0, 10_000_000, 90_000_000, 1), None);
+        // One step above the floor still has exactly one rate below it.
+        assert_eq!(
+            retry_bitrate(floor + 1, 10_000_000, 90_000_000, 1),
+            Some(floor)
+        );
+        for (bps, measured) in [(floor + 1, 1), (50_000, 10_000_001), (1_000_000, 1)] {
+            let next = retry_bitrate(bps, 10_000_000, measured, 1).unwrap();
+            assert!(floor <= next && next < bps, "{bps} -> {next}");
+        }
     }
 
     #[test]
@@ -1165,7 +1216,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             already_small_note(remux.sizing.as_ref().unwrap()),
-            "Already 6.00 MB, under 10 MB; stream-copied without re-encoding."
+            "Already 6.00 MB, under 10 MB; the video was stream-copied, not re-encoded."
+        );
+        let mut unknown_remux = remux.sizing.clone().unwrap();
+        unknown_remux.source_bytes = None;
+        assert_eq!(
+            already_small_note(&unknown_remux),
+            "Already under 10 MB; the video was stream-copied, not re-encoded."
         );
         let mut unknown = copy.sizing.clone().unwrap();
         unknown.source_bytes = None;
@@ -1241,11 +1298,11 @@ mod tests {
 
     #[test]
     fn a_retry_never_climbs_and_shrinks_with_each_attempt() {
-        let first = retry_bitrate(1_000_000, 10_000_000, 10_500_000, 1);
-        let second = retry_bitrate(1_000_000, 10_000_000, 10_500_000, 2);
+        let first = retry_bitrate(1_000_000, 10_000_000, 10_500_000, 1).unwrap();
+        let second = retry_bitrate(1_000_000, 10_000_000, 10_500_000, 2).unwrap();
         assert!(second < first, "{second} < {first}");
         // Even a result a whisker over never asks for the same rate again.
-        assert!(retry_bitrate(1_000_000, 10_000_000, 10_000_001, 1) < 1_000_000);
+        assert!(retry_bitrate(1_000_000, 10_000_000, 10_000_001, 1).unwrap() < 1_000_000);
     }
 
     #[test]
@@ -1311,5 +1368,207 @@ mod tests {
             Format::Gif,
             &tuned("10mb")
         ));
+    }
+
+    /// A pair convkit cannot convert is reported as such, not as a missing
+    /// ffprobe the user would install for nothing.
+    #[test]
+    fn an_unsupported_pair_does_not_ask_for_a_probe() {
+        assert!(!registry::requires_probe(
+            Format::Png,
+            Format::Mp4,
+            &tuned("10mb")
+        ));
+        assert!(registry::requires_probe(
+            Format::Gif,
+            Format::Mp4,
+            &tuned("10mb")
+        ));
+        let e = build_tuned(
+            Format::Png,
+            Format::Mp4,
+            &[PathBuf::from("in.png")],
+            Path::new("o.mp4"),
+            None,
+            None,
+            &tuned("10mb"),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::UnsupportedPair, "{}", e.message);
+    }
+
+    fn with_fps(fps: &str) -> Tuning {
+        Tuning {
+            fps: Some(fps.into()),
+            ..tuned("10mb")
+        }
+    }
+
+    #[test]
+    fn an_fps_that_cannot_be_held_exactly_is_refused_not_dropped() {
+        let p = probe(60, 6_000_000);
+        for bad in ["abc", "99999999999/1", "1/99999999999", "5.", "0"] {
+            let e = build(Format::Mp4, Format::Mp4, &p, &with_fps(bad)).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation, "{bad}");
+            assert_eq!(
+                e.message,
+                format!(
+                    "--fps {bad} cannot be used with --max-size; write it as N/D, e.g. 24000/1001"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_decimal_fps_binds_like_any_other() {
+        let plan = build(
+            Format::Mp4,
+            Format::Mp4,
+            &probe(60, 6_000_000),
+            &with_fps("23.9760239760"),
+        )
+        .unwrap();
+        let sizing = plan.sizing.unwrap();
+        assert_eq!(sizing.strategy, Strategy::Encode, "the cap is a request");
+        let c = sizing.choice.unwrap();
+        // 23.976023976 is 2997002997/125000000; the choice may not exceed it.
+        assert!(
+            u128::from(c.fps.0) * 125_000_000 <= 2_997_002_997 * u128::from(c.fps.1),
+            "{c:?}"
+        );
+    }
+
+    /// An `--fps` at or above the source rate is not a cap, so a small file
+    /// is still copied; equal rates are equal however they are spelled.
+    #[test]
+    fn an_fps_equal_to_the_source_rate_does_not_bind() {
+        let p = probe(60, 6_000_000);
+        let plan = build(Format::Mp4, Format::Mp4, &p, &with_fps("30")).unwrap();
+        assert_eq!(plan.sizing.unwrap().strategy, Strategy::Copy);
+        let ntsc = MediaProbe {
+            frame_rate: Some((30_000, 1001)),
+            ..p
+        };
+        for spelling in ["30000/1001", "60000/2002"] {
+            let plan = build(Format::Mp4, Format::Mp4, &ntsc, &with_fps(spelling)).unwrap();
+            assert_eq!(plan.sizing.unwrap().strategy, Strategy::Copy, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_source_of_unknown_size_is_never_copied_or_remuxed() {
+        let unknown = MediaProbe {
+            size_bytes: None,
+            ..probe(60, 6_000_000)
+        };
+        for (from, to) in [(Format::Mp4, Format::Mp4), (Format::Mkv, Format::Mp4)] {
+            let plan = build(from, to, &unknown, &tuned("10mb")).unwrap();
+            assert_eq!(plan.sizing.unwrap().strategy, Strategy::Encode, "{from:?}");
+        }
+    }
+
+    #[test]
+    fn a_source_exactly_at_the_target_fits() {
+        let at = build(
+            Format::Mp4,
+            Format::Mp4,
+            &probe(60, 10_000_000),
+            &tuned("10mb"),
+        )
+        .unwrap();
+        assert_eq!(at.sizing.unwrap().strategy, Strategy::Copy);
+        let over = build(
+            Format::Mp4,
+            Format::Mp4,
+            &probe(60, 10_000_001),
+            &tuned("10mb"),
+        )
+        .unwrap();
+        assert_eq!(over.sizing.unwrap().strategy, Strategy::Encode);
+    }
+
+    /// The remux route keeps the video but re-encodes an audio track the
+    /// target cannot hold, so its note must not claim the file was copied.
+    #[test]
+    fn a_remux_that_re_encodes_audio_does_not_claim_a_plain_copy() {
+        let camera = MediaProbe {
+            audio_codecs: vec!["pcm_s16le".into()],
+            audio_bitrates: vec![Some(1_536_000)],
+            ..probe(60, 6_000_000)
+        };
+        let plan = build(Format::Mov, Format::Mp4, &camera, &tuned("10mb")).unwrap();
+        let sizing = plan.sizing.as_ref().unwrap();
+        assert_eq!(sizing.strategy, Strategy::Remux);
+        assert!(has(&plan.steps[0].argv, ["-c:v", "copy"]));
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.contains("re-encoded to aac")),
+            "the mapping names the re-encoded audio: {:?}",
+            plan.warnings
+        );
+        let note = already_small_note(sizing);
+        assert_eq!(
+            note,
+            "Already 6.00 MB, under 10 MB; the video was stream-copied, not re-encoded."
+        );
+        assert!(!note.contains("without re-encoding"), "{note}");
+    }
+
+    #[test]
+    fn the_errors_without_a_probe_or_a_codec_say_what_to_do() {
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Mp4,
+            &[PathBuf::from("in.mp4")],
+            Path::new("o.mp4"),
+            None,
+            None,
+            &tuned("10mb"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.message,
+            "--max-size needs ffprobe to read in.mp4; install ffprobe or check that it runs"
+        );
+        let no_codec = MediaProbe {
+            video_codec: None,
+            ..probe(60, 50_000_000)
+        };
+        let e = build(Format::Mp4, Format::Mp4, &no_codec, &tuned("10mb")).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConversionFailed);
+        assert_eq!(
+            e.message,
+            "cannot build a two-pass encode for in.mp4; the probe found no video codec to encode"
+        );
+    }
+
+    /// argv[1] is the input, so a file whose name looks like the pass-log
+    /// flag must not be mistaken for it; only the exact flag spellings count.
+    #[test]
+    fn the_pass_log_is_found_by_its_exact_flag_after_the_input() {
+        let argv = |flag: &str| -> Vec<String> {
+            [
+                "-i",
+                "-passlogfile-x.mp4",
+                flag,
+                "/s/log",
+                "-y",
+                "/s/out.mp4",
+            ]
+            .iter()
+            .map(|a| (*a).to_string())
+            .collect()
+        };
+        for flag in ["-passlogfile", "-passlogfile:v:0"] {
+            let step = ffmpeg_step(argv(flag), OutputMode::Path, PathBuf::from("/s/out.mp4"));
+            assert_eq!(step.path_args, vec![1, 3, 5], "{flag}");
+        }
+        let step = ffmpeg_step(
+            argv("-passlogfile-old"),
+            OutputMode::Path,
+            PathBuf::from("/s/out.mp4"),
+        );
+        assert_eq!(step.path_args, vec![1, 5], "not the flag");
     }
 }

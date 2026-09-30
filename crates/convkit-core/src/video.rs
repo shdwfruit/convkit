@@ -135,23 +135,40 @@ pub(crate) fn fit_within(geometry: &str, (w, h): (u32, u32)) -> (u32, u32) {
     (nw.max(2) as u32, nh.max(2) as u32)
 }
 
-/// Parses a `--fps` value (`24`, `29.97`, `30000/1001`) into an exact
-/// rational: `29.97` is `2997/100`, not a float.
+/// Parses a `--fps` value (`24`, `29.97`, `30000/1001`) into an exact,
+/// reduced rational: `29.97` is `2997/100`, not a float, and `24.0` is
+/// `24/1`. Any number of fraction digits is read exactly. `None` when the
+/// value is not a positive number or does not fit in a `u32` ratio once
+/// reduced, so a caller can refuse it rather than drop the cap.
 pub(crate) fn parse_rate(s: &str) -> Option<(u32, u32)> {
+    let digits = |t: &str| {
+        let all = !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+        all.then(|| t.parse::<u128>().ok()).flatten()
+    };
     let (n, d) = if let Some((n, d)) = s.split_once('/') {
-        (n.parse::<u32>().ok()?, d.parse::<u32>().ok()?)
+        (digits(n)?, digits(d)?)
     } else if let Some((whole, frac)) = s.split_once('.') {
-        if frac.is_empty() || frac.len() > 6 {
+        if frac.is_empty() {
             return None;
         }
-        (
-            format!("{whole}{frac}").parse::<u32>().ok()?,
-            10u32.pow(frac.len() as u32),
-        )
+        // Trailing zeros add no precision; without them a long run of zeros
+        // cannot overflow the scale.
+        let frac = frac.trim_end_matches('0');
+        let scale = 10u128.checked_pow(u32::try_from(frac.len()).ok()?)?;
+        let whole = if whole.is_empty() { 0 } else { digits(whole)? };
+        let frac = if frac.is_empty() { 0 } else { digits(frac)? };
+        (whole.checked_mul(scale)?.checked_add(frac)?, scale)
     } else {
-        (s.parse::<u32>().ok()?, 1)
+        (digits(s)?, 1)
     };
-    (n != 0 && d != 0).then_some((n, d))
+    if n == 0 || d == 0 {
+        return None;
+    }
+    let (mut a, mut b) = (n, d);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    Some((u32::try_from(n / a).ok()?, u32::try_from(d / a).ok()?))
 }
 
 /// Resolves the video knobs against a source.
@@ -406,6 +423,42 @@ mod tests {
             fit_within("99999999999999999999x", (1920, 1080)),
             (1920, 1080)
         );
+    }
+
+    #[test]
+    fn parse_rate_reduces_and_refuses_what_it_cannot_hold() {
+        assert_eq!(parse_rate("24.0"), Some((24, 1)));
+        assert_eq!(parse_rate("29.970"), Some((2997, 100)));
+        assert_eq!(parse_rate("60/2"), Some((30, 1)));
+        assert_eq!(parse_rate("60000/2002"), Some((30000, 1001)));
+        assert_eq!(parse_rate(".5"), Some((1, 2)));
+        assert_eq!(parse_rate("0.5"), Some((1, 2)));
+        // Any number of fraction digits, exactly: 23.976023976 = 2997002997/125000000.
+        assert_eq!(
+            parse_rate("23.9760239760"),
+            Some((2_997_002_997, 125_000_000))
+        );
+        assert_eq!(
+            parse_rate("24.0000000000000000000000000000000000000000000"),
+            Some((24, 1))
+        );
+        assert_eq!(parse_rate("4294967295"), Some((u32::MAX, 1)));
+        for refused in [
+            "4294967296",
+            "99999999999/1",
+            "1/99999999999",
+            "5.",
+            "0.0",
+            "0/5",
+            "+24",
+            "1e3",
+            "1.2.3",
+            "",
+            "/5",
+            "24/",
+        ] {
+            assert_eq!(parse_rate(refused), None, "{refused:?}");
+        }
     }
 
     #[test]
