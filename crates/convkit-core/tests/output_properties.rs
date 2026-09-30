@@ -1274,6 +1274,17 @@ fn convert_sized(
     size: &str,
     allow_extreme: bool,
 ) -> convkit_core::Result<exec::Outcome> {
+    convert_sized_with(input, output, size, Tuning::default(), allow_extreme)
+}
+
+/// `convert_sized` with other tuning beside the size.
+fn convert_sized_with(
+    input: &Path,
+    output: &Path,
+    size: &str,
+    tuning: Tuning,
+    allow_extreme: bool,
+) -> convkit_core::Result<exec::Outcome> {
     let from = Format::from_path(input).unwrap();
     let to = Format::from_path(output).unwrap();
     let resolver = Resolver::new();
@@ -1288,7 +1299,7 @@ fn convert_sized(
             overwrite: false,
             tuning: Tuning {
                 max_size: Some(convkit_core::size::parse(size).unwrap()),
-                ..Default::default()
+                ..tuning
             },
             allow_extreme,
         },
@@ -1492,6 +1503,42 @@ fn a_source_already_under_the_target_is_copied_untouched() {
     let out = dir.path().join("same.mkv");
     convert_sized(&src, &out, "50mb", false).unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&src).unwrap());
+}
+
+/// A source already under the target must still be encoded when a
+/// `--resize` binds or its codec does not suit the target; either way it is
+/// budgeted at its own size, so the encode never makes it larger.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_source_already_under_the_target_is_not_grown_by_an_encode() {
+    let dir = tmp();
+    let noisy = Noisy {
+        strength: 10,
+        ..Noisy::hd()
+    }
+    .synth(dir.path(), "noisy.mkv");
+    let small = dir.path().join("small.mp4");
+    convert_sized(&noisy, &small, "1mb", false).unwrap();
+    let source = std::fs::metadata(&small).unwrap().len();
+    let resized = Tuning {
+        resize: Some("640x".into()),
+        ..Tuning::default()
+    };
+    for (name, tuning) in [("resized.mp4", resized), ("other.webm", Tuning::default())] {
+        let out = dir.path().join(name);
+        let o = convert_sized_with(&small, &out, "10mb", tuning, false).unwrap();
+        let sizing = o.sizing.unwrap();
+        assert_eq!(
+            sizing.strategy,
+            convkit_core::sized::Strategy::Encode,
+            "{name}"
+        );
+        let bytes = std::fs::metadata(&out).unwrap().len();
+        assert!(
+            bytes <= source,
+            "{name}: {bytes} bytes from a {source}-byte source"
+        );
+    }
 }
 
 // --- Unit tests: identify_command ------------------------------------------

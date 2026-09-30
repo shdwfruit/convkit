@@ -853,7 +853,7 @@ impl StepRunner<'_> {
                 return Ok(SizedRun::new(built, sizing, 1));
             }
             // It looked small enough, but the copy came out over: encode.
-            let plan = encoder.plan(sized::Aim::first(target))?;
+            let plan = encoder.plan(encoder.first_aim())?;
             let sizing = plan.sizing.clone().expect("an encode plan is sized");
             if sizing.choice.as_ref().is_some_and(|c| c.extreme) && !req.allow_extreme {
                 return Err(sized::confirmation_error(&req.inputs[0], &sizing));
@@ -869,7 +869,7 @@ impl StepRunner<'_> {
         // Where the encode's notes begin, so a retry can replace them.
         let notes_from = self.notes.len();
         self.run_all(&plan)?;
-        let mut aim = sized::Aim::first(target);
+        let mut aim = encoder.first_aim();
         let mut attempts = 1;
         let mut bytes = file_len(temp_final)?;
         while bytes > target && attempts < sized::MAX_ATTEMPTS {
@@ -3334,8 +3334,15 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     #[test]
     fn a_remux_that_comes_out_over_falls_back_to_an_encode() {
         let dir = tempfile::tempdir().unwrap();
-        // The remux writes 12 MB, over the 10 MB target; pass 2 writes 9 MB.
-        let r = stubbed(dir.path(), &probe_json(60, 12), &[12_000_000, 9_000_000]);
+        // The source is 9.9 MB, under the 10 MB target, so it is remuxed; the
+        // remux writes 12 MB, over it; pass 2 writes 9 MB. The fallback encode
+        // is budgeted at the source's size, so that size has to be a real
+        // one for it to be an ordinary encode.
+        let r = stubbed(
+            dir.path(),
+            &probe_json(60, 9_900_000),
+            &[12_000_000, 9_000_000],
+        );
         let req = sized_request_between(dir.path(), (Format::Mkv, Format::Mp4), "10mb", false);
         let o = run(&req, &r, &mut |_| {}).unwrap();
 
@@ -3368,6 +3375,56 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert!(!scratch_left(dir.path()));
     }
 
+    /// What an attempt asks the encoder for, over a 60 s clip, in bytes.
+    #[cfg(unix)]
+    fn bytes_over_a_minute(a: &Asked) -> u64 {
+        a.total() * 60 / 8
+    }
+
+    /// A source already under the target that must be encoded (webm cannot
+    /// hold its H.264) is budgeted at its own 4 MB, not the 10 MB asked for,
+    /// and a retry is scaled from that budget, not from the target.
+    #[cfg(unix)]
+    #[test]
+    fn a_small_source_that_must_be_encoded_is_never_budgeted_above_its_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(
+            dir.path(),
+            &probe_json(60, 4_000_000),
+            &[10_500_000, 3_500_000],
+        );
+        let req = sized_request_between(dir.path(), (Format::Mp4, Format::Webm), "10mb", false);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        let tries = attempts_of(&calls(dir.path()));
+        assert_eq!(tries.len(), 2, "{tries:?}");
+        for a in &tries {
+            assert!(bytes_over_a_minute(a) < 4_000_000, "{tries:?}");
+        }
+        let s = o.sizing.unwrap();
+        assert_eq!((s.target_bytes, s.over_target), (10_000_000, false));
+    }
+
+    /// The encode a remux falls back to is budgeted at the source's own size
+    /// too: the source fitted, and only the new container came out over.
+    #[cfg(unix)]
+    #[test]
+    fn the_encode_after_an_oversized_remux_is_budgeted_at_the_sources_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(
+            dir.path(),
+            &probe_json(60, 9_000_000),
+            &[10_100_000, 8_500_000],
+        );
+        let req = sized_request_between(dir.path(), (Format::Mkv, Format::Mp4), "10mb", false);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        let c = calls(dir.path());
+        assert!(!c[0].contains("-pass"), "the remux runs first: {c:?}");
+        let tries = attempts_of(&c[1..]);
+        assert_eq!(tries.len(), 1, "{c:?}");
+        assert!(bytes_over_a_minute(&tries[0]) < 9_000_000, "{tries:?}");
+        assert_eq!(o.bytes, 8_500_000);
+    }
+
     /// The fallback encode is planned only after the remux has run, so it can
     /// turn out to be an extreme one; the same refusal applies, and nothing is
     /// left behind.
@@ -3375,9 +3432,11 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     #[test]
     fn a_fallback_encode_that_is_extreme_is_refused_unless_allowed() {
         let dir = tempfile::tempdir().unwrap();
+        // 45 minutes: at the source's 4.9 MB the encode is extreme however it
+        // is budgeted.
         let r = stubbed(
             dir.path(),
-            &probe_json(45 * 60, 12),
+            &probe_json(45 * 60, 4_900_000),
             &[6_000_000, 4_000_000],
         );
         let req = sized_request_between(dir.path(), (Format::Mkv, Format::Mp4), "5mb", false);
@@ -3629,7 +3688,8 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     #[test]
     fn a_fallback_encode_that_writes_nothing_fails_rather_than_reusing_the_remux() {
         let dir = tempfile::tempdir().unwrap();
-        let mut r = stubbed(dir.path(), &probe_json(60, 12), &[]);
+        // Under the 10 MB target, so remuxed first; see the fallback test above.
+        let mut r = stubbed(dir.path(), &probe_json(60, 9_900_000), &[]);
         r.with_override(
             Backend::Ffmpeg,
             ffmpeg_stub_that_writes_once(&dir.path().join("bin"), 12_000_000),

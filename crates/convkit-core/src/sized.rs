@@ -102,7 +102,8 @@ const RETRY_UNDER_PERMILLE: u64 = 20;
 const SATURATION_PERCENT: u64 = 5;
 
 /// What one encode attempt is planned against. The first attempt aims at
-/// the user's target with every picture size open to it. A retry aims at a
+/// the user's target, or at the source's own size when that is smaller
+/// (see `first_aim`), with every picture size open to it. A retry aims at a
 /// smaller budget and, once an attempt has shown the encoder cannot hold a
 /// rate at some picture size, at pictures below that size. Only the
 /// arithmetic moves: the target the user asked for, and every sentence
@@ -116,12 +117,23 @@ pub(crate) struct Aim {
 }
 
 impl Aim {
-    pub(crate) fn first(target_bytes: u64) -> Aim {
+    /// A first attempt's aim: `budget_bytes`, every picture size open.
+    pub(crate) fn first(budget_bytes: u64) -> Aim {
         Aim {
-            budget_bytes: target_bytes,
+            budget_bytes,
             max_short: None,
         }
     }
+}
+
+/// The aim of a conversion's first encode attempt: the user's target, or
+/// the source's own size when the source is already under it and is encoded
+/// all the same (a `--resize` or `--fps` cap binds, or its codec does not
+/// suit the target container, or a remux of it came out over). Re-encoding
+/// cannot add quality the source lacks, so a size tool must not inflate it.
+fn first_aim(p: &Prepared<'_>) -> Aim {
+    let source = p.probe.size_bytes.filter(|&b| b > 0);
+    Aim::first(source.map_or(p.max.bytes, |b| b.min(p.max.bytes)))
 }
 
 /// Everything `encode` needs, validated once.
@@ -182,7 +194,8 @@ pub(crate) fn plan(
             });
         }
     }
-    encode(&p, sizing, Aim::first(max.bytes))
+    let aim = first_aim(&p);
+    encode(&p, sizing, aim)
 }
 
 /// A sized conversion checked once and then planned as an encode, attempt
@@ -204,6 +217,11 @@ pub(crate) fn encoder<'a>(
 }
 
 impl Encoder<'_> {
+    /// The aim of the first attempt, the one `plan` above encodes with.
+    pub(crate) fn first_aim(&self) -> Aim {
+        first_aim(&self.0)
+    }
+
     /// Both passes of one attempt, chosen against `aim`. The plan's sizing
     /// keeps the user's own target.
     pub(crate) fn plan(&self, aim: Aim) -> Result<ConversionPlan> {
@@ -410,10 +428,11 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         sizing.warning = Some(extreme_sentence(&p.src, &sizing, &choice));
         // The suggestion was found against this attempt's budget; the user
         // types a target, which a retry's budget undershoots by the ratio
-        // between the two.
+        // between it and the first attempt's. A first budget lowered to the
+        // source's size is no such cut: it is not scaled back up.
         sizing.suggested = choice
             .suggested_bytes
-            .map(|b| as_target(b, p.max.bytes, aim.budget_bytes))
+            .map(|b| as_target(b, first_aim(p).budget_bytes, aim.budget_bytes))
             .map(|b| size::round_up(b, p.max.family).spelling);
     }
     sizing.choice = Some(choice);
@@ -564,11 +583,12 @@ fn requested_bps(c: &SizedChoice, tracks: usize) -> u64 {
     c.video_bps.saturating_add(audio)
 }
 
-/// `bytes` found against a budget of `budget_bytes`, as the target that
-/// budget stands for: scaled up by `target / budget_bytes`, rounded up.
-fn as_target(bytes: u64, target: u64, budget_bytes: u64) -> u64 {
+/// `bytes` found against a retry's budget of `budget_bytes`, as the target
+/// that budget stands for: scaled up by `first / budget_bytes`, where
+/// `first` is the first attempt's budget, and rounded up.
+fn as_target(bytes: u64, first: u64, budget_bytes: u64) -> u64 {
     let budget = u128::from(budget_bytes.max(1));
-    let scaled = (u128::from(bytes) * u128::from(target)).div_ceil(budget);
+    let scaled = (u128::from(bytes) * u128::from(first)).div_ceil(budget);
     u64::try_from(scaled).unwrap_or(u64::MAX)
 }
 
@@ -1435,6 +1455,83 @@ mod tests {
         assert!(
             chain.contains(&format!("scale=w={}:h={}", c.width, c.height)),
             "{chain}"
+        );
+    }
+
+    /// Re-encoding cannot add quality the source lacks, so a source already
+    /// under the target that must still be encoded (a cap binds, or its
+    /// codec does not suit the target) is budgeted at its own size: a 4 MB
+    /// clip sized for 10 MB stays near 4 MB. The target, and every sentence
+    /// about it, is still the user's.
+    #[test]
+    fn a_small_source_that_must_be_encoded_is_budgeted_at_its_own_size() {
+        let p = probe(60, 4_000_000);
+        let src = Source::from_probe(&p).unwrap();
+        let resized = Tuning {
+            resize: Some("640x".into()),
+            ..tuned("10mb")
+        };
+        for (to, t, limits) in [
+            (
+                Format::Mp4,
+                &resized,
+                Limits {
+                    max_dims: Some((640, 360)),
+                    max_fps: None,
+                },
+            ),
+            (Format::Webm, &tuned("10mb"), Limits::default()),
+        ] {
+            let plan = build(Format::Mp4, to, &p, t).unwrap();
+            let s = plan.sizing.unwrap();
+            assert_eq!(s.strategy, Strategy::Encode, "{to:?}");
+            assert_eq!(
+                (s.target_bytes, s.target_label.as_str()),
+                (10_000_000, "10 MB")
+            );
+            let c = s.choice.unwrap();
+            let at_source = budget::choose(&src, 4_000_000, to, &limits, &SizePolicy::default());
+            assert_eq!(c, at_source, "{to:?}");
+            let asked = (c.video_bps + u64::from(c.audio_kbps.unwrap()) * 1000) * 60 / 8;
+            assert!(asked < 4_000_000, "{to:?}: {asked} bytes asked for");
+        }
+    }
+
+    /// A source over the target, or of unknown size, is budgeted at the
+    /// target as before.
+    #[test]
+    fn only_a_source_under_the_target_lowers_the_first_budget() {
+        for p in [
+            probe(60, 50_000_000),
+            MediaProbe {
+                size_bytes: None,
+                ..probe(60, 4_000_000)
+            },
+        ] {
+            with_encoder(&p, "10mb", |enc| {
+                assert_eq!(enc.first_aim(), Aim::first(10_000_000), "{p:?}");
+            });
+        }
+        with_encoder(&probe(60, 4_000_000), "10mb", |enc| {
+            assert_eq!(enc.first_aim(), Aim::first(4_000_000));
+        });
+    }
+
+    /// A first budget lowered to the source's size is not a retry's cut, so
+    /// a suggestion found against it is not scaled back up by the target
+    /// over the source: it is the size the budget found, rounded.
+    #[test]
+    fn a_suggestion_against_a_small_sources_budget_is_not_scaled_up() {
+        let p = probe(30 * 60, 4_000_000);
+        let s = build(Format::Mp4, Format::Webm, &p, &tuned("10mb"))
+            .unwrap()
+            .sizing
+            .unwrap();
+        let found = s.choice.as_ref().unwrap().suggested_bytes.unwrap();
+        assert_eq!(
+            s.suggested.as_deref(),
+            Some(size::round_up(found, UnitFamily::Decimal).spelling.as_str()),
+            "{s:?}"
         );
     }
 
