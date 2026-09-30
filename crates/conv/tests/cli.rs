@@ -2026,6 +2026,60 @@ fn yes_answers_the_extreme_question_and_the_conversion_starts() {
     assert!(!stderr.contains("confirmation_required"), "{stderr}");
 }
 
+/// ffmpeg stand-in: exits 0 on `-version` and on pass 1, and otherwise
+/// writes `bytes` bytes to its last argument, the output.
+#[cfg(unix)]
+fn ffmpeg_stub(dir: &std::path::Path, bytes: u64) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join("ffmpeg_stub.sh");
+    std::fs::write(
+        &p,
+        format!(
+            "#!/bin/sh
+             if [ \"$1\" = \"-version\" ]; then exit 0; fi
+             case \" $* \" in *\" -pass 1 \"*) exit 0;; esac
+             for a in \"$@\"; do last=\"$a\"; done
+             head -c {bytes} /dev/zero > \"$last\"
+"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// With `--yes`, the extreme sentence is printed before the encode; the
+/// result carries the same sentence as a note, which is not printed a
+/// second time. The suggested command leaves `--yes` out.
+#[cfg(unix)]
+#[test]
+fn a_confirmed_extreme_conversion_prints_its_warning_once() {
+    let dir = tempfile::tempdir().unwrap();
+    // 20 s of 1080p at 1 MB: extreme, but it fits, and the stub's file does.
+    let probe = ffprobe_stub(dir.path(), &probe_json(20, 50_000_000));
+    let ffmpeg = ffmpeg_stub(dir.path(), 900_000);
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg("--ffmpeg-path")
+        .arg(&ffmpeg)
+        .arg(&input)
+        .args(["--max-size", "1mb", "--yes"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert_eq!(
+        stderr.matches("Extreme compression: 1 MB for 20 s").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("try: conv "), "{stderr}");
+    assert!(!stderr.contains("--yes"), "{stderr}");
+    assert!(dir.path().join("clip-1mb.mp4").is_file());
+}
+
 /// The "try this instead" line is built from the raw command line, which on
 /// Unix may hold bytes that are not UTF-8. Showing it must never panic.
 #[cfg(unix)]

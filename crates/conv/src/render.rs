@@ -98,12 +98,18 @@ pub fn plan_human(plan: &ConversionPlan) -> String {
 }
 
 /// The user's own command with only the `--max-size` value replaced, for a
-/// "try this instead" line. `args` excludes the program name.
+/// "try this instead" line. `args` excludes the program name. `--yes` is
+/// left out: the suggested size is not extreme by construction, so the
+/// command has no question for it to answer.
 pub fn suggestion_command(args: &[String], new_size: &str) -> String {
     let mut out = vec!["conv".to_string()];
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
+        if a == "--yes" {
+            i += 1;
+            continue;
+        }
         if a == "--max-size" && i + 1 < args.len() {
             out.push(a.clone());
             out.push(new_size.to_string());
@@ -268,10 +274,13 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
 /// Backend-reported degradation on a *successful* conversion, rendered for
 /// stderr — a script watching only stderr must see trouble even when the
 /// exit code is 0. `label` names the input in batch mode (where per-job
-/// success lines are suppressed) and is empty for a single job.
-pub fn conversion_notes_human(label: &str, o: &Outcome, styled: bool) -> String {
+/// success lines are suppressed) and is empty for a single job. A note in
+/// `shown` was printed, word for word, before this job ran (the extreme
+/// `--max-size` warning), and is not printed again; `Outcome.notes` keeps
+/// it for `--json`.
+pub fn conversion_notes_human(label: &str, o: &Outcome, shown: &[&str], styled: bool) -> String {
     let mut s = String::new();
-    for n in &o.notes {
+    for n in o.notes.iter().filter(|n| !shown.contains(&n.as_str())) {
         let line = if label.is_empty() {
             format!("warning  {n}")
         } else {
@@ -676,6 +685,37 @@ mod tests {
         assert!(cmd.contains("my clip.mp4"), "{cmd}");
         let eq: Vec<String> = vec!["a.mp4".into(), "--max-size=5mb".into()];
         assert!(suggestion_command(&eq, "40mb").contains("--max-size=40mb"));
+    }
+
+    /// Only a note printed word for word before the run is left out; one that
+    /// changed since (a retry chose another picture) is printed.
+    #[test]
+    fn a_note_already_shown_is_not_printed_again() {
+        let mut o = sample_outcome(1, false, vec![]);
+        o.notes = vec![
+            "Extreme compression: 1 MB for 20 s of 1080p will look poor (240p, 30 fps).".into(),
+            "Something else.".into(),
+        ];
+        let before = "Extreme compression: 1 MB for 20 s of 1080p will look poor (240p, 30 fps).";
+        let out = conversion_notes_human("", &o, &[before], false);
+        assert_eq!(out, "warning  Something else.\n");
+        let changed = "Extreme compression: 1 MB for 20 s of 1080p will look poor (360p, 30 fps).";
+        let out = conversion_notes_human("a.mp4", &o, &[changed], false);
+        assert_eq!(out.matches("warning  a.mp4: ").count(), 2, "{out}");
+    }
+
+    /// The suggested size is not extreme by construction, so the command it
+    /// is offered in does not carry the `--yes` that answered for this one.
+    #[test]
+    fn a_suggested_command_leaves_out_yes() {
+        let args: Vec<String> = ["clip.mp4", "--max-size", "1mb", "--yes", "-y"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            suggestion_command(&args, "2mb"),
+            "conv clip.mp4 --max-size 2mb -y"
+        );
     }
 
     #[test]

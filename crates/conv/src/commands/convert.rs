@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use convkit_core::{
@@ -27,8 +28,8 @@ pub fn run(cli: &Cli) -> i32 {
         return dry_run(&jobs, cli);
     }
 
-    let allow_extreme = match confirm_extreme(&jobs, cli) {
-        Ok(confirmed) => confirmed || cli.yes,
+    let (allow_extreme, mut shown) = match confirm_extreme(&jobs, cli) {
+        Ok(c) => (c.allowed || cli.yes, c.shown),
         Err(e) => {
             render::print_error(cli.json, &e);
             return e.code.exit_code();
@@ -73,10 +74,13 @@ pub fn run(cli: &Cli) -> i32 {
                         true
                     } else {
                         match confirm_extreme(&retry_jobs, cli) {
-                            Ok(confirmed) => confirmed,
+                            Ok(c) => {
+                                shown.extend(c.shown);
+                                c.allowed
+                            }
                             Err(e) => {
                                 render::print_error(cli.json, &e);
-                                print_results(&results, cli, elapsed);
+                                print_results(&results, cli, elapsed, &shown);
                                 return e.code.exit_code();
                             }
                         }
@@ -107,18 +111,28 @@ pub fn run(cli: &Cli) -> i32 {
         }
     }
 
-    print_results(&results, cli, elapsed);
+    print_results(&results, cli, elapsed, &shown);
     code
 }
 
+/// What `confirm_extreme` decided, and what it printed.
+#[derive(Debug, Default)]
+struct Confirmation {
+    /// Extreme jobs may run. False when nothing extreme was found (a preview
+    /// that fails is not an answer; the real run reports that failure
+    /// itself).
+    allowed: bool,
+    /// The warning printed for each extreme job, by input, before it ran.
+    /// Its result carries the same sentence as a note, which the human
+    /// output does not print twice.
+    shown: Vec<(PathBuf, String)>,
+}
+
 /// Previews every `--max-size` job and, when any is extreme, prints why and
-/// asks once for the whole batch. `Ok(true)`: extreme jobs may run.
-/// `Ok(false)`: nothing extreme was found (a preview that fails is not an
-/// answer; the real run reports that failure itself). `Err`: not
-/// confirmed, so nothing may run.
-fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<bool, ConvError> {
+/// asks once for the whole batch. `Err`: not confirmed, so nothing may run.
+fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvError> {
     if cli.max_size.is_none() {
-        return Ok(false);
+        return Ok(Confirmation::default());
     }
     let resolver = cli.resolver();
     let tuning = cli.tuning();
@@ -142,11 +156,12 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<bool, ConvError> {
         })
         .collect();
     if extreme.is_empty() {
-        return Ok(false);
+        return Ok(Confirmation::default());
     }
+    let mut shown = Vec::new();
     if !cli.json {
         let args = typed_args();
-        let entries: Vec<(&std::path::Path, &str, Option<&str>)> = extreme
+        let entries: Vec<(&Path, &str, Option<&str>)> = extreme
             .iter()
             .filter_map(|(job, sz)| {
                 Some((
@@ -160,7 +175,15 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<bool, ConvError> {
             "{}",
             render::extreme_warnings_human(&entries, jobs.len(), &args, render::stderr_styled())
         );
+        shown = entries
+            .iter()
+            .map(|(input, warning, _)| (input.to_path_buf(), (*warning).to_string()))
+            .collect();
     }
+    let allowed = Confirmation {
+        allowed: true,
+        shown,
+    };
     let refusal = || {
         if let [(job, sz)] = extreme.as_slice() {
             if jobs.len() == 1 {
@@ -182,7 +205,7 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<bool, ConvError> {
         cli.quiet,
         prompt::is_interactive_session(),
     ) {
-        Gate::Proceed => Ok(true),
+        Gate::Proceed => Ok(allowed),
         Gate::Refuse => Err(refusal()),
         Gate::Ask => {
             let question = if jobs.len() == 1 {
@@ -195,7 +218,7 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<bool, ConvError> {
                 )
             };
             if prompt::ask(&question) {
-                Ok(true)
+                Ok(allowed)
             } else {
                 Err(refusal())
             }
@@ -384,7 +407,15 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
 /// per-job failure lines, drop per-job success spam." `--quiet` silences
 /// every success line (single or batch summary) but never a failure line —
 /// "silences everything except errors."
-fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
+///
+/// `shown` is what `confirm_extreme` printed before the run: a note that
+/// repeats it word for word, for the same input, is not printed again.
+fn print_results(
+    results: &[batch::JobResult],
+    cli: &Cli,
+    elapsed: Duration,
+    shown: &[(PathBuf, String)],
+) {
     if cli.json {
         let arr: Vec<serde_json::Value> = results
             .iter()
@@ -406,6 +437,13 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
     let styled_out = render::stdout_styled();
     let styled_err = render::stderr_styled();
     let args = typed_args();
+    let shown_for = |input: &Path| -> Vec<&str> {
+        shown
+            .iter()
+            .filter(|(i, _)| i == input)
+            .map(|(_, w)| w.as_str())
+            .collect()
+    };
 
     if let [r] = results {
         match &r.result {
@@ -417,7 +455,10 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
                 // --quiet: "silences everything except errors" — and a
                 // conversion that dropped your images is in the errors'
                 // half of that bargain, exit code notwithstanding.
-                eprint!("{}", render::conversion_notes_human("", o, styled_err));
+                eprint!(
+                    "{}",
+                    render::conversion_notes_human("", o, &shown_for(&r.input), styled_err)
+                );
                 eprint!("{}", render::sizing_hint_human("", o, &args, styled_err));
             }
             Err(e) => {
@@ -443,7 +484,12 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
             }
             Ok(o) => {
                 let label = r.input.display().to_string();
-                err.push_str(&render::conversion_notes_human(&label, o, styled_err));
+                err.push_str(&render::conversion_notes_human(
+                    &label,
+                    o,
+                    &shown_for(&r.input),
+                    styled_err,
+                ));
                 err.push_str(&render::sizing_hint_human(&label, o, &args, styled_err));
             }
         }
