@@ -921,11 +921,18 @@ encoder saturates: it cannot reach the rate it was given (at 0.005 bpp the
 under x264, and VP9's `crowd_run` 73% over), and so every cell below 0.04
 bpp says more about the encoder's limit than about a bias the budget should
 reserve for on every file. When a starved encode happens anyway, the
-executor measures the file, sees its video run more than 5% over the rate it
-asked for, and plans again at a smaller picture (up to three attempts in
-all). The reserve is therefore sized from the operating region only, the
-encodes of at least 256 KiB aimed at 0.04 bpp or more (`--reserve-min-bpp`,
-default 0.04), 39 per codec:
+executor measures the file, and plans again only if it is over the target,
+up to three attempts in all. If the video ran more than 5% over the rate it
+asked for, the encoder could not hold that rate at that picture size, so the
+next plan is capped to a smaller picture and its budget is only the last one
+less 2%: the smaller picture is what removes the overshoot, and scaling the
+budget by it as well would count it twice and leave the file far under the
+target. Otherwise the budget is scaled by the target over the measured size,
+less 2%. A retry that would be extreme needs consent like any other plan;
+without it the attempt that came out over is kept and flagged. The reserve
+is therefore sized from the operating region only, the encodes of at least
+256 KiB aimed at 0.04 bpp or more (`--reserve-min-bpp`, default 0.04), 39
+per codec:
 
 | | median | p90 | max |
 |---|---|---|---|
@@ -951,6 +958,10 @@ over that reserve (three of 39 here: `crowd_run` at 1080p and 720p, and
 `in_to_tree` at 360p, all aimed at 0.04 bpp), and is expected to be measured
 over the target and planned again; below 0.04 bpp the retry is the rule (16
 of the 18 x264 encodes of 256 KiB or more below it came out over 2.9%). The
+operating region is not where every ordinary target lands, either: the plans
+nearest the extreme line (`EXTREME_COST`, below) sit at about 0.03-0.04 bpp,
+where x264's median overshoot runs from 1.024 (the 0.04 row) towards 1.056
+(the 0.02 row), so a retry is common for a target just above that line. The
 ratios are of the video stream, which is less than all of a file that has
 audio, so the same overshoot is a smaller share of such a file: the reserve
 is, if anything, generous there, and unmeasured, because the corpus is
@@ -958,20 +969,25 @@ silent.
 
 ### What the constants do in practice
 
-For a 5 s 1080p 30 fps clip with one 160 kb/s AAC track, made by `ffmpeg -f
-lavfi -i testsrc2=size=1920x1080:rate=30:duration=5 -f lavfi -i
+For a 5 s 1080p 30 fps clip with one AAC track, made by `ffmpeg -f lavfi -i
+testsrc2=size=1920x1080:rate=30:duration=5 -f lavfi -i
 sine=frequency=440:duration=5 -c:v libx264 -crf 20 -pix_fmt yuv420p -c:a aac
 -b:a 160k clip.mp4`, the dry run (`conv clip.mp4 --max-size SIZE
 --dry-run`, which only probes) plans:
 
 | `--max-size` | Picture | Video | Audio | Said |
 |---|---|---|---|---|
-| 600kb | 1280x720, 30 fps | 804 kb/s | 128 kb/s | extreme; "try --max-size 650kb" |
+| 300kb | 854x480, 30 fps | 338 kb/s | 128 kb/s | extreme; "try --max-size 450kb" |
+| 400kb | 960x540, 30 fps | 493 kb/s | 128 kb/s | extreme; "try --max-size 450kb" |
+| 450kb | 960x540, 30 fps | 571 kb/s | 128 kb/s | |
+| 600kb | 1280x720, 30 fps | 804 kb/s | 128 kb/s | |
 | 1mb | 1280x720, 30 fps | 1.43 Mb/s | 128 kb/s | |
 | 2mb | 1920x1080, 30 fps | 2.98 Mb/s | 128 kb/s | |
 | 5mb | 1920x1080, 30 fps | 7.64 Mb/s | 128 kb/s | |
 
-The reserve at 1 MB is 29 kB.
+The clip's audio probes at 133 kb/s, not the 160 kb/s it was asked of the
+encoder, so the 128 kb/s in every row is the source's own top rung of the
+ladder, not a cut. The reserve at 1 MB is 29 kB.
 
 ### Limits of the corpus
 
@@ -1015,31 +1031,31 @@ stay evenly spaced.
 runs 2 (120 to 60 fps), 6.2 (60 to 48), 5.9 (48 to 30), 12.4, 22.8, 24.1,
 31.1 and 38.0 (12 to 10 fps), and then falls again, to 27.0 (10 to 5) and
 10.8 (5 to 1), because it is pinned to 100 at 1 fps. The dip at 48 to 30 fps
-is 5% and changes nothing in practice. The tail under 10 fps is where a cut is
-cheaper than the one before, the opposite of the shape the budget relies on
-to spread loss across the dials; but a source of 24 fps or more pays at least
-36 to reach 10 fps, so a choice that goes below it is extreme or all but,
-and asks for confirmation regardless. Above 10 fps the curve steepens as it
-falls.
+is 5% and changes nothing in practice. The tail under 10 fps is where a cut
+is cheaper than the one before, the opposite of the shape the budget relies
+on to spread loss across the dials; but a source of 24 fps or more pays at
+least 40 to reach 10 fps, where the line is 50, so a choice that goes below
+it is on or near the line, and its picture has cost something too. Above 10
+fps the curve steepens as it falls.
 
 **`AAC_LADDER`.** Kilobits per second per track, against a score, for
 ffmpeg's native `aac` encoder, which is what convkit's recipes use. Rungs
 above the source's own rate are not offered. 160 kb/s is convkit's own
 anchor (§4) and scores 0; 128 scores 1, since most listeners cannot tell the
 two apart on most material; 96 scores 4 and 64 scores 12, where the loss
-becomes audible to a careful listener and then plain; 48 scores 22; 32 scores
-40, which from a 160 kb/s track is exactly `EXTREME_COST`, so with any
-picture loss added the bottom rung is extreme. The steps are not measured
-(no audio was scored here): they are chosen to steepen toward the bottom, as
-the picture's loss does, and to sit on the same 0-100 scale.
+becomes audible to a careful listener and then plain; 48 scores 22; 32
+scores 40, so the bottom rung, from a 160 kb/s track, pays 40 of the 50 that
+`EXTREME_COST` allows in all and leaves the picture 10. The steps are not
+measured (no audio was scored here): they are chosen to steepen toward the
+bottom, as the picture's loss does, and to sit on the same 0-100 scale.
 
 **`OPUS_LADDER`.** The same for `libopus`, which the webm recipe uses and
 which is generally held to stay good at lower rates than AAC: 128 kb/s per
 track scores 0 and 96 scores 1; 64 scores 4, where Opus is still comfortably
 good; 48 scores 8, 32 scores 15 and 24 scores 25, degrading as speech-grade
-rates are approached; 16 scores 40, the same extreme bottom rung. The ladder
-scores lower than AAC's at every rate the two share, on purpose, and is
-judgement like the rest.
+rates are approached; 16 scores 40, the same bottom score. The ladder scores
+lower than AAC's at every rate the two share, on purpose, and is judgement
+like the rest.
 
 **`SUBTITLE_ALLOWANCE_BYTES`, 100,000.** The bytes set aside for each
 subtitle stream passed through. A feature-length SRT track is 50-100 kB of
@@ -1049,13 +1065,38 @@ subtitle was in the corpus, and an image-based subtitle stream is larger than
 this figure covers. Attachments (mkv) are added at their probed size and are
 not estimated.
 
-**`EXTREME_COST`, 40.** Where a choice needs `--yes`, or a larger target. The
-cost scale is VMAF's, inverted, and 40 is a predicted VMAF of about 60 for
-the picture alone: on the rough five-point reading of VMAF (20 bad, 40 poor,
-60 fair, 80 good, 100 excellent), a picture whose artefacts are obvious at
-normal viewing distance. Each dial's cost adds to the others', so 40 in all
-can be reached by a moderate loss in each or by a large one in one: the bottom
-rung of each audio ladder, or a 60 fps source cut to 12 fps, sits at or near
-it on its own. It is a judgement, not a measured threshold: the fits above
-do not know the content, so a choice just under the line can still look worse
+**`EXTREME_COST`, 50.** Where a choice needs `--yes`, or a larger target.
+The picture's share of the cost scale is VMAF's, inverted, so 50 is a
+predicted VMAF of 50. The fit is pulled down by the hardest clip
+(`crowd_run`'s mean residual is -20), and the median clip scores above its
+prediction (by 7.7 VMAF for x264 and 11.3 for VP9), so for a typical clip a
+predicted 50 is about 58-61: on the rough five-point reading of VMAF (20
+bad, 40 poor, 60 fair, 80 good, 100 excellent), "fair", where artefacts are
+obvious at normal viewing distance. That is the authored intent, "about VMAF
+60".
+
+The line began at 40, written before the fit was measured, and was raised
+once the fit was in. Measured, the fit is harsh on ordinary requests: the
+best plan for a 60 s 1080p 60 fps clip at 10 MB costs 40.9 (720p at 30 fps),
+which would have asked for confirmation, although at that picture and rate
+(1280x720, 0.04 bpp) two of the three corpus clips measure 78.2 and 82.6
+VMAF under x264, and only `crowd_run` measures 32.7. With one 160 kb/s AAC
+track (a 128 kb/s audio rung below is a cut from 160, costing 1), the budget
+chooses:
+
+| Source | Target | Plan | Cost | Extreme |
+|---|---|---|---|---|
+| 60 s 1080p60 | 10 MB | 1280x720, 30 fps, 1.13 Mb/s video, 160 kb/s audio | 40.9 | no |
+| 60 s 1080p30 | 10 MB | 1280x720, 30 fps, 1.13 Mb/s video, 160 kb/s audio | 34.9 | no |
+| 120 s 1080p30 | 10 MB | 960x540, 30 fps, 519 kb/s video, 128 kb/s audio | 50.4 | yes |
+| 300 s 1080p30 | 10 MB | 640x360, 30 fps, 131 kb/s video, 128 kb/s audio | 74.5 | yes |
+| 30 s 4K30 | 25 MB | 2560x1440, 30 fps, 6.31 Mb/s video, 160 kb/s audio | 29.6 | no |
+| 45 min 1080p30 | 5 MB | nothing fits: 256x144, 1 fps, 16 kb/s video, 32 kb/s audio | 232 | yes |
+
+(The last needs 16.2 MB at the very least, 10.8 MB of it audio.) Each dial's
+cost adds to the others', so 50 in all can be reached by a moderate loss in
+each or a large one in one: the bottom rung of each audio ladder pays 40 from
+a 160 kb/s track (AAC) or a 128 kb/s one (Opus), and a 60 fps source cut to
+12 fps pays 36. It is a judgement, not a measured threshold: the fits above do
+not know the content, so a choice just under the line can still look worse
 than one just over it on a different clip.

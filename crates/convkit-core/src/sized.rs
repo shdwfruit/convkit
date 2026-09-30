@@ -93,7 +93,7 @@ pub fn is_video_target(to: Format) -> bool {
 /// A sized encode runs at most this many times, both passes each time.
 pub const MAX_ATTEMPTS: u32 = 3;
 
-/// A retry aims this much further under the budget its result scaled to,
+/// A retry aims this much further under the budget it would otherwise have,
 /// per mille, so an encoder that ran over once has room to do so again.
 const RETRY_UNDER_PERMILLE: u64 = 20;
 /// An attempt whose video came out more than this far over the rate it
@@ -212,10 +212,11 @@ impl Encoder<'_> {
 
     /// The attempt after one planned at `aim` that chose `last` and came out
     /// at `measured` bytes, over the target: planned again from a budget
-    /// scaled by how far over it came out, and below its picture size when
-    /// its video ran over the rate it asked for. `None` when that plan asks
-    /// the encoder for no fewer bits than `last` did, since running it could
-    /// only repeat the result that came out over.
+    /// scaled by how far over it came out, or, when its video ran over the
+    /// rate it asked for, below its picture size with the budget only
+    /// trimmed (the smaller picture is what removes that overshoot). `None`
+    /// when that plan asks the encoder for no fewer bits than `last` did,
+    /// since running it could only repeat the result that came out over.
     pub(crate) fn retry(
         &self,
         aim: Aim,
@@ -504,6 +505,12 @@ pub fn confirmation_error(input: &Path, sizing: &SizingPlan) -> ConvError {
     )
 }
 
+/// `budget` less `RETRY_UNDER_PERMILLE`. Always below `budget`.
+fn trimmed(budget: u64) -> u64 {
+    let next = u128::from(budget) * u128::from(1000 - RETRY_UNDER_PERMILLE) / 1000;
+    u64::try_from(next).unwrap_or(u64::MAX)
+}
+
 /// The budget for the attempt after one planned against `budget` whose
 /// result came out at `measured` bytes, over `target`: scaled by how far
 /// over it came out, and a further 2% under that. Always below `budget`.
@@ -514,8 +521,7 @@ fn next_budget(budget: u64, target: u64, measured: u64) -> u64 {
     // neither step can overflow.
     let over = measured.max(target).max(1);
     let scaled = u128::from(budget) * u128::from(target) / u128::from(over);
-    let next = scaled * u128::from(1000 - RETRY_UNDER_PERMILLE) / 1000;
-    u64::try_from(next).unwrap_or(u64::MAX)
+    trimmed(u64::try_from(scaled).unwrap_or(u64::MAX))
 }
 
 /// Whether an attempt's video came out more than `SATURATION_PERCENT` over
@@ -531,13 +537,20 @@ fn saturated(requested_bps: u64, achieved_bps: u64) -> bool {
 /// The aim for the attempt after one planned at `aim` that chose `last`,
 /// whose file came out at `measured` bytes, over `target`, carrying
 /// `achieved_bps` of video. A saturated attempt caps every later one
-/// strictly below its own picture; a cap, once set, stays.
+/// strictly below its own picture; a cap, once set, stays. That smaller
+/// picture is what removes the saturated attempt's overshoot, so the budget
+/// is only trimmed: scaling it by the overshoot as well would count it
+/// twice and leave the file far under the target. With no smaller picture
+/// to go to, or when the encoder held its rate, the budget is scaled.
 fn aim_after(aim: Aim, target: u64, measured: u64, last: &SizedChoice, achieved_bps: u64) -> Aim {
     let below = saturated(last.video_bps, achieved_bps)
         .then(|| budget::next_short_side_below(last.width.min(last.height)))
         .flatten();
     Aim {
-        budget_bytes: next_budget(aim.budget_bytes, target, measured),
+        budget_bytes: match below {
+            Some(_) => trimmed(aim.budget_bytes),
+            None => next_budget(aim.budget_bytes, target, measured),
+        },
         max_short: below.or(aim.max_short),
     }
 }
@@ -1121,18 +1134,33 @@ mod tests {
                 max_short: None,
             }
         );
-        // Could not: the next picture is strictly smaller than this one.
+        // Could not: the next picture is strictly smaller than this one, and
+        // that picture is what removes the overshoot, so the budget is only
+        // the last one less 2%, not also scaled by how far over it came out.
         let over = aim_after(first, 1_000_000, 1_080_000, &at_540, 1_333_000);
         assert_eq!(over.max_short, Some(480));
-        assert_eq!(over.budget_bytes, held.budget_bytes);
+        assert_eq!(over.budget_bytes, 980_000);
+        assert!(over.budget_bytes > held.budget_bytes, "{over:?} {held:?}");
         // A portrait picture is capped on its short side too.
         let portrait = choice_at(540, 960, 1_115_000);
         let upright = aim_after(first, 1_000_000, 1_080_000, &portrait, 1_333_000);
         assert_eq!(upright.max_short, Some(480));
-        // A cap, once set, holds for every later attempt.
+        assert_eq!(upright.budget_bytes, 980_000);
+        // A cap, once set, holds for every later attempt, and an attempt that
+        // held its rate scales the budget it was given by its overshoot.
         let at_480 = choice_at(854, 480, 900_000);
         let later = aim_after(over, 1_000_000, 1_020_000, &at_480, 910_000);
         assert_eq!(later.max_short, Some(480));
+        assert_eq!(
+            later.budget_bytes,
+            next_budget(980_000, 1_000_000, 1_020_000)
+        );
+        // A picture under the cap that saturates is capped again, below
+        // itself, and its budget is trimmed from the last one, not scaled.
+        let at_360 = choice_at(640, 360, 700_000);
+        let deeper = aim_after(over, 1_000_000, 1_040_000, &at_360, 900_000);
+        assert_eq!(deeper.max_short, Some(240));
+        assert_eq!(deeper.budget_bytes, 960_400);
         // At the smallest picture there is nothing below; the cap stays.
         let bottom = Aim {
             budget_bytes: 50_000,
@@ -1141,6 +1169,12 @@ mod tests {
         let at_144 = choice_at(256, 144, 16_000);
         let still = aim_after(bottom, 1_000_000, 2_000_000, &at_144, 900_000);
         assert_eq!(still.max_short, Some(144));
+        // No smaller picture exists to remove that overshoot, so the budget
+        // is scaled by it after all.
+        assert_eq!(
+            still.budget_bytes,
+            next_budget(50_000, 1_000_000, 2_000_000)
+        );
     }
 
     /// Everything a retry needs, over `in.mp4` into `/s/out.mp4`.
@@ -1199,6 +1233,10 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(aim.max_short, budget::next_short_side_below(short(&c1)));
+            assert_eq!(
+                aim.budget_bytes, 980_000,
+                "a saturated attempt's overshoot is left to the smaller picture"
+            );
             let uncapped = choice_for(Aim {
                 budget_bytes: aim.budget_bytes,
                 max_short: None,
@@ -1241,24 +1279,34 @@ mod tests {
 
     /// A retry's budget can turn a choice extreme. Its suggestion is a size
     /// for the user to type, so it is scaled back up from the retry's budget:
-    /// never at or below the target they already asked for.
+    /// never at or below the target they already asked for. The target is
+    /// the smallest whole kilobyte that is not extreme, so even a retry that
+    /// only trims its budget crosses the line.
     #[test]
     fn an_extreme_retry_says_so_and_suggests_more_than_the_target_tried() {
-        with_encoder(&probe(5, 50_000_000), "1mb", |enc| {
-            let c1 = first_choice(enc, 1_000_000);
+        let p = probe(5, 50_000_000);
+        let kb =
+            budget::smallest_unextreme_kb(&budget::Source::from_probe(&p).unwrap(), Format::Mp4);
+        let size = format!("{kb}kb");
+        let target = kb * 1000;
+        with_encoder(&p, &size, |enc| {
+            let c1 = first_choice(enc, target);
             assert!(!c1.extreme, "{c1:?}");
             let (_, next) = enc
-                .retry(Aim::first(1_000_000), &c1, 20_000_000)
+                .retry(Aim::first(target), &c1, target * 2)
                 .unwrap()
                 .unwrap();
             let s = next.sizing.unwrap();
             assert!(s.choice.as_ref().unwrap().extreme, "{s:?}");
             let w = s.warning.clone().unwrap();
-            assert!(w.starts_with("Extreme compression: 1 MB for 5 s"), "{w}");
+            assert!(
+                w.starts_with(&format!("Extreme compression: {kb} KB for 5 s")),
+                "{w}"
+            );
             let suggested = crate::size::parse(s.suggested.as_deref().unwrap())
                 .unwrap()
                 .bytes;
-            assert!(suggested > 1_000_000, "{s:?}");
+            assert!(suggested > target, "{s:?}");
         });
     }
 

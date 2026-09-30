@@ -5,10 +5,11 @@
 //! scored against the byte budget, and the cheapest wins. The cost adds
 //! three terms on one 0-100 scale anchored to VMAF: picture loss
 //! (resolution and compression artefacts together), frame-rate loss, and
-//! audio loss. Every curve steepens as it falls, so many small cuts cost
-//! less than one large one, and the cheapest choice spreads the loss across
-//! the dials instead of draining one before touching the next. Nothing here
-//! says "cut every dial"; it follows from the shape.
+//! audio loss. Every curve steepens as it falls (the frame-rate curve above
+//! 10 fps; it is not convex below), so many small cuts cost less than one
+//! large one, and the cheapest choice spreads the loss across the dials
+//! instead of draining one before touching the next. Nothing here says "cut
+//! every dial"; it follows from the shape.
 //!
 //! Loss is measured from what the user asked for: the source itself, or the
 //! `--resize` and `--fps` ceilings where those bind. A ceiling the user chose
@@ -33,8 +34,11 @@ pub const OVERHEAD_PERMILLE: u64 = 7;
 pub const SUBTITLE_ALLOWANCE_BYTES: u64 = 100_000;
 /// Below this an encoder cannot hold a bitrate at all.
 pub const MIN_VIDEO_BPS: u64 = 16_000;
-/// A choice costing more than this is extreme: it needs confirmation.
-pub const EXTREME_COST: f64 = 40.0;
+/// A choice costing more than this is extreme: it needs confirmation. The
+/// picture's share of the cost is 100 minus its predicted VMAF, so 50 is a
+/// predicted VMAF of 50: about 60 for a typical clip, since the fit is pulled
+/// down by the hardest one. Authored, not measured.
+pub const EXTREME_COST: f64 = 50.0;
 
 /// Short-side steps. The source's own short side is always the first step.
 const SHORT_SIDES: [u32; 9] = [2160, 1440, 1080, 720, 540, 480, 360, 240, 144];
@@ -573,6 +577,35 @@ pub fn choose_capped(
         c.suggested_bytes = suggest_target(src, target_bytes, to, limits, max_short, policy);
     }
     c
+}
+
+/// The smallest whole-kilobyte target, in kilobytes, whose choice for `src`
+/// is not extreme. A test that needs a retry to cross the line aims at it, so
+/// it keeps reaching the line whatever the calibration.
+#[cfg(test)]
+pub(crate) fn smallest_unextreme_kb(src: &Source, to: Format) -> u64 {
+    let fits = |bytes: u64| {
+        !evaluate(
+            src,
+            bytes,
+            to,
+            &Limits::default(),
+            None,
+            &SizePolicy::default(),
+        )
+        .extreme
+    };
+    let (mut lo, mut hi) = (1_000u64, 1_000_000_000u64);
+    assert!(!fits(lo) && fits(hi), "the line is between 1 kB and 1 GB");
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if fits(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi.div_ceil(1000)
 }
 
 /// Bisects for the smallest target whose best choice is not extreme. The
