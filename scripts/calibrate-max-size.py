@@ -9,11 +9,16 @@ uses, scores each against its source with VMAF, and prints:
     crates/convkit-core/src/budget.rs)
   * OVERHEAD_PERMILLE and MARGIN_PERMILLE from the measured size error
 
-The size error is taken per codec, from encodes of at least 256 KiB only:
-on a file of a few kilobytes the first frame and the container are most of
-the bytes, which says nothing about the multi-megabyte files the budget is
-used for. The reserve is the larger codec's 90th percentile over target;
-the overhead is that codec's median, and the margin is what remains.
+The size error is taken per codec, from the budget's operating region only:
+encodes of at least 256 KiB (on a file of a few kilobytes the first frame and
+the container are most of the bytes, which says nothing about the
+multi-megabyte files the budget is used for) whose target is at least
+--reserve-min-bpp bits per pixel (0.04 by default). Below that the overshoot
+is an encoder saturating, not a bias to reserve for: libx264 cannot spend
+fewer bits than its floor on a picture this starved, and the executor
+re-plans at a smaller picture when an encode comes back over. The reserve is
+the larger codec's 90th percentile over target; the overhead is that codec's
+median, and the margin is what remains.
 
 Needs ffmpeg built with libvmaf, libx264 and libvpx-vp9 (checked before
 anything is downloaded). Standard library only. Re-running skips work
@@ -31,7 +36,8 @@ overwrites the other's.
 
 Usage:
   scripts/calibrate-max-size.py --work DIR [--codecs x264,vp9]
-      [--frames 250] [--vp9-clips in_to_tree] [--threads N] [--verbose]
+      [--frames 250] [--vp9-clips in_to_tree] [--reserve-min-bpp 0.04]
+      [--threads N] [--verbose]
 """
 
 import argparse
@@ -68,6 +74,9 @@ BPPS = [0.005, 0.01, 0.02, 0.04, 0.08, 0.16]
 READ_TIMEOUT = 120
 # Smaller encodes are left out of the size statistics.
 MIN_STAT_BYTES = 256 * 1024
+# So are encodes aimed below this many bits per pixel, unless --reserve-min-bpp
+# says otherwise.
+DEFAULT_RESERVE_MIN_BPP = 0.04
 # The reserve is never thinner than this fraction of the target.
 MIN_RESERVE = 0.01
 
@@ -85,10 +94,10 @@ def geometric(lo, hi, count):
 # result on either end of its range is reported: the true optimum may lie
 # beyond it.
 GRID = {
-    "res_scale": linear(4.0, 20.0, 1.0),
+    "res_scale": linear(4.0, 40.0, 1.0),
     "res_power": linear(1.0, 3.0, 0.25),
     "bpp_half": geometric(0.002, 0.06, 60),
-    "bpp_slope": linear(0.8, 2.2, 0.1),
+    "bpp_slope": linear(0.4, 2.2, 0.1),
 }
 
 VERBOSE = False
@@ -286,14 +295,50 @@ def fit(rows):
     return f, math.sqrt(err / len(rows))
 
 
-def size_stats(rows):
-    """Median and 90th percentile of size over target, from the encodes large
-    enough to say something; None when there are none."""
-    ratios = sorted(r["size_ratio"] for r in rows if r["bytes"] >= MIN_STAT_BYTES)
+def clip_offsets(rows, best):
+    """How much of the fit's error is which clip it is. Each clip's mean
+    residual, and the rmse left once that one offset per clip is removed: the
+    part of the error a model that knows nothing about content cannot remove,
+    however its other constants are chosen."""
+    residuals = {}
+    for r in rows:
+        residuals.setdefault(r["clip"], []).append(
+            r["vmaf"] - predict(best, r["scale"], r["bpp"]))
+    offsets = {clip: statistics.mean(es) for clip, es in residuals.items()}
+    err = sum((e - offsets[clip]) ** 2 for clip, es in residuals.items() for e in es)
+    return offsets, math.sqrt(err / len(rows))
+
+
+def operating_region(rows, min_bpp):
+    """The encodes the size budget is used for: large enough to say something,
+    and aimed at a bits-per-pixel an encoder can hold. The small tolerance
+    keeps a target of exactly min_bpp in."""
+    return [r for r in rows
+            if r["bytes"] >= MIN_STAT_BYTES and r["target_bpp"] >= min_bpp - 1e-9]
+
+
+def size_stats(rows, min_bpp):
+    """Median, 90th percentile and maximum of size over target, from the
+    operating region; None when it is empty."""
+    ratios = sorted(r["size_ratio"] for r in operating_region(rows, min_bpp))
     if not ratios:
         return None
     return {"used": len(ratios), "of": len(rows), "median": statistics.median(ratios),
-            "p90": ratios[min(len(ratios) - 1, int(0.9 * len(ratios)))]}
+            "p90": ratios[min(len(ratios) - 1, int(0.9 * len(ratios)))],
+            "max": ratios[-1]}
+
+
+def size_by_bpp(rows):
+    """(target bpp, encodes, median, maximum) of size over target for each
+    target bits per pixel, over the encodes of at least MIN_STAT_BYTES:
+    where the overshoot is, whether or not it is in the operating region."""
+    out = []
+    for bpp in sorted({r["target_bpp"] for r in rows}):
+        ratios = sorted(r["size_ratio"] for r in rows
+                        if r["target_bpp"] == bpp and r["bytes"] >= MIN_STAT_BYTES)
+        if ratios:
+            out.append((bpp, len(ratios), statistics.median(ratios), ratios[-1]))
+    return out
 
 
 def permille(fraction):
@@ -323,6 +368,10 @@ def parse_args(argv=None):
     ap.add_argument("--frames", type=int, default=250)
     ap.add_argument("--vp9-clips", default="in_to_tree",
                     help="VP9 is slow; calibrate it on these clips only")
+    ap.add_argument("--reserve-min-bpp", type=float, default=DEFAULT_RESERVE_MIN_BPP,
+                    help="size the reserve from encodes aimed at least this many bits per "
+                         "pixel (default %(default)s); below that an encoder saturates and "
+                         "the executor re-plans, so those encodes do not set the reserve")
     ap.add_argument("--threads", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -342,6 +391,8 @@ def parse_args(argv=None):
         ap.error("--frames must be at least 1")
     if args.threads < 1:
         ap.error("--threads must be at least 1")
+    if not args.reserve_min_bpp >= 0:
+        ap.error("--reserve-min-bpp must not be negative")
     args.work = os.path.abspath(args.work)
     if any(c in args.work for c in FILTER_GRAPH_SPECIALS):
         ap.error(f"--work must not contain any of {FILTER_GRAPH_SPECIALS}")
@@ -420,24 +471,43 @@ def main():
         print(f"pub const {const}: VideoFit = VideoFit {{ res_scale: {rs:.1f}, "
               f"res_power: {rp:.2f}, bpp_half: {bh:.5f}, bpp_slope: {bs:.1f} }}; "
               f"// rmse {rmse:.2f} VMAF over {len(rows[codec])} encodes")
+        offsets, left = clip_offsets(rows[codec], best)
+        print(f"// {const}: one offset per clip would bring the rmse to {left:.2f}; the clips' "
+              f"mean residuals are "
+              + ", ".join(f"{clip} {offset:+.1f}" for clip, offset in offsets.items())
+              + ". That spread at equal bits per pixel is content, which this model cannot see.")
         for field, value in zip(GRID, best):
             values = GRID[field]
             if value in (values[0], values[-1]):
                 print(f"// note: {const} {field} is at the edge of its search range "
                       f"({values[0]}-{values[-1]}); the optimum may lie beyond it")
-    stats = {codec: size_stats(rows[codec]) for codec in rows}
+    min_bpp = args.reserve_min_bpp
+    print(f"// The size reserve is sized from the operating region only: encodes of at least "
+          f"{MIN_STAT_BYTES // 1024} KiB aimed at {min_bpp} bits per pixel or more.")
+    print("// Below that the overshoot is concentrated in deliberately starved cells, where "
+          "the encoder")
+    print("// saturates (libx264 cannot spend fewer bits than its floor on so thin a "
+          "budget); the")
+    print("// executor re-plans at a smaller picture when an encode comes back over, so "
+          "those cells")
+    print("// are not a bias the reserve should pay for on every file.")
+    for codec in rows:
+        for bpp, n, median, worst in size_by_bpp(rows[codec]):
+            print(f"// size over target, {codec}, target {bpp} bpp: median {median:.4f}, "
+                  f"max {worst:.4f}, {n} encodes of at least {MIN_STAT_BYTES // 1024} KiB")
+    stats = {codec: size_stats(rows[codec], min_bpp) for codec in rows}
     for codec, s in stats.items():
         if s:
-            print(f"// size over target, {codec}: median {s['median']:.4f}, p90 {s['p90']:.4f}, "
-                  f"from {s['used']} of {len(rows[codec])} encodes of at least "
-                  f"{MIN_STAT_BYTES // 1024} KiB")
+            print(f"// size over target, {codec}, operating region: median {s['median']:.4f}, "
+                  f"p90 {s['p90']:.4f}, max {s['max']:.4f}, from {s['used']} of "
+                  f"{len(rows[codec])} encodes")
         else:
             print(f"// size over target, {codec}: no encode reached "
-                  f"{MIN_STAT_BYTES // 1024} KiB, so none is used")
+                  f"{MIN_STAT_BYTES // 1024} KiB at {min_bpp} bits per pixel, so none is used")
     chosen = reserve(stats)
     if chosen is None:
-        print("// OVERHEAD_PERMILLE and MARGIN_PERMILLE: no codec has a usable encode; "
-              "run with more --frames")
+        print("// OVERHEAD_PERMILLE and MARGIN_PERMILLE: no codec has an encode in the "
+              "operating region; run with more --frames or a lower --reserve-min-bpp")
     else:
         codec, overhead, margin = chosen
         s = stats[codec]
