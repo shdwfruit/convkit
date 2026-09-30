@@ -225,8 +225,8 @@ impl ConvError {
 
     /// `backend.is_managed()` is true, but `manifest::lookup` has no
     /// verified asset for the platform this process is running on.
-    /// Deliberately distinct from an unverified manifest entry: per Task
-    /// 14's controller ruling, a missing entry must fail immediately with
+    /// Deliberately distinct from an unverified manifest entry: a missing
+    /// entry must fail immediately with
     /// this remediation, not after a download, with a checksum error the
     /// user cannot act on.
     pub fn no_managed_build(backend: Backend) -> ConvError {

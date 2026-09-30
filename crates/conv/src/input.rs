@@ -1149,9 +1149,9 @@ mod tests {
         assert_eq!(jobs[0].inputs, v(&["a.mp4"]));
     }
 
-    // --- Controller review round 4: skip already-converted files by
-    // format, not by location, so re-running a batch stays idempotent
-    // without disabling in-place conversion ------------------------------
+    // --- Skip already-converted files by format, not by location, so
+    // re-running a batch stays idempotent without disabling in-place
+    // conversion ----------------------------------------------------------
 
     fn cli_for(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
         Cli {

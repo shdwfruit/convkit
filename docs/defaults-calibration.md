@@ -167,7 +167,7 @@ regardless of this finding and passed for real on this machine.
 
 **Recipe:** `TO_GIF` in `registry.rs` -- `fps=15,scale=w=min(640\,iw):h=-2`
 into a two-pass `palettegen=stats_mode=diff` / `paletteuse=dither=bayer`
-filtergraph, vs. the brief's naive comparison command.
+filtergraph, vs. a naive `ffmpeg -i ... naive.gif` for comparison.
 
 **Commands:**
 
@@ -177,8 +177,7 @@ conv tests/fixtures/clip.mp4 tuned.gif      # built from this branch, release pr
 ```
 
 **`magick identify` was not available to measure colour count** (`magick`
-is not installed on this machine -- see the standing constraints). Per the
-brief, I measured what I could without it: `ffprobe` for frame/size/rate
+is not installed on this machine). So I measured what I could without it: `ffprobe` for frame/size/rate
 properties, and a real, exact colour-count analysis built from ffmpeg's
 own raw frame output. ffmpeg can decode either GIF to a raw RGB24 dump:
 
@@ -646,7 +645,7 @@ any more.
 
 | file | how it was generated | size |
 |---|---|---|
-| `tests/fixtures/clip.mp4` | the brief's exact `ffmpeg -f lavfi` command (top of this doc) | 56,325 B |
+| `tests/fixtures/clip.mp4` | the `ffmpeg -f lavfi` command at the top of this doc | 56,325 B |
 | `tests/fixtures/sample.md` | hand-written | 726 B |
 | `tests/fixtures/sample.docx` | `pandoc tests/fixtures/sample.md --standalone -o tests/fixtures/sample.docx` | 11,357 B |
 | `tests/fixtures/photo.heic` | supplied directly by the repo owner: a real iPhone photo, committed as-is (see below for why) | 1,623,213 B |

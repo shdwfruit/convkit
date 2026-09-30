@@ -162,7 +162,7 @@ fn doctor_json_marks_imagemagick_as_manual_install_only() {
     assert_eq!(magick["managed_install"], false);
 }
 
-// --- Controller review round 3 -------------------------------------------
+// --- Failing jobs: where they report, and what a dry run still shows ----
 
 /// A real (non-dry-run) failing conversion must report on stderr, never
 /// stdout — a script piping stdout to a file and watching stderr for
@@ -224,11 +224,11 @@ fn dry_run_exits_with_the_underlying_code_when_every_job_fails() {
         .code(2);
 }
 
-// --- Task 14: `conv install` --------------------------------------------
+// --- `conv install` ------------------------------------------------------
 //
 // Only the no-network refusal paths are covered here — a real download is
-// exercised by the task's end-to-end acceptance check, not by a test that
-// would make `cargo test --workspace` depend on network access.
+// checked by hand, not by a test that would make `cargo test --workspace`
+// depend on network access.
 
 /// LibreOffice has no relocatable binary, so `conv install soffice` must
 /// refuse outright — never print a "downloading" line, never attempt a
@@ -274,7 +274,7 @@ fn install_soffice_json_refusal_has_no_managed_remediation() {
     assert!(v["error"]["remediation"]["manual"].is_string());
 }
 
-// --- Task 2: docx/odt -> pdf availability-based recipe selection --------
+// --- docx/odt -> pdf availability-based recipe selection ----------------
 //
 // A previous review found `--dry-run` printing a transcode command for a
 // run that would actually stream-copy; the fix there was to have dry-run

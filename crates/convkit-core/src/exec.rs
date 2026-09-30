@@ -124,8 +124,8 @@ pub struct Outcome {
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
-/// so two conversions racing inside one process (Task 12's rayon batch mode)
-/// never land on the same scratch path.
+/// so two conversions racing inside one process (the rayon batch mode) never
+/// land on the same scratch path.
 static SCRATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Creates a private scratch directory inside `dest_dir`, named
@@ -363,7 +363,7 @@ fn tail_str(s: &str, max: usize) -> &str {
 ///
 /// # Design note
 ///
-/// `--dry-run` (Task 10) calls `plan::build` directly with the user's real
+/// `--dry-run` calls `plan::build` directly with the user's real
 /// output path. This function instead builds a plan targeting a temp path
 /// inside a private scratch directory and renames the final result out on
 /// success — the two therefore render the same flags with different output
@@ -1086,8 +1086,8 @@ fn io_err(e: std::io::Error) -> ConvError {
 
 /// Uniquifies the LibreOffice profile directory across however many soffice
 /// invocations happen to run inside one process — a single conversion's
-/// recipe can invoke soffice more than once, and Task 12's rayon batch mode
-/// can run multiple conversions concurrently. A separate counter from
+/// recipe can invoke soffice more than once, and the rayon batch mode can
+/// run multiple conversions concurrently. A separate counter from
 /// `SCRATCH_COUNTER`, not a reuse of it, because a profile's uniqueness no
 /// longer has anything to do with which scratch directory (if any) happens
 /// to be backing the surrounding conversion.
@@ -1258,14 +1258,12 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     /// `--version`/`-version` on whatever path it resolves, including these
     /// stubs when a test overrides a backend with one, so without this
     /// exception the version probe alone would make even a "do nothing"
-    /// invocation write a file named `-version` (this is exactly how the
-    /// stray `crates/convkit-core/-version` file from the first round of
-    /// this task was found — see the amended task-8-report.md).
+    /// invocation write a file named `-version` (a stray
+    /// `crates/convkit-core/-version` file once showed exactly that).
     ///
-    /// The brief's original Windows stub only shifted through argv and never
-    /// wrote anything — verified by hand against `cmd.exe` on this machine
-    /// (see task-8-report.md). Fixed here: track the last argument across
-    /// the shift loop, then write exactly one byte to it with no trailing
+    /// A Windows stub that only shifts through argv writes nothing (checked
+    /// by hand against `cmd.exe`), so this one tracks the last argument
+    /// across the shift loop, then writes exactly one byte to it with no trailing
     /// newline (`<nul set /p "=x"` is the standard cmd.exe trick for that)
     /// and exit 0 explicitly, since `set /p` reading from `nul` otherwise
     /// leaves `%errorlevel%` at 1 and would make a successful stub look like
@@ -1787,9 +1785,9 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         );
     }
 
-    // --- Controller review round 2: the data-loss bug and its guards ------
+    // --- The data-loss bug and its guards -----------------------------------
 
-    /// CRITICAL fix + REQUIRED TEST. Before the scratch-directory fix,
+    /// Before the scratch-directory fix,
     /// `soffice` was handed the user's real destination directory as
     /// `--outdir` scratch space, so `locate_outdir_result` could not tell
     /// "the backend just wrote this" from "this was already here": a
@@ -2083,8 +2081,8 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     /// config/...` and more) nest deep enough to blow past Windows'
     /// 260-character `MAX_PATH` in the field. Also checks two calls never
     /// collide, even back-to-back in the same process -- the property that
-    /// keeps concurrent soffice invocations (Task 12's rayon batch mode, or
-    /// more than one soffice step in a single recipe) from colliding on the
+    /// keeps concurrent soffice invocations (the rayon batch mode, or more
+    /// than one soffice step in a single recipe) from colliding on the
     /// same profile.
     #[test]
     fn make_lo_profile_dir_lives_directly_under_system_temp_and_is_unique_per_call() {
@@ -2106,8 +2104,8 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         }
     }
 
-    // --- Task 2: Arg::BackendPath substitution for the pandoc+typst
-    // docx/odt -> pdf fallback -----------------------------------------------
+    // --- Arg::BackendPath substitution for the pandoc+typst docx/odt -> pdf
+    // fallback ---------------------------------------------------------------
 
     /// Writes a script standing in for pandoc's role in the fallback
     /// recipe: records every argv token it received (i.e. *after*

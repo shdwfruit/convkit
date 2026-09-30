@@ -1,4 +1,4 @@
-//! Task 15: property tests against real backend output.
+//! Property tests against real backend output.
 //!
 //! Every test here is `#[ignore]`-gated: `cargo test` stays green on a
 //! machine with zero backends installed, and `cargo test -- --ignored`

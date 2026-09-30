@@ -328,8 +328,8 @@ fn available_for(resolver: &Resolver, job: &input::Job) -> Option<AvailableBacke
 /// its result is passed in, the same split `exec::run` already uses between
 /// itself and `plan::build`.
 ///
-/// Task 2 applies the identical lesson to backend availability: a docx/odt
-/// -> pdf dry-run must preview the pandoc+typst command when soffice is
+/// The same holds for backend availability: a docx/odt -> pdf dry-run must
+/// preview the pandoc+typst command when soffice is
 /// absent, not the (unusable) soffice one — `available_for` (gated on
 /// `registry::has_fallback` exactly like `exec::run`'s own check) is what
 /// makes that true.
@@ -713,7 +713,7 @@ mod tests {
         assert!(probed_for(&none, &j, &fps).unwrap().is_none());
     }
 
-    // --- Task 2: available_for -----------------------------------------------
+    // --- available_for -------------------------------------------------------
 
     /// A minimal script that exits 0 no matter what it's invoked with
     /// (including a bare version probe, either dash convention) — stands in

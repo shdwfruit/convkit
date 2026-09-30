@@ -1,15 +1,14 @@
 //! Which `(from, to)` pairs this harness exercises.
 //!
-//! Scoped to images on purpose (see the task brief: "A working images-only
-//! harness is far more useful than a broken one that also claims to handle
-//! documents"). convkit-core's registry has three families -- image, media,
-//! video/audio, and document -- and this harness only drives the image
-//! family, plus the two GIF pathways that specifically matter to the
-//! imagequant engine-swap question named in the brief (ffmpeg's
-//! `palettegen`/`paletteuse`, used only by the video/image -> GIF recipe):
-//! a video source converting *to* GIF, and GIF converting back to video.
-//! Everything else -- audio, documents, general video transcoding -- is out
-//! of scope; see the harness report's "does not yet cover" section.
+//! Scoped to images on purpose: a working images-only harness is far more
+//! useful than a broken one that also claims to handle documents.
+//! convkit-core's registry has three families -- image, media, video/audio,
+//! and document -- and this harness only drives the image family, plus the
+//! two GIF pathways that specifically matter to the imagequant engine-swap
+//! question (ffmpeg's `palettegen`/`paletteuse`, used only by the
+//! video/image -> GIF recipe): a video source converting *to* GIF, and GIF
+//! converting back to video. Everything else -- audio, documents, general
+//! video transcoding -- is out of scope.
 
 use convkit_core::{registry, Format, Kind};
 

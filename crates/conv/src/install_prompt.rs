@@ -2,9 +2,8 @@
 //! making the user read a `backend_missing` error, run `conv install
 //! <backend>` by hand, then re-run their original command.
 //!
-//! Everything here lives in the `conv` binary, never in `convkit-core` —
-//! the hard constraint the brief calls out ("`convkit-core` must never
-//! prompt or print"). `convkit-core` keeps returning the same structured
+//! Everything here lives in the `conv` binary, never in `convkit-core`,
+//! which must never prompt or print. `convkit-core` keeps returning the same structured
 //! `ConvError` it always has; this module decides whether to ask the user
 //! about it, and `commands/convert.rs` decides what to do with the answer.
 

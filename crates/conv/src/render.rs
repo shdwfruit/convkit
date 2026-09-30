@@ -237,8 +237,8 @@ pub fn error_json(e: &ConvError) -> serde_json::Value {
 /// This is deliberately the *old*, unstyled `error_human` shape, not Part
 /// 2's redesigned conversion-result rendering below: this function reports
 /// on invocations that never became a job at all (bad arguments, `conv
-/// install` refusing), which Part 2's brief never asked to change — only
-/// "a failing conversion" (`conversion_failure_human`) did.
+/// install` refusing), which that redesign left as they were: it changed
+/// only how a failing conversion reads (`conversion_failure_human`).
 pub fn print_error(json: bool, e: &ConvError) {
     if json {
         eprintln!("{}", serde_json::to_string_pretty(&error_json(e)).unwrap());
@@ -298,8 +298,7 @@ pub fn conversion_notes_human(label: &str, o: &Outcome, shown: &[&str], styled: 
 // rs`'s `print_results` for a real (non-`--dry-run`) run — never by
 // `--json` (unaffected by design) and never by the other human-mode
 // renderers above (`plan_human`, `error_human`), which report on
-// `--dry-run` previews and pre-job failures the brief never asked to
-// change.
+// `--dry-run` previews and pre-job failures and were left as they were.
 
 /// Whether ANSI escape sequences will actually be *interpreted* by the
 /// console rather than printed as literal bytes — and, on Windows, the call
@@ -386,10 +385,8 @@ fn paint(text: &str, style: Style, enabled: bool) -> String {
 
 /// A file size in the same binary-but-labelled-decimal convention common
 /// file managers use (1024 B = "1 KB", not 1000) — kilobytes with no
-/// decimal place, megabytes and up with one. Chosen to match Part 2's own
-/// worked example exactly: 2161 KiB (the pre-Part-2 rendering) is 2.11 MiB,
-/// which this formula rounds to "2.1 MB" — the exact figure the brief's
-/// sample output shows for the same file.
+/// decimal place, megabytes and up with one. For example, 2161 KiB is
+/// 2.11 MiB, which this formula shows as "2.1 MB".
 fn human_size(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -862,9 +859,7 @@ mod tests {
 
     // --- human_size / human_elapsed -----------------------------------------
 
-    /// The exact worked example from the brief: 2161 KiB (the pre-Part-2
-    /// rendering's own number for this file) must come out "2.1 MB", not
-    /// "2.2 MB" — proving this uses binary (1024-based) units labelled `MB`,
+    /// 2161 KiB must come out "2.1 MB", not "2.2 MB" — proving this uses binary (1024-based) units labelled `MB`,
     /// not decimal (1000-based) ones.
     #[test]
     fn human_size_matches_the_briefs_worked_example() {
@@ -1060,8 +1055,7 @@ mod tests {
         }
     }
 
-    /// The brief's own worked example, boiled down to the counting rule: an
-    /// `OutputExists` failure is a "skipped" file, not a "failed" one — this
+    /// The counting rule: an `OutputExists` failure is a "skipped" file, not a "failed" one — this
     /// is a rendering choice only, `batch::exit_code` still treats every
     /// `Err` identically.
     #[test]

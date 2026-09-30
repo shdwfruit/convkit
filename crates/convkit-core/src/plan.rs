@@ -36,8 +36,8 @@ pub struct PlannedStep {
     pub argv: Vec<String>,
     pub output_mode: OutputMode,
     /// The path this step actually writes: the final output for the last
-    /// step, the intermediate path for every earlier step. Task 9's
-    /// execution engine relies on this rather than reading the last argv
+    /// step, the intermediate path for every earlier step. The execution
+    /// engine relies on this rather than reading the last argv
     /// element, which is wrong for `soffice` recipes — their argv ends with
     /// the *input* path, not the output.
     pub output: PathBuf,
@@ -609,7 +609,7 @@ mod tests {
         );
     }
 
-    // --- Controller amendments beyond the brief -----------------------------
+    // --- Each target container gets its own remux variant ------------------
 
     /// `-movflags +faststart` is an mp4-muxer-only option that makes ffmpeg
     /// exit 1 on a WebM output, so the stream-mapped webm invocation must
@@ -776,7 +776,7 @@ mod tests {
     }
 
     /// `PlannedStep::output` is the path that step actually writes; the
-    /// execution engine (Task 9) needs this because reading the last argv
+    /// execution engine needs this because reading the last argv
     /// element is wrong for `soffice` recipes, whose argv ends with the
     /// *input* path.
     #[test]
@@ -855,7 +855,7 @@ mod tests {
         );
     }
 
-    // --- Task 2: availability-based selection for docx/odt -> pdf ----------
+    // --- Availability-based selection for docx/odt -> pdf ------------------
 
     fn avail(backends: &[Backend]) -> AvailableBackends {
         backends.iter().copied().collect()

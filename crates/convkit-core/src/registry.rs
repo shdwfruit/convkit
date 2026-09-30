@@ -972,7 +972,7 @@ const OFFICE_TO_PDF: Recipe = Recipe {
 /// `draw_pdf_import`, so without `--infilter=writer_pdf_import` forcing the
 /// Writer importer, the source is read as a Draw model before the export
 /// filter ever sees it. Flagged for empirical verification against a real
-/// LibreOffice in Task 15.
+/// LibreOffice.
 const PDF_TO_DOCX: Recipe = Recipe {
     steps: &[soffice_step!(
         "docx:MS Word 2007 XML",
@@ -1878,7 +1878,7 @@ mod tests {
         }
     }
 
-    // --- Task 2: pandoc+typst fallback for docx/odt -> pdf -----------------
+    // --- pandoc+typst fallback for docx/odt -> pdf -------------------------
 
     #[test]
     fn docx_and_odt_to_pdf_have_a_pandoc_typst_fallback() {
