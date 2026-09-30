@@ -1081,10 +1081,8 @@ mod tests {
         // `0:a?` -- the same wildcard `mp4_remux_maps_every_audio_track`
         // (the copy path's own flagship-bug test) checks for, and both aac
         // and ac3 are MP4_COMPATIBLE_AUDIO, so both ride under -c:a copy.
-        // The brief's original assertion here checked for per-index maps
-        // (-map 0:a:0 / -map 0:a:1), which this branch never emits even on
-        // the copy path; corrected to match the mapping this file actually
-        // produces.
+        // Not per-index maps (-map 0:a:0 / -map 0:a:1): this branch never
+        // emits those, even on the copy path.
         assert!(
             m.argv.windows(2).any(|w| w == ["-map", "0:a?"]),
             "{:?}",

@@ -132,8 +132,9 @@ fn parse_duration_ms(s: &str) -> Option<u64> {
         .checked_add(millis.parse().ok()?)
 }
 
-/// Parses `ffprobe -show_streams` JSON. Any malformed input yields an empty
-/// probe, which callers treat as "unknown" and therefore transcode.
+/// Parses `ffprobe -show_streams -show_format` JSON: the streams, and the
+/// container's duration and size. Any malformed input yields an empty probe,
+/// which callers treat as "unknown" and therefore transcode.
 pub fn parse(json: &str) -> MediaProbe {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return MediaProbe::default();

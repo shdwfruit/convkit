@@ -928,8 +928,8 @@ mod tests {
         }
     }
 
-    /// Review focus 2 (later): computed long sides round to the nearest even
-    /// value, as ffmpeg's `-2` does.
+    /// Computed long sides round to the nearest even value, as ffmpeg's `-2`
+    /// does, for a landscape and a portrait source alike.
     #[test]
     fn computed_dimensions_round_to_the_nearest_even_value() {
         let src = source(1920, 1080, (30, 1), 60, &[None]);
@@ -951,8 +951,8 @@ mod tests {
         assert!(steps.contains(&(240, 240, 426)), "{steps:?}");
     }
 
-    /// Review focus 2: the steps apply to the displayed short side, and a
-    /// portrait source stays portrait.
+    /// The steps apply to the displayed short side, and a portrait source
+    /// stays portrait.
     #[test]
     fn a_portrait_source_steps_its_short_side_and_stays_portrait() {
         let src = source(1080, 1920, (30, 1), 60, &[Some(128_000)]);
@@ -967,7 +967,8 @@ mod tests {
         }
     }
 
-    /// Review focus 1: rationals stay exact and never exceed the source.
+    /// NTSC and variable-frame-rate sources: a chosen rate stays an exact
+    /// division of the source's own rational, never above it.
     #[test]
     fn ntsc_and_variable_rates_divide_exactly() {
         for fps in [(30_000, 1001), (1799, 60)] {
@@ -1025,7 +1026,8 @@ mod tests {
         );
     }
 
-    /// Review focus 3.
+    /// A source with no audio gets no audio rate, and every audio track of
+    /// a source with several is paid for.
     #[test]
     fn audio_tracks_are_counted_and_a_silent_source_gets_no_audio_rate() {
         let silent = source(1280, 720, (30, 1), 60, &[]);

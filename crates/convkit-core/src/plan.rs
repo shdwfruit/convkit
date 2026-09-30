@@ -117,10 +117,9 @@ pub fn build_tuned(
     // Resolved once, above every branch below, so the probe-aware dynamic
     // path and the static-recipe path both render against the same value
     // instead of the static path discarding it for `ResolvedVideo::default()`
-    // (the bug Task 8b fixes: `--fps`/`--resize` on `video -> gif` and
-    // `gif -> mp4` were accepted, exited 0, and did nothing, because neither
-    // pair ever took the dynamic branch below -- see `plan.rs`'s module docs
-    // history for `needs_probe`/`compat_tables(Gif)`). An empty `Tuning`
+    // (when it did, `--fps`/`--resize` on `video -> gif` and `gif -> mp4`
+    // were accepted, exited 0, and did nothing, because neither pair ever
+    // takes the dynamic branch below). An empty `Tuning`
     // resolves to `ResolvedVideo::default()` with no notes regardless of
     // `probe`, which is what keeps the untuned argv snapshot byte-identical.
     let resolved = crate::video::resolve(tuning, probe);
@@ -1164,15 +1163,13 @@ mod tests {
         assert!(e.message.contains("--quality"), "{}", e.message);
     }
 
-    // --- Task 8: the dispatch consults the tuning before choosing the
-    // path, so a video knob on a media pair transcodes instead of always
-    // being refused --------------------------------------------------------
+    // --- The dispatch consults the tuning before choosing the path, so a
+    // video knob on a media pair transcodes instead of always being
+    // refused --------------------------------------------------------------
 
-    // The brief's snippets call an `all_available()` helper that does not
-    // exist anywhere in this module; every existing dynamic-media test above
-    // passes `None` for `available` instead (it only matters to `select`,
-    // never to the probe-aware branch these tests exercise), so these follow
-    // that convention rather than inventing a new helper.
+    // These pass `None` for `available`, as every dynamic-media test above
+    // does: it only matters to `select`, never to the probe-aware branch
+    // these tests exercise.
 
     #[test]
     fn a_video_knob_on_a_remuxable_pair_transcodes_instead_of_refusing() {
@@ -1350,8 +1347,8 @@ mod tests {
         );
     }
 
-    /// A brief-verification finding: the 0-51 `--crf` bound in
-    /// `validate_tuning` only ever ran on the *static* table. Once a video
+    /// The 0-51 `--crf` bound in `validate_tuning` once ran only on the
+    /// *static* table. Once a video
     /// knob routes a probe-selected pair through `transcoded_invocation`
     /// instead, that check never ran and `--crf 60` on an mp4 target sailed
     /// through unrefused. `check_crf_range` is now shared by both
@@ -1383,8 +1380,8 @@ mod tests {
         assert!(err.message.contains("out of range"), "{}", err.message);
     }
 
-    // --- Task 8b: a video knob must reach a static recipe's chain too,
-    // not only the probe-selected dynamic path -------------------------
+    // --- A video knob must reach a static recipe's chain too, not only the
+    // probe-selected dynamic path ----------------------------------------
 
     #[test]
     fn a_video_knob_reaches_a_static_recipes_chain() {

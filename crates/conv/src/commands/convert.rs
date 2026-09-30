@@ -334,16 +334,14 @@ fn available_for(resolver: &Resolver, job: &input::Job) -> Option<AvailableBacke
 /// `registry::has_fallback` exactly like `exec::run`'s own check) is what
 /// makes that true.
 ///
-/// Task 9 added its own note here for a knob that wanted a probe but did
-/// not get one (`ffprobe` missing, the probe itself failing, or the input
-/// not being a real file). Task 8b hoisted `video::resolve` above
-/// `plan::build_tuned`'s probe branch so it runs on *every* path, including
-/// this one with `probed: None` — which means `video::resolve` itself now
+/// A knob that wanted a probe but did not get one (`ffprobe` missing, the
+/// probe itself failing, or the input not being a real file) gets no note
+/// of its own here. `video::resolve` runs above `plan::build_tuned`'s probe
+/// branch, on *every* path, including this one with `probed: None`, and
 /// pushes "Source frame rate could not be determined; --fps N was applied
 /// as given." onto the plan's own warnings for exactly this case, on a real
-/// run and not only a preview. Keeping this function's own wording alongside
-/// it would print two notes about one missing probe, so this note is gone;
-/// `video::resolve`'s survives because it now fires where it matters more.
+/// run and not only a preview. A note here as well would print two notes
+/// about one missing probe.
 fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
     let resolver = cli.resolver();
     let tuning = cli.tuning();
@@ -540,7 +538,7 @@ mod tests {
     /// Writes a stub standing in for `ffprobe`. Responds to a bare
     /// `-version` probe (as `Resolver::resolve` issues on every backend it
     /// finds) with a no-op success, and to anything else — the real
-    /// `-v quiet -print_format json -show_streams <input>` invocation
+    /// `-v quiet -print_format json -show_streams -show_format <input>` invocation
     /// `probe::run` issues — with a fixed, compatible-codec JSON payload on
     /// stdout. Named arbitrarily (not `ffprobe.exe`/`ffprobe`) because this
     /// is registered via `Resolver::with_override`, which — unlike the
