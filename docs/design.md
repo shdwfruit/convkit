@@ -250,7 +250,12 @@ further it falls. Loss is measured from what the user allowed, not from the
 source, so a `--resize` or `--fps` ceiling is a limit the choice stays
 within and its own reduction is not counted as damage. Convexity is the
 whole design: it makes many small cuts cheaper than one large one, so loss
-spreads across the dials without any rule saying it should.
+spreads across the dials without a rule saying it should. There is one
+rule, for a target too small to look good: there the picture scores near
+zero whatever it is given, the cost stops weighing frames against pictures,
+and the cheapest choice would keep every frame of a 144 fps clip at 240p.
+So such a choice keeps no faster frame rate than the choice at the size
+conv suggests instead, and the frames it drops are still counted as loss.
 
 The target is a ceiling, met by a two-pass encode at the chosen bitrate and
 measured afterwards. A result that comes out over is planned again against

@@ -9,7 +9,10 @@
 //! 10 fps; it is not convex below), so many small cuts cost less than one
 //! large one, and the cheapest choice spreads the loss across the dials
 //! instead of draining one before touching the next. Nothing here says "cut
-//! every dial"; it follows from the shape.
+//! every dial"; it follows from the shape. The one rule is past the extreme
+//! line, where the shape runs out: the picture scores near zero whatever it
+//! is given, so an extreme choice keeps no faster frame rate than the choice
+//! at its suggested size (see `choose_capped`).
 //!
 //! Loss is measured from what the user asked for: the source itself, or the
 //! `--resize` and `--fps` ceilings where those bind. A ceiling the user chose
@@ -303,6 +306,15 @@ fn rate_value((n, d): (u32, u32)) -> f64 {
     f64::from(n) / f64::from(d)
 }
 
+/// Whether rate `a` is strictly slower than rate `b`, exactly.
+fn below(a: (u32, u32), b: (u32, u32)) -> bool {
+    u64::from(a.0) * u64::from(b.1) < u64::from(b.0) * u64::from(a.1)
+}
+
+fn at_or_below(a: (u32, u32), b: (u32, u32)) -> bool {
+    !below(b, a)
+}
+
 /// (short side, width, height) per step, largest first. The first step is
 /// the source itself, or the `--resize` bound when that is smaller. Every
 /// computed dimension is even, the long side is rounded to the nearest even
@@ -349,10 +361,6 @@ fn resolution_steps(src: &Source, limits: &Limits) -> Vec<(u32, u32, u32)> {
 /// under the ceiling, down to 1 fps. Even divisions keep every kept frame
 /// evenly spaced, so nothing stutters.
 fn fps_steps(src: &Source, limits: &Limits) -> Vec<(u32, u32)> {
-    let below = |a: (u32, u32), b: (u32, u32)| {
-        u64::from(a.0) * u64::from(b.1) < u64::from(b.0) * u64::from(a.1)
-    };
-    let at_or_below = |a: (u32, u32), b: (u32, u32)| !below(b, a);
     let mut out = Vec::new();
     if let Some(cap) = limits.max_fps.filter(|&cap| below(cap, src.fps)) {
         out.push(cap);
@@ -434,6 +442,17 @@ struct Candidate {
     cost: f64,
 }
 
+/// The sizing's own caps on a choice, as opposed to the user's `Limits`:
+/// each leaves out the steps above it but moves no reference, so what it
+/// cuts is still charged as loss.
+#[derive(Debug, Clone, Copy, Default)]
+struct Caps {
+    /// No picture whose short side is longer than this.
+    max_short: Option<u32>,
+    /// No frame rate faster than this.
+    max_rate: Option<(u32, u32)>,
+}
+
 /// The cheapest feasible candidate for `target`, or the bottom step of
 /// every dial flagged `over` when none is feasible. Never suggests a size;
 /// `choose` does that, so the bisection can call this without recursing.
@@ -442,7 +461,7 @@ fn evaluate(
     target: u64,
     to: Format,
     limits: &Limits,
-    max_short: Option<u32>,
+    caps: Caps,
     policy: &SizePolicy,
 ) -> SizedChoice {
     let (fit, ladder) = codec_for(to);
@@ -451,17 +470,24 @@ fn evaluate(
     let tracks = src.audio_bitrates.len() as f64;
     let (audio, audio_ref) = audio_steps(src, ladder);
     let mut resolutions = resolution_steps(src, limits);
-    let rates = fps_steps(src, limits);
+    let mut rates = fps_steps(src, limits);
     // Loss is measured from the top step of each dial: the source, or the
     // user's own ceiling where one binds, which is not a loss the budget chose.
-    // Taken before `max_short` removes any step: that cap is the budget's own.
+    // Taken before `caps` removes any step: those caps are the budget's own.
     let top_short = f64::from(resolutions[0].0);
     let fps_ref = fps_curve(rate_value(rates[0]));
-    if let Some(cap) = max_short {
+    if let Some(cap) = caps.max_short {
         let smallest = *resolutions.last().expect("at least one resolution step");
         resolutions.retain(|&(short, _, _)| short <= cap);
         if resolutions.is_empty() {
             resolutions.push(smallest);
+        }
+    }
+    if let Some(cap) = caps.max_rate {
+        let slowest = *rates.last().expect("at least one frame-rate step");
+        rates.retain(|&r| at_or_below(r, cap));
+        if rates.is_empty() {
+            rates.push(slowest);
         }
     }
 
@@ -564,6 +590,15 @@ pub fn choose(
 /// for: unlike `Limits`, it moves no reference, so the loss of a smaller
 /// picture is still measured from the source or the user's own ceiling.
 /// The suggested size, when extreme, is found under the same cap.
+///
+/// An extreme choice also keeps no faster frame rate than the choice at its
+/// own suggested size. Past the extreme line the cost flattens: the picture
+/// scores near zero whatever it is given, so extra bits per frame buy
+/// nothing, and the cheapest candidate would keep every frame of a 144 fps
+/// source at 240p. The suggestion's frame rate is where the cost still
+/// weighs frames against pictures, so it caps this one. Like `max_short`,
+/// that cap moves no reference: the frames it cuts are charged. A choice
+/// that is not extreme is never capped this way.
 pub fn choose_capped(
     src: &Source,
     target_bytes: u64,
@@ -572,10 +607,28 @@ pub fn choose_capped(
     max_short: Option<u32>,
     policy: &SizePolicy,
 ) -> SizedChoice {
-    let mut c = evaluate(src, target_bytes, to, limits, max_short, policy);
-    if c.extreme {
-        c.suggested_bytes = suggest_target(src, target_bytes, to, limits, max_short, policy);
+    let caps = Caps {
+        max_short,
+        max_rate: None,
+    };
+    let c = evaluate(src, target_bytes, to, limits, caps, policy);
+    if !c.extreme {
+        return c;
     }
+    let suggested = suggest_target(src, target_bytes, to, limits, max_short, policy);
+    let anchor = suggested.map(|s| evaluate(src, s, to, limits, caps, policy).fps);
+    let mut c = match anchor {
+        // Capping only removes candidates, so the choice stays extreme.
+        Some(rate) if below(rate, c.fps) => {
+            let capped = Caps {
+                max_rate: Some(rate),
+                ..caps
+            };
+            evaluate(src, target_bytes, to, limits, capped, policy)
+        }
+        _ => c,
+    };
+    c.suggested_bytes = suggested;
     c
 }
 
@@ -590,7 +643,7 @@ pub(crate) fn smallest_unextreme_kb(src: &Source, to: Format) -> u64 {
             bytes,
             to,
             &Limits::default(),
-            None,
+            Caps::default(),
             &SizePolicy::default(),
         )
         .extreme
@@ -619,7 +672,11 @@ fn suggest_target(
     max_short: Option<u32>,
     policy: &SizePolicy,
 ) -> Option<u64> {
-    let fits = |bytes: u64| !evaluate(src, bytes, to, limits, max_short, policy).extreme;
+    let caps = Caps {
+        max_short,
+        max_rate: None,
+    };
+    let fits = |bytes: u64| !evaluate(src, bytes, to, limits, caps, policy).extreme;
     let mut lo = target;
     let mut hi = target.max(1);
     let mut doublings = 0;
@@ -700,6 +757,62 @@ mod tests {
         let short = c.width.min(c.height);
         assert!(!(short <= 360 && rate(c.fps) >= 144.0), "{c:?}");
         assert!(short > 360, "{c:?}");
+    }
+
+    /// Past the extreme line the picture scores near zero whatever it is
+    /// given, so extra bits per frame buy nothing and nothing in the cost
+    /// argues for cutting the frame rate: 20 s of 1080p144 at 300 kB chose
+    /// 240p at 144 fps. The choice at the suggested size, 720p at 24 fps,
+    /// caps the frame rate instead.
+    #[test]
+    fn a_starved_144_fps_clip_does_not_keep_144_fps() {
+        let src = source(1920, 1080, (144, 1), 20, &[Some(160_000)]);
+        let c = pick(&src, 300_000);
+        assert!(c.extreme, "{c:?}");
+        let anchor = pick(&src, c.suggested_bytes.expect("a suggestion"));
+        assert_eq!(anchor.fps, (144, 6), "{anchor:?}");
+        assert!(rate_le(c.fps, anchor.fps), "{c:?} vs {anchor:?}");
+        assert!(c.width.min(c.height) >= 240, "{c:?}");
+    }
+
+    /// The frame-rate cap on an extreme choice, over a sweep: no extreme
+    /// choice keeps a faster frame rate than the choice at its own
+    /// suggested size, under the same picture cap.
+    #[test]
+    fn no_extreme_choice_keeps_a_faster_frame_rate_than_its_suggestion() {
+        let sources = [
+            source(1920, 1080, (144, 1), 20, &[Some(160_000)]),
+            source(1920, 1080, (60, 1), 60, &[Some(160_000)]),
+            source(3840, 2160, (60, 1), 60, &[Some(160_000)]),
+            source(1920, 1080, (30, 1), 120, &[Some(128_000)]),
+            source(1280, 720, (30_000, 1001), 300, &[]),
+            source(1080, 1920, (60, 1), 15, &[Some(128_000); 2]),
+        ];
+        let mut extreme = 0;
+        for src in &sources {
+            for to in [Format::Mp4, Format::Webm] {
+                for max_short in [None, Some(480)] {
+                    for kb in [50, 100, 200, 300, 500, 1_000, 2_000, 5_000, 10_000] {
+                        let policy = SizePolicy::default();
+                        let limits = Limits::default();
+                        let c = choose_capped(src, kb * 1000, to, &limits, max_short, &policy);
+                        let Some(s) = c.suggested_bytes.filter(|_| c.extreme) else {
+                            continue;
+                        };
+                        extreme += 1;
+                        let anchor = choose_capped(src, s, to, &limits, max_short, &policy);
+                        assert!(
+                            rate_le(c.fps, anchor.fps),
+                            "{src:?} {to:?} {max_short:?} {kb} kB: {c:?} vs {anchor:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            extreme > 50,
+            "the sweep reaches the extreme region: {extreme}"
+        );
     }
 
     #[test]
