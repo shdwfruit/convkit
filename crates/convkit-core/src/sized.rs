@@ -155,13 +155,6 @@ pub(crate) fn plan(
 
 /// Always an encode: the executor's fallback when a remux of a source that
 /// looked small enough came out over.
-// Nothing calls the items marked below until the executor's sized run does.
-// Once it does, each expectation goes unmet, which is the compiler's cue to
-// delete it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the executor's sized run calls this")
-)]
 pub(crate) fn encode_plan(
     from: Format,
     to: Format,
@@ -438,10 +431,6 @@ pub fn confirmation_error(input: &Path, sizing: &SizingPlan) -> ConvError {
 /// rate that overshot and never below the encoder's floor. `None` when no
 /// such rate exists, that is when `video_bps` is already at the floor, so a
 /// retry would only repeat the encode that overshot.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the executor's sized run calls this")
-)]
 pub(crate) fn retry_bitrate(
     video_bps: u64,
     target: u64,
@@ -460,10 +449,6 @@ pub(crate) fn retry_bitrate(
 }
 
 /// Pass 2 with its bitrate replaced; every other token unchanged.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the executor's sized run calls this")
-)]
 pub(crate) fn with_bitrate(step: &PlannedStep, bps: u64) -> PlannedStep {
     let mut s = step.clone();
     if let Some(i) = s.argv.iter().position(|a| a == "-b:v" || a == "-b:v:0") {
@@ -472,10 +457,6 @@ pub(crate) fn with_bitrate(step: &PlannedStep, bps: u64) -> PlannedStep {
     s
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the executor's sized run calls this")
-)]
 pub(crate) fn report(
     sizing: &SizingPlan,
     bytes: u64,
@@ -532,10 +513,6 @@ fn extreme_sentence(src: &Source, sizing: &SizingPlan, c: &SizedChoice) -> Strin
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the executor's sized run calls this")
-)]
 pub(crate) fn summary_note(r: &SizingReport) -> String {
     let mut parts = Vec::new();
     if let (Some(w), Some(h), Some(fps)) = (r.width, r.height, r.fps) {
@@ -559,10 +536,6 @@ pub(crate) fn summary_note(r: &SizingReport) -> String {
     format!("Sized to {}; {passes}.", parts.join(", "))
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the executor's sized run calls this")
-)]
 pub(crate) fn already_small_note(s: &SizingPlan) -> String {
     // A remux keeps the video as it is but may re-encode an audio track the
     // target cannot hold, so it never claims the whole file was copied; the
@@ -582,13 +555,15 @@ pub(crate) fn already_small_note(s: &SizingPlan) -> String {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the executor's sized run calls this")
-)]
 pub(crate) fn measured_over_sentence(s: &SizingPlan, bytes: u64, attempts: u32) -> String {
+    // The loop can stop after one attempt, so the noun has to agree.
+    let tries = if attempts == 1 {
+        "1 attempt".to_string()
+    } else {
+        format!("{attempts} attempts")
+    };
     format!(
-        "Could not get under {} after {attempts} attempts: the result is {}.",
+        "Could not get under {} after {tries}: the result is {}.",
         s.target_label,
         size::display(bytes, s.family)
     )
@@ -616,10 +591,6 @@ fn fps_words((n, d): (u32, u32)) -> String {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the executor's sized run calls this")
-)]
 fn bps_words(bps: u64) -> String {
     if bps >= 1_000_000 {
         format!("{:.2} Mb/s", bps as f64 / 1_000_000.0)
@@ -1250,6 +1221,28 @@ mod tests {
         assert_eq!(
             summary_note(&three),
             "Sized to 1280x720 at 24 fps, 900 kb/s video; 4 passes (2 retries)."
+        );
+    }
+
+    /// The loop can stop after one attempt (already at the encoder's floor),
+    /// and "after 1 attempts" reads as a typo.
+    #[test]
+    fn the_measured_over_sentence_counts_its_attempts_in_the_right_number() {
+        let plan = build(
+            Format::Mp4,
+            Format::Mp4,
+            &probe(60, 50_000_000),
+            &tuned("10mb"),
+        )
+        .unwrap();
+        let sizing = plan.sizing.unwrap();
+        assert_eq!(
+            measured_over_sentence(&sizing, 10_040_000, 1),
+            "Could not get under 10 MB after 1 attempt: the result is 10.04 MB."
+        );
+        assert_eq!(
+            measured_over_sentence(&sizing, 10_040_000, 2),
+            "Could not get under 10 MB after 2 attempts: the result is 10.04 MB."
         );
     }
 
