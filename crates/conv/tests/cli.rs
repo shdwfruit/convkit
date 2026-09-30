@@ -1724,6 +1724,20 @@ fn capabilities_lists_max_size_for_video_targets_only() {
     assert!(!row("mp3").iter().any(|f| f == "--max-size"));
 }
 
+/// Why a flag is not `global` is a note for whoever edits `cli.rs`, and
+/// clap prints a field's whole doc comment in `--help`.
+#[test]
+fn help_carries_no_notes_meant_for_the_source() {
+    let assert = conv().arg("--help").assert().success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(!out.contains("global"), "{out}");
+    assert!(!out.contains("doc comment"), "{out}");
+    assert!(
+        out.contains("In a parallel batch the lines from different jobs interleave"),
+        "what --verbose's user needs to know stays: {out}"
+    );
+}
+
 /// The mp4 recipe drops subtitles and every audio track past the first, but
 /// a sized conversion maps every stream, so the note that says so must not
 /// read as true of `--max-size` too.

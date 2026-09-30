@@ -21,10 +21,10 @@ pub struct Cli {
     pub to: Option<String>,
 
     /// Print the backend command instead of running it.
-    ///
-    /// Not `global`: this only means something for the implicit conversion
-    /// path (no subcommand), so it must not show up in `conv doctor --help`,
-    /// `conv install --help`, etc.
+    // Not `global`: this only means something for the implicit conversion
+    // path (no subcommand), so it must not show up in `conv doctor --help`,
+    // `conv install --help`, etc. A `//` comment, not `///`: clap prints a
+    // field's whole doc comment in `--help`.
     #[arg(long)]
     pub dry_run: bool,
 
@@ -33,9 +33,8 @@ pub struct Cli {
     pub json: bool,
 
     /// Overwrite existing outputs.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment; the same reasoning
-    /// applies to every conversion-only flag below it.
+    // Not `global` -- see `dry_run`'s comment; the same reasoning applies to
+    // every conversion-only flag below it.
     #[arg(short = 'y', long)]
     pub overwrite: bool,
 
@@ -46,18 +45,17 @@ pub struct Cli {
     /// Show each backend command as it is spawned (resolved program, final
     /// argv) and the backend's full output afterwards, on stderr.
     ///
-    /// Not `global` -- see `dry_run`'s doc comment. In a parallel batch the
-    /// lines from different jobs interleave; this is a debugging aid, not a
-    /// machine interface (that's --json's `backend_output`).
+    /// In a parallel batch the lines from different jobs interleave; this is
+    /// a debugging aid, not a machine interface (that's --json's
+    /// `backend_output`).
+    // Not `global` -- see `dry_run`'s comment.
     #[arg(short = 'v', long, conflicts_with = "quiet")]
     pub verbose: bool,
 
     /// Fit within this geometry, aspect preserved: `1600x900`, `1600x`
     /// (width), `x900` (height), or `50%`. On video and GIF targets this is
     /// a cap: a source already smaller is left alone.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment; likewise the four flags
-    /// below.
+    // Not `global` -- see `dry_run`'s comment; likewise the four flags below.
     #[arg(long, value_name = "GEOMETRY", value_parser = parse_resize_geometry)]
     pub resize: Option<String>,
 
@@ -73,9 +71,7 @@ pub struct Cli {
 
     /// Cap the frame rate; slower sources are left alone. Video and GIF
     /// targets only.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment, as with the three
-    /// flags above.
+    // Not `global` -- see `dry_run`'s comment, as with the three flags above.
     #[arg(long, value_name = "RATE", value_parser = parse_frame_rate)]
     pub fps: Option<String>,
 
@@ -88,8 +84,7 @@ pub struct Cli {
     /// rate and bitrates to fit. Video targets only. SIZE is a number and a
     /// unit: 500kb, 10mb, 1.5gb, 10mib. A lone input keeps its format and is
     /// written as NAME-SIZE.EXT, e.g. clip-10mb.mp4.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment.
+    // Not `global` -- see `dry_run`'s comment.
     #[arg(long, value_name = "SIZE", value_parser = parse_max_size, conflicts_with = "crf")]
     pub max_size: Option<convkit_core::size::MaxSize>,
 
@@ -108,14 +103,12 @@ pub struct Cli {
     pub no_install: bool,
 
     /// Write outputs into this directory.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment.
+    // Not `global` -- see `dry_run`'s comment.
     #[arg(short = 'o', long)]
     pub outdir: Option<PathBuf>,
 
     /// Parallel jobs in batch mode. Defaults to the core count.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment.
+    // Not `global` -- see `dry_run`'s comment.
     #[arg(short = 'j', long)]
     pub jobs: Option<usize>,
 
