@@ -277,14 +277,22 @@ pub fn jobs_from(
 fn sized_single_job(input: &Path, outdir: Option<&Path>) -> Result<Job, ConvError> {
     let from = format_of(input)?;
     if !convkit_core::sized::is_video_target(from) {
-        return Err(ConvError::new(
-            ErrorCode::InvalidInvocation,
+        // `--to mp4` is only a fix where a conversion to mp4 exists (avi,
+        // gif); for audio, other images and documents there is none, and
+        // suggesting it would just move the refusal.
+        let message = if convkit_core::registry::lookup(from, Format::Mp4).is_some() {
             format!(
                 "--max-size keeps {}'s own format, and {} is not one it can size; add --to mp4",
                 input.display(),
                 from.ext()
-            ),
-        ));
+            )
+        } else {
+            format!(
+                "--max-size applies to video; {} is not a video file",
+                input.display()
+            )
+        };
+        return Err(ConvError::new(ErrorCode::InvalidInvocation, message));
     }
     let output = match outdir {
         Some(dir) => {
@@ -308,17 +316,22 @@ fn sized_single_job(input: &Path, outdir: Option<&Path>) -> Result<Job, ConvErro
 
 /// A sized conversion may target its own container, so an output can land
 /// on its input. A derived output gets the size in its name
-/// (`clip-10mb.mp4`); an explicit one is refused. (An output landing on
-/// *another* job's input needs no check here: that job's own output is its
-/// input path until this renames it, so `jobs_from`'s collision check has
-/// already refused the pair.)
+/// (`clip-10mb.mp4`); an explicit one is refused.
+///
+/// The renaming itself can make outputs collide: `clip.mp4` becomes
+/// `clip-10mb.mp4`, which `clip-10mb.mov --to mp4` already plans onto, or
+/// which is a previous run's output sitting in the same `*.mp4` glob. So
+/// the final job set is checked once more, after renaming: no two outputs
+/// may be one file, and no output may be any job's input, since that job
+/// would be read while another overwrites it.
 fn name_sized_outputs(
     mut jobs: Vec<Job>,
     max: &MaxSize,
     explicit_output: bool,
 ) -> Result<Vec<Job>, ConvError> {
     for job in &mut jobs {
-        if collision_key(&job.output) == collision_key(&job.inputs[0]) {
+        let output = collision_key(&job.output);
+        if job.inputs.iter().any(|i| collision_key(i) == output) {
             if explicit_output {
                 return Err(ConvError::new(
                     ErrorCode::InvalidInvocation,
@@ -329,6 +342,36 @@ fn name_sized_outputs(
                 ));
             }
             job.output = sized_name(&job.output, &max.spelling);
+        }
+    }
+
+    let input_keys: Vec<PathBuf> = jobs
+        .iter()
+        .flat_map(|job| job.inputs.iter().map(|i| collision_key(i)))
+        .collect();
+    let mut seen: HashMap<PathBuf, &Job> = HashMap::new();
+    for job in &jobs {
+        let key = collision_key(&job.output);
+        if let Some(prev) = seen.insert(key.clone(), job) {
+            return Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "outputs collide: {} and {} both produce {}",
+                    prev.inputs[0].display(),
+                    job.inputs[0].display(),
+                    job.output.display()
+                ),
+            ));
+        }
+        if input_keys.contains(&key) {
+            return Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "outputs collide: {} would write {}, which is also an input",
+                    job.inputs[0].display(),
+                    job.output.display()
+                ),
+            ));
         }
     }
     Ok(jobs)
@@ -455,11 +498,31 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
 
     // Without `--to`, the last positional is the output and must not be
     // globbed. See `expand_globs`.
+    // The exception is a lone path under `--max-size`: that form has no
+    // output positional at all, so the one path is an input.
+    let lone_sized_input = cli.max_size.is_some() && cli.to.is_none() && cli.paths.len() == 1;
     let globbable = match cli.to {
         Some(_) => cli.paths.len(),
+        None if lone_sized_input => 1,
         None => cli.paths.len().saturating_sub(1),
     };
     let positionals = expand_globs(&cli.paths, globbable);
+    // A lone pattern that matched several files must not slide into the
+    // `IN OUT` pair form, where the second match would be an output.
+    if lone_sized_input && positionals.len() > 1 {
+        let pattern = &cli.paths[0];
+        let ext = Format::from_path(pattern)
+            .filter(|f| convkit_core::sized::is_video_target(*f))
+            .map_or("mp4", |f| f.ext());
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "{} matched {} files; add --to {ext} to size each one",
+                pattern.display(),
+                positionals.len()
+            ),
+        ));
+    }
 
     // Without `--to`, positional grammar gives the last path an *output*
     // meaning (the pair and image-merge forms), so a directory positional
@@ -544,7 +607,19 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
                     continue;
                 };
                 if Some(fmt) == target_format {
-                    continue;
+                    // Under `--max-size` a file already in the target format
+                    // is what gets sized, so it is kept; only a previous
+                    // run's own result (`clip-10mb.mp4`) is left behind.
+                    let own_result = cli.max_size.as_ref().is_some_and(|max| {
+                        p.file_stem().is_some_and(|stem| {
+                            stem.to_string_lossy()
+                                .to_lowercase()
+                                .ends_with(&format!("-{}", max.spelling))
+                        })
+                    });
+                    if cli.max_size.is_none() || own_result {
+                        continue;
+                    }
                 }
                 dir_entries.push(p);
             }
@@ -1161,10 +1236,14 @@ mod tests {
         assert_eq!(jobs[0].output, PathBuf::from("a.jpg"));
     }
 
-    fn sized(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+    fn sized_to(size: &str, paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
         let mut c = cli_for(paths, to, outdir);
-        c.max_size = Some(convkit_core::size::parse("10mb").unwrap());
+        c.max_size = Some(convkit_core::size::parse(size).unwrap());
         c
+    }
+
+    fn sized(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+        sized_to("10mb", paths, to, outdir)
     }
 
     #[test]
@@ -1244,6 +1323,148 @@ mod tests {
         let clip = dir.path().join("clip.mp4");
         let jobs = plan_jobs(&sized(vec![clip], None, Some(dir.path().to_path_buf()))).unwrap();
         assert_eq!(jobs[0].output, dir.path().join("clip-10mb.mp4"));
+    }
+
+    /// `clip.mp4` is renamed to `clip-80kb.mp4` only after `jobs_from` has
+    /// compared outputs, and `clip-80kb.mov` already plans onto that name:
+    /// both would write one file and both would report success.
+    #[test]
+    fn a_derived_name_that_another_job_also_writes_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        let other = dir.path().join("clip-80kb.mov");
+        std::fs::write(&clip, b"x").unwrap();
+        std::fs::write(&other, b"x").unwrap();
+        let cli = sized_to("80kb", vec![clip, other], Some("mp4"), None);
+        let e = plan_jobs(&cli).unwrap_err();
+        assert!(e.message.starts_with("outputs collide"), "{}", e.message);
+        for name in ["clip.mp4", "clip-80kb.mov", "clip-80kb.mp4"] {
+            assert!(e.message.contains(name), "{name} missing: {}", e.message);
+        }
+    }
+
+    /// A repeat run over `*.mp4` picks up the last run's `clip-80kb.mp4`. The
+    /// first job would write the second job's input while it is being read.
+    #[test]
+    fn a_derived_name_that_is_another_jobs_input_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        let previous = dir.path().join("clip-80kb.mp4");
+        std::fs::write(&clip, b"x").unwrap();
+        std::fs::write(&previous, b"x").unwrap();
+        for order in [
+            vec![clip.clone(), previous.clone()],
+            vec![previous.clone(), clip.clone()],
+        ] {
+            let e = plan_jobs(&sized_to("80kb", order, Some("mp4"), None)).unwrap_err();
+            assert!(e.message.starts_with("outputs collide"), "{}", e.message);
+            assert!(
+                e.message.contains("would write") && e.message.ends_with("which is also an input"),
+                "{}",
+                e.message
+            );
+        }
+    }
+
+    /// `conv DIR --to mp4 --max-size 10mb` is the intended same-container
+    /// case, so the directory keeps its mp4s -- but not a previous run's
+    /// `a-10mb.mp4`, which would be re-encoded on every repeat. Without
+    /// `--max-size` the same-format skip is unchanged.
+    #[test]
+    fn a_directory_under_max_size_keeps_same_format_files_but_not_its_own_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let clips = dir.path().join("clips");
+        std::fs::create_dir(&clips).unwrap();
+        for name in ["a.mp4", "b.mov", "a-10mb.mp4"] {
+            std::fs::write(clips.join(name), b"x").unwrap();
+        }
+
+        let jobs = plan_jobs(&sized(vec![clips.clone()], Some("mp4"), None)).unwrap();
+        assert_eq!(
+            names(&jobs.iter().map(|j| j.inputs[0].clone()).collect::<Vec<_>>()),
+            vec!["a.mp4", "b.mov"],
+            "{jobs:?}"
+        );
+        assert_eq!(jobs[0].output, clips.join("a-10mb.mp4"));
+        assert_eq!(jobs[1].output, clips.join("b.mp4"));
+
+        let jobs = plan_jobs(&cli_for(vec![clips.clone()], Some("mp4"), None)).unwrap();
+        assert_eq!(
+            names(&jobs.iter().map(|j| j.inputs[0].clone()).collect::<Vec<_>>()),
+            vec!["b.mov"],
+            "without --max-size the same-format skip is unchanged: {jobs:?}"
+        );
+    }
+
+    #[test]
+    fn a_quoted_glob_matching_several_files_under_max_size_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.mp4", "b.mp4"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let e = plan_jobs(&sized(vec![dir.path().join("*.mp4")], None, None)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(
+            e.message
+                .ends_with("matched 2 files; add --to mp4 to size each one"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn the_glob_refusal_suggests_the_pattern_own_container_when_it_can_be_sized() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.mov", "b.mov"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let e = plan_jobs(&sized(vec![dir.path().join("*.mov")], None, None)).unwrap_err();
+        assert!(
+            e.message.ends_with("add --to mov to size each one"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn a_quoted_glob_matching_one_file_under_max_size_is_the_single_form() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("clip.mp4"), b"x").unwrap();
+        std::fs::write(dir.path().join("notes.md"), b"x").unwrap();
+        let jobs = plan_jobs(&sized(vec![dir.path().join("*.mp4")], None, None)).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].inputs, vec![dir.path().join("clip.mp4")]);
+        assert_eq!(jobs[0].output, dir.path().join("clip-10mb.mp4"));
+    }
+
+    #[test]
+    fn the_single_form_suggests_to_mp4_only_where_it_would_work() {
+        let dir = tempfile::tempdir().unwrap();
+        for ext in ["avi", "gif"] {
+            let e = plan_jobs(&sized(
+                vec![dir.path().join(format!("clip.{ext}"))],
+                None,
+                None,
+            ))
+            .unwrap_err();
+            assert!(e.message.contains("add --to mp4"), "{ext}: {}", e.message);
+        }
+        for ext in ["mp3", "png", "pdf"] {
+            let e = plan_jobs(&sized(
+                vec![dir.path().join(format!("clip.{ext}"))],
+                None,
+                None,
+            ))
+            .unwrap_err();
+            assert!(
+                e.message.starts_with("--max-size applies to video; ")
+                    && e.message
+                        .ends_with(&format!("clip.{ext} is not a video file")),
+                "{ext}: {}",
+                e.message
+            );
+            assert!(!e.message.contains("--to"), "{ext}: {}", e.message);
+        }
     }
 
     #[test]

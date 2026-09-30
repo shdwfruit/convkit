@@ -11,7 +11,9 @@ use convkit_core::{Resolver, Tuning};
 )]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
-    /// Input paths, then optionally an output path or a bare `.ext`.
+    /// Input paths, then optionally an output path or a bare `.ext`. With
+    /// `--max-size`, a lone input keeps its format and is written as
+    /// NAME-SIZE.EXT (`clip.mp4` -> `clip-10mb.mp4`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -84,7 +86,8 @@ pub struct Cli {
 
     /// Keep each output at or under this size, choosing resolution, frame
     /// rate and bitrates to fit. Video targets only. SIZE is a number and a
-    /// unit: 500kb, 10mb, 1.5gb, 10mib.
+    /// unit: 500kb, 10mb, 1.5gb, 10mib. A lone input keeps its format and is
+    /// written as NAME-SIZE.EXT, e.g. clip-10mb.mp4.
     ///
     /// Not `global` -- see `dry_run`'s doc comment.
     #[arg(long, value_name = "SIZE", value_parser = parse_max_size, conflicts_with = "crf")]

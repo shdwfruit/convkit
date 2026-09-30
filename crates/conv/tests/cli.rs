@@ -1785,3 +1785,19 @@ fn max_size_without_a_unit_is_a_usage_error() {
         .code(2)
         .stderr(contains("add a unit"));
 }
+
+#[test]
+fn max_size_with_an_output_equal_to_the_input_is_refused_even_with_y() {
+    conv()
+        .args([
+            "clip.mp4",
+            "clip.mp4",
+            "--max-size",
+            "10mb",
+            "-y",
+            "--dry-run",
+        ])
+        .assert()
+        .code(2)
+        .stderr(contains("output is the input"));
+}
