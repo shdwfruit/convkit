@@ -132,10 +132,11 @@ pub fn round_up(bytes: u64, family: UnitFamily) -> MaxSize {
     let step = 10u128.pow(digits.saturating_sub(2)) * 5;
     let rounded = milli.div_ceil(step) * step;
     // Rounding can carry into the next unit (999.9 MB -> 1000 MB = 1 GB).
-    if let Some(&(_, next, ..)) = units_of(family).find(|u| u.1 > scale) {
+    if let Some(&(next_suffix, next, ..)) = units_of(family).find(|u| u.1 > scale) {
         let rounded_bytes = rounded * u128::from(scale) / 1000;
         if rounded_bytes >= u128::from(next) {
-            return round_up(rounded_bytes as u64, family);
+            return parse(&format!("1{next_suffix}"))
+                .expect("carry always produces 1 of next unit");
         }
     }
     let (int, frac) = (rounded / 1000, rounded % 1000);
@@ -233,5 +234,25 @@ mod tests {
                 assert_eq!(parse(&r.spelling).unwrap(), r);
             }
         }
+    }
+
+    #[test]
+    fn binary_carry_chooses_one_of_next_unit_not_fractional() {
+        // When rounding causes a carry in binary units, the result should be
+        // 1 of the next unit, not an overshoot like 1.5 of the next unit.
+        assert_eq!(round_up(1_040_000, UnitFamily::Binary).spelling, "1mib");
+        assert_eq!(round_up(1_073_741_000, UnitFamily::Binary).spelling, "1gib");
+    }
+
+    #[test]
+    fn unit_family_serialises_correctly() {
+        assert_eq!(
+            serde_json::to_string(&UnitFamily::Decimal).unwrap(),
+            r#""decimal""#
+        );
+        assert_eq!(
+            serde_json::to_string(&UnitFamily::Binary).unwrap(),
+            r#""binary""#
+        );
     }
 }
