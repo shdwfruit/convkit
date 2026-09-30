@@ -5,13 +5,7 @@
   </picture>
 </h1>
 
-```text
-                          ██   ██ ██ ████████
-  _________  ____ _   __  ██  ██  ██    ██
- / ___/ __ \/ __ \ | / /  █████   ██    ██
-/ /__/ /_/ / / / / |/ /   ██  ██  ██    ██
-\___/\____/_/ /_/|___/    ██   ██ ██    ██
-```
+<p align="center"><img src="docs/media/convkit-ascii-loop.gif" alt="The word convkit converting between ASCII-art fonts, conv and kit each behind a glowing scanline, ending on the plain convkit wordmark." width="100%"></p>
 
 <a href="docs/media/convkit-launch.mp4"><img src="docs/media/convkit-launch.jpg" alt="convkit: any file in, the format you need out. A long ffmpeg GIF command next to conv scan listing what each file can become, and conv clip.mkv clip.gif. Click to play the 27-second demo." width="100%"></a>
 
