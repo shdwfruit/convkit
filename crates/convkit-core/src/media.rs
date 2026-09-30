@@ -1239,6 +1239,7 @@ mod tests {
             fps: Some("15/1".into()),
             scale: Some("scale=w=1280:h=720".into()),
             notes: vec![],
+            keep_source_rate: false,
         }
     }
 

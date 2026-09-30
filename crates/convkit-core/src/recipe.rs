@@ -74,7 +74,8 @@ pub struct VideoChainSpec {
     /// own trailing comma.
     pub prefix: &'static str,
     /// The frame-rate cap this recipe authored. GIF authors "15"; the
-    /// transcodes carry the source rate and author `None`.
+    /// transcodes carry the source rate and author `None`. Any `--fps`
+    /// replaces it, including one the source already satisfies.
     pub fps: Option<&'static str>,
     /// How this recipe spells a width cap.
     pub scale: ScaleStyle,
@@ -91,7 +92,8 @@ impl VideoChainSpec {
     /// It is what keeps `tests/recipes.rs`'s snapshot green.
     pub fn compose(&self, resolved: &ResolvedVideo) -> String {
         let mut out = String::from(self.prefix);
-        if let Some(f) = resolved.fps.as_deref().or(self.fps) {
+        let authored = self.fps.filter(|_| !resolved.keep_source_rate);
+        if let Some(f) = resolved.fps.as_deref().or(authored) {
             out.push_str("fps=");
             out.push_str(f);
             out.push(',');

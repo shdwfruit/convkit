@@ -1430,6 +1430,44 @@ mod tests {
         );
     }
 
+    /// `--fps` replaces GIF's authored 15 whether or not it binds against
+    /// the source. When it does not bind, the output keeps the source's own
+    /// rate, as the note says -- not the recipe's 15, which made `--fps 30`
+    /// on a 30 fps source give half the frames `--fps 29` did.
+    #[test]
+    fn a_gif_fps_at_or_above_the_source_keeps_the_source_rate() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        for fps in ["30", "60"] {
+            let plan = build_tuned(
+                Format::Mp4,
+                Format::Gif,
+                &[p("in.mp4")],
+                Path::new("out.gif"),
+                Some(&probe),
+                None,
+                &Tuning {
+                    fps: Some(fps.into()),
+                    ..Default::default()
+                },
+            )
+            .expect("mp4 -> gif is a registered pair");
+            let vf = plan.steps[0].argv.join(" ");
+            assert!(
+                !vf.contains("fps="),
+                "--fps {fps} must lift the authored cap, not keep it: {vf}"
+            );
+            let note = format!("Source is 30 fps; --fps {fps} left it unchanged.");
+            assert!(plan.warnings.contains(&note), "{:?}", plan.warnings);
+        }
+    }
+
     #[test]
     fn an_untuned_static_recipe_is_unchanged_by_the_hoist() {
         let probe = MediaProbe {

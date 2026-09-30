@@ -395,6 +395,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         scale: ((choice.width, choice.height) != (p.src.width & !1, p.src.height & !1))
             .then(|| format!("scale=w={}:h={}", choice.width, choice.height)),
         notes: Vec::new(),
+        keep_source_rate: false,
     };
     let passlog = p.output.with_extension("convkit-pass");
     let two = media::two_pass_invocations(
