@@ -1801,3 +1801,164 @@ fn max_size_with_an_output_equal_to_the_input_is_refused_even_with_y() {
         .code(2)
         .stderr(contains("output is the input"));
 }
+
+/// ffprobe stand-in: exits 0 on `-version`, otherwise prints `probe.json`
+/// from its own directory, whatever file it is asked about.
+fn ffprobe_stub(dir: &std::path::Path, json: &str) -> std::path::PathBuf {
+    std::fs::write(dir.join("probe.json"), json).unwrap();
+    let (name, body) = if cfg!(windows) {
+        (
+            "ffprobe_stub.bat",
+            "@echo off\r\nif \"%~1\"==\"-version\" exit /b 0\r\ntype \"%~dp0probe.json\"\r\n",
+        )
+    } else {
+        (
+            "ffprobe_stub.sh",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then exit 0; fi\ncat \"$(dirname \"$0\")/probe.json\"\n",
+        )
+    };
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    p
+}
+
+fn probe_json(secs: u64, file_bytes: u64) -> String {
+    format!(
+        r#"{{"streams":[
+            {{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,
+              "r_frame_rate":"30/1","avg_frame_rate":"30/1"}},
+            {{"codec_type":"audio","codec_name":"aac","bit_rate":"160000"}}],
+          "format":{{"duration":"{secs}.000000","size":"{file_bytes}"}}}}"#
+    )
+}
+
+/// assert_cmd pipes stdin and stderr, so this session is non-interactive:
+/// with no --yes, nobody can be asked, and nothing may be converted.
+#[test]
+fn an_extreme_target_without_yes_writes_nothing_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("Could not get under 5 MB"), "{stderr}");
+    assert!(
+        stderr.contains("For a watchable result, try: conv"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("extreme compression not confirmed"),
+        "{stderr}"
+    );
+    assert!(!dir.path().join("clip-5mb.mp4").exists());
+}
+
+#[test]
+fn json_mode_never_prompts_and_reports_confirmation_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb", "--json"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("confirmation_required"), "{stderr}");
+    assert!(
+        !stderr.contains("warning  "),
+        "no human block in --json: {stderr}"
+    );
+}
+
+#[test]
+fn a_batch_with_extreme_jobs_asks_once_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    for n in ["a.mp4", "b.mp4"] {
+        std::fs::write(dir.path().join(n), b"x").unwrap();
+    }
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(dir.path().join("a.mp4"))
+        .arg(dir.path().join("b.mp4"))
+        .args(["--to", "mp4", "--max-size", "5mb"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("2 of 2"), "{stderr}");
+    assert!(!dir.path().join("a-5mb.mp4").exists());
+    assert!(!dir.path().join("b-5mb.mp4").exists());
+}
+
+/// `--yes` is the answer to the question, not a way around the preview: the
+/// warning is still printed, and the conversion goes on to ask ffmpeg, which
+/// is named at a path that does not exist so nothing is encoded.
+#[test]
+fn yes_answers_the_extreme_question_and_the_conversion_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg("--ffmpeg-path")
+        .arg(dir.path().join("no-such-ffmpeg"))
+        .arg(&input)
+        .args(["--max-size", "5mb", "--yes"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("Could not get under 5 MB"), "{stderr}");
+    assert!(stderr.contains("no-such-ffmpeg"), "{stderr}");
+    assert!(!stderr.contains("not confirmed"), "{stderr}");
+    assert!(!stderr.contains("confirmation_required"), "{stderr}");
+}
+
+/// The "try this instead" line is built from the raw command line, which on
+/// Unix may hold bytes that are not UTF-8. Showing it must never panic.
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf8_does_not_break_the_extreme_warning() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let odd_ffmpeg = dir
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"no-ffmpeg-\xff"));
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg("--ffmpeg-path")
+        .arg(&odd_ffmpeg)
+        .arg(&input)
+        .args(["--max-size", "5mb"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(
+        stderr.contains("extreme compression not confirmed"),
+        "{stderr}"
+    );
+}

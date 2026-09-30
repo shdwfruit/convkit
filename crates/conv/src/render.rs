@@ -80,6 +80,65 @@ pub fn plan_human(plan: &ConversionPlan) -> String {
     s
 }
 
+/// The user's own command with only the `--max-size` value replaced, for a
+/// "try this instead" line. `args` excludes the program name.
+pub fn suggestion_command(args: &[String], new_size: &str) -> String {
+    let mut out = vec!["conv".to_string()];
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--max-size" && i + 1 < args.len() {
+            out.push(a.clone());
+            out.push(new_size.to_string());
+            i += 2;
+            continue;
+        }
+        if a.starts_with("--max-size=") {
+            out.push(format!("--max-size={new_size}"));
+        } else {
+            out.push(a.clone());
+        }
+        i += 1;
+    }
+    out.iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The block printed before the confirmation question, one entry per
+/// extreme conversion: the core's sentence, then what to try instead.
+pub fn extreme_warnings_human(
+    entries: &[(&Path, &str, Option<&str>)],
+    total: usize,
+    args: &[String],
+    styled: bool,
+) -> String {
+    let mut s = String::new();
+    for (input, warning, suggested) in entries {
+        let head = if total == 1 {
+            format!("warning  {warning}")
+        } else {
+            format!("warning  {}: {warning}", input.display())
+        };
+        s.push_str(&paint(&head, yellow_bold(), styled));
+        s.push('\n');
+        if let Some(size) = suggested {
+            let hint = if total == 1 {
+                format!(
+                    "         For a watchable result, try: {}",
+                    suggestion_command(args, size)
+                )
+            } else {
+                format!("         For a watchable result, try --max-size {size}.")
+            };
+            s.push_str(&paint(&hint, yellow_bold(), styled));
+            s.push('\n');
+        }
+    }
+    s
+}
+
 /// One resolved command line for `--verbose`: the program and argv exactly
 /// as spawned, shell-quoted the same way `plan_human` quotes a preview so
 /// the line is honest about what ran *and* pastable.
@@ -531,6 +590,66 @@ mod tests {
 
     fn only_ascii(s: &str) -> bool {
         s.is_ascii()
+    }
+
+    #[test]
+    fn a_suggested_command_swaps_only_the_size() {
+        let args: Vec<String> = ["my clip.mp4", "--max-size", "5mb", "-y"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let cmd = suggestion_command(&args, "40mb");
+        assert!(cmd.starts_with("conv "), "{cmd}");
+        assert!(cmd.contains("--max-size 40mb"), "{cmd}");
+        assert!(!cmd.contains("5mb"), "{cmd}");
+        assert!(cmd.contains("my clip.mp4"), "{cmd}");
+        let eq: Vec<String> = vec!["a.mp4".into(), "--max-size=5mb".into()];
+        assert!(suggestion_command(&eq, "40mb").contains("--max-size=40mb"));
+    }
+
+    #[test]
+    fn the_extreme_block_names_files_only_when_there_are_several() {
+        let args: Vec<String> = ["a.mp4", "--max-size", "5mb"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let one = extreme_warnings_human(
+            &[(
+                Path::new("a.mp4"),
+                "Could not get under 5 MB.",
+                Some("40mb"),
+            )],
+            1,
+            &args,
+            false,
+        );
+        assert_eq!(
+            one,
+            "warning  Could not get under 5 MB.\n         \
+             For a watchable result, try: conv a.mp4 --max-size 40mb\n"
+        );
+
+        let entries = [
+            (Path::new("a.mp4"), "Extreme compression.", Some("40mb")),
+            (Path::new("b.mp4"), "Extreme compression.", None),
+        ];
+        let many = extreme_warnings_human(&entries, 3, &args, false);
+        assert!(
+            many.contains("warning  a.mp4: Extreme compression.\n"),
+            "{many}"
+        );
+        assert!(
+            many.contains("warning  b.mp4: Extreme compression.\n"),
+            "{many}"
+        );
+        assert!(many.contains("try --max-size 40mb.\n"), "{many}");
+        assert_eq!(
+            many.matches("try").count(),
+            1,
+            "no hint without a size: {many}"
+        );
+        assert!(!has_ansi(&many), "{many:?}");
+        assert!(has_ansi(&extreme_warnings_human(&entries, 3, &args, true)));
     }
 
     // --- shell quoting for --dry-run (F76) -----------------------------------

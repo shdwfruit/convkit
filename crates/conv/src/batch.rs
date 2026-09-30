@@ -87,6 +87,9 @@ pub fn exit_code(results: &[JobResult]) -> i32 {
 /// docs for why): this is the "did it hang?" answer Part 2 exists to give,
 /// and it has to wrap the whole parallel batch, not sum each job's own
 /// elapsed time, since jobs overlap.
+///
+/// `allow_extreme` is the answer to the confirmation `commands/convert.rs`
+/// asked for, passed to every job's `Request`.
 /// # Invariant
 ///
 /// Callers must hand this distinct output paths: the rayon fan-out below
@@ -94,7 +97,7 @@ pub fn exit_code(results: &[JobResult]) -> i32 {
 /// enforced at planning time (`jobs_from`'s collision check — today the
 /// only production source of a multi-job batch). A new multi-job source
 /// must run the same check.
-pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
+pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i32, Duration) {
     let batch_start = Instant::now();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(cli.jobs.unwrap_or_else(num_cpus_or_one))
@@ -130,7 +133,7 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                         output: job.output.clone(),
                         overwrite: cli.overwrite,
                         tuning: cli.tuning(),
-                        allow_extreme: false,
+                        allow_extreme,
                     };
                     // I8: the `Event` channel used to be threaded all the
                     // way through with a no-op consumer everywhere —
@@ -176,6 +179,13 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                             let text =
                                 crate::render::verbose_report_human(backend.exe_name(), &report);
                             print_verbose(&spinner, &bar, text.trim_end());
+                        }
+                        exec::Event::SizeRetry {
+                            measured, target, ..
+                        } => {
+                            let Some(pb) = &spinner else { return };
+                            let over = (measured as f64 / target as f64 - 1.0) * 100.0;
+                            pb.set_message(format!("over by {over:.1}%, retrying pass 2…"));
                         }
                         _ => {}
                     };
@@ -373,7 +383,7 @@ mod tests {
             to: Format::Jpg,
         };
 
-        let (results, code, _elapsed) = run(vec![job], &cli);
+        let (results, code, _elapsed) = run(vec![job], &cli, false);
         assert_eq!(code, 0);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].to, Format::Jpg);

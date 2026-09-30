@@ -93,10 +93,11 @@ pub struct Cli {
     #[arg(long, value_name = "SIZE", value_parser = parse_max_size, conflicts_with = "crf")]
     pub max_size: Option<convkit_core::size::MaxSize>,
 
-    /// Assume yes when prompted to install a missing backend — for a script
-    /// that wants the install-then-retry behaviour without a TTY to answer
-    /// the interactive prompt. Contradicts `--no-install`, which asks the
-    /// opposite question ("never install"): passing both is a usage error.
+    /// Assume yes to every prompt: installing a missing backend, or
+    /// converting an extreme --max-size target. For a script that wants
+    /// either without a terminal to answer. Contradicts `--no-install`,
+    /// which asks the opposite question ("never install"): passing both is
+    /// a usage error.
     #[arg(long, global = true, conflicts_with = "no_install")]
     pub yes: bool,
 

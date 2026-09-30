@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use convkit_core::{
-    plan, probe, registry, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe, Outcome,
-    Resolver, Tuning,
+    plan, probe, registry, sized, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe,
+    Outcome, Resolver, Tuning,
 };
 use serde_json::json;
 
@@ -11,6 +11,7 @@ use crate::cli::Cli;
 use crate::commands::install;
 use crate::input;
 use crate::install_prompt;
+use crate::prompt::{self, Gate};
 use crate::render;
 
 pub fn run(cli: &Cli) -> i32 {
@@ -26,11 +27,19 @@ pub fn run(cli: &Cli) -> i32 {
         return dry_run(&jobs, cli);
     }
 
+    let allow_extreme = match confirm_extreme(&jobs, cli) {
+        Ok(confirmed) => confirmed || cli.yes,
+        Err(e) => {
+            render::print_error(cli.json, &e);
+            return e.code.exit_code();
+        }
+    };
+
     // Kept alongside `results` so a retry below can re-run exactly the jobs
     // that failed on a missing backend — `JobResult` alone has nothing to
     // hand back to `batch::run`, only what came out of it.
     let original_jobs = jobs.clone();
-    let (mut results, mut code, mut elapsed) = batch::run(jobs, cli);
+    let (mut results, mut code, mut elapsed) = batch::run(jobs, cli, allow_extreme);
 
     // --- Part 1: offer to install a missing backend, then retry once -----
     //
@@ -56,7 +65,17 @@ pub fn run(cli: &Cli) -> i32 {
                         .iter()
                         .map(|&i| original_jobs[i].clone())
                         .collect();
-                    let (retry_results, _, _) = batch::run(retry_jobs, cli);
+                    // A preview needs ffprobe, which may be exactly what was
+                    // just installed: ask again for the jobs being retried.
+                    let allow = match confirm_extreme(&retry_jobs, cli) {
+                        Ok(confirmed) => confirmed || cli.yes,
+                        Err(e) => {
+                            render::print_error(cli.json, &e);
+                            print_results(&results, cli, elapsed);
+                            return e.code.exit_code();
+                        }
+                    };
+                    let (retry_results, _, _) = batch::run(retry_jobs, cli, allow);
                     for (idx, new_result) in retry_indices.into_iter().zip(retry_results) {
                         results[idx] = new_result;
                     }
@@ -84,6 +103,96 @@ pub fn run(cli: &Cli) -> i32 {
 
     print_results(&results, cli, elapsed);
     code
+}
+
+/// Previews every `--max-size` job and, when any is extreme, prints why and
+/// asks once for the whole batch. `Ok(true)`: extreme jobs may run.
+/// `Ok(false)`: nothing extreme was found (a preview that fails is not an
+/// answer; the real run reports that failure itself). `Err`: not
+/// confirmed, so nothing may run.
+fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<bool, ConvError> {
+    if cli.max_size.is_none() {
+        return Ok(false);
+    }
+    let resolver = cli.resolver();
+    let tuning = cli.tuning();
+    let extreme: Vec<(&input::Job, sized::SizingPlan)> = jobs
+        .iter()
+        .filter_map(|job| {
+            let sz = sized::preview(job.from, job.to, &job.inputs[0], &tuning, &resolver)
+                .ok()
+                .flatten()?;
+            sz.choice
+                .as_ref()
+                .is_some_and(|c| c.extreme)
+                .then_some((job, sz))
+        })
+        .collect();
+    if extreme.is_empty() {
+        return Ok(false);
+    }
+    if !cli.json {
+        // Lossy, because the line is only shown and `env::args` panics on a
+        // byte sequence that is not UTF-8, which clap accepts as a path.
+        let args: Vec<String> = std::env::args_os()
+            .skip(1)
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let entries: Vec<(&std::path::Path, &str, Option<&str>)> = extreme
+            .iter()
+            .map(|(job, sz)| {
+                (
+                    job.inputs[0].as_path(),
+                    sz.warning.as_deref().unwrap_or("Extreme compression."),
+                    sz.suggested.as_deref(),
+                )
+            })
+            .collect();
+        eprint!(
+            "{}",
+            render::extreme_warnings_human(&entries, jobs.len(), &args, render::stderr_styled())
+        );
+    }
+    let refusal = || {
+        if let [(job, sz)] = extreme.as_slice() {
+            if jobs.len() == 1 {
+                return sized::confirmation_error(&job.inputs[0], sz);
+            }
+        }
+        ConvError::new(
+            ErrorCode::ConfirmationRequired,
+            format!(
+                "extreme compression not confirmed for {} of {} files; pass --yes to convert anyway",
+                extreme.len(),
+                jobs.len()
+            ),
+        )
+    };
+    match prompt::extreme_gate(
+        cli.yes,
+        cli.json,
+        cli.quiet,
+        prompt::is_interactive_session(),
+    ) {
+        Gate::Proceed => Ok(true),
+        Gate::Refuse => Err(refusal()),
+        Gate::Ask => {
+            let question = if jobs.len() == 1 {
+                "Convert anyway? [y/N] ".to_string()
+            } else {
+                format!(
+                    "{} of {} conversions are extreme. Convert anyway? [y/N] ",
+                    extreme.len(),
+                    jobs.len()
+                )
+            };
+            if prompt::ask(&question) {
+                Ok(true)
+            } else {
+                Err(refusal())
+            }
+        }
+    }
 }
 
 /// The single backend to offer installing, given this batch's results —
