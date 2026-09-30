@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Serialize, Serializer};
 
-use crate::budget::{self, Limits, SizePolicy, SizedChoice, Source, SourceGap};
+use crate::budget::{self, Limits, Over, SizePolicy, SizedChoice, Source, SourceGap};
 use crate::plan::{ConversionPlan, PlannedStep};
 use crate::probe::MediaProbe;
 use crate::size::{self, MaxSize, UnitFamily};
@@ -485,9 +485,28 @@ pub(crate) fn report(
 
 // --- Wording ---------------------------------------------------------------
 
+/// The overshoot, when the smallest possible file is predicted over the
+/// target itself. A choice is also flagged `over` when it missed only the
+/// target less its safety margin; its predicted file carries no margin and
+/// can still fit, so that is not a claim the target cannot be met.
+fn overshoot(c: &SizedChoice, target_bytes: u64) -> Option<Over> {
+    c.over.filter(|o| o.predicted_bytes > target_bytes)
+}
+
+/// Whether this plan's `warning` is the "Could not get under" sentence: the
+/// smallest possible file is predicted over the target. False for a plan
+/// with no warning, and for one whose warning only says the picture will
+/// look poor.
+pub(crate) fn predicts_over_target(sizing: &SizingPlan) -> bool {
+    sizing
+        .choice
+        .as_ref()
+        .is_some_and(|c| overshoot(c, sizing.target_bytes).is_some())
+}
+
 fn extreme_sentence(src: &Source, sizing: &SizingPlan, c: &SizedChoice) -> String {
     let short = c.width.min(c.height);
-    match c.over {
+    match overshoot(c, sizing.target_bytes) {
         Some(over) => {
             let cause = if over.audio_bytes >= sizing.target_bytes {
                 format!(
@@ -854,6 +873,52 @@ mod tests {
         assert!(w.starts_with("Could not get under 5 MB"), "{w}");
         assert!(w.ends_with('.'), "warning register: {w}");
         assert!(s.suggested.unwrap().ends_with("mb"));
+    }
+
+    /// "Could not get under" is a claim about the file, so it is made only
+    /// when even the smallest possible file is predicted over the target. A
+    /// choice that missed only the target less its safety margin (1.21 MB
+    /// against a 1.231 MB target) says the picture will look poor instead.
+    #[test]
+    fn the_extreme_sentence_says_could_not_fit_only_when_the_smallest_file_is_over() {
+        let over = build(
+            Format::Mp4,
+            Format::Mp4,
+            &probe(45 * 60, 900_000_000),
+            &tuned("5mb"),
+        )
+        .unwrap()
+        .sizing
+        .unwrap();
+        let w = over.warning.unwrap();
+        assert!(
+            w.starts_with("Could not get under 5 MB: the smallest possible is about "),
+            "{w}"
+        );
+
+        let silent = MediaProbe {
+            audio_codecs: Vec::new(),
+            audio_bitrates: Vec::new(),
+            ..probe(600, 900_000_000)
+        };
+        let margin = build(Format::Mp4, Format::Mp4, &silent, &tuned("1231kb"))
+            .unwrap()
+            .sizing
+            .unwrap();
+        let predicted = margin
+            .choice
+            .as_ref()
+            .unwrap()
+            .over
+            .unwrap()
+            .predicted_bytes;
+        assert!(predicted < margin.target_bytes, "{predicted}");
+        let w = margin.warning.unwrap();
+        assert!(
+            w.starts_with("Extreme compression: 1231 KB for 10 min of 1080p will look poor"),
+            "{w}"
+        );
+        assert!(!w.contains("Could not get under"), "{w}");
     }
 
     #[test]

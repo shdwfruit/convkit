@@ -370,10 +370,13 @@ fn tail_str(s: &str, max: usize) -> &str {
 /// missing or zero-byte result is always a failure regardless of exit code,
 /// since `soffice` returns 0 on failure.
 ///
-/// A `--max-size` plan carries its sizing decision: an extreme one is refused
-/// unless `Request::allow_extreme` is set, before anything is spawned; a
-/// source that already fits is copied; and an encode's result is measured and
-/// pass 2 re-run at a lower bitrate while it is over the target.
+/// A `--max-size` plan carries its sizing decision. An extreme one is refused
+/// unless `Request::allow_extreme` is set, before any conversion step runs
+/// (the source has been probed by then, and nothing more). A source that
+/// already fits is copied, or remuxed when its video suits the target
+/// container; a remux that comes out over is redone as a two-pass encode,
+/// which meets the same refusal. An encode's result is measured, and pass 2
+/// is re-run at a lower bitrate while it is over the target.
 pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) -> Result<Outcome> {
     if req.inputs.is_empty() {
         return Err(ConvError::new(
@@ -493,8 +496,10 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             (built, None)
         }
         Some(sz) => {
-            // Checked before anything is spawned: an unconfirmed extreme
-            // conversion must cost nothing.
+            // Checked before any conversion step runs, so an unconfirmed
+            // extreme conversion costs a probe and nothing more. A remux
+            // that falls back to an encode is checked again in `run_sized`,
+            // once the remux has run.
             if sz.choice.as_ref().is_some_and(|c| c.extreme) && !req.allow_extreme {
                 return Err(sized::confirmation_error(&req.inputs[0], &sz));
             }
@@ -522,10 +527,18 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             Strategy::Copy | Strategy::Remux => warnings.push(sized::already_small_note(&sz)),
             Strategy::Encode => warnings.push(sized::summary_note(&report)),
         }
+        // At most one sentence says the target was missed, and only when the
+        // file really is over it. A plan that predicted the overshoot has
+        // already worded it; any other measured miss gets the measured
+        // sentence. The quality warning for a plan that merely looks poor
+        // stays whether or not the file fits.
+        let predicted_over = sized::predicts_over_target(&sz);
         if let Some(w) = &sz.warning {
-            notes.insert(0, w.clone());
+            if report.over_target || !predicted_over {
+                notes.insert(0, w.clone());
+            }
         }
-        if report.over_target {
+        if report.over_target && !predicted_over {
             notes.push(sized::measured_over_sentence(&sz, bytes, attempts));
         }
         report
@@ -567,6 +580,16 @@ impl StepRunner<'_> {
             self.run(step, index, total)?;
         }
         Ok(())
+    }
+
+    /// Runs a two-pass encode plan. Returns how many notes were recorded
+    /// before pass 2 ran: a re-run of pass 2 truncates back to that.
+    fn run_encode(&mut self, plan: &ConversionPlan) -> Result<usize> {
+        let total = plan.steps.len();
+        self.run(&plan.steps[0], 0, total)?;
+        let pass2_notes_from = self.notes.len();
+        self.run(&plan.steps[1], 1, total)?;
+        Ok(pass2_notes_from)
     }
 
     fn run(&mut self, step: &PlannedStep, index: usize, total: usize) -> Result<()> {
@@ -803,10 +826,16 @@ impl StepRunner<'_> {
         temp_final: &Path,
     ) -> Result<(ConversionPlan, SizingPlan, u32)> {
         if sizing.strategy == Strategy::Copy {
-            std::fs::copy(&req.inputs[0], temp_final).map_err(io_err)?;
+            copy_fresh(&req.inputs[0], temp_final)?;
             return Ok((built, sizing, 0));
         }
-        self.run_all(&built)?;
+        // Where pass 2's notes begin, so a re-run can replace them.
+        let mut pass2_notes_from = if sizing.strategy == Strategy::Encode {
+            self.run_encode(&built)?
+        } else {
+            self.run_all(&built)?;
+            0
+        };
         let (plan, mut sizing) =
             if sizing.strategy == Strategy::Remux && file_len(temp_final)? > sizing.target_bytes {
                 // It looked small enough, but the copy came out over: encode.
@@ -828,7 +857,10 @@ impl StepRunner<'_> {
                 if sizing.choice.as_ref().is_some_and(|c| c.extreme) && !req.allow_extreme {
                     return Err(sized::confirmation_error(&req.inputs[0], &sizing));
                 }
-                self.run_all(&plan)?;
+                // Start the encode from no file, so a pass 2 that writes
+                // nothing cannot pass on the remux it replaces.
+                remove_if_present(temp_final)?;
+                pass2_notes_from = self.run_encode(&plan)?;
                 (plan, sizing)
             } else {
                 (built, sizing)
@@ -854,7 +886,11 @@ impl StepRunner<'_> {
                     });
                     choice.video_bps = next;
                     let pass2 = sized::with_bitrate(&plan.steps[1], choice.video_bps);
-                    self.run(&pass2, 1, 2)?;
+                    // The attempt being replaced leaves no notes behind, and
+                    // no file for this one to be mistaken for.
+                    self.notes.truncate(pass2_notes_from);
+                    remove_if_present(temp_final)?;
+                    self.run(&pass2, 1, plan.steps.len())?;
                     attempts += 1;
                     bytes = file_len(temp_final)?;
                 }
@@ -866,6 +902,26 @@ impl StepRunner<'_> {
 
 fn file_len(p: &Path) -> Result<u64> {
     Ok(std::fs::metadata(p).map_err(io_err)?.len())
+}
+
+/// Copies `from` to a new file at `to`. Not `std::fs::copy`, which would
+/// carry the source's permissions along: a read-only source must not make a
+/// read-only output.
+fn copy_fresh(from: &Path, to: &Path) -> Result<()> {
+    let mut src = std::fs::File::open(from).map_err(io_err)?;
+    let mut dst = std::fs::File::create(to).map_err(io_err)?;
+    std::io::copy(&mut src, &mut dst).map_err(io_err)?;
+    Ok(())
+}
+
+/// Removes `p` when it exists, so a step that is meant to write it and does
+/// not is caught by the missing-or-empty check rather than passing on an
+/// earlier run's file.
+fn remove_if_present(p: &Path) -> Result<()> {
+    match std::fs::remove_file(p) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_err(e)),
+        _ => Ok(()),
+    }
 }
 
 fn is_non_empty(p: &Path) -> bool {
@@ -2613,6 +2669,91 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         )
     }
 
+    /// A screen recording: one video stream and no audio at all.
+    #[cfg(unix)]
+    fn probe_json_silent(secs: u64, file_bytes: u64) -> String {
+        format!(
+            r#"{{"streams":[
+                {{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,
+                  "r_frame_rate":"30/1","avg_frame_rate":"30/1"}}],
+              "format":{{"duration":"{secs}.000000","size":"{file_bytes}"}}}}"#
+        )
+    }
+
+    /// ffmpeg stand-in that reports something on stderr on every call, its
+    /// text carrying the call's number, and writes `bytes` bytes to its last
+    /// argument on every call but pass 1.
+    #[cfg(unix)]
+    fn ffmpeg_stub_with_a_note_per_call(dir: &Path, bytes: &[u64]) -> PathBuf {
+        let lines: Vec<String> = bytes.iter().map(u64::to_string).collect();
+        std::fs::write(dir.join("sizes"), lines.join("\n") + "\n").unwrap();
+        let p = dir.join("ffmpeg_noting.sh");
+        std::fs::write(
+            &p,
+            "#!/bin/sh\n\
+             if [ \"$#\" = \"1\" ] && [ \"$1\" = \"-version\" ]; then exit 0; fi\n\
+             d=\"$(dirname \"$0\")\"\n\
+             echo \"$*\" >> \"$d/calls\"\n\
+             k=$(wc -l < \"$d/calls\" | tr -d ' ')\n\
+             echo \"[h264 @ 0x$k] Invalid data in call $k\" >&2\n\
+             case \" $* \" in *\" -pass 1 \"*) exit 0;; esac\n\
+             for a in \"$@\"; do last=\"$a\"; done\n\
+             n=$(head -n 1 \"$d/sizes\"); tail -n +2 \"$d/sizes\" > \"$d/sizes.next\"; mv \"$d/sizes.next\" \"$d/sizes\"\n\
+             head -c \"$n\" /dev/zero > \"$last\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// ffmpeg stand-in that writes `bytes` bytes to its last argument the
+    /// first time it is asked for a real output, and exits 0 having written
+    /// nothing on every call after that.
+    #[cfg(unix)]
+    fn ffmpeg_stub_that_writes_once(dir: &Path, bytes: u64) -> PathBuf {
+        let p = dir.join("ffmpeg_once.sh");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$#\" = \"1\" ] && [ \"$1\" = \"-version\" ]; then exit 0; fi\n\
+                 d=\"$(dirname \"$0\")\"\n\
+                 echo \"$*\" >> \"$d/calls\"\n\
+                 case \" $* \" in *\" -pass 1 \"*) exit 0;; esac\n\
+                 for a in \"$@\"; do last=\"$a\"; done\n\
+                 if [ -e \"$d/wrote\" ]; then exit 0; fi\n\
+                 touch \"$d/wrote\"\n\
+                 head -c {bytes} /dev/zero > \"$last\"\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// Where a sentence goes is part of the contract: fit and extremity
+    /// sentences are notes (rendered as warnings), the summary and the
+    /// already-small remark are warnings (rendered as notes).
+    #[cfg(unix)]
+    fn assert_routed(o: &Outcome) {
+        for w in &o.warnings {
+            assert!(
+                !w.starts_with("Could not get under") && !w.starts_with("Extreme compression"),
+                "{w:?} belongs in notes: {:?}",
+                o.warnings
+            );
+        }
+        for n in &o.notes {
+            assert!(
+                !n.starts_with("Sized to ") && !n.starts_with("Already "),
+                "{n:?} belongs in warnings: {:?}",
+                o.notes
+            );
+        }
+    }
+
     /// A sized request between two containers, over an input called
     /// `clip.<from's extension>`.
     #[cfg(unix)]
@@ -2805,6 +2946,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         let req = sized_request(dir.path(), "1mb", false);
         let o = run(&req, &r, &mut |_| {}).unwrap();
         assert!(req.output.is_file());
+        assert_eq!(o.bytes, 1_020_000, "the last attempt is the one kept");
         let s = o.sizing.unwrap();
         assert!(s.over_target);
         assert_eq!(s.attempts, 3);
@@ -2866,12 +3008,17 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert_eq!(s.attempts, 1);
         assert_eq!(o.bytes, 6_000_000);
         assert!(req.output.is_file(), "the over-target result is kept");
+        // Predicted over and measured over: one "Could not get under"
+        // sentence, the predicted one, not two near-identical ones.
+        let could_not: Vec<&String> = o
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("Could not get under"))
+            .collect();
+        assert_eq!(could_not.len(), 1, "{:?}", o.notes);
         assert!(
-            o.notes
-                .iter()
-                .any(|n| n.starts_with("Could not get under 5 MB after 1 attempt:")),
-            "{:?}",
-            o.notes
+            could_not[0].starts_with("Could not get under 5 MB: the smallest possible is about"),
+            "{could_not:?}"
         );
     }
 
@@ -2888,21 +3035,24 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert!(!scratch_left(dir.path()));
     }
 
+    /// The plan predicted the smallest file over the target, but the encode
+    /// came in under it: the outcome must not also claim it could not fit.
     #[cfg(unix)]
     #[test]
-    fn an_allowed_extreme_plan_runs_and_says_so() {
+    fn an_allowed_extreme_plan_that_fits_anyway_does_not_say_it_could_not() {
         let dir = tempfile::tempdir().unwrap();
         let r = stubbed(dir.path(), &probe_json(45 * 60, 900_000_000), &[4_000_000]);
         let req = sized_request(dir.path(), "5mb", true);
         let o = run(&req, &r, &mut |_| {}).unwrap();
+        let s = o.sizing.unwrap();
+        assert!(!s.over_target);
+        assert_eq!(o.bytes, 4_000_000);
         assert!(
-            o.notes
-                .iter()
-                .any(|n| n.starts_with("Could not get under 5 MB")),
+            !o.notes.iter().any(|n| n.starts_with("Could not get under")),
             "{:?}",
             o.notes
         );
-        assert!(o.sizing.unwrap().suggested.is_some());
+        assert!(s.suggested.is_some());
     }
 
     #[cfg(unix)]
@@ -2981,6 +3131,253 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
         assert_eq!(e.code, ErrorCode::ConfirmationRequired, "{}", e.message);
         assert_eq!(calls(dir.path()).len(), 1, "only the remux ran");
+        assert!(!req.output.exists());
+        assert!(!scratch_left(dir.path()));
+    }
+
+    /// Over the target only because of the safety margin (the smallest
+    /// possible file is 1.21 MB against a 1.231 MB target): the plan cannot
+    /// honestly say it will not fit, so it says the picture will look poor.
+    /// If the encode then fits, that is all the notes carry.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_missed_only_by_the_margin_is_a_quality_note_when_the_encode_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(
+            dir.path(),
+            &probe_json_silent(600, 900_000_000),
+            &[1_200_000],
+        );
+        let req = sized_request(dir.path(), "1231kb", true);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert!(!o.sizing.as_ref().unwrap().over_target);
+        assert_eq!(o.notes.len(), 1, "{:?}", o.notes);
+        assert!(
+            o.notes[0].starts_with("Extreme compression:"),
+            "{:?}",
+            o.notes
+        );
+        assert_routed(&o);
+    }
+
+    /// The same margin-band plan, but the encode comes out over: the quality
+    /// note stays, and the measured result is the one "Could not get under".
+    #[cfg(unix)]
+    #[test]
+    fn a_target_missed_only_by_the_margin_says_so_once_the_encode_is_measured_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(
+            dir.path(),
+            &probe_json_silent(600, 900_000_000),
+            &[1_240_000],
+        );
+        let req = sized_request(dir.path(), "1231kb", true);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert!(o.sizing.as_ref().unwrap().over_target);
+        assert_eq!(o.notes.len(), 2, "{:?}", o.notes);
+        assert!(
+            o.notes[0].starts_with("Extreme compression:"),
+            "{:?}",
+            o.notes
+        );
+        assert_eq!(
+            o.notes[1],
+            "Could not get under 1231 KB after 1 attempt: the result is 1.24 MB."
+        );
+        assert_routed(&o);
+    }
+
+    /// A cost-extreme plan (no predicted overshoot) keeps its quality note
+    /// whether or not the encode fits.
+    #[cfg(unix)]
+    #[test]
+    fn a_cost_extreme_plan_keeps_its_quality_note_when_the_encode_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(dir.path(), &probe_json(600, 900_000_000), &[4_000_000]);
+        let req = sized_request(dir.path(), "5mb", true);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert!(!o.sizing.as_ref().unwrap().over_target);
+        assert_eq!(o.notes.len(), 1, "{:?}", o.notes);
+        assert!(
+            o.notes[0].starts_with("Extreme compression: 5 MB"),
+            "{:?}",
+            o.notes
+        );
+        assert_routed(&o);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_sized_outcome_routes_its_sentences_the_same_way() {
+        let ordinary = probe_json(5, 50_000_000);
+        let long = probe_json(45 * 60, 900_000_000);
+        let cost_extreme = probe_json(600, 900_000_000);
+        let small = probe_json(60, 12);
+        let mp4 = (Format::Mp4, Format::Mp4);
+        let mkv_to_mp4 = (Format::Mkv, Format::Mp4);
+        // Each row: the probe, what the ffmpeg stub writes, the target, the
+        // containers, and whether an extreme plan may run.
+        let scenarios = [
+            (&ordinary, vec![900_000], "1mb", mp4, false),
+            (
+                &ordinary,
+                vec![1_100_000, 1_050_000, 1_020_000],
+                "1mb",
+                mp4,
+                false,
+            ),
+            (&long, vec![6_000_000], "5mb", mp4, true),
+            (&long, vec![4_000_000], "5mb", mp4, true),
+            (&cost_extreme, vec![4_000_000], "5mb", mp4, true),
+            (&cost_extreme, vec![6_000_000], "5mb", mp4, true),
+            (&small, vec![], "1mb", mp4, false),
+            (&small, vec![900_000], "1mb", mkv_to_mp4, false),
+        ];
+        for (json, sizes, size, pair, allow_extreme) in scenarios {
+            let dir = tempfile::tempdir().unwrap();
+            let r = stubbed(dir.path(), json, &sizes);
+            let req = sized_request_between(dir.path(), pair, size, allow_extreme);
+            let o = run(&req, &r, &mut |_| {}).unwrap();
+            assert_routed(&o);
+            assert!(o.sizing.is_some());
+        }
+    }
+
+    /// The event names the attempt about to start, what the last one
+    /// measured, and the target it missed.
+    #[cfg(unix)]
+    #[test]
+    fn a_size_retry_event_carries_the_attempt_and_the_measurement() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(
+            dir.path(),
+            &probe_json(5, 50_000_000),
+            &[1_100_000, 950_000],
+        );
+        let req = sized_request(dir.path(), "1mb", false);
+        let mut seen = Vec::new();
+        run(&req, &r, &mut |e| {
+            if let Event::SizeRetry {
+                attempt,
+                measured,
+                target,
+            } = e
+            {
+                seen.push((attempt, measured, target));
+            }
+        })
+        .unwrap();
+        assert_eq!(seen, vec![(2, 1_100_000, 1_000_000)]);
+    }
+
+    /// A source that fits and whose video suits the target is remuxed: one
+    /// ffmpeg call, no second pass, no measurement loop.
+    #[cfg(unix)]
+    #[test]
+    fn a_remux_that_fits_is_one_ffmpeg_call_and_says_the_video_was_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(dir.path(), &probe_json(60, 12), &[900_000]);
+        let req = sized_request_between(dir.path(), (Format::Mkv, Format::Mp4), "1mb", false);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        let c = calls(dir.path());
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert!(!c[0].contains("-pass"), "{c:?}");
+        assert_eq!(o.bytes, 900_000);
+        assert!(o.remuxed);
+        let s = o.sizing.unwrap();
+        assert_eq!(s.strategy, crate::sized::Strategy::Remux);
+        assert_eq!((s.attempts, s.over_target), (1, false));
+        assert!(
+            o.warnings.iter().any(|w| w.starts_with("Already ")
+                && w.ends_with("the video was stream-copied, not re-encoded.")),
+            "{:?}",
+            o.warnings
+        );
+        assert!(o.notes.is_empty(), "{:?}", o.notes);
+    }
+
+    /// Pass 1 and the attempt that produced the kept file are what the notes
+    /// describe; an earlier attempt's pass 2 does not pile up beside them.
+    #[cfg(unix)]
+    #[test]
+    fn a_retry_does_not_multiply_the_notes_of_the_pass_it_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = stubbed(dir.path(), &probe_json(5, 50_000_000), &[]);
+        r.with_override(
+            Backend::Ffmpeg,
+            ffmpeg_stub_with_a_note_per_call(&dir.path().join("bin"), &[1_100_000, 950_000]),
+        );
+        let req = sized_request(dir.path(), "1mb", false);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(o.sizing.unwrap().attempts, 2);
+        assert_eq!(
+            o.notes,
+            vec![
+                "[h264 @ 0x1] Invalid data in call 1".to_string(),
+                "[h264 @ 0x3] Invalid data in call 3".to_string(),
+            ],
+            "pass 1, then the last pass 2 only"
+        );
+    }
+
+    /// The copy is a new file, not the source's permissions along with its
+    /// bytes: a read-only source does not make a read-only output.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_source_is_copied_to_a_writable_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(dir.path(), &probe_json(60, 12), &[]);
+        let req = sized_request(dir.path(), "1mb", false);
+        std::fs::set_permissions(&req.inputs[0], std::fs::Permissions::from_mode(0o444)).unwrap();
+        run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read(&req.output).unwrap(), b"source bytes");
+        let mode = std::fs::metadata(&req.output).unwrap().permissions().mode();
+        assert!(mode & 0o200 != 0, "the output is writable: {mode:o}");
+    }
+
+    /// A pass 2 that is run again must not be able to pass on the previous
+    /// run's file: if it writes nothing, that is the failure it always is.
+    #[cfg(unix)]
+    #[test]
+    fn a_retried_pass_two_that_writes_nothing_fails_rather_than_reusing_the_last_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = stubbed(dir.path(), &probe_json(5, 50_000_000), &[]);
+        r.with_override(
+            Backend::Ffmpeg,
+            ffmpeg_stub_that_writes_once(&dir.path().join("bin"), 1_100_000),
+        );
+        let req = sized_request(dir.path(), "1mb", false);
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert!(
+            e.message.starts_with("ffmpeg produced no output"),
+            "{}",
+            e.message
+        );
+        assert_eq!(calls(dir.path()).len(), 3, "pass 1, pass 2, the retry");
+        assert!(!req.output.exists());
+        assert!(!scratch_left(dir.path()));
+    }
+
+    /// Likewise the fallback encode: it starts from no file, so the remux's
+    /// over-target result cannot stand in for an encode that wrote nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_fallback_encode_that_writes_nothing_fails_rather_than_reusing_the_remux() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = stubbed(dir.path(), &probe_json(60, 12), &[]);
+        r.with_override(
+            Backend::Ffmpeg,
+            ffmpeg_stub_that_writes_once(&dir.path().join("bin"), 12_000_000),
+        );
+        let req = sized_request_between(dir.path(), (Format::Mkv, Format::Mp4), "10mb", false);
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert!(
+            e.message.starts_with("ffmpeg produced no output"),
+            "{}",
+            e.message
+        );
+        assert_eq!(calls(dir.path()).len(), 3, "remux, pass 1, pass 2");
         assert!(!req.output.exists());
         assert!(!scratch_left(dir.path()));
     }
