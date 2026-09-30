@@ -1865,8 +1865,12 @@ fn an_extreme_target_without_yes_writes_nothing_and_says_why() {
     assert!(!dir.path().join("clip-5mb.mp4").exists());
 }
 
+/// assert_cmd is non-interactive whatever the flags, so this does not
+/// exercise the `--json` row of the gate table (the unit table in
+/// `prompt.rs` does). It pins what a script sees when a refusal happens under
+/// `--json`: the `confirmation_required` code, exit 2, and no human block.
 #[test]
-fn json_mode_never_prompts_and_reports_confirmation_required() {
+fn a_json_refusal_is_confirmation_required_with_no_human_block() {
     let dir = tempfile::tempdir().unwrap();
     let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
     let input = dir.path().join("clip.mp4");
@@ -1961,4 +1965,62 @@ fn an_argument_that_is_not_utf8_does_not_break_the_extreme_warning() {
         stderr.contains("extreme compression not confirmed"),
         "{stderr}"
     );
+}
+
+/// `--dry-run` is inert: it plans, never asks, and an extreme source is a
+/// plan to show, not a refusal.
+#[test]
+fn dry_run_of_an_extreme_source_plans_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb", "--dry-run"])
+        .assert()
+        .success();
+    let out = assert.get_output();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!both.contains("not confirmed"), "{both}");
+    assert!(!both.contains("Convert anyway"), "{both}");
+}
+
+/// A job that cannot run because its output exists is reported as that, not
+/// asked about; with `-y` it can run, so it is asked about like any other.
+#[test]
+fn a_job_whose_output_exists_is_not_asked_about() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    std::fs::write(dir.path().join("clip-5mb.mp4"), b"old").unwrap();
+
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("exists; pass -y"), "{stderr}");
+    assert!(!stderr.contains("not confirmed"), "{stderr}");
+    assert!(!stderr.contains("warning  "), "{stderr}");
+
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb", "-y"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("not confirmed"), "{stderr}");
 }

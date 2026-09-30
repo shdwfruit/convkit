@@ -65,14 +65,20 @@ pub fn run(cli: &Cli) -> i32 {
                         .iter()
                         .map(|&i| original_jobs[i].clone())
                         .collect();
-                    // A preview needs ffprobe, which may be exactly what was
-                    // just installed: ask again for the jobs being retried.
-                    let allow = match confirm_extreme(&retry_jobs, cli) {
-                        Ok(confirmed) => confirmed || cli.yes,
-                        Err(e) => {
-                            render::print_error(cli.json, &e);
-                            print_results(&results, cli, elapsed);
-                            return e.code.exit_code();
+                    // An answer already given stands for the retried jobs
+                    // too. Only when the first pass could not preview (it
+                    // needs ffprobe, which may be exactly what was just
+                    // installed) is there nothing to reuse, so ask now.
+                    let allow = if allow_extreme {
+                        true
+                    } else {
+                        match confirm_extreme(&retry_jobs, cli) {
+                            Ok(confirmed) => confirmed,
+                            Err(e) => {
+                                render::print_error(cli.json, &e);
+                                print_results(&results, cli, elapsed);
+                                return e.code.exit_code();
+                            }
                         }
                     };
                     let (retry_results, _, _) = batch::run(retry_jobs, cli, allow);
@@ -119,9 +125,16 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<bool, ConvError> {
     let extreme: Vec<(&input::Job, sized::SizingPlan)> = jobs
         .iter()
         .filter_map(|job| {
+            // Cannot run, and `batch::run` will say so; not worth a question.
+            if job.output.exists() && !cli.overwrite {
+                return None;
+            }
             let sz = sized::preview(job.from, job.to, &job.inputs[0], &tuning, &resolver)
                 .ok()
                 .flatten()?;
+            // The core words every extreme choice; a plan with nothing to
+            // say has nothing to ask about.
+            sz.warning.as_ref()?;
             sz.choice
                 .as_ref()
                 .is_some_and(|c| c.extreme)
@@ -132,20 +145,21 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<bool, ConvError> {
         return Ok(false);
     }
     if !cli.json {
-        // Lossy, because the line is only shown and `env::args` panics on a
-        // byte sequence that is not UTF-8, which clap accepts as a path.
-        let args: Vec<String> = std::env::args_os()
+        // The command line as `main` parsed it. Lossy, because the line is
+        // only shown, and a byte sequence that is not UTF-8 (which clap
+        // accepts as a path) would panic `env::args`.
+        let args: Vec<String> = wild::args_os()
             .skip(1)
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let entries: Vec<(&std::path::Path, &str, Option<&str>)> = extreme
             .iter()
-            .map(|(job, sz)| {
-                (
+            .filter_map(|(job, sz)| {
+                Some((
                     job.inputs[0].as_path(),
-                    sz.warning.as_deref().unwrap_or("Extreme compression."),
+                    sz.warning.as_deref()?,
                     sz.suggested.as_deref(),
-                )
+                ))
             })
             .collect();
         eprint!(

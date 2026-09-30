@@ -63,6 +63,26 @@ fn single_job_spinner(cli: &Cli, job_count: usize) -> Option<indicatif::Progress
     Some(pb)
 }
 
+/// The spinner text for a step that is starting: which backend, which step
+/// of how many for a multi-step recipe, and `retry` (see `retry_label`) once
+/// a sized encode has come out over and is being run again.
+fn step_message(name: &str, index: usize, total: usize, retry: Option<&str>) -> String {
+    let detail = match (total > 1, retry) {
+        (true, Some(r)) => format!(" (step {}/{total}, {r})", index + 1),
+        (true, None) => format!(" (step {}/{total})", index + 1),
+        (false, Some(r)) => format!(" ({r})"),
+        (false, None) => String::new(),
+    };
+    format!("running {name}{detail}…")
+}
+
+/// Why pass 2 is running again: the attempt about to start and how far over
+/// its target the last one came out.
+fn retry_label(attempt: u32, measured: u64, target: u64) -> String {
+    let over = (measured as f64 / target as f64 - 1.0) * 100.0;
+    format!("retry {attempt}, over by {over:.1}%")
+}
+
 /// The batch exit-code rule: 0 if every job succeeded, the underlying
 /// error's own code if every job failed (so a batch that failed only
 /// because a backend is missing still exits 3), or `BatchPartialFailure`
@@ -146,6 +166,13 @@ pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i
                     // step's full transcript to stderr. `suspend` keeps
                     // those prints from being overdrawn by the live
                     // spinner/bar.
+                    //
+                    // `retry` holds the label of a sized encode that came
+                    // out over. The core starts pass 2 again at once, so a
+                    // message set on the retry itself would be replaced
+                    // before anyone saw it; the label is folded into the
+                    // step message instead.
+                    let mut retry: Option<String> = None;
                     let mut on_event = |e: exec::Event| match e {
                         exec::Event::StepStarted {
                             backend,
@@ -153,15 +180,12 @@ pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i
                             total,
                         } => {
                             let Some(pb) = &spinner else { return };
-                            let name = backend.exe_name();
-                            if total > 1 {
-                                pb.set_message(format!(
-                                    "running {name} (step {}/{total})…",
-                                    index + 1
-                                ));
-                            } else {
-                                pb.set_message(format!("running {name}…"));
-                            }
+                            pb.set_message(step_message(
+                                backend.exe_name(),
+                                index,
+                                total,
+                                retry.as_deref(),
+                            ));
                         }
                         exec::Event::StepSpawned { program, argv, .. } if cli.verbose => {
                             let line = format!(
@@ -181,12 +205,10 @@ pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i
                             print_verbose(&spinner, &bar, text.trim_end());
                         }
                         exec::Event::SizeRetry {
-                            measured, target, ..
-                        } => {
-                            let Some(pb) = &spinner else { return };
-                            let over = (measured as f64 / target as f64 - 1.0) * 100.0;
-                            pb.set_message(format!("over by {over:.1}%, retrying pass 2…"));
-                        }
+                            attempt,
+                            measured,
+                            target,
+                        } => retry = Some(retry_label(attempt, measured, target)),
                         _ => {}
                     };
                     exec::run(&req, &resolver, &mut on_event)
@@ -359,6 +381,35 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         p
+    }
+
+    #[test]
+    fn a_step_message_carries_the_retry_label_when_there_is_one() {
+        assert_eq!(
+            step_message("ffmpeg", 0, 2, None),
+            "running ffmpeg (step 1/2)…"
+        );
+        assert_eq!(
+            step_message("ffmpeg", 1, 2, Some("retry 2, over by 10.0%")),
+            "running ffmpeg (step 2/2, retry 2, over by 10.0%)…"
+        );
+        assert_eq!(step_message("magick", 0, 1, None), "running magick…");
+        assert_eq!(
+            step_message("ffmpeg", 0, 1, Some("retry 2, over by 1.5%")),
+            "running ffmpeg (retry 2, over by 1.5%)…"
+        );
+    }
+
+    #[test]
+    fn the_retry_label_names_the_attempt_and_how_far_over() {
+        assert_eq!(
+            retry_label(2, 11_000_000, 10_000_000),
+            "retry 2, over by 10.0%"
+        );
+        assert_eq!(
+            retry_label(3, 10_150_000, 10_000_000),
+            "retry 3, over by 1.5%"
+        );
     }
 
     /// Part 2's own wiring: a real (stubbed-backend) successful job must
