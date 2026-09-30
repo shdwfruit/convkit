@@ -63,8 +63,8 @@ pub struct SizingReport {
     pub suggested: Option<String>,
 }
 
-// Spelled `std::result::Result`: Task 6 imports the crate's one-parameter
-// `Result` alias into this module.
+// Spelled `std::result::Result` so a later import of the crate's
+// one-parameter `Result` alias into this module cannot shadow it.
 fn optional_rational<S: Serializer>(
     r: &Option<(u32, u32)>,
     s: S,
@@ -92,5 +92,35 @@ mod tests {
         for f in [Format::Gif, Format::Avi, Format::Mp3, Format::Jpg] {
             assert!(!is_video_target(f), "{f:?}");
         }
+    }
+
+    fn report(fps: Option<(u32, u32)>) -> SizingReport {
+        SizingReport {
+            target_bytes: 10_000_000,
+            family: UnitFamily::Decimal,
+            strategy: Strategy::Encode,
+            width: Some(1280),
+            height: Some(720),
+            fps,
+            video_bps: Some(900_000),
+            audio_bps: vec![96_000],
+            attempts: 1,
+            cost: Some(1.5),
+            over_target: false,
+            suggested: None,
+        }
+    }
+
+    /// `--json` output is a published contract: the rate is an `N/D` string,
+    /// the enums are snake_case, and an unknown rate is `null`, not absent.
+    #[test]
+    fn a_sizing_report_serialises_in_its_json_shape() {
+        let v = serde_json::to_value(report(Some((30_000, 1_001)))).unwrap();
+        assert_eq!(v["fps"], "30000/1001", "{v}");
+        assert_eq!(v["strategy"], "encode", "{v}");
+        assert_eq!(v["family"], "decimal", "{v}");
+
+        let v = serde_json::to_value(report(None)).unwrap();
+        assert!(v.get("fps").is_some_and(|f| f.is_null()), "{v}");
     }
 }

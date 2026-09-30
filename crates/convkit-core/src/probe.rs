@@ -56,7 +56,7 @@ pub struct MediaProbe {
     pub size_bytes: Option<u64>,
     /// Each audio stream's bitrate in bits per second, in stream order and
     /// always the same length as `audio_codecs`, `None` where the container
-    /// does not say (mkv usually does not).
+    /// does not say (mkv usually does not) or reports zero.
     pub audio_bitrates: Vec<Option<u32>>,
     /// Bytes carried by attachment streams (fonts in mkv), which a remux
     /// or re-encode passes through untouched.
