@@ -2904,10 +2904,10 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             .collect()
     }
 
+    #[cfg(unix)]
     impl Asked {
         /// Everything the pass asks the encoder for, in bits per second: the
         /// video and the one audio track the stub probe reports.
-        #[cfg(unix)]
         fn total(&self) -> u64 {
             self.rate + self.audio
         }
