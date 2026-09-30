@@ -36,7 +36,7 @@ fn fixture(name: &str) -> PathBuf {
     assert!(
         p.is_file(),
         "missing fixture tests/fixtures/{name}; see docs/defaults-calibration.md \
-         and the Task 15 report for how each fixture was generated"
+         for how each fixture was generated"
     );
     p
 }
