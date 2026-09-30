@@ -1,2 +1,8 @@
 target/
 .DS_Store
+
+# Local design and planning notes -- not published docs
+docs/local/
+
+# Rendered launch video and its build files
+brag-output/
