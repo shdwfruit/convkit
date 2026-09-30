@@ -1,5 +1,9 @@
 # convkit
 
+<a href="docs/media/convkit-launch.mp4"><img src="docs/media/convkit-launch.jpg" alt="convkit launch video: conv clip.mp4 clip.gif replaces a long ffmpeg palettegen command. Click to play (21s, with sound)." width="100%"></a>
+
+<p align="center"><a href="docs/media/convkit-launch.mp4">▶ Watch the 21-second demo</a></p>
+
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
 ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 115
