@@ -2284,4 +2284,59 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         .collect();
         assert!(is_remux(&argv), "{argv:?}");
     }
+
+    /// A webm video knob can only be applied by the probe-aware path, so an
+    /// unresolvable ffprobe is the real error and must reach the caller as
+    /// `backend_missing` naming ffprobe -- that pair of fields is what makes
+    /// the CLI offer to install it. The static recipe's refusal ("webm is
+    /// not a video target") is the wrong answer, and so is a silent
+    /// fallback.
+    ///
+    /// `overrides_only` with no ffprobe override makes ffprobe unresolvable
+    /// regardless of the host's `PATH`. The contrast case pins the other
+    /// side: where a probe is only an optimisation (`mkv -> mp4`, whose
+    /// static recipe carries a chain slot), the same missing ffprobe is
+    /// still swallowed, so the first backend to fail is ffmpeg.
+    #[test]
+    fn a_webm_knob_with_no_ffprobe_reports_backend_missing_naming_ffprobe() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        std::fs::write(&input, b"not really a video").unwrap();
+        let mut r = Resolver::new();
+        r.overrides_only();
+
+        let req = Request {
+            from: Format::Mp4,
+            to: Format::Webm,
+            inputs: vec![input.clone()],
+            output: dir.path().join("out.webm"),
+            overwrite: false,
+            tuning: crate::Tuning {
+                fps: Some("15".into()),
+                ..Default::default()
+            },
+        };
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::BackendMissing, "{}", e.message);
+        assert_eq!(e.backend, Some(Backend::Ffprobe));
+
+        let req = Request {
+            from: Format::Mkv,
+            to: Format::Mp4,
+            inputs: vec![input],
+            output: dir.path().join("out.mp4"),
+            overwrite: false,
+            tuning: crate::Tuning {
+                fps: Some("15".into()),
+                ..Default::default()
+            },
+        };
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::BackendMissing, "{}", e.message);
+        assert_eq!(
+            e.backend,
+            Some(Backend::Ffmpeg),
+            "the probe is optional here"
+        );
+    }
 }

@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::media;
 use crate::probe::MediaProbe;
 use crate::resolve::AvailableBackends;
+use crate::video::ResolvedVideo;
 use crate::{registry, Arg, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe, Tuning};
 
 /// The first argv element `build` inserts for every `Soffice` step, in
@@ -176,7 +177,7 @@ pub fn build_tuned(
 
     let recipe =
         select(from, to, probe, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
-    validate_tuning(&recipe, from, to, tuning)?;
+    validate_tuning(&recipe, from, to, tuning, &resolved)?;
 
     let last = recipe.steps.len() - 1;
 
@@ -302,22 +303,42 @@ fn check_crf_range(to: Format, tuning: &Tuning) -> Result<()> {
 /// Refuses any tuning flag whose slot the selected recipe does not carry.
 /// Per-flag, so `--quality` on a lossless target gets the honest "png is
 /// lossless" answer while `--resize` on the same invocation still works.
-fn validate_tuning(recipe: &Recipe, from: Format, to: Format, tuning: &Tuning) -> Result<()> {
+///
+/// `resolved` is the video knobs already resolved against the probe (or the
+/// lack of one). It matters for exactly one pair shape, a probe-routed webm
+/// target: `VIDEO_TO_WEBM` has no filter slot, so a knob can only be applied
+/// by the probe-aware path in `build_tuned`, and this static recipe is
+/// reached when that path declined. The question is then whether the knob
+/// still needs applying, which only `resolved` answers.
+fn validate_tuning(
+    recipe: &Recipe,
+    from: Format,
+    to: Format,
+    tuning: &Tuning,
+    resolved: &ResolvedVideo,
+) -> Result<()> {
     if tuning.is_empty() {
         return Ok(());
     }
     let has_slot =
         |wanted: fn(&Arg) -> bool| recipe.steps.iter().any(|s| s.args.iter().any(&wanted));
-    // A webm target reaches this static path with a video knob only when
-    // the probe never ran or read nothing (see `registry::requires_probe`),
-    // since the probe-aware path above honours both knobs on webm. Say
-    // that, rather than the refusal below, which would claim webm is not a
-    // video target.
-    if to == Format::Webm
-        && registry::needs_probe(from, to)
-        && (tuning.fps.is_some() || tuning.resize.is_some())
-    {
-        let flag = if tuning.fps.is_some() {
+    // On a probe-routed webm target, `--fps` and `--resize` are decided by
+    // what they resolved to, never by the recipe's (absent) slot:
+    //
+    // - Something to apply (`resolved.fps` or `resolved.scale` is set) that
+    //   this recipe cannot carry means the probe-aware path declined for
+    //   want of a source to map: no probe ran, or it read no video stream
+    //   (`--resize` always resolves to a scale, and `--fps` does whenever
+    //   the source rate is unknown or the cap binds). Say that, rather than
+    //   the refusal below, which would claim webm is not a video target.
+    // - Nothing to apply means the probe read the source and the cap does
+    //   not bind (`--fps 60` on a 24 fps source): the flag is a no-op that
+    //   `resolved.notes` already explains on the plan's warnings, so the
+    //   `--fps` check below lets it through rather than refusing it.
+    //   (`--resize` cannot land here: it always resolves to a scale.)
+    let probe_routed_webm = to == Format::Webm && registry::needs_probe(from, to);
+    if probe_routed_webm && (resolved.fps.is_some() || resolved.scale.is_some()) {
+        let flag = if resolved.fps.is_some() {
             "--fps"
         } else {
             "--resize"
@@ -366,7 +387,8 @@ fn validate_tuning(recipe: &Recipe, from: Format, to: Format, tuning: &Tuning) -
             ),
         ));
     }
-    if tuning.fps.is_some() && !has_slot(|a| matches!(a, Arg::VideoChain(_))) {
+    if tuning.fps.is_some() && !probe_routed_webm && !has_slot(|a| matches!(a, Arg::VideoChain(_)))
+    {
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
             format!(
@@ -1510,6 +1532,99 @@ mod tests {
         assert!(
             !e.message.contains("it tunes video and GIF targets"),
             "webm is a video target: {}",
+            e.message
+        );
+    }
+
+    /// The other side of the guard: a cap that does not bind (a 60 fps cap
+    /// on a 24 fps source) resolves to nothing, so nothing needs a probe to
+    /// apply it. h264 is not in the webm table, so the stream copy is not
+    /// available either and this lands on the static webm recipe -- which
+    /// must run, as a no-op for the knob, not claim ffprobe failed when it
+    /// just answered.
+    #[test]
+    fn a_non_binding_fps_on_a_probed_webm_target_is_a_noted_no_op() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((24, 1)),
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Webm,
+            &[p("in.mp4")],
+            Path::new("out.webm"),
+            Some(&probe),
+            None,
+            &Tuning {
+                fps: Some("60".into()),
+                ..Default::default()
+            },
+        )
+        .expect("a cap that does not bind is not a refusal");
+        let argv = &plan.steps[0].argv;
+        assert!(argv.iter().any(|a| a == "libvpx-vp9"), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "-vf"), "{argv:?}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.contains("Source is 24 fps; --fps 60 left it unchanged.")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// A probe that read no video stream leaves `--fps` applied as given
+    /// (there is no source rate to cap against), which the static webm
+    /// recipe cannot do -- so this is still the "needs ffprobe" refusal, not
+    /// a silent no-op.
+    #[test]
+    fn a_webm_fps_on_a_probe_that_read_no_video_still_needs_ffprobe() {
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Webm,
+            &[p("in.mp4")],
+            Path::new("out.webm"),
+            Some(&MediaProbe::default()),
+            None,
+            &Tuning {
+                fps: Some("15".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            e.message.starts_with("--fps on mp4 -> webm needs ffprobe"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// `--resize` always resolves to a scale filter, so on a probe that read
+    /// no video stream (nothing for `transcoded_invocation` to map) it is
+    /// refused as the probe's failure, naming `--resize`.
+    #[test]
+    fn a_webm_resize_on_a_probe_that_read_no_video_names_resize() {
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Webm,
+            &[p("in.mp4")],
+            Path::new("out.webm"),
+            Some(&MediaProbe::default()),
+            None,
+            &Tuning {
+                resize: Some("640x".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            e.message
+                .starts_with("--resize on mp4 -> webm needs ffprobe"),
+            "{}",
             e.message
         );
     }
