@@ -117,13 +117,32 @@ fn failed_on_missing_backend(result: &Result<Outcome, ConvError>, backend: Backe
 /// stream copy, or a video knob needs a source to cap against — mirrors
 /// `exec::run`'s own gate exactly (`registry::needs_probe_tuned`), so
 /// `--dry-run` and the real run it previews always agree on whether a probe
-/// happens at all. `ffprobe` missing, or the probe itself failing, is
-/// swallowed into `None` here exactly as it is in `exec::run`: both
-/// conservatively fall back to a transcode preview rather than turning "no
-/// ffprobe" into its own dry-run failure mode.
-fn probed_for(resolver: &Resolver, job: &input::Job, tuning: &Tuning) -> Option<MediaProbe> {
+/// happens at all. Where a probe is optional, `ffprobe` missing or the probe
+/// itself failing is swallowed into `None` here exactly as it is in
+/// `exec::run`: both conservatively fall back to a transcode preview rather
+/// than turning "no ffprobe" into its own dry-run failure mode. Where a knob
+/// can *only* be honoured with a probe (`registry::requires_probe`), that
+/// failure is the preview's real answer, as it is `exec::run`'s.
+fn probed_for(
+    resolver: &Resolver,
+    job: &input::Job,
+    tuning: &Tuning,
+) -> Result<Option<MediaProbe>, ConvError> {
+    // A knob that can only be honoured with a probe: a missing ffprobe or
+    // a missing input is this preview's real answer, exactly as it is
+    // `exec::run`'s (see `registry::requires_probe`).
+    if registry::requires_probe(job.from, job.to, tuning) {
+        if !job.inputs[0].is_file() {
+            return Err(ConvError::new(
+                ErrorCode::InputNotFound,
+                format!("input not found: {}", job.inputs[0].display()),
+            ));
+        }
+        let ffprobe = resolver.resolve(Backend::Ffprobe)?;
+        return probe::run(&ffprobe.path, &job.inputs[0]).map(Some);
+    }
     if !registry::needs_probe_tuned(job.from, job.to, tuning) {
-        return None;
+        return Ok(None);
     }
     // `--dry-run` is documented as inert, but ffprobe honours URLs and
     // device paths, so probing the raw positional would turn a preview of
@@ -132,12 +151,12 @@ fn probed_for(resolver: &Resolver, job: &input::Job, tuning: &Tuning) -> Option<
     // anything else falls back to the conservative transcode preview the
     // no-probe path already produces.
     if !job.inputs[0].is_file() {
-        return None;
+        return Ok(None);
     }
-    resolver
+    Ok(resolver
         .resolve(Backend::Ffprobe)
         .ok()
-        .and_then(|p| probe::run(&p.path, &job.inputs[0]).ok())
+        .and_then(|p| probe::run(&p.path, &job.inputs[0]).ok()))
 }
 
 /// Checks backend availability when, and only when, this pair has more
@@ -191,7 +210,7 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
     let results: Vec<_> = jobs
         .iter()
         .map(|job| {
-            let probed = probed_for(&resolver, job, &tuning);
+            let probed = probed_for(&resolver, job, &tuning)?;
             let available = available_for(&resolver, job);
             plan::build_tuned(
                 job.from,
@@ -417,7 +436,9 @@ mod tests {
             from: convkit_core::Format::Mkv,
             to: convkit_core::Format::Mp4,
         };
-        let probed = probed_for(&r, &j, &Tuning::default()).expect("must probe a remuxable pair");
+        let probed = probed_for(&r, &j, &Tuning::default())
+            .unwrap()
+            .expect("must probe a remuxable pair");
         assert_eq!(probed.video_codec.as_deref(), Some("h264"));
         assert_eq!(probed.audio_codec(), Some("aac"));
     }
@@ -441,7 +462,7 @@ mod tests {
                 "out.mp4",
             );
             assert!(
-                probed_for(&r, &j, &Tuning::default()).is_none(),
+                probed_for(&r, &j, &Tuning::default()).unwrap().is_none(),
                 "{input} must not be probed"
             );
         }
@@ -459,7 +480,62 @@ mod tests {
             "in.pdf",
             "out.docx",
         );
-        assert!(probed_for(&r, &j, &Tuning::default()).is_none());
+        assert!(probed_for(&r, &j, &Tuning::default()).unwrap().is_none());
+    }
+
+    /// A webm video knob can only be honoured with a probe
+    /// (`registry::requires_probe`), so the preview, like the real run,
+    /// answers with the real cause instead of a conservative transcode
+    /// preview that would then refuse the flag.
+    #[test]
+    fn probed_for_reports_a_webm_video_knobs_missing_probe_as_the_real_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_ffprobe_stub(dir.path());
+        let fps = Tuning {
+            fps: Some("15".into()),
+            ..Default::default()
+        };
+
+        // Input missing: named, not skipped.
+        let mut with_stub = Resolver::new();
+        with_stub.with_override(Backend::Ffprobe, stub.clone());
+        let j = job(
+            convkit_core::Format::Mp4,
+            convkit_core::Format::Webm,
+            "definitely-missing.mp4",
+            "out.webm",
+        );
+        let e = probed_for(&with_stub, &j, &fps).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InputNotFound, "{}", e.message);
+
+        // Input present, ffprobe resolvable: probed.
+        let input = dir.path().join("in.mp4");
+        std::fs::write(&input, b"x").unwrap();
+        let j = job(
+            convkit_core::Format::Mp4,
+            convkit_core::Format::Webm,
+            input.to_str().unwrap(),
+            "out.webm",
+        );
+        let probed = probed_for(&with_stub, &j, &fps).unwrap().unwrap();
+        assert_eq!(probed.video_codec.as_deref(), Some("h264"));
+
+        // Input present, no ffprobe anywhere: backend_missing, naming it.
+        let mut none = Resolver::new();
+        none.overrides_only();
+        let e = probed_for(&none, &j, &fps).unwrap_err();
+        assert_eq!(e.code, ErrorCode::BackendMissing, "{}", e.message);
+        assert_eq!(e.backend, Some(Backend::Ffprobe));
+
+        // The same missing ffprobe is still swallowed where a probe is only
+        // an optimisation (an untuned remux, or a tuned mp4 target).
+        let j = job(
+            convkit_core::Format::Mkv,
+            convkit_core::Format::Mp4,
+            input.to_str().unwrap(),
+            "out.mp4",
+        );
+        assert!(probed_for(&none, &j, &fps).unwrap().is_none());
     }
 
     // --- Task 2: available_for -----------------------------------------------

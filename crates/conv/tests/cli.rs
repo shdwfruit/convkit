@@ -1746,3 +1746,24 @@ fn a_zero_dimension_geometry_is_refused() {
             .stderr(predicates::str::contains("geometry must be"));
     }
 }
+
+/// Defect C: a webm knob with no usable ffprobe used to be refused as if
+/// webm were not a video target at all.
+#[test]
+fn a_webm_knob_with_no_ffprobe_names_ffprobe_not_a_false_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("src.mp4");
+    std::fs::write(&input, b"not really a video").unwrap();
+    let assert = conv()
+        .args(["--ffprobe-path", "/nonexistent/ffprobe", "--fps", "15"])
+        .arg(&input)
+        .arg(dir.path().join("out.webm"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("ffprobe"), "{stderr}");
+    assert!(
+        !stderr.contains("it tunes video and GIF targets"),
+        "{stderr}"
+    );
+}

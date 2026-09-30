@@ -389,8 +389,15 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
 
     // Probe when a stream copy is even possible for this pair, or when a
     // video knob needs a source to cap against (gif -> mp4 carries a
-    // filter chain but no stream-copy possibility of its own).
-    let probed = if registry::needs_probe_tuned(req.from, req.to, &req.tuning) {
+    // filter chain but no stream-copy possibility of its own). Where the
+    // knob can *only* be honoured with a probe, a missing ffprobe is the
+    // real error and is returned as one, so the install prompt can offer
+    // the fix, rather than being swallowed into a refusal that blames the
+    // flag.
+    let probed = if registry::requires_probe(req.from, req.to, &req.tuning) {
+        let ffprobe = resolver.resolve(Backend::Ffprobe)?;
+        Some(probe::run(&ffprobe.path, &req.inputs[0])?)
+    } else if registry::needs_probe_tuned(req.from, req.to, &req.tuning) {
         resolver
             .resolve(Backend::Ffprobe)
             .ok()

@@ -308,6 +308,29 @@ fn validate_tuning(recipe: &Recipe, from: Format, to: Format, tuning: &Tuning) -
     }
     let has_slot =
         |wanted: fn(&Arg) -> bool| recipe.steps.iter().any(|s| s.args.iter().any(&wanted));
+    // A webm target reaches this static path with a video knob only when
+    // the probe never ran or read nothing (see `registry::requires_probe`),
+    // since the probe-aware path above honours both knobs on webm. Say
+    // that, rather than the refusal below, which would claim webm is not a
+    // video target.
+    if to == Format::Webm
+        && registry::needs_probe(from, to)
+        && (tuning.fps.is_some() || tuning.resize.is_some())
+    {
+        let flag = if tuning.fps.is_some() {
+            "--fps"
+        } else {
+            "--resize"
+        };
+        return Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!(
+                "{flag} on {} -> webm needs ffprobe to read the source, and it could not; \
+                 check that ffprobe is installed and the input is a readable video",
+                from.ext()
+            ),
+        ));
+    }
     if tuning.resize.is_some() && !has_slot(|a| matches!(a, Arg::TuneResize | Arg::VideoChain(_))) {
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
@@ -1466,5 +1489,28 @@ mod tests {
             plan.warnings
         );
         assert!(plan.steps[0].argv.iter().any(|a| a.contains("fps=24")));
+    }
+
+    #[test]
+    fn a_webm_video_knob_without_a_probe_names_the_real_cause() {
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Webm,
+            &[p("in.mp4")],
+            Path::new("out.webm"),
+            None,
+            None,
+            &Tuning {
+                fps: Some("15".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(e.message.contains("needs ffprobe"), "{}", e.message);
+        assert!(
+            !e.message.contains("it tunes video and GIF targets"),
+            "webm is a video target: {}",
+            e.message
+        );
     }
 }

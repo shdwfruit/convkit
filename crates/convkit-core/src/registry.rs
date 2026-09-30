@@ -1199,6 +1199,19 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
     })
 }
 
+/// Whether a knob on this pair can only be honoured with a probe, so a
+/// missing or failing ffprobe has to be reported as itself rather than
+/// quietly falling back to a static recipe that refuses the knob.
+///
+/// Today that is a video knob on `* -> webm`: `VIDEO_TO_WEBM` carries no
+/// filter slot (vp9 needs no even-dimension guard, so none was authored,
+/// and adding one would put a `-vf` into every untuned webm transcode), so
+/// only `media::transcoded_invocation` can apply `--fps` or `--resize`
+/// there, and it needs the probe to map the streams.
+pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
+    to == Format::Webm && needs_probe(from, to) && (tuning.fps.is_some() || tuning.resize.is_some())
+}
+
 /// The verified codec-compatibility tables for a remuxable target
 /// container, `None` for any other format. The single lookup both the
 /// probe-aware stream mapping (`media.rs`) and any future caller share, so
@@ -1759,6 +1772,29 @@ mod tests {
             ..Default::default()
         };
         assert!(needs_probe_tuned(Format::Gif, Format::Mp4, &t));
+    }
+
+    #[test]
+    fn a_webm_video_knob_requires_a_probe_and_nothing_else_does() {
+        let fps = Tuning {
+            fps: Some("15".into()),
+            ..Default::default()
+        };
+        let resize = Tuning {
+            resize: Some("640x".into()),
+            ..Default::default()
+        };
+        assert!(requires_probe(Format::Mp4, Format::Webm, &fps));
+        assert!(requires_probe(Format::Mkv, Format::Webm, &resize));
+        // The static mp4 recipe carries a chain slot, so a probe is only
+        // an optimisation there, never a requirement.
+        assert!(!requires_probe(Format::Mkv, Format::Mp4, &fps));
+        // No knob, no requirement.
+        assert!(!requires_probe(
+            Format::Mp4,
+            Format::Webm,
+            &Tuning::default()
+        ));
     }
 
     #[test]
