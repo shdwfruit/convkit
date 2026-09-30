@@ -256,6 +256,9 @@ zero whatever it is given, the cost stops weighing frames against pictures,
 and the cheapest choice would keep every frame of a 144 fps clip at 240p.
 So such a choice keeps no faster frame rate than the choice at the size
 conv suggests instead, and the frames it drops are still counted as loss.
+A retry that has stepped the picture down so far that no size would look
+good has no suggestion of its own; it takes the frame rate from the size
+conv would suggest without that step.
 
 The target is a ceiling, met by a two-pass encode at the chosen bitrate and
 measured afterwards. A result that comes out over is planned again against

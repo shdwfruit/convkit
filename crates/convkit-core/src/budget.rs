@@ -609,9 +609,11 @@ pub fn choose(
 /// scores near zero whatever it is given, so extra bits per frame buy
 /// nothing, and the cheapest candidate would keep every frame of a 144 fps
 /// source at 240p. The suggestion's frame rate is where the cost still
-/// weighs frames against pictures, so it caps this one. Like `max_short`,
-/// that cap moves no reference: the frames it cuts are charged. A choice
-/// that is not extreme is never capped this way.
+/// weighs frames against pictures, so it caps this one. When `max_short` is
+/// small enough that no size under it escapes the extreme region, the
+/// choice at the uncapped suggestion lends its frame rate instead. Like
+/// `max_short`, that cap moves no reference: the frames it cuts are
+/// charged. A choice that is not extreme is never capped this way.
 pub fn choose_capped(
     src: &Source,
     target_bytes: u64,
@@ -629,7 +631,14 @@ pub fn choose_capped(
         return c;
     }
     let suggested = suggest_target(src, target_bytes, to, limits, max_short, policy);
-    let anchor = suggested.map(|s| evaluate(src, s, to, limits, caps, policy).fps);
+    let anchor = match suggested {
+        Some(s) => Some(evaluate(src, s, to, limits, caps, policy).fps),
+        // Under a small enough picture cap no size escapes the extreme
+        // region, so there is no suggestion to take a frame rate from.
+        None if max_short.is_some() => suggest_target(src, target_bytes, to, limits, None, policy)
+            .map(|s| evaluate(src, s, to, limits, Caps::default(), policy).fps),
+        None => None,
+    };
     let mut c = match anchor {
         // Capping only removes candidates, so the choice stays extreme.
         Some(rate) if below(rate, c.fps) => {
@@ -788,9 +797,35 @@ mod tests {
         assert!(c.width.min(c.height) >= 240, "{c:?}");
     }
 
+    /// A retry that saturated at a small picture caps every later one below
+    /// it, and under a cap of 360p or less on a 1080p source no size escapes
+    /// the extreme region, so there is no suggestion to take a frame rate
+    /// from: 5 s of 1080p144 at 75 kB ended at 144p and 144 fps. The choice
+    /// at the uncapped suggestion caps the frame rate instead.
+    #[test]
+    fn a_picture_capped_144_fps_clip_does_not_keep_144_fps() {
+        let src = source(1920, 1080, (144, 1), 5, &[Some(160_000)]);
+        let (target, to) = (73_500, Format::Mp4);
+        let (limits, policy) = (Limits::default(), SizePolicy::default());
+        let uncapped = pick(
+            &src,
+            pick(&src, target).suggested_bytes.expect("a suggestion"),
+        );
+        for max_short in [360, 240, 144] {
+            let c = choose_capped(&src, target, to, &limits, Some(max_short), &policy);
+            assert!(c.extreme, "{max_short}: {c:?}");
+            assert!(c.width.min(c.height) <= max_short, "{max_short}: {c:?}");
+            assert!(
+                rate_le(c.fps, uncapped.fps),
+                "{max_short}: {c:?} vs {uncapped:?}"
+            );
+        }
+    }
+
     /// The frame-rate cap on an extreme choice, over a sweep: no extreme
     /// choice keeps a faster frame rate than the choice at its own
-    /// suggested size, under the same picture cap.
+    /// suggested size, under the same picture cap, or, when that cap leaves
+    /// no suggestion, than the choice at the uncapped one.
     #[test]
     fn no_extreme_choice_keeps_a_faster_frame_rate_than_its_suggestion() {
         let sources = [
@@ -801,19 +836,32 @@ mod tests {
             source(1280, 720, (30_000, 1001), 300, &[]),
             source(1080, 1920, (60, 1), 15, &[Some(128_000); 2]),
         ];
-        let mut extreme = 0;
+        let (mut extreme, mut unsuggested) = (0, 0);
         for src in &sources {
             for to in [Format::Mp4, Format::Webm] {
-                for max_short in [None, Some(480)] {
+                for max_short in [None, Some(480), Some(240), Some(144)] {
                     for kb in [50, 100, 200, 300, 500, 1_000, 2_000, 5_000, 10_000] {
                         let policy = SizePolicy::default();
                         let limits = Limits::default();
-                        let c = choose_capped(src, kb * 1000, to, &limits, max_short, &policy);
-                        let Some(s) = c.suggested_bytes.filter(|_| c.extreme) else {
+                        let target = kb * 1000;
+                        let c = choose_capped(src, target, to, &limits, max_short, &policy);
+                        if !c.extreme {
                             continue;
-                        };
+                        }
                         extreme += 1;
-                        let anchor = choose_capped(src, s, to, &limits, max_short, &policy);
+                        let anchor = match c.suggested_bytes {
+                            Some(s) => choose_capped(src, s, to, &limits, max_short, &policy),
+                            None => {
+                                unsuggested += 1;
+                                let u = choose(src, target, to, &limits, &policy);
+                                let s = if u.extreme {
+                                    u.suggested_bytes.expect("an uncapped suggestion")
+                                } else {
+                                    target
+                                };
+                                choose(src, s, to, &limits, &policy)
+                            }
+                        };
                         assert!(
                             rate_le(c.fps, anchor.fps),
                             "{src:?} {to:?} {max_short:?} {kb} kB: {c:?} vs {anchor:?}"
@@ -823,8 +871,8 @@ mod tests {
             }
         }
         assert!(
-            extreme > 50,
-            "the sweep reaches the extreme region: {extreme}"
+            extreme > 50 && unsuggested > 10,
+            "the sweep reaches the extreme region: {extreme}, {unsuggested} without a suggestion"
         );
     }
 
