@@ -356,6 +356,11 @@ const GIF_FILTER: &str = concat!(
     "[b][p]paletteuse=dither=bayer:bayer_scale=3"
 );
 
+/// `VIDEO_TO_MP4`'s one warning. Public so `conv capabilities` can say,
+/// beside it, that a `--max-size` conversion keeps what it drops.
+pub const TRACKS_DROPPED_NOTE: &str =
+    "Subtitle tracks and any audio tracks beyond the first are dropped.";
+
 /// `-sn` disables default subtitle-stream selection. Without it, `mkv → mp4`
 /// — the flagship pair in this table — fails outright on a source carrying a
 /// bitmap subtitle track (PGS), since ffmpeg tries to encode it to the MP4
@@ -388,7 +393,7 @@ const VIDEO_TO_MP4: Recipe = Recipe {
             Arg::Output,
         ]
     )],
-    warnings: &["Subtitle tracks and any audio tracks beyond the first are dropped."],
+    warnings: &[TRACKS_DROPPED_NOTE],
 };
 
 /// `mov` is the same muxer family as `mp4` (both are handled by ffmpeg's

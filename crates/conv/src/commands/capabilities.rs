@@ -107,6 +107,19 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     flags
 }
 
+/// A recipe's note as this view shows it. The mp4 and mov recipes drop
+/// subtitles and every audio track past the first, but a `--max-size`
+/// conversion maps every stream the target can hold, so the note says so
+/// rather than read as true of that flag too.
+fn shown_note(note: &str) -> String {
+    match note.strip_suffix('.') {
+        Some(body) if note == registry::TRACKS_DROPPED_NOTE => {
+            format!("{body} (--max-size keeps every audio track and every text subtitle).")
+        }
+        _ => note.to_string(),
+    }
+}
+
 /// Pushes `flag` unless it is already present. `--resize` can be earned by
 /// two different slots (`Arg::TuneResize` and `Arg::VideoChain`), and a
 /// recipe carrying both must not list it twice.
@@ -220,7 +233,9 @@ fn format_detail(cli: &Cli, ext: &str) -> i32 {
                     "backends": registry::backends_for(fmt, t),
                     "tuning": tuning_flags_for(fmt, t),
                     "defaults": anchors_json(&default_anchors_for(fmt, t)),
-                    "notes": registry::lookup(fmt, t).map(|r| r.warnings.to_vec()).unwrap_or_default(),
+                    "notes": registry::lookup(fmt, t)
+                        .map(|r| r.warnings.iter().map(|w| shown_note(w)).collect::<Vec<_>>())
+                        .unwrap_or_default(),
                 })
             })
             .collect();
@@ -299,7 +314,7 @@ fn format_detail(cli: &Cli, ext: &str) -> i32 {
         }
     }
     for n in notes {
-        println!("  note: {n}");
+        println!("  note: {}", shown_note(n));
     }
     println!(
         "\n  full pair list: conv capabilities; exact command preview: conv <in> <out> --dry-run"

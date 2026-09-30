@@ -1724,6 +1724,44 @@ fn capabilities_lists_max_size_for_video_targets_only() {
     assert!(!row("mp3").iter().any(|f| f == "--max-size"));
 }
 
+/// The mp4 recipe drops subtitles and every audio track past the first, but
+/// a sized conversion maps every stream, so the note that says so must not
+/// read as true of `--max-size` too.
+#[test]
+fn capabilities_say_max_size_keeps_the_tracks_the_mp4_recipe_drops() {
+    let assert = conv().args(["capabilities", "mp4"]).assert().success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        out.contains(
+            "  note: Subtitle tracks and any audio tracks beyond the first are dropped \
+             (--max-size keeps every audio track and every text subtitle).\n"
+        ),
+        "{out}"
+    );
+
+    let assert = conv()
+        .args(["capabilities", "mkv", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    for to in ["mp4", "mov"] {
+        let row = v["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["to"] == to)
+            .unwrap();
+        let notes = row["notes"].as_array().unwrap();
+        assert!(
+            notes.iter().any(|n| n
+                .as_str()
+                .unwrap()
+                .ends_with("(--max-size keeps every audio track and every text subtitle).")),
+            "{to}: {notes:?}"
+        );
+    }
+}
+
 #[test]
 fn a_frame_rate_accepts_integers_decimals_and_rationals() {
     for good in ["24", "30", "29.97", "60", "30000/1001"] {

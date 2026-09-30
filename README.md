@@ -221,7 +221,7 @@ mp4 (Video)
   tuning flags when writing mp4: --resize --fps --crf --max-size
 
   defaults: crf 20 (override with --crf)
-  note: Subtitle tracks and any audio tracks beyond the first are dropped.
+  note: Subtitle tracks and any audio tracks beyond the first are dropped (--max-size keeps every audio track and every text subtitle).
   note: A looping GIF becomes a single play in MP4; there is no container-level loop flag to carry it over.
 
   full pair list: conv capabilities; exact command preview: conv <in> <out> --dry-run
