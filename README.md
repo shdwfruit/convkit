@@ -262,8 +262,11 @@ forces the encode.
 With one file and no output name, conv keeps the format and adds the size
 to the name (`clip-10mb.mp4`), but only when the output would otherwise
 land on the input: with `-o` to another directory the name is kept. Name an
-output, or use `--to` for a batch, as usual; an output that is the input
-itself is refused, even with `-y`:
+output, or use `--to` for a batch, as usual. An output that is the input
+itself is refused, even with `-y`, and so is an existing output in the
+input's own format: in a folder of two clips, the shell turns
+`conv *.mp4 --max-size 8mb` into `conv a.mp4 b.mp4 --max-size 8mb`, which
+would replace `b.mp4` with a sized copy of `a.mp4`. A batch needs `--to`:
 
 ```console
 conv clip.mov small.mp4 --max-size 25mb   # name the output

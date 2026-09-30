@@ -239,17 +239,12 @@ pub fn jobs_from(
     }
 
     if paths.len() >= 3 {
-        let (leading, last) = paths.split_at(paths.len() - 1);
-        let last = &last[0];
-        let last_is_pdf = Format::from_path(last) == Some(Format::Pdf);
-        let all_images = leading
-            .iter()
-            .all(|p| Format::from_path(p).map(|f| f.kind()) == Some(Kind::Image));
-        if last_is_pdf && all_images {
+        if is_image_merge(paths) {
+            let (leading, last) = paths.split_at(paths.len() - 1);
             let from_fmt = format_of(&leading[0])?;
             return Ok(vec![Job {
                 inputs: leading.to_vec(),
-                output: last.clone(),
+                output: last[0].clone(),
                 from: from_fmt,
                 to: Format::Pdf,
             }]);
@@ -270,6 +265,19 @@ pub fn jobs_from(
         from: from_fmt,
         to: to_fmt,
     }])
+}
+
+/// Whether three or more paths are the image-to-PDF merge form: every path
+/// but the last an image, the last a `.pdf`.
+fn is_image_merge(paths: &[PathBuf]) -> bool {
+    let [leading @ .., last] = paths else {
+        return false;
+    };
+    paths.len() >= 3
+        && Format::from_path(last) == Some(Format::Pdf)
+        && leading
+            .iter()
+            .all(|p| Format::from_path(p).map(|f| f.kind()) == Some(Kind::Image))
 }
 
 /// `conv clip.mp4 --max-size 10mb`: the input's own container, beside the
@@ -637,11 +645,6 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
     let Some(max) = &cli.max_size else {
         return jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref());
     };
-    // The one form --max-size adds: a lone path keeps its own container.
-    let jobs = match (cli.to.as_deref(), expanded.as_slice()) {
-        (None, [single]) => vec![sized_single_job(single, cli.outdir.as_deref())?],
-        _ => jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?,
-    };
     // A typed-out OUT is the user's explicit choice and is never renamed;
     // the `.ext` shorthand and every --to output are derived.
     let explicit_output = cli.to.is_none()
@@ -650,7 +653,66 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
             .to_string_lossy()
             .strip_prefix('.')
             .is_some_and(is_bare_extension_shorthand);
+    if cli.to.is_none() {
+        refuse_a_sized_batch_without_to(&expanded, explicit_output)?;
+    }
+    // The one form --max-size adds: a lone path keeps its own container.
+    let jobs = match (cli.to.as_deref(), expanded.as_slice()) {
+        (None, [single]) => vec![sized_single_job(single, cli.outdir.as_deref())?],
+        _ => jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?,
+    };
     name_sized_outputs(jobs, max, explicit_output)
+}
+
+/// Under `--max-size` with no `--to`, a glob of clips (`conv *.mp4 --max-size
+/// 8mb`) reaches conv as a list of paths that the positional grammar reads
+/// as something else. Two paths are the `IN OUT` pair, so sizing them would
+/// replace the second clip with a sized copy of the first; three or more
+/// are the image-to-PDF merge form. Both are refused here with `--to` as the
+/// fix. A pair whose output already exists in the input's own format is
+/// refused even with `-y`, since that is exactly what the glob produces; to
+/// write a sized copy over a file of the same format, remove it first. An
+/// output that is the input itself is left to `name_sized_outputs`, which
+/// words that case.
+fn refuse_a_sized_batch_without_to(
+    paths: &[PathBuf],
+    explicit_output: bool,
+) -> Result<(), ConvError> {
+    match paths {
+        [input, output] if explicit_output && output.exists() => {
+            let from = Format::from_path(input);
+            if from.is_none()
+                || from != Format::from_path(output)
+                || collision_key(input) == collision_key(output)
+            {
+                return Ok(());
+            }
+            let ext = from.expect("checked above").ext();
+            Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "{} and {} are both {ext} files; add --to {ext} to size each one, \
+                     or remove {} to write a sized copy there",
+                    input.display(),
+                    output.display(),
+                    output.display()
+                ),
+            ))
+        }
+        [first, _, _, ..] if !is_image_merge(paths) => {
+            let ext = Format::from_path(first)
+                .filter(|f| convkit_core::sized::is_video_target(*f))
+                .map_or("mp4", |f| f.ext());
+            Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "--max-size without --to takes one input, or an input and an output; \
+                     add --to {ext} to size each file"
+                ),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -1266,6 +1328,50 @@ mod tests {
             "{}",
             e.message
         );
+    }
+
+    /// Only an existing output of the input's own format is the shape a
+    /// glob of clips produces. A new name, another format (the ordinary `-y`
+    /// rule), and the input itself (worded by its own refusal) all pass here.
+    #[test]
+    fn a_pair_is_refused_only_when_its_output_exists_in_the_inputs_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.mp4");
+        let b = dir.path().join("b.mp4");
+        let c = dir.path().join("c.mov");
+        for f in [&a, &b, &c] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let e = plan_jobs(&sized(vec![a.clone(), b.clone()], None, None)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("are both mp4 files"), "{}", e.message);
+
+        let fresh = dir.path().join("small.mp4");
+        let jobs = plan_jobs(&sized(vec![a.clone(), fresh.clone()], None, None)).unwrap();
+        assert_eq!(jobs[0].output, fresh);
+        let jobs = plan_jobs(&sized(vec![a.clone(), c.clone()], None, None)).unwrap();
+        assert_eq!(jobs[0].output, c);
+        let e = plan_jobs(&sized(vec![a.clone(), a], None, None)).unwrap_err();
+        assert!(
+            e.message.starts_with("output is the input"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// The fix names the clips' own container, and the image merge form is
+    /// left to its own refusal of `--max-size` on a pdf target.
+    #[test]
+    fn several_paths_under_max_size_without_to_name_the_fix() {
+        let e = plan_jobs(&sized(v(&["a.webm", "b.webm", "c.webm"]), None, None)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(
+            e.message.ends_with("; add --to webm to size each file"),
+            "{}",
+            e.message
+        );
+        let merge = plan_jobs(&sized(v(&["a.png", "b.png", "out.pdf"]), None, None)).unwrap();
+        assert_eq!(merge[0].to, Format::Pdf);
     }
 
     #[test]

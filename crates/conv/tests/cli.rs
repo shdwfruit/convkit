@@ -1865,6 +1865,68 @@ fn probe_json(secs: u64, file_bytes: u64) -> String {
     )
 }
 
+/// `conv *.mp4 --max-size 8mb` in a folder of two clips reaches conv as
+/// `conv a.mp4 b.mp4 --max-size 8mb`: the `IN OUT` pair. Sized, b.mp4 would
+/// be replaced by a copy of a.mp4, so an existing output of the input's own
+/// format is refused, even with `-y`, and b.mp4 keeps its bytes. The source
+/// is small enough to be copied, so the run needs no ffmpeg to do damage.
+#[test]
+fn an_existing_same_format_output_is_refused_under_max_size_even_with_y() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(60, 6_000_000));
+    let a = dir.path().join("a.mp4");
+    let b = dir.path().join("b.mp4");
+    std::fs::write(&a, b"clip a").unwrap();
+    std::fs::write(&b, b"clip b").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&a)
+        .arg(&b)
+        .args(["--max-size", "8mb", "-y"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(&format!(
+            "{} and {} are both mp4 files; add --to mp4 to size each one, \
+             or remove {} to write a sized copy there",
+            a.display(),
+            b.display(),
+            b.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&b).unwrap(), b"clip b", "b.mp4 is untouched");
+    assert_eq!(std::fs::read(&a).unwrap(), b"clip a");
+}
+
+/// Without `--to`, three or more paths are the image-to-PDF merge form, so
+/// a glob of three clips used to be told to name a .pdf; under `--max-size`
+/// the fix is `--to`.
+#[test]
+fn several_videos_under_max_size_without_to_are_told_to_add_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let names = ["a.mp4", "b.mp4", "c.mp4"];
+    for n in names {
+        std::fs::write(dir.path().join(n), n.as_bytes()).unwrap();
+    }
+    let assert = conv()
+        .args(names.map(|n| dir.path().join(n)))
+        .args(["--max-size", "8mb", "-y"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("add --to mp4 to size each file"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(".pdf"), "{stderr}");
+    for n in names {
+        assert_eq!(std::fs::read(dir.path().join(n)).unwrap(), n.as_bytes());
+    }
+}
+
 /// assert_cmd pipes stdin and stderr, so this session is non-interactive:
 /// with no --yes, nobody can be asked, and nothing may be converted.
 #[test]
