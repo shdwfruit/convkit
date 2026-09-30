@@ -928,11 +928,12 @@ next plan is capped to a smaller picture and its budget is only the last one
 less 2%: the smaller picture is what removes the overshoot, and scaling the
 budget by it as well would count it twice and leave the file far under the
 target. Otherwise the budget is scaled by the target over the measured size,
-less 2%. A retry that would be extreme needs consent like any other plan;
-without it the attempt that came out over is kept and flagged. The reserve
-is therefore sized from the operating region only, the encodes of at least
-256 KiB aimed at 0.04 bpp or more (`--reserve-min-bpp`, default 0.04), 39
-per codec:
+less 2%, and so is the budget of a saturated attempt that was already at the
+smallest picture step, which has no smaller picture to go to. A retry that
+would be extreme needs consent like any other plan; without it the attempt
+that came out over is kept and flagged. The reserve is therefore sized from
+the operating region only, the encodes of at least 256 KiB aimed at 0.04 bpp
+or more (`--reserve-min-bpp`, default 0.04), 39 per codec:
 
 | | median | p90 | max |
 |---|---|---|---|

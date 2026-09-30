@@ -3090,7 +3090,8 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     /// The smallest whole-kilobyte target, spelled as `--max-size` takes it,
     /// that is not extreme for the clip `probe_json(5, _)` describes. The
     /// first plan at it runs unconfirmed, and a retry that trims its budget
-    /// by even 2% is extreme.
+    /// by even 2% is extreme. Stub file sizes are taken from it, not written
+    /// out, so the tests keep reaching the line when the calibration moves.
     #[cfg(unix)]
     fn just_above_extreme() -> String {
         let src = crate::budget::Source {
@@ -3114,9 +3115,11 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     #[cfg(unix)]
     #[test]
     fn a_retry_that_would_turn_extreme_waits_for_consent() {
-        let dir = tempfile::tempdir().unwrap();
-        let r = stubbed(dir.path(), &probe_json(5, 50_000_000), &[600_000, 380_000]);
         let target = just_above_extreme();
+        let bytes = crate::size::parse(&target).unwrap().bytes;
+        let (over, under) = (bytes * 3 / 2, bytes * 9 / 10);
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(dir.path(), &probe_json(5, 50_000_000), &[over, under]);
         let req = sized_request(dir.path(), &target, false);
         let mut retries = 0;
         let o = run(&req, &r, &mut |e| {
@@ -3127,7 +3130,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         .unwrap();
         assert_eq!(calls(dir.path()).len(), 2, "one attempt only");
         assert_eq!(retries, 0, "no retry ran, so none was announced");
-        assert_eq!(o.bytes, 600_000, "the last attempt is kept");
+        assert_eq!(o.bytes, over, "the last attempt is kept");
         let s = o.sizing.as_ref().unwrap();
         assert_eq!((s.attempts, s.over_target), (1, true));
         assert_eq!(s.suggested, None, "the kept attempt was not extreme");
@@ -3135,8 +3138,9 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert_eq!(
             o.notes[0],
             format!(
-                "Could not get under {} KB after 1 attempt: the result is 600.00 KB.",
-                target.trim_end_matches("kb")
+                "Could not get under {} KB after 1 attempt: the result is {}.",
+                target.trim_end_matches("kb"),
+                crate::size::display(over, crate::size::UnitFamily::Decimal)
             )
         );
         assert!(
@@ -3149,11 +3153,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         );
         let suggested = o.notes[1].rsplit("--max-size ").next().unwrap();
         let suggested = crate::size::parse(suggested.trim_end_matches('.')).unwrap();
-        assert!(
-            suggested.bytes > crate::size::parse(&target).unwrap().bytes,
-            "{:?}",
-            o.notes
-        );
+        assert!(suggested.bytes > bytes, "{:?}", o.notes);
         assert!(!o.notes.iter().any(|n| n.starts_with("Extreme compression")));
         assert_routed(&o);
     }
@@ -3163,12 +3163,14 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     #[cfg(unix)]
     #[test]
     fn a_retry_that_turns_extreme_runs_with_consent_and_says_so() {
-        let dir = tempfile::tempdir().unwrap();
-        let r = stubbed(dir.path(), &probe_json(5, 50_000_000), &[600_000, 380_000]);
         let target = just_above_extreme();
+        let bytes = crate::size::parse(&target).unwrap().bytes;
+        let (over, under) = (bytes * 3 / 2, bytes * 9 / 10);
+        let dir = tempfile::tempdir().unwrap();
+        let r = stubbed(dir.path(), &probe_json(5, 50_000_000), &[over, under]);
         let req = sized_request(dir.path(), &target, true);
         let o = run(&req, &r, &mut |_| {}).unwrap();
-        assert_eq!(o.bytes, 380_000);
+        assert_eq!(o.bytes, under);
         let s = o.sizing.as_ref().unwrap();
         assert_eq!((s.attempts, s.over_target), (2, false));
         assert!(

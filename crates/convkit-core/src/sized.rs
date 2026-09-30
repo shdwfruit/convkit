@@ -1277,11 +1277,11 @@ mod tests {
         });
     }
 
-    /// A retry's budget can turn a choice extreme. Its suggestion is a size
-    /// for the user to type, so it is scaled back up from the retry's budget:
-    /// never at or below the target they already asked for. The target is
-    /// the smallest whole kilobyte that is not extreme, so even a retry that
-    /// only trims its budget crosses the line.
+    /// A retry's budget can turn a choice extreme, and the plan then says so
+    /// and suggests a target above the one tried. The target is the smallest
+    /// whole kilobyte that is not extreme, so even a retry that only trims
+    /// its budget crosses the line. (That the suggestion is scaled back up
+    /// from the retry's budget is pinned by the two tests below.)
     #[test]
     fn an_extreme_retry_says_so_and_suggests_more_than_the_target_tried() {
         let p = probe(5, 50_000_000);
@@ -1308,6 +1308,38 @@ mod tests {
                 .bytes;
             assert!(suggested > target, "{s:?}");
         });
+    }
+
+    /// A suggestion is a target for the user to type, but it is found against
+    /// the budget this attempt was planned at, which a retry cuts. A plan
+    /// against a twentieth of a 1 MB target must therefore scale its
+    /// suggestion back up by twenty: more than the 1 MB already asked for, not
+    /// the small figure that would have fitted the small budget.
+    #[test]
+    fn a_suggestion_found_against_a_cut_budget_is_scaled_back_up_to_a_target() {
+        with_encoder(&probe(5, 50_000_000), "1mb", |enc| {
+            let s = enc
+                .plan(Aim {
+                    budget_bytes: 50_000,
+                    max_short: None,
+                })
+                .unwrap()
+                .sizing
+                .unwrap();
+            assert!(s.choice.as_ref().unwrap().extreme, "{s:?}");
+            let suggested = crate::size::parse(s.suggested.as_deref().unwrap())
+                .unwrap()
+                .bytes;
+            assert!(suggested > 1_000_000, "{s:?}");
+        });
+    }
+
+    #[test]
+    fn a_found_size_is_scaled_up_by_target_over_budget_and_rounded_up() {
+        assert_eq!(as_target(425_000, 1_000_000, 50_000), 8_500_000);
+        assert_eq!(as_target(1, 1_000_000, 3), 333_334, "rounded up");
+        assert_eq!(as_target(7, 1_000, 1_000), 7, "a whole budget scales by 1");
+        assert_eq!(as_target(7, 1_000, 0), 7_000, "no divide by zero");
     }
 
     #[test]
