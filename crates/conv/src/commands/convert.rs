@@ -145,13 +145,7 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<bool, ConvError> {
         return Ok(false);
     }
     if !cli.json {
-        // The command line as `main` parsed it. Lossy, because the line is
-        // only shown, and a byte sequence that is not UTF-8 (which clap
-        // accepts as a path) would panic `env::args`.
-        let args: Vec<String> = wild::args_os()
-            .skip(1)
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let args = typed_args();
         let entries: Vec<(&std::path::Path, &str, Option<&str>)> = extreme
             .iter()
             .filter_map(|(job, sz)| {
@@ -411,6 +405,7 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
 
     let styled_out = render::stdout_styled();
     let styled_err = render::stderr_styled();
+    let args = typed_args();
 
     if let [r] = results {
         match &r.result {
@@ -423,6 +418,7 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
                 // conversion that dropped your images is in the errors'
                 // half of that bargain, exit code notwithstanding.
                 eprint!("{}", render::conversion_notes_human("", o, styled_err));
+                eprint!("{}", render::sizing_hint_human("", o, &args, styled_err));
             }
             Err(e) => {
                 eprint!(
@@ -448,6 +444,7 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
             Ok(o) => {
                 let label = r.input.display().to_string();
                 err.push_str(&render::conversion_notes_human(&label, o, styled_err));
+                err.push_str(&render::sizing_hint_human(&label, o, &args, styled_err));
             }
         }
     }
@@ -459,6 +456,17 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
             render::batch_summary_human(results, elapsed, styled_out)
         );
     }
+}
+
+/// The command line as `main` parsed it, without the program name, for the
+/// "try this instead" lines. Lossy, because the line is only shown, and a byte
+/// sequence that is not UTF-8 (which clap accepts as a path) would panic
+/// `env::args`.
+fn typed_args() -> Vec<String> {
+    wild::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// The batch exit-code rule, shared in spirit with `batch::run`: 0 if every

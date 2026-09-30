@@ -574,6 +574,33 @@ pub(crate) fn already_small_note(s: &SizingPlan) -> String {
     }
 }
 
+/// One line for `--dry-run`: what a real run would do.
+pub fn dry_run_note(s: &SizingPlan) -> String {
+    match (s.strategy, &s.choice) {
+        (Strategy::Encode, Some(c)) => {
+            let audio = c
+                .audio_kbps
+                .map(|k| format!(", {k} kb/s audio"))
+                .unwrap_or_default();
+            format!(
+                "Would size to {}x{} at {} fps, {} video{audio}; a retry at a lower video bitrate \
+                 may follow if the first attempt comes out over.",
+                c.width,
+                c.height,
+                fps_words(c.fps),
+                bps_words(c.video_bps)
+            )
+        }
+        (Strategy::Copy, _) => {
+            already_small_note(s).replace("; copied without", "; it would be copied without")
+        }
+        _ => already_small_note(s).replace(
+            "; the video was stream-copied, not re-encoded.",
+            "; the video would be stream-copied, and re-encoded only if the copy came out over.",
+        ),
+    }
+}
+
 pub(crate) fn measured_over_sentence(s: &SizingPlan, bytes: u64, attempts: u32) -> String {
     // The loop can stop after one attempt, so the noun has to agree.
     let tries = if attempts == 1 {
@@ -1628,5 +1655,49 @@ mod tests {
             PathBuf::from("/s/out.mp4"),
         );
         assert_eq!(step.path_args, vec![1, 5], "not the flag");
+    }
+
+    #[test]
+    fn a_dry_run_says_what_would_happen() {
+        let p = probe(60, 50_000_000);
+        let enc = build(Format::Mp4, Format::Mp4, &p, &tuned("10mb"))
+            .unwrap()
+            .sizing
+            .unwrap();
+        let n = dry_run_note(&enc);
+        assert!(n.starts_with("Would size to "), "{n}");
+        assert!(
+            n.contains("a retry at a lower video bitrate may follow"),
+            "{n}"
+        );
+        let copy = build(
+            Format::Mp4,
+            Format::Mp4,
+            &probe(60, 6_000_000),
+            &tuned("10mb"),
+        )
+        .unwrap()
+        .sizing
+        .unwrap();
+        assert!(dry_run_note(&copy).contains("would be copied without re-encoding"));
+    }
+
+    #[test]
+    fn a_dry_run_of_a_remux_keeps_the_re_encode_fallback_in_view() {
+        let remux = build(
+            Format::Mkv,
+            Format::Mp4,
+            &probe(60, 6_000_000),
+            &tuned("10mb"),
+        )
+        .unwrap()
+        .sizing
+        .unwrap();
+        assert_eq!(remux.strategy, Strategy::Remux);
+        assert_eq!(
+            dry_run_note(&remux),
+            "Already 6.00 MB, under 10 MB; the video would be stream-copied, \
+             and re-encoded only if the copy came out over."
+        );
     }
 }

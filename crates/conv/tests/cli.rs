@@ -1967,6 +1967,32 @@ fn an_argument_that_is_not_utf8_does_not_break_the_extreme_warning() {
     );
 }
 
+/// The result printer reads the raw command line for its "try this instead"
+/// line on every human-mode run, sized or not, so a byte sequence that is not
+/// UTF-8 must not panic there either.
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf8_does_not_break_the_result_printer() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let odd_ffmpeg = dir
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"no-ffmpeg-\xff"));
+    let assert = conv()
+        .arg("--ffmpeg-path")
+        .arg(&odd_ffmpeg)
+        .arg(&input)
+        .arg(dir.path().join("out.gif"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(stderr.contains("no-ffmpeg-"), "{stderr}");
+}
+
 /// `--dry-run` is inert: it plans, never asks, and an extreme source is a
 /// plan to show, not a refusal.
 #[test]
@@ -2023,4 +2049,65 @@ fn a_job_whose_output_exists_is_not_asked_about() {
         .code(2);
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(stderr.contains("not confirmed"), "{stderr}");
+}
+
+#[test]
+fn a_sized_dry_run_shows_both_passes_and_the_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(60, 50_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "10mb", "--dry-run"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(out.contains(" -pass 1 "), "{out}");
+    assert!(out.contains(" -pass 2 "), "{out}");
+    assert!(out.contains("clip-10mb.mp4"), "{out}");
+    assert!(out.contains("Would size to "), "{out}");
+}
+
+#[test]
+fn a_sized_dry_run_of_an_extreme_source_warns_and_suggests() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb", "--dry-run"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(out.contains("warning: Could not get under 5 MB"), "{out}");
+    assert!(
+        out.contains("note: For a watchable result, try --max-size "),
+        "{out}"
+    );
+    assert!(out.contains("note: Would size to "), "{out}");
+}
+
+#[test]
+fn a_sized_json_dry_run_carries_the_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(60, 50_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "10mb", "--dry-run", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let sizing = &v["plans"][0]["plan"]["sizing"];
+    assert_eq!(sizing["strategy"], "encode");
+    assert!(sizing["choice"]["width"].as_u64().unwrap() > 0);
 }

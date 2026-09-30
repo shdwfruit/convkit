@@ -64,6 +64,9 @@ fn shell_quote(token: &str) -> String {
 /// quoting, not decoration: the README calls `--dry-run` "the actual
 /// product demo" and shows its output as something to run, so a line that
 /// cannot be pasted is a wrong answer rather than an ugly one.
+///
+/// A sized plan ends with what a real run would do, after any warning its
+/// choice carries.
 pub fn plan_human(plan: &ConversionPlan) -> String {
     let mut s = String::new();
     for step in &plan.steps {
@@ -76,6 +79,20 @@ pub fn plan_human(plan: &ConversionPlan) -> String {
     }
     for w in &plan.warnings {
         s.push_str(&format!("note: {w}\n"));
+    }
+    if let Some(sz) = &plan.sizing {
+        if let Some(w) = &sz.warning {
+            s.push_str(&format!("warning: {w}\n"));
+            if let Some(size) = &sz.suggested {
+                s.push_str(&format!(
+                    "note: For a watchable result, try --max-size {size}.\n"
+                ));
+            }
+        }
+        s.push_str(&format!(
+            "note: {}\n",
+            convkit_core::sized::dry_run_note(sz)
+        ));
     }
     s
 }
@@ -137,6 +154,27 @@ pub fn extreme_warnings_human(
         }
     }
     s
+}
+
+/// After a sized conversion whose result came out over its target: the
+/// size to try instead. Empty otherwise -- an extreme conversion that fitted
+/// was already given a suggestion before it ran.
+pub fn sizing_hint_human(label: &str, o: &Outcome, args: &[String], styled: bool) -> String {
+    let Some(sizing) = o.sizing.as_ref().filter(|s| s.over_target) else {
+        return String::new();
+    };
+    let Some(size) = sizing.suggested.as_deref() else {
+        return String::new();
+    };
+    let line = if label.is_empty() {
+        format!(
+            "         For a watchable result, try: {}\n",
+            suggestion_command(args, size)
+        )
+    } else {
+        format!("         {label}: for a watchable result, try --max-size {size}.\n")
+    };
+    paint(&line, yellow_bold(), styled)
 }
 
 /// One resolved command line for `--verbose`: the program and argv exactly
@@ -208,7 +246,7 @@ pub fn print_error(json: bool, e: &ConvError) {
 /// emit `ok` plus a plural key," and this must go on being exactly that
 /// contract plus one new, ignorable field — never a reshaped one.
 pub fn outcome_json(o: &Outcome) -> serde_json::Value {
-    json!({
+    let mut v = json!({
         "ok": true,
         "output": o.output,
         "bytes": o.bytes,
@@ -220,7 +258,11 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
         "backends": o.backends.iter()
             .map(|(b, v)| json!({ "backend": b, "version": v }))
             .collect::<Vec<_>>(),
-    })
+    });
+    if let Some(s) = &o.sizing {
+        v["sizing"] = json!(s);
+    }
+    v
 }
 
 /// Backend-reported degradation on a *successful* conversion, rendered for
@@ -355,6 +397,16 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// A result's size: in the `--max-size` flag's own unit family when sized
+/// (so `9,999,999` bytes under `10mb` reads `9.99 MB`, not `9.5 MB`),
+/// the file-manager convention otherwise.
+fn size_for(o: &Outcome) -> String {
+    match &o.sizing {
+        Some(s) => convkit_core::size::display(o.bytes, s.family),
+        None => human_size(o.bytes),
+    }
+}
+
 /// Elapsed time as "0.9s"/"8.3s" below a minute, "1m05s" at or above one —
 /// this is the other half of "did it hang?" Part 2 exists to answer, so it
 /// stays legible at both ends: sub-second precision for a quick conversion,
@@ -412,7 +464,7 @@ pub fn conversion_success_human(o: &Outcome, styled: bool) -> String {
 
     let mut fields = vec![
         name,
-        human_size(o.bytes),
+        size_for(o),
         human_elapsed(Duration::from_millis(o.elapsed_ms)),
     ];
     if o.remuxed {
@@ -580,6 +632,25 @@ mod tests {
             elapsed_ms: 900,
             sizing: None,
         }
+    }
+
+    fn sized_outcome(bytes: u64) -> Outcome {
+        let mut o = sample_outcome(bytes, false, vec![]);
+        o.sizing = Some(convkit_core::sized::SizingReport {
+            target_bytes: 10_000_000,
+            family: convkit_core::size::UnitFamily::Decimal,
+            strategy: convkit_core::sized::Strategy::Encode,
+            width: Some(1280),
+            height: Some(720),
+            fps: Some((30, 1)),
+            video_bps: Some(1_190_000),
+            audio_bps: vec![96_000],
+            attempts: 1,
+            cost: Some(18.4),
+            over_target: false,
+            suggested: None,
+        });
+        o
     }
 
     const NO_ESCAPE: char = '\u{1b}';
@@ -989,5 +1060,60 @@ mod tests {
         let results = vec![ok_result("a.jpg"), failed_result()];
         let s = batch_summary_human(&results, Duration::from_millis(1), false);
         assert!(!has_ansi(&s), "{s:?}");
+    }
+
+    /// Floored in the flag's own units: under the target never reads as it.
+    #[test]
+    fn a_sized_result_shows_its_size_in_the_targets_units() {
+        let s = conversion_success_human(&sized_outcome(9_999_999), false);
+        assert!(s.contains("9.99 MB"), "{s}");
+    }
+
+    #[test]
+    fn json_carries_the_sizing_report_only_when_sized() {
+        assert!(outcome_json(&sample_outcome(1, false, vec![]))
+            .get("sizing")
+            .is_none());
+        let v = outcome_json(&sized_outcome(9_000_000));
+        assert_eq!(v["sizing"]["width"], 1280);
+        assert_eq!(v["sizing"]["fps"], "30/1");
+        assert_eq!(v["sizing"]["over_target"], false);
+    }
+
+    #[test]
+    fn a_suggestion_follows_an_extreme_result() {
+        let mut o = sized_outcome(4_900_000);
+        o.notes = vec!["Could not get under 5 MB after 3 attempts: the result is 5.12 MB.".into()];
+        let s = o.sizing.as_mut().unwrap();
+        s.suggested = Some("40mb".into());
+        s.over_target = true;
+        let args = vec!["clip.mp4".to_string(), "--max-size".into(), "5mb".into()];
+        let hint = sizing_hint_human("", &o, &args, false);
+        assert!(
+            hint.contains("For a watchable result, try: conv clip.mp4 --max-size 40mb"),
+            "{hint}"
+        );
+        assert_eq!(sizing_hint_human("", &sized_outcome(1), &args, false), "");
+        // Extreme but fitted: the suggestion was made before the run.
+        let mut fitted = sized_outcome(4_900_000);
+        fitted.sizing.as_mut().unwrap().suggested = Some("40mb".into());
+        assert_eq!(sizing_hint_human("", &fitted, &args, false), "");
+    }
+
+    #[test]
+    fn a_batch_hint_names_the_file_and_leaves_the_command_out() {
+        let mut o = sized_outcome(5_200_000);
+        let s = o.sizing.as_mut().unwrap();
+        s.suggested = Some("40mb".into());
+        s.over_target = true;
+        let args = vec!["a.mp4".to_string(), "--max-size".into(), "5mb".into()];
+        let hint = sizing_hint_human("a.mp4", &o, &args, false);
+        assert!(
+            hint.contains("a.mp4: for a watchable result, try --max-size 40mb."),
+            "{hint}"
+        );
+        assert!(!hint.contains("conv "), "{hint}");
+        assert!(has_ansi(&sizing_hint_human("a.mp4", &o, &args, true)));
+        assert!(!has_ansi(&hint));
     }
 }
