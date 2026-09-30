@@ -208,9 +208,9 @@ $ conv capabilities mp4
 mp4 (Video)
 
   as source, converts to:
-    mp4 -> mov      [--resize --fps --crf]
-    mp4 -> mkv      [--resize --fps --crf]
-    mp4 -> webm     [--crf --resize --fps]
+    mp4 -> mov      [--resize --fps --crf --max-size]
+    mp4 -> mkv      [--resize --fps --crf --max-size]
+    mp4 -> webm     [--crf --resize --fps --max-size]
     mp4 -> mp3   
     mp4 -> m4a   
     mp4 -> wav   
@@ -218,7 +218,7 @@ mp4 (Video)
     mp4 -> gif      [--resize --fps]
 
   as target, accepts: mov mkv webm avi gif
-  tuning flags when writing mp4: --resize --fps --crf
+  tuning flags when writing mp4: --resize --fps --crf --max-size
 
   defaults: crf 20 (override with --crf)
   note: Subtitle tracks and any audio tracks beyond the first are dropped.
@@ -226,6 +226,90 @@ mp4 (Video)
 
   full pair list: conv capabilities; exact command preview: conv <in> <out> --dry-run
 ```
+
+### Size targets
+
+`--max-size` makes a video fit a size, for upload limits and attachments:
+
+```console
+$ conv clip.mp4 --max-size 10mb
+OK clip-10mb.mp4 - 9.99 MB - 23.7s
+  /home/user/Videos/clip-10mb.mp4
+  note  Sized to 1920x1080 at 30 fps, 3.76 Mb/s video, 128 kb/s audio; 2 passes.
+```
+
+conv picks the resolution, frame rate and bitrates together. Each costs
+something, and it takes the combination that costs least in total, so a
+tight target trims a little from everything rather than all of one thing:
+a 144 fps clip loses frame rate long before it drops to 360p. The size is a
+ceiling: `10mb` means 10,000,000 bytes, which also fits a limit enforced as
+10 MiB. `kb`, `mb` and `gb` are decimal; write `kib`, `mib` or `gib` for
+binary units.
+
+It encodes in two passes and checks the result. If the file comes out over,
+conv plans again with a smaller budget and runs both passes again, three
+attempts at most. If the encoder could not reach the rate it was asked for
+at that picture size, which very detailed footage makes it do, the retry
+also steps down to a smaller picture. A result still over after the last
+attempt is kept and flagged, never thrown away. A file already under the
+target is copied, or stream-copied into another container, rather than
+re-encoded, unless a `--resize` or `--fps` limit would change it.
+
+With one file and no output name, conv keeps the format and adds the size
+to the name (`clip-10mb.mp4`). Name an output, or use `--to` for a batch,
+as usual; an output that is the input itself is refused, even with `-y`:
+
+```console
+conv clip.mov small.mp4 --max-size 25mb   # name the output
+conv *.mov --to mp4 --max-size 8mb        # a batch: each file is sized on its own
+```
+
+`--resize` and `--fps` become limits it stays within. What they cut is your
+choice, so it never makes a target count as too small by itself. `--crf`
+asks for the opposite (a constant quality, whatever the size) and cannot be
+combined with `--max-size`.
+
+If a target is too small to look good, conv says so before encoding,
+suggests a size that would, and asks:
+
+```console
+$ conv clip.mp4 --max-size 1mb
+warning  Extreme compression: 1 MB for 20 s of 1080p will look poor (480p, 30 fps).
+         For a watchable result, try: conv clip.mp4 --max-size 2mb
+Convert anyway? [y/N] n
+error: extreme compression not confirmed for clip.mp4; pass --yes to convert anyway, or try --max-size 2mb
+```
+
+Where that line sits, and how it was measured, is in the "Size targets"
+section of [`docs/defaults-calibration.md`](docs/defaults-calibration.md#size-targets---max-size).
+
+Scripts answer with `--yes`. Without a terminal to ask, and without
+`--yes`, nothing is converted and the exit code is 2:
+
+```console
+$ conv clip.mp4 --max-size 1mb < /dev/null
+warning  Extreme compression: 1 MB for 20 s of 1080p will look poor (480p, 30 fps).
+         For a watchable result, try: conv clip.mp4 --max-size 2mb
+error: extreme compression not confirmed for clip.mp4; pass --yes to convert anyway, or try --max-size 2mb
+$ echo $?
+2
+$ conv clip.mp4 --max-size 1mb --yes
+warning  Extreme compression: 1 MB for 20 s of 1080p will look poor (480p, 30 fps).
+         For a watchable result, try: conv clip.mp4 --max-size 2mb --yes
+OK clip-1mb.mp4 - 973.83 KB - 39.1s
+  /home/user/Videos/clip-1mb.mp4
+  note  Sized to 854x480 at 30 fps, 251 kb/s video, 128 kb/s audio; 4 passes (1 retry).
+warning  Extreme compression: 1 MB for 20 s of 1080p will look poor (480p, 30 fps).
+```
+
+The last run needed a retry, which the note counts. A retry never escalates
+to extreme compression on its own: without `--yes` (or a `y`), an
+over-target result is kept and flagged, with a note naming `--yes` and a
+size to try.
+
+`--dry-run` probes the file and prints both passes of the first attempt.
+`--json` adds a `sizing` object to each result: the choice it made, the
+number of attempts, and whether the result is `over_target`.
 
 ## Discovering formats and capabilities
 
@@ -375,7 +459,9 @@ typst     0.15.1     /opt/homebrew/bin/typst      (PATH)
 backend. A conversion that fails on a missing managed backend offers to
 install it and retry (interactive sessions only, never under `--json`/
 `--quiet`); `--yes` pre-answers the prompt for scripts, `--no-install`
-always fails with the structured `backend_missing` error instead.
+always fails with the structured `backend_missing` error instead. `--yes`
+also answers the other question conv can ask, about an extreme
+[`--max-size`](#size-targets) target.
 
 ## Updating convkit
 

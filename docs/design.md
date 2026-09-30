@@ -238,6 +238,39 @@ Rules:
 `indicatif` for progress. Continue on error; collect failures into a summary
 table (or a JSON array under `--json`) and exit non-zero.
 
+### 5.7 Size targets
+
+Added after v1, for the four video targets. `--max-size` is a policy over
+the knobs rather than another knob: given a size, it chooses their values.
+The budget weighs every combination of a resolution step, an even division
+of the source frame rate, and an audio rate, scoring each on one quality
+scale anchored to VMAF: picture loss (resolution and compression artefacts
+together), frame-rate loss and audio loss, with each curve steeper the
+further it falls. Loss is measured from what the user allowed, not from the
+source, so a `--resize` or `--fps` ceiling is a limit the choice stays
+within and its own reduction is not counted as damage. Convexity is the
+whole design: it makes many small cuts cheaper than one large one, so loss
+spreads across the dials without any rule saying it should.
+
+The target is a ceiling, met by a two-pass encode at the chosen bitrate and
+measured afterwards. A result that comes out over is planned again against
+a smaller budget and encoded again, both passes, so that pass 1's statistics
+always describe the encode they guide. Re-running pass 2 alone does not
+converge on footage the encoder cannot compress further at that picture
+size: it saturates, and only a smaller picture gets under. So an attempt
+whose video overshot the rate it was asked for also steps the next one down
+a resolution. There are at most three attempts, and a result still over is
+kept and flagged, never discarded.
+
+A target too small to look good is not refused; conv asks first, because
+the result is usually not worth keeping, and a script opts in with `--yes`.
+Consent holds through the retries: a re-plan never escalates to extreme
+compression the user has not allowed, and stops with the last attempt kept
+and flagged instead. The core holds that gate itself, as it holds overwrite,
+so a frontend that skips the prompt cannot skip the question. The
+calibration behind the curves, and where the line for "too small" sits, is
+in [defaults-calibration.md](defaults-calibration.md#size-targets---max-size).
+
 ## 6. The v1 conversion table
 
 | Family | Pairs | Backend |
