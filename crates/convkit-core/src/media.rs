@@ -87,9 +87,13 @@ pub(crate) enum VideoDisposition<'a> {
         /// companions instead.
         companions: &'static [&'static str],
     },
-    /// Two-pass, bitrate-targeted re-encode: pass 2 of a `--max-size`
-    /// conversion. (Pass 1 is built separately; it maps only the video.)
+    /// One pass (`pass` is 1 or 2) of a bitrate-targeted re-encode, for
+    /// `--max-size`. Pass 2 is the real conversion. Pass 1 uses this only
+    /// for mkv, where it has to lay out the same streams as pass 2 (see
+    /// `two_pass_invocations`); the other targets build their pass 1
+    /// directly.
     TwoPass {
+        pass: u8,
         chain: &'a str,
         encoder: &'static str,
         bitrate: String,
@@ -105,6 +109,9 @@ pub(crate) enum AudioDisposition {
     Fit,
     /// Re-encode every track at this rate, so its size is known in advance.
     Reencode { kbps: u32 },
+    /// Stream-copy every track, whether or not the target would keep it.
+    /// For a pass whose output is discarded.
+    Copy,
 }
 
 /// Emits the video codec and, for a transcode, its filter chain.
@@ -136,12 +143,14 @@ fn push_video_args(argv: &mut Vec<String>, to: Format, video: &VideoDisposition<
             push(argv, companions);
         }
         VideoDisposition::TwoPass {
+            pass,
             chain,
             encoder,
             bitrate,
             passlog,
             companions,
         } => {
+            let pass = pass.to_string();
             // Scoped to stream 0 on mkv for the same reason the codec is
             // (see this function's docs): -map 0 also selects cover art,
             // which is copied, not encoded.
@@ -150,17 +159,33 @@ fn push_video_args(argv: &mut Vec<String>, to: Format, video: &VideoDisposition<
                 push(argv, &["-c:v", "copy"]);
                 push(argv, &["-c:v:0", encoder]);
                 push(argv, &["-b:v:0", bitrate.as_str()]);
-                push(argv, &["-pass:v:0", "2"]);
+                push(argv, &["-pass:v:0", pass.as_str()]);
                 push(argv, &["-passlogfile:v:0", passlog.as_str()]);
             } else {
                 push(argv, &["-vf", chain]);
                 push(argv, &["-c:v", encoder]);
                 push(argv, &["-b:v", bitrate.as_str()]);
-                push(argv, &["-pass", "2"]);
+                push(argv, &["-pass", pass.as_str()]);
                 push(argv, &["-passlogfile", passlog.as_str()]);
             }
             push(argv, companions);
         }
+    }
+}
+
+/// Emits the audio arguments for the chosen disposition.
+fn push_audio_args(
+    argv: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+    to: Format,
+    audio_ok: &[&str],
+    audios: &[&str],
+    audio: AudioDisposition,
+) {
+    match audio {
+        AudioDisposition::Fit => audio_codec_args(argv, warnings, to, audio_ok, audios),
+        AudioDisposition::Reencode { kbps } => reencode_audio_args(argv, to, kbps, audios.len()),
+        AudioDisposition::Copy => push(argv, &["-c:a", "copy"]),
     }
 }
 
@@ -224,14 +249,7 @@ fn mapped_invocation(
         }
 
         push_video_args(&mut argv, to, &video);
-        match audio {
-            AudioDisposition::Fit => {
-                audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios)
-            }
-            AudioDisposition::Reencode { kbps } => {
-                reencode_audio_args(&mut argv, to, kbps, audios.len())
-            }
-        }
+        push_audio_args(&mut argv, &mut warnings, to, audio_ok, &audios, audio);
 
         if any_mov_text {
             // mov_text only ever comes from mp4/mov, which cannot hold the
@@ -295,14 +313,7 @@ fn mapped_invocation(
         }
 
         push_video_args(&mut argv, to, &video);
-        match audio {
-            AudioDisposition::Fit => {
-                audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios)
-            }
-            AudioDisposition::Reencode { kbps } => {
-                reencode_audio_args(&mut argv, to, kbps, audios.len())
-            }
-        }
+        push_audio_args(&mut argv, &mut warnings, to, audio_ok, &audios, audio);
 
         if !kept_subs.is_empty() {
             let target_codec = if to == Format::Webm {
@@ -429,16 +440,24 @@ pub(crate) fn transcoded_invocation(
 
 /// Both passes of a bitrate-targeted encode, for `--max-size`.
 ///
-/// Pass 1 maps only the first video stream, runs the same filter chain and
-/// encoder settings as pass 2 (the statistics are only valid if it does),
-/// and writes nothing but the pass log: `-f null -` works the same on every
-/// platform, so there is no `/dev/null` versus `NUL` branch. Pass 2 is the
-/// ordinary stream mapping with the rate set by bitrate rather than CRF,
-/// and every audio track re-encoded at `audio_kbps` so its size is known.
-// Nothing outside the tests calls this yet, which also leaves the `TwoPass`
-// and `Reencode` variants it builds unconstructed. Once the sized planner
-// calls it this expectation goes unmet, which is the compiler's cue to
-// delete it.
+/// Pass 1 runs the same filter chain and encoder settings as pass 2 (the
+/// statistics are only valid if it does) and writes nothing but the pass
+/// log: `-f null -` works the same on every platform, so there is no
+/// `/dev/null` versus `NUL` branch. Pass 2 is the ordinary stream mapping
+/// with the rate set by bitrate rather than CRF, and every audio track
+/// re-encoded at `audio_kbps` so its size is known. `audio_kbps` is `None`
+/// only for a source with no audio; a rate given for one is ignored.
+///
+/// ffmpeg names the pass log by the encoded stream's index in the output. For
+/// mp4, mov and webm both passes map `0:v:0` first, so that index is 0 in
+/// each. mkv maps everything (`-map 0`), which can put audio ahead of the
+/// video, so its pass 1 is built from the same mapping as pass 2, with the
+/// audio copied and the output discarded; the video then lands on the same
+/// index in both passes and pass 2 finds the log pass 1 wrote.
+// Nothing outside the tests calls this yet, which also leaves the `TwoPass`,
+// `Reencode` and `Copy` variants it builds unconstructed. Once the sized
+// planner calls it this expectation goes unmet, which is the compiler's cue
+// to delete it.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the sized planner is its only caller")
@@ -466,37 +485,42 @@ pub(crate) fn two_pass_invocations(
     let chain = registry::TRANSCODE_CHAIN.compose(resolved);
     let bitrate = video_bps.to_string();
     let log = passlog.to_string_lossy().into_owned();
+    let video = |pass| VideoDisposition::TwoPass {
+        pass,
+        chain: &chain,
+        encoder,
+        bitrate: bitrate.clone(),
+        passlog: log.clone(),
+        companions,
+    };
 
-    let mut pass1: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
-    push(
-        &mut pass1,
-        &["-map", "0:v:0", "-vf", &chain, "-c:v", encoder],
-    );
-    push(
-        &mut pass1,
-        &["-b:v", &bitrate, "-pass", "1", "-passlogfile", &log],
-    );
-    push(&mut pass1, companions);
-    push(&mut pass1, &["-an", "-sn", "-dn", "-f", "null", "-"]);
+    let pass1 = if to == Format::Mkv {
+        let mut argv =
+            mapped_invocation(to, probe, video(1), AudioDisposition::Copy, input, output)?.argv;
+        // The mapping ends `-y <output>`; pass 1 writes nowhere.
+        argv.pop();
+        push(&mut argv, &["-f", "null", "-"]);
+        argv
+    } else {
+        let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
+        push(
+            &mut argv,
+            &["-map", "0:v:0", "-vf", &chain, "-c:v", encoder],
+        );
+        push(
+            &mut argv,
+            &["-b:v", &bitrate, "-pass", "1", "-passlogfile", &log],
+        );
+        push(&mut argv, companions);
+        push(&mut argv, &["-an", "-sn", "-dn", "-f", "null", "-"]);
+        argv
+    };
 
     let audio = match audio_kbps {
         Some(kbps) => AudioDisposition::Reencode { kbps },
         None => AudioDisposition::Fit,
     };
-    let pass2 = mapped_invocation(
-        to,
-        probe,
-        VideoDisposition::TwoPass {
-            chain: &chain,
-            encoder,
-            bitrate,
-            passlog: log,
-            companions,
-        },
-        audio,
-        input,
-        output,
-    )?;
+    let pass2 = mapped_invocation(to, probe, video(2), audio, input, output)?;
     Some(TwoPass { pass1, pass2 })
 }
 
@@ -1255,11 +1279,66 @@ mod tests {
         )
         .unwrap();
         let a = &t.pass2.argv;
+        assert!(has(a, ["-map", "0"]), "{a:?}");
         assert!(has(a, ["-c:v:0", "libx264"]), "{a:?}");
         assert!(has(a, ["-b:v:0", "800000"]), "{a:?}");
         assert!(has(a, ["-pass:v:0", "2"]), "{a:?}");
         assert!(has(a, ["-passlogfile:v:0", "/s/o.convkit-pass"]), "{a:?}");
         assert!(!a.iter().any(|x| x == "-crf"), "{a:?}");
+        // ffmpeg takes the last matching per-stream option, so the blanket
+        // copy has to come first and the scoped encoder after it.
+        let at = |pair| a.windows(2).position(|w| w == pair).unwrap();
+        assert!(at(["-c:v", "copy"]) < at(["-c:v:0", "libx264"]), "{a:?}");
+    }
+
+    fn maps(argv: &[String]) -> Vec<&str> {
+        argv.windows(2)
+            .filter(|w| w[0] == "-map")
+            .map(|w| w[1].as_str())
+            .collect()
+    }
+
+    /// ffmpeg names the pass log by the encoded stream's output index, and
+    /// mkv's `-map 0` can put audio ahead of the video. Pass 1 therefore
+    /// has to lay out the same streams as pass 2, or pass 2 looks for a log
+    /// pass 1 never wrote.
+    #[test]
+    fn mkv_pass_one_lays_out_the_same_streams_as_pass_two() {
+        let probe = MediaProbe {
+            audio_codecs: vec!["aac".into(), "aac".into()],
+            audio_bitrates: vec![Some(160_000), Some(96_000)],
+            subtitle_codecs: vec!["subrip".into(), "xsub".into()],
+            data_streams: 1,
+            ..h264_aac()
+        };
+        let t = two_pass_invocations(
+            Format::Mkv,
+            &probe,
+            &ResolvedVideo::default(),
+            800_000,
+            Some(128),
+            Path::new("/s/o.convkit-pass"),
+            Path::new("in.mkv"),
+            Path::new("/s/o.mkv"),
+        )
+        .unwrap();
+        let (p1, p2) = (&t.pass1, &t.pass2.argv);
+        assert_eq!(maps(p1), ["0", "-0:d", "-0:s:1"], "{p1:?}");
+        assert_eq!(maps(p1), maps(p2));
+        assert!(has(p1, ["-pass:v:0", "1"]), "{p1:?}");
+        assert!(has(p2, ["-pass:v:0", "2"]), "{p2:?}");
+        assert!(!has(p1, ["-pass:v:0", "2"]) && !has(p2, ["-pass:v:0", "1"]));
+        for a in [p1, p2] {
+            assert!(has(a, ["-passlogfile:v:0", "/s/o.convkit-pass"]), "{a:?}");
+            assert!(has(a, ["-b:v:0", "800000"]), "{a:?}");
+        }
+        // Pass 1 has no use for the audio, so it copies it rather than
+        // spending time on an encode whose output is thrown away.
+        assert!(has(p1, ["-c:a", "copy"]), "{p1:?}");
+        assert!(!p1.iter().any(|x| x == "-b:a"), "{p1:?}");
+        assert!(has(p1, ["-f", "null"]), "{p1:?}");
+        assert_eq!(p1.last().unwrap(), "-");
+        assert!(!p1.iter().any(|x| x.ends_with("o.mkv")), "{p1:?}");
     }
 
     #[test]
@@ -1277,6 +1356,7 @@ mod tests {
         .unwrap();
         for argv in [&t.pass1, &t.pass2.argv] {
             assert!(has(argv, ["-c:v", "libvpx-vp9"]), "{argv:?}");
+            assert!(has(argv, ["-b:v", "500000"]), "{argv:?}");
             assert!(
                 !has(argv, ["-b:v", "0"]),
                 "constant-quality mode must be off: {argv:?}"
@@ -1311,6 +1391,62 @@ mod tests {
             "{:?}",
             t.pass2.argv
         );
+    }
+
+    /// A rate handed to a source with nothing to encode at it is ignored,
+    /// not turned into an audio encode that has no stream to act on.
+    #[test]
+    fn a_rate_on_a_silent_source_adds_no_audio_arguments() {
+        let silent = MediaProbe {
+            audio_codecs: vec![],
+            audio_bitrates: vec![],
+            ..h264_aac()
+        };
+        for to in [Format::Mp4, Format::Mkv, Format::Webm] {
+            let t = two_pass_invocations(
+                to,
+                &silent,
+                &ResolvedVideo::default(),
+                500_000,
+                Some(96),
+                Path::new("p"),
+                Path::new("in.mp4"),
+                Path::new("o"),
+            )
+            .unwrap();
+            for flag in ["-c:a", "-b:a", "-af"] {
+                assert!(
+                    !t.pass2.argv.iter().any(|x| x == flag),
+                    "{to:?} {flag}: {:?}",
+                    t.pass2.argv
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_audio_track_shares_one_reencode_rate() {
+        let two_tracks = MediaProbe {
+            audio_codecs: vec!["aac".into(), "ac3".into()],
+            audio_bitrates: vec![Some(160_000), Some(384_000)],
+            ..h264_aac()
+        };
+        let t = two_pass_invocations(
+            Format::Mp4,
+            &two_tracks,
+            &ResolvedVideo::default(),
+            500_000,
+            Some(128),
+            Path::new("p"),
+            Path::new("in.mp4"),
+            Path::new("o.mp4"),
+        )
+        .unwrap();
+        let a = &t.pass2.argv;
+        let count = |flag: &str| a.iter().filter(|x| *x == flag).count();
+        // Unindexed options apply to every mapped audio stream.
+        assert_eq!((count("-c:a"), count("-b:a")), (1, 1), "{a:?}");
+        assert!(has(a, ["-c:a", "aac"]) && has(a, ["-b:a", "128k"]), "{a:?}");
     }
 
     #[test]
