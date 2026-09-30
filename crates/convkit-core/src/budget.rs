@@ -10,6 +10,10 @@
 //! the dials instead of draining one before touching the next. Nothing here
 //! says "cut every dial"; it follows from the shape.
 //!
+//! Loss is measured from what the user asked for: the source itself, or the
+//! `--resize` and `--fps` ceilings where those bind. A ceiling the user chose
+//! is not a loss the budget imposed, so it is never charged as one.
+//!
 //! Constants marked "calibrated" are set by the measurements recorded in
 //! docs/defaults-calibration.md; the authored curves are judgement, with
 //! the reasoning written beside them there.
@@ -142,7 +146,10 @@ impl Source {
         if p.video_streams == 0 {
             return Err(SourceGap::NoVideo);
         }
-        let (width, height) = p.display_dimensions().ok_or(SourceGap::NoDimensions)?;
+        let (width, height) = p
+            .display_dimensions()
+            .filter(|&(w, h)| w > 0 && h > 0)
+            .ok_or(SourceGap::NoDimensions)?;
         let fps = p.frame_rate.ok_or(SourceGap::NoFrameRate)?;
         let duration_ms = p
             .duration_ms
@@ -173,7 +180,8 @@ impl Source {
 }
 
 /// User ceilings from `--resize` (as the fitted output dimensions) and
-/// `--fps`. Candidates above either are never considered.
+/// `--fps`. Candidates above either are never considered, and loss is
+/// measured from a binding ceiling rather than from the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Limits {
     pub max_dims: Option<(u32, u32)>,
@@ -221,20 +229,34 @@ fn tenths<S: Serializer>(t: &u32, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_f64(f64::from(*t) / 10.0)
 }
 
+/// What is set aside from `target` before any audio or video: the
+/// container overhead, subtitle allowances, (for mkv, the one target that
+/// keeps them) attachments, and, unless `without_margin`, the safety margin.
+/// In `u128`, so a target anywhere in the `u64` range cannot overflow it.
+fn reserve_bytes(src: &Source, target: u64, to: Format, without_margin: bool) -> u128 {
+    let target = u128::from(target);
+    let attachments = if to == Format::Mkv {
+        u128::from(src.attachment_bytes)
+    } else {
+        0
+    };
+    let margin = if without_margin {
+        0
+    } else {
+        target * u128::from(MARGIN_PERMILLE) / 1000
+    };
+    margin
+        + target * u128::from(OVERHEAD_PERMILLE) / 1000
+        + src.subtitle_tracks as u128 * u128::from(SUBTITLE_ALLOWANCE_BYTES)
+        + attachments
+}
+
 /// Bytes left for audio and video after the margin, the container
 /// overhead, subtitle allowances and (for mkv, the one target that keeps
 /// them) attachments.
 pub(crate) fn payload_bytes(src: &Source, target: u64, to: Format) -> u64 {
-    let attachments = if to == Format::Mkv {
-        src.attachment_bytes
-    } else {
-        0
-    };
-    let reserve = target * MARGIN_PERMILLE / 1000
-        + target * OVERHEAD_PERMILLE / 1000
-        + src.subtitle_tracks as u64 * SUBTITLE_ALLOWANCE_BYTES
-        + attachments;
-    target.saturating_sub(reserve)
+    let left = u128::from(target).saturating_sub(reserve_bytes(src, target, to, false));
+    u64::try_from(left).unwrap_or(u64::MAX)
 }
 
 fn codec_for(to: Format) -> (&'static VideoFit, &'static [(u32, f64)]) {
@@ -250,10 +272,17 @@ fn rate_value((n, d): (u32, u32)) -> f64 {
 }
 
 /// (short side, width, height) per step, largest first. The first step is
-/// the source itself, or the `--resize` bound when that is smaller.
+/// the source itself, or the `--resize` bound when that is smaller. Every
+/// computed dimension is even, the long side is rounded to the nearest even
+/// value as ffmpeg's `-2` does, and no step exceeds the source or the bound.
 fn resolution_steps(src: &Source, limits: &Limits) -> Vec<(u32, u32, u32)> {
     let (short, long) = (src.short_side(), src.long_side());
-    let top = limits.max_dims.map_or(short, |(w, h)| w.min(h)).min(short);
+    let mut top = limits.max_dims.map_or(short, |(w, h)| w.min(h)).min(short);
+    if top != short {
+        // An odd bound still steps on an even short side, so it cannot repeat
+        // the step just below it.
+        top = (top & !1).max(2);
+    }
     let mut shorts = vec![top];
     shorts.extend(SHORT_SIDES.iter().copied().filter(|&s| s < top));
     shorts
@@ -264,15 +293,20 @@ fn resolution_steps(src: &Source, limits: &Limits) -> Vec<(u32, u32, u32)> {
                     .max_dims
                     .is_none_or(|(w, h)| w >= src.width && h >= src.height)
             {
-                return (s, src.width & !1, src.height & !1);
+                return (s, (src.width & !1).max(2), (src.height & !1).max(2));
             }
             let s = (s & !1).max(2);
-            let l = (u64::from(s) * u64::from(long) + u64::from(short) / 2) / u64::from(short);
-            let l = ((l as u32) & !1).max(2);
-            if src.width >= src.height {
-                (s, l, s)
+            let scaled =
+                (u64::from(s) * u64::from(long) + u64::from(short)) / (2 * u64::from(short)) * 2;
+            let l = u32::try_from(scaled).unwrap_or(u32::MAX).max(2);
+            let (w, h) = if src.width >= src.height {
+                (l, s)
             } else {
-                (s, s, l)
+                (s, l)
+            };
+            match limits.max_dims {
+                Some((bw, bh)) => (s, w.min(bw & !1).max(2), h.min(bh & !1).max(2)),
+                None => (s, w, h),
             }
         })
         .collect()
@@ -308,7 +342,10 @@ fn fps_steps(src: &Source, limits: &Limits) -> Vec<(u32, u32)> {
 
 /// Audio steps under the source's highest track bitrate, each with its
 /// cost, and the cost of the first (the reference a loss is measured from).
-/// `[None]` for a silent source.
+/// The rate is taken to the nearest kb/s, so a nominal 128 kb/s track that
+/// reports 127,999 b/s keeps its 128 rung. When every rung of the ladder is
+/// above the source, the source's own rate is the only step: audio is never
+/// raised. `[None]` for a silent source.
 fn audio_steps(src: &Source, ladder: &'static [(u32, f64)]) -> (Vec<Option<(u32, f64)>>, f64) {
     if src.audio_bitrates.is_empty() {
         return (vec![None], 0.0);
@@ -316,7 +353,7 @@ fn audio_steps(src: &Source, ladder: &'static [(u32, f64)]) -> (Vec<Option<(u32,
     let top_kbps = src
         .audio_bitrates
         .iter()
-        .map(|b| b.map_or(u32::MAX, |b| b / 1000))
+        .map(|b| b.map_or(u32::MAX, |b| b.saturating_add(500) / 1000))
         .max()
         .unwrap_or(u32::MAX);
     let mut steps: Vec<(u32, f64)> = ladder
@@ -325,7 +362,7 @@ fn audio_steps(src: &Source, ladder: &'static [(u32, f64)]) -> (Vec<Option<(u32,
         .filter(|&(k, _)| k <= top_kbps)
         .collect();
     if steps.is_empty() {
-        steps.push(*ladder.last().expect("ladders are not empty"));
+        steps.push((top_kbps.max(1), 0.0));
     }
     let reference = steps[0].1;
     (steps.into_iter().map(Some).collect(), reference)
@@ -379,14 +416,17 @@ fn evaluate(
     let seconds = src.seconds();
     let payload_bits = payload_bytes(src, target, to) as f64 * 8.0;
     let tracks = src.audio_bitrates.len() as f64;
-    let fps_ref = fps_curve(rate_value(src.fps));
     let (audio, audio_ref) = audio_steps(src, ladder);
     let resolutions = resolution_steps(src, limits);
     let rates = fps_steps(src, limits);
+    // Loss is measured from the top step of each dial: the source, or the
+    // user's own ceiling where one binds, which is not a loss the budget chose.
+    let top_short = f64::from(resolutions[0].0);
+    let fps_ref = fps_curve(rate_value(rates[0]));
 
     let mut best: Option<Candidate> = None;
     for &(short, width, height) in &resolutions {
-        let scale = f64::from(short) / f64::from(src.short_side());
+        let scale = f64::from(short) / top_short;
         for &fps in &rates {
             let fps_cost = (fps_curve(rate_value(fps)) - fps_ref).max(0.0);
             for step in &audio {
@@ -437,16 +477,10 @@ fn evaluate(
     let kbps = audio.last().copied().flatten().map(|(k, _)| k);
     let audio_bits = f64::from(kbps.unwrap_or(0)) * 1000.0 * tracks * seconds;
     let video_bits = MIN_VIDEO_BPS as f64 * seconds;
-    let reserve_without_margin = target * OVERHEAD_PERMILLE / 1000
-        + src.subtitle_tracks as u64 * SUBTITLE_ALLOWANCE_BYTES
-        + if to == Format::Mkv {
-            src.attachment_bytes
-        } else {
-            0
-        };
+    let reserve_without_margin =
+        u64::try_from(reserve_bytes(src, target, to, true)).unwrap_or(u64::MAX);
     let bpp = MIN_VIDEO_BPS as f64 / (f64::from(width) * f64::from(height) * rate_value(fps));
-    let cost = policy.w_video
-        * video_loss(f64::from(short) / f64::from(src.short_side()), bpp, fit)
+    let cost = policy.w_video * video_loss(f64::from(short) / top_short, bpp, fit)
         + policy.w_fps * (fps_curve(rate_value(fps)) - fps_ref).max(0.0)
         + policy.w_audio
             * audio
@@ -463,7 +497,8 @@ fn evaluate(
         cost_tenths: (cost * 10.0).round().clamp(0.0, 10_000.0) as u32,
         extreme: true,
         over: Some(Over {
-            predicted_bytes: ((video_bits + audio_bits) / 8.0) as u64 + reserve_without_margin,
+            predicted_bytes: (((video_bits + audio_bits) / 8.0) as u64)
+                .saturating_add(reserve_without_margin),
             audio_bytes: (audio_bits / 8.0) as u64,
         }),
         suggested_bytes: None,
@@ -600,6 +635,14 @@ mod tests {
         assert!(c.over.is_none());
     }
 
+    fn rate_le(a: (u32, u32), b: (u32, u32)) -> bool {
+        u64::from(a.0) * u64::from(b.1) <= u64::from(b.0) * u64::from(a.1)
+    }
+
+    /// The chosen settings cannot tell an upscaled or sped-up candidate that
+    /// was generated and lost from one never generated, so the steps
+    /// themselves are checked: none exceeds the source or the user's bound,
+    /// whatever odd bound is given, and none repeats.
     #[test]
     fn nothing_is_ever_upscaled_or_sped_up() {
         let src = source(1280, 720, (24, 1), 30, &[None]);
@@ -608,6 +651,90 @@ mod tests {
             assert!(c.width <= 1280 && c.height <= 720, "{c:?}");
             assert!(rate(c.fps) <= 24.0, "{c:?}");
         }
+
+        let landscape = source(1920, 1080, (30, 1), 60, &[None]);
+        let portrait = source(1080, 1920, (30, 1), 60, &[None]);
+        let bounds = [
+            None,
+            Some((1280, 720)),
+            Some((641, 361)),
+            Some((853, 480)),
+            Some((4000, 3000)),
+            Some((1920, 1080)),
+        ];
+        for bound in bounds {
+            for (src, bound) in [(&landscape, bound), (&portrait, bound.map(|(w, h)| (h, w)))] {
+                let limits = Limits {
+                    max_dims: bound,
+                    max_fps: None,
+                };
+                let steps = resolution_steps(src, &limits);
+                assert!(!steps.is_empty());
+                for &(short, w, h) in &steps {
+                    assert!(w <= src.width && h <= src.height, "{bound:?}: {steps:?}");
+                    if let Some((bw, bh)) = bound {
+                        assert!(w <= bw && h <= bh, "{bound:?}: {steps:?}");
+                    }
+                    assert_eq!(short, w.min(h), "{bound:?}: {steps:?}");
+                }
+                assert!(
+                    steps.windows(2).all(|p| p[0].0 > p[1].0),
+                    "each step is strictly smaller: {bound:?}: {steps:?}"
+                );
+            }
+        }
+
+        for fps in [(24, 1), (30_000, 1001), (1799, 60), (60, 1)] {
+            let src = source(1920, 1080, fps, 60, &[None]);
+            for cap in [
+                None,
+                Some((24, 1)),
+                Some((25, 1)),
+                Some((24_000, 1001)),
+                Some((61, 1)),
+                Some((240, 1)),
+            ] {
+                let limits = Limits {
+                    max_dims: None,
+                    max_fps: cap,
+                };
+                let steps = fps_steps(&src, &limits);
+                assert!(!steps.is_empty());
+                for &step in &steps {
+                    assert!(rate_le(step, fps), "{fps:?} cap {cap:?}: {steps:?}");
+                    if let Some(cap) = cap {
+                        assert!(rate_le(step, cap), "{fps:?} cap {cap:?}: {steps:?}");
+                    }
+                }
+                assert!(
+                    steps.windows(2).all(|p| !rate_le(p[0], p[1])),
+                    "each step is strictly slower: {fps:?} cap {cap:?}: {steps:?}"
+                );
+            }
+        }
+    }
+
+    /// Review focus 2 (later): computed long sides round to the nearest even
+    /// value, as ffmpeg's `-2` does.
+    #[test]
+    fn computed_dimensions_round_to_the_nearest_even_value() {
+        let src = source(1920, 1080, (30, 1), 60, &[None]);
+        let steps = resolution_steps(&src, &Limits::default());
+        for want in [
+            (1080, 1920, 1080),
+            (720, 1280, 720),
+            (540, 960, 540),
+            (480, 854, 480),
+            (360, 640, 360),
+            (240, 426, 240),
+            (144, 256, 144),
+        ] {
+            assert!(steps.contains(&want), "{want:?} missing from {steps:?}");
+        }
+        let portrait = source(1080, 1920, (30, 1), 60, &[None]);
+        let steps = resolution_steps(&portrait, &Limits::default());
+        assert!(steps.contains(&(480, 480, 854)), "{steps:?}");
+        assert!(steps.contains(&(240, 240, 426)), "{steps:?}");
     }
 
     /// Review focus 2: the steps apply to the displayed short side, and a
@@ -615,9 +742,15 @@ mod tests {
     #[test]
     fn a_portrait_source_steps_its_short_side_and_stays_portrait() {
         let src = source(1080, 1920, (30, 1), 60, &[Some(128_000)]);
-        let c = pick(&src, 8_000_000);
-        assert!(c.width < c.height, "{c:?}");
-        assert!(c.width <= 1080, "{c:?}");
+        for target in [3_000_000, 8_000_000, 40_000_000] {
+            let c = pick(&src, target);
+            assert!(c.width < c.height, "{c:?}");
+            // The displayed short side is the width, and it lands on a step.
+            assert!(
+                [1080, 720, 540, 480, 360, 240, 144].contains(&c.width),
+                "the width is a short-side step: {c:?}"
+            );
+        }
     }
 
     /// Review focus 1: rationals stay exact and never exceed the source.
@@ -649,36 +782,31 @@ mod tests {
         assert_eq!(c.fps, (24, 1), "the user's own rate is a candidate: {c:?}");
     }
 
+    /// A tight target, where the default choice certainly cuts both dials, so
+    /// a weight that is ignored would leave the two choices equal and fail.
     #[test]
     fn raising_a_weight_protects_that_dial() {
-        let src = source(1920, 1080, (60, 1), 120, &[Some(160_000)]);
-        let base = pick(&src, 8_000_000);
-        let fps_first = choose(
-            &src,
-            8_000_000,
-            Format::Mp4,
-            &Limits::default(),
-            &SizePolicy {
-                w_fps: 20.0,
-                ..SizePolicy::default()
-            },
-        );
+        let src = source(1920, 1080, (60, 1), 60, &[Some(160_000)]);
+        let target = 2_000_000;
+        let base = pick(&src, target);
+        assert!(rate(base.fps) < 60.0, "precondition: {base:?}");
+        assert!(base.audio_kbps < Some(160), "precondition: {base:?}");
+        let with =
+            |policy: SizePolicy| choose(&src, target, Format::Mp4, &Limits::default(), &policy);
+        let fps_first = with(SizePolicy {
+            w_fps: 1000.0,
+            ..SizePolicy::default()
+        });
         assert!(
-            rate(fps_first.fps) >= rate(base.fps),
+            rate(fps_first.fps) > rate(base.fps),
             "{base:?} vs {fps_first:?}"
         );
-        let audio_first = choose(
-            &src,
-            8_000_000,
-            Format::Mp4,
-            &Limits::default(),
-            &SizePolicy {
-                w_audio: 20.0,
-                ..SizePolicy::default()
-            },
-        );
+        let audio_first = with(SizePolicy {
+            w_audio: 1000.0,
+            ..SizePolicy::default()
+        });
         assert!(
-            audio_first.audio_kbps >= base.audio_kbps,
+            audio_first.audio_kbps > base.audio_kbps,
             "{base:?} vs {audio_first:?}"
         );
     }
@@ -716,6 +844,118 @@ mod tests {
     fn audio_is_never_raised_above_the_source() {
         let src = source(1280, 720, (30, 1), 60, &[Some(96_000)]);
         assert!(pick(&src, 500_000_000).audio_kbps <= Some(96));
+
+        // Below every rung of the ladder the source's own rate is the only
+        // step, not the ladder's lowest rung: AAC bottoms out at 32 kb/s and
+        // Opus at 16.
+        let low_aac = source(1280, 720, (30, 1), 60, &[Some(24_000)]);
+        assert_eq!(pick(&low_aac, 500_000_000).audio_kbps, Some(24));
+        let low_opus = source(1280, 720, (30, 1), 60, &[Some(12_000)]);
+        let webm = choose(
+            &low_opus,
+            500_000_000,
+            Format::Webm,
+            &Limits::default(),
+            &SizePolicy::default(),
+        );
+        assert_eq!(webm.audio_kbps, Some(12));
+
+        // A nominal 128 kb/s track can report a hair under it and must keep
+        // its 128 kb/s rung.
+        let nominal = source(1280, 720, (30, 1), 60, &[Some(127_999)]);
+        assert_eq!(pick(&nominal, 500_000_000).audio_kbps, Some(128));
+    }
+
+    /// A ceiling the user asked for is not a loss the budget chose: measured
+    /// from the ceiling, a generous target leaves it costing nothing.
+    #[test]
+    fn a_binding_user_ceiling_is_not_charged_as_loss() {
+        let src = source(3840, 2160, (30, 1), 60, &[Some(160_000)]);
+        for limits in [
+            Limits {
+                max_dims: Some((854, 480)),
+                max_fps: None,
+            },
+            Limits {
+                max_dims: None,
+                max_fps: Some((10, 1)),
+            },
+            Limits {
+                max_dims: Some((854, 480)),
+                max_fps: Some((10, 1)),
+            },
+        ] {
+            let c = choose(
+                &src,
+                500_000_000_000,
+                Format::Mp4,
+                &limits,
+                &SizePolicy::default(),
+            );
+            assert!(!c.extreme, "{limits:?}: {c:?}");
+            assert!(c.cost() < 1.0, "{limits:?}: {c:?}");
+            assert!(c.suggested_bytes.is_none(), "{limits:?}: {c:?}");
+        }
+    }
+
+    /// A ceiling far below the source used to be charged as loss at every
+    /// size, so the search for a target that is not extreme doubled past the
+    /// range of the reserve arithmetic and overflowed.
+    #[test]
+    fn a_ceiling_far_below_the_source_does_not_overflow_the_search() {
+        let src = source(3840, 2160, (30, 1), 60, &[Some(160_000)]);
+        let dims = Limits {
+            max_dims: Some((854, 480)),
+            max_fps: None,
+        };
+        let c = choose(&src, 50_000_000, Format::Mp4, &dims, &SizePolicy::default());
+        assert!(!c.extreme, "{c:?}");
+
+        let fast = source(1920, 1080, (60, 1), 60, &[Some(160_000)]);
+        let fps = Limits {
+            max_dims: None,
+            max_fps: Some((8, 1)),
+        };
+        let c = choose(&fast, 50_000_000, Format::Mp4, &fps, &SizePolicy::default());
+        assert!(!c.extreme, "{c:?}");
+    }
+
+    /// No target can hold 16 kb/s over this duration, so the search for a
+    /// size that is not extreme runs out of doublings: it must say so with
+    /// `None`, not overflow the reserve arithmetic on the way.
+    #[test]
+    fn a_target_that_can_never_be_met_has_no_suggestion_and_no_overflow() {
+        let src = Source {
+            duration_ms: u64::MAX,
+            ..source(1920, 1080, (30, 1), 0, &[Some(160_000)])
+        };
+        let c = pick(&src, 1_000_000);
+        assert!(c.extreme, "{c:?}");
+        assert!(c.over.is_some(), "{c:?}");
+        assert_eq!(c.suggested_bytes, None, "{c:?}");
+    }
+
+    #[test]
+    fn a_target_near_u64_max_does_not_overflow() {
+        let src = source(1920, 1080, (30, 1), 60, &[Some(160_000)]);
+        for target in [u64::MAX, u64::MAX / 2, u64::MAX / 30] {
+            let c = pick(&src, target);
+            assert!(!c.extreme, "{target}: {c:?}");
+            assert_eq!((c.width, c.height), (1920, 1080), "{target}: {c:?}");
+        }
+        let mut with_extras = src.clone();
+        with_extras.subtitle_tracks = 2;
+        with_extras.attachment_bytes = u64::MAX;
+        let bytes = payload_bytes(&with_extras, u64::MAX, Format::Mkv);
+        assert_eq!(bytes, 0, "the reserve exceeds the target: nothing left");
+        let c = choose(
+            &with_extras,
+            u64::MAX,
+            Format::Mkv,
+            &Limits::default(),
+            &SizePolicy::default(),
+        );
+        assert!(c.extreme, "{c:?}");
     }
 
     #[test]
@@ -760,5 +1000,23 @@ mod tests {
         assert_eq!(Source::from_probe(&p), Err(SourceGap::NoDuration));
         p.video_streams = 0;
         assert_eq!(Source::from_probe(&p), Err(SourceGap::NoVideo));
+    }
+
+    #[test]
+    fn from_probe_refuses_a_zero_dimension() {
+        let mut p = MediaProbe {
+            video_streams: 1,
+            width: Some(0),
+            height: Some(1080),
+            frame_rate: Some((30, 1)),
+            duration_ms: Some(1000),
+            ..MediaProbe::default()
+        };
+        assert_eq!(Source::from_probe(&p), Err(SourceGap::NoDimensions));
+        p.width = Some(1920);
+        p.height = Some(0);
+        assert_eq!(Source::from_probe(&p), Err(SourceGap::NoDimensions));
+        p.height = Some(1080);
+        assert!(Source::from_probe(&p).is_ok());
     }
 }
