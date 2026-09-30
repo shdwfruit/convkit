@@ -19,6 +19,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use convkit_core::budget::{MARGIN_PERMILLE, OVERHEAD_PERMILLE};
 use convkit_core::{exec, registry, Backend, Format, MediaProbe, Resolver, Tuning};
 
 // --- Fixtures ----------------------------------------------------------
@@ -1162,6 +1163,229 @@ fn a_tuned_gif_still_has_an_optimised_palette() {
         !is_default_web_palette(&out),
         "the palette chain was bypassed"
     );
+}
+
+// --- --max-size -----------------------------------------------------------
+
+/// A clip noisy enough that the encoder has to spend the bits it is given:
+/// a clean test pattern compresses so well that a bitrate target is never
+/// reached, which would make "close to the target" untestable.
+fn synth_noisy(dir: &Path, name: &str, w: u32, h: u32, secs: u32, audio_tracks: usize) -> PathBuf {
+    synth_noisy_ordered(dir, name, w, h, secs, audio_tracks, false)
+}
+
+/// `synth_noisy`, with control over stream order: `audio_first` maps every
+/// audio track ahead of the video, so the container's first stream is audio.
+fn synth_noisy_ordered(
+    dir: &Path,
+    name: &str,
+    w: u32,
+    h: u32,
+    secs: u32,
+    audio_tracks: usize,
+    audio_first: bool,
+) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let out = dir.join(name);
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={w}x{h}:rate=30:duration={secs}"),
+        ]);
+    for t in 0..audio_tracks {
+        cmd.args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency={}:duration={secs}", 440 + 110 * t),
+        ]);
+    }
+    cmd.args(["-filter_complex", "[0:v]noise=alls=30:allf=t[v]"]);
+    if !audio_first {
+        cmd.args(["-map", "[v]"]);
+    }
+    for t in 0..audio_tracks {
+        cmd.args(["-map", &format!("{}:a", t + 1)]);
+    }
+    if audio_first {
+        cmd.args(["-map", "[v]"]);
+    }
+    cmd.args([
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "12",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+    ])
+    .arg(&out);
+    let status = cmd.status().unwrap();
+    assert!(status.success(), "synthesising {name}");
+    out
+}
+
+fn convert_sized(
+    input: &Path,
+    output: &Path,
+    size: &str,
+    allow_extreme: bool,
+) -> convkit_core::Result<exec::Outcome> {
+    let from = Format::from_path(input).unwrap();
+    let to = Format::from_path(output).unwrap();
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    require_backend(&resolver, Backend::Ffprobe);
+    exec::run(
+        &exec::Request {
+            from,
+            to,
+            inputs: vec![input.to_path_buf()],
+            output: output.to_path_buf(),
+            overwrite: false,
+            tuning: Tuning {
+                max_size: Some(convkit_core::size::parse(size).unwrap()),
+                ..Default::default()
+            },
+            allow_extreme,
+        },
+        &resolver,
+        &mut |_| {},
+    )
+}
+
+/// The result is at or under `target`, and no further under it than the
+/// budget's own reserve (margin plus container overhead) explains, with ten
+/// percentage points to spare for the encoder's rate control. Derived from
+/// the budget's constants so a recalibration moves the test with it.
+fn assert_close_under(bytes: u64, target: u64) {
+    let reserve = MARGIN_PERMILLE + OVERHEAD_PERMILLE + 100;
+    let floor = target * 1000u64.saturating_sub(reserve) / 1000;
+    assert!(bytes <= target, "{bytes} is over {target}");
+    assert!(
+        bytes >= floor,
+        "{bytes} is further under {target} than the {reserve} permille reserve allows \
+         (floor {floor})"
+    );
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn max_size_lands_under_the_target_and_close_to_it() {
+    let dir = tmp();
+    let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 1);
+    let out = dir.path().join("small.mp4");
+    let o = convert_sized(&src, &out, "1mb", false).unwrap();
+    assert_close_under(std::fs::metadata(&out).unwrap().len(), 1_000_000);
+    assert!(!o.sizing.unwrap().over_target);
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn max_size_works_for_webm_too() {
+    let dir = tmp();
+    let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 1);
+    let out = dir.path().join("small.webm");
+    convert_sized(&src, &out, "1mb", false).unwrap();
+    assert_close_under(std::fs::metadata(&out).unwrap().len(), 1_000_000);
+}
+
+/// Every audio track survives a sized conversion, and the audio budget
+/// counts all of them.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_three_track_mkv_keeps_every_track() {
+    let dir = tmp();
+    let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 3);
+    let out = dir.path().join("small.mkv");
+    convert_sized(&src, &out, "2mb", false).unwrap();
+    assert_eq!(probe_audio_count(&out), 3);
+    assert!(std::fs::metadata(&out).unwrap().len() <= 2_000_000);
+}
+
+/// A source whose first stream is audio still gets its video rate applied
+/// to the video, keeps its audio, and fits: nothing may assume the video is
+/// stream 0.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_audio_first_mkv_is_sized_without_losing_its_pass_log() {
+    let dir = tmp();
+    let src = synth_noisy_ordered(dir.path(), "src.mkv", 1280, 720, 6, 1, true);
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffprobe);
+    let ffprobe = resolver.resolve(Backend::Ffprobe).unwrap().path;
+    let streams = probe_streams_json(&ffprobe, &src);
+    assert_eq!(
+        streams[0]["codec_type"], "audio",
+        "the fixture must start with its audio track"
+    );
+    let out = dir.path().join("small.mkv");
+    let o = convert_sized(&src, &out, "2mb", false).unwrap();
+    assert_eq!(probe_audio_count(&out), 1);
+    assert!(probe_media(&out).video_codec.is_some());
+    assert_close_under(std::fs::metadata(&out).unwrap().len(), 2_000_000);
+    assert!(!o.sizing.unwrap().over_target);
+}
+
+/// Two jobs at once in one directory, whose name has a space, must not
+/// share a pass log.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn parallel_sized_jobs_keep_their_pass_logs_apart() {
+    let dir = tmp();
+    let spaced = dir.path().join("with space");
+    std::fs::create_dir(&spaced).unwrap();
+    let a = synth_noisy(&spaced, "a.mkv", 1280, 720, 6, 1);
+    let b = synth_noisy(&spaced, "b.mkv", 1280, 720, 6, 1);
+    std::thread::scope(|s| {
+        let ha = s.spawn(|| convert_sized(&a, &spaced.join("a.mp4"), "1mb", false));
+        let hb = s.spawn(|| convert_sized(&b, &spaced.join("b.mp4"), "1mb", false));
+        ha.join().unwrap().unwrap();
+        hb.join().unwrap().unwrap();
+    });
+    for n in ["a.mp4", "b.mp4"] {
+        assert_close_under(std::fs::metadata(spaced.join(n)).unwrap().len(), 1_000_000);
+    }
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_extreme_target_converts_only_when_allowed() {
+    let dir = tmp();
+    let src = synth_noisy(dir.path(), "src.mkv", 1280, 720, 6, 1);
+    let out = dir.path().join("tiny.mp4");
+    let e = convert_sized(&src, &out, "30kb", false).unwrap_err();
+    assert_eq!(e.code, convkit_core::ErrorCode::ConfirmationRequired);
+    assert!(!out.exists());
+    let o = convert_sized(&src, &out, "30kb", true).unwrap();
+    assert!(out.is_file());
+    assert!(
+        o.notes
+            .iter()
+            .any(|n| n.starts_with("Extreme compression") || n.starts_with("Could not get under")),
+        "{:?}",
+        o.notes
+    );
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_source_already_under_the_target_is_copied_untouched() {
+    let dir = tmp();
+    let src = synth_noisy(dir.path(), "src.mkv", 640, 360, 2, 1);
+    let out = dir.path().join("same.mkv");
+    convert_sized(&src, &out, "50mb", false).unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&src).unwrap());
 }
 
 // --- Unit tests: identify_command ------------------------------------------
