@@ -259,7 +259,8 @@ where that container can hold its video (an H.264 mp4 going to webm is
 re-encoded). A `--resize` or `--fps` limit that would change the file
 forces the encode. A file already under the target that is re-encoded
 aims at its own size, not the target: an encode cannot add quality the
-source lacks, so the result is never larger than the file it came from.
+source lacks, so the result lands within a few percent of the file it came
+from rather than growing toward the target.
 
 With one file and no output name, conv keeps the format and adds the size
 to the name (`clip-10mb.mp4`), but only when the output would otherwise
