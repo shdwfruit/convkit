@@ -12,6 +12,7 @@ mod procutil;
 pub mod recipe;
 pub mod registry;
 pub mod resolve;
+pub mod size;
 mod video;
 pub mod winpath;
 
