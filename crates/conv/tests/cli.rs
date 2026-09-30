@@ -1953,6 +1953,30 @@ fn an_existing_same_format_output_is_refused_under_max_size_even_with_y() {
     assert_eq!(std::fs::read(&a).unwrap(), b"clip a");
 }
 
+/// A pair of images is refused as a target `--max-size` cannot size, not
+/// told to add `--to png`, which would be refused the same way.
+#[test]
+fn an_existing_same_format_output_that_cannot_be_sized_is_refused_by_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.png");
+    let b = dir.path().join("b.png");
+    std::fs::write(&a, b"image a").unwrap();
+    std::fs::write(&b, b"image b").unwrap();
+    let assert = conv()
+        .arg(&a)
+        .arg(&b)
+        .args(["--max-size", "1mb", "-y"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("--max-size does not apply to png -> png"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("--to png"), "{stderr}");
+    assert_eq!(std::fs::read(&b).unwrap(), b"image b", "b.png is untouched");
+}
+
 /// Without `--to`, three or more paths are the image-to-PDF merge form, so
 /// a glob of three clips used to be told to name a .pdf; under `--max-size`
 /// the fix is `--to`.

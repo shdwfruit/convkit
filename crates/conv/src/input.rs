@@ -669,8 +669,9 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
 /// as something else. Two paths are the `IN OUT` pair, so sizing them would
 /// replace the second clip with a sized copy of the first; three or more
 /// are the image-to-PDF merge form. Both are refused here with `--to` as the
-/// fix. A pair whose output already exists in the input's own format is
-/// refused even with `-y`, since that is exactly what the glob produces; to
+/// fix. A pair whose output already exists in the input's own format, one
+/// `--max-size` can size, is refused even with `-y`, since that is exactly
+/// what the glob produces; to
 /// write a sized copy over a file of the same format, remove it first. An
 /// output that is the input itself is left to `name_sized_outputs`, which
 /// words that case.
@@ -680,7 +681,11 @@ fn refuse_a_sized_batch_without_to(
 ) -> Result<(), ConvError> {
     match paths {
         [input, output] if explicit_output && output.exists() => {
-            let from = Format::from_path(input);
+            // Only a format `--max-size` can size gets `--to` as the fix; for
+            // any other pair it would just move the refusal, so the pair is
+            // left to the refusal of the flag on that target.
+            let from =
+                Format::from_path(input).filter(|f| convkit_core::sized::is_video_target(*f));
             if from.is_none()
                 || from != Format::from_path(output)
                 || collision_key(input) == collision_key(output)
@@ -1357,6 +1362,24 @@ mod tests {
             "{}",
             e.message
         );
+    }
+
+    /// `--to png` would only move the refusal for a pair of images, so a
+    /// pair in a format `--max-size` cannot size passes here, to be refused
+    /// by the flag itself on that target.
+    #[test]
+    fn a_pair_that_cannot_be_sized_is_not_told_to_add_to() {
+        let dir = tempfile::tempdir().unwrap();
+        for ext in ["png", "avi", "mp3"] {
+            let a = dir.path().join(format!("a.{ext}"));
+            let b = dir.path().join(format!("b.{ext}"));
+            for f in [&a, &b] {
+                std::fs::write(f, b"x").unwrap();
+            }
+            let jobs = plan_jobs(&sized(vec![a, b.clone()], None, None)).unwrap();
+            assert_eq!(jobs[0].output, b, "{ext}");
+            assert_eq!(jobs[0].from, jobs[0].to, "{ext}");
+        }
     }
 
     /// The fix names the clips' own container, and the image merge form is
