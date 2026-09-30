@@ -1,6 +1,6 @@
 # convkit
 
-<a href="docs/media/convkit-launch.mp4"><img src="docs/media/convkit-launch.jpg" alt="convkit launch video: conv clip.mp4 clip.gif replaces a long ffmpeg palettegen command. Click to play (21s, with sound)." width="100%"></a>
+<a href="docs/media/convkit-launch.mp4"><img src="docs/media/convkit-launch.jpg" alt="convkit: any file in, the format you need out. A long ffmpeg GIF command next to conv scan listing what each file can become, and conv clip.mkv clip.gif. Click to play the 21-second demo." width="100%"></a>
 
 <p align="center"><a href="docs/media/convkit-launch.mp4">▶ Watch the 21-second demo</a></p>
 
