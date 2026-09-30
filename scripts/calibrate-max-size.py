@@ -220,13 +220,15 @@ def encode(ref, out, codec, w, h, bps, passlog, frames):
     chain = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
     if (w, h) != (SRC_W, SRC_H):
         chain = f"scale=w={w}:h={h},{chain}"
+    # Both passes name the frame-rate mode the target's muxer would pick, as
+    # convkit does, so that they encode the same frames.
     if codec == "x264":
         enc = ["-c:v", "libx264", "-b:v", str(bps)]
-        companions = ["-pix_fmt", "yuv420p"]
+        companions = ["-fps_mode", "cfr", "-pix_fmt", "yuv420p"]
         tail = ["-movflags", "+faststart"]
     else:
         enc = ["-c:v", "libvpx-vp9", "-b:v", str(bps)]
-        companions = ["-row-mt", "1", "-threads", "0"]
+        companions = ["-fps_mode", "vfr", "-row-mt", "1", "-threads", "0"]
         tail = []
     common = ["ffmpeg", "-y", "-v", "error", "-i", ref, "-frames:v", str(frames),
               "-map", "0:v:0", "-vf", chain, *enc]

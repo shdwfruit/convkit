@@ -801,22 +801,25 @@ width x height x 50`): 3 clips x 5 sizes x 6 rates = 90 encodes per codec,
 (1,843,200 bit/s):
 
 ```
-ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libx264 -b:v 1843200 -pass 1 -passlogfile in_to_tree.x264.720.0.04.mp4.pass -pix_fmt yuv420p -an -sn -dn -f null -
-ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libx264 -b:v 1843200 -pass 2 -passlogfile in_to_tree.x264.720.0.04.mp4.pass -pix_fmt yuv420p -an -movflags +faststart in_to_tree.x264.720.0.04.partial.mp4
+ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libx264 -b:v 1843200 -pass 1 -passlogfile in_to_tree.x264.720.0.04.mp4.pass -fps_mode cfr -pix_fmt yuv420p -an -sn -dn -f null -
+ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libx264 -b:v 1843200 -pass 2 -passlogfile in_to_tree.x264.720.0.04.mp4.pass -fps_mode cfr -pix_fmt yuv420p -an -movflags +faststart in_to_tree.x264.720.0.04.partial.mp4
 ```
 
 and the same cell in VP9 (the partial file is renamed when pass 2 finishes):
 
 ```
-ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libvpx-vp9 -b:v 1843200 -pass 1 -passlogfile in_to_tree.vp9.720.0.04.webm.pass -row-mt 1 -threads 0 -an -sn -dn -f null -
-ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libvpx-vp9 -b:v 1843200 -pass 2 -passlogfile in_to_tree.vp9.720.0.04.webm.pass -row-mt 1 -threads 0 -an in_to_tree.vp9.720.0.04.partial.webm
+ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libvpx-vp9 -b:v 1843200 -pass 1 -passlogfile in_to_tree.vp9.720.0.04.webm.pass -fps_mode vfr -row-mt 1 -threads 0 -an -sn -dn -f null -
+ffmpeg -y -v error -i in_to_tree.ref.y4m -frames:v 250 -map 0:v:0 -vf 'scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libvpx-vp9 -b:v 1843200 -pass 2 -passlogfile in_to_tree.vp9.720.0.04.webm.pass -fps_mode vfr -row-mt 1 -threads 0 -an in_to_tree.vp9.720.0.04.partial.webm
 ```
 
 At 1080p the first `scale` is left out, as convkit leaves it out at the
 source's own size. Apart from `-y -v error`, the 250-frame limit and the
 file names, these are the arguments `conv clip.mp4 --max-size 1mb --dry-run`
 and `conv clip.mp4 --to webm --max-size 1mb --dry-run` print (compared
-against both on 2026-09-30), less the audio.
+against both on 2026-09-30), less the audio. `-fps_mode` was added to both
+passes after the measurements: without it ffmpeg 6.1 encodes a different
+number of frames in each pass of an mp4 and pass 2 hangs. It changes nothing
+for these sources, whose frames are already evenly spaced.
 
 Each encode is scored against the reference with VMAF, every frame, the
 encode scaled back up to 1920x1080 with bicubic first, so that the loss from

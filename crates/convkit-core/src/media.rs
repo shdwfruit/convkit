@@ -161,12 +161,14 @@ fn push_video_args(argv: &mut Vec<String>, to: Format, video: &VideoDisposition<
                 push(argv, &["-b:v:0", bitrate.as_str()]);
                 push(argv, &["-pass:v:0", pass.as_str()]);
                 push(argv, &["-passlogfile:v:0", passlog.as_str()]);
+                push(argv, &["-fps_mode:v:0", two_pass_fps_mode(to)]);
             } else {
                 push(argv, &["-vf", chain]);
                 push(argv, &["-c:v", encoder]);
                 push(argv, &["-b:v", bitrate.as_str()]);
                 push(argv, &["-pass", pass.as_str()]);
                 push(argv, &["-passlogfile", passlog.as_str()]);
+                push(argv, &["-fps_mode", two_pass_fps_mode(to)]);
             }
             push(argv, companions);
         }
@@ -440,8 +442,9 @@ pub(crate) fn transcoded_invocation(
 
 /// Both passes of a bitrate-targeted encode, for `--max-size`.
 ///
-/// Pass 1 runs the same filter chain and encoder settings as pass 2 (the
-/// statistics are only valid if it does) and writes nothing but the pass
+/// Pass 1 runs the same filter chain, encoder settings and frame-rate mode
+/// as pass 2 (the statistics are only valid if it does) and writes nothing
+/// but the pass
 /// log: `-f null -` works the same on every platform, so there is no
 /// `/dev/null` versus `NUL` branch. Pass 2 is the ordinary stream mapping
 /// with the rate set by bitrate rather than CRF, and every audio track
@@ -503,6 +506,7 @@ pub(crate) fn two_pass_invocations(
             &mut argv,
             &["-b:v", &bitrate, "-pass", "1", "-passlogfile", &log],
         );
+        push(&mut argv, &["-fps_mode", two_pass_fps_mode(to)]);
         push(&mut argv, companions);
         push(&mut argv, &["-an", "-sn", "-dn", "-f", "null", "-"]);
         argv
@@ -514,6 +518,20 @@ pub(crate) fn two_pass_invocations(
     };
     let pass2 = mapped_invocation(to, probe, video(2), audio, input, output)?;
     Some(TwoPass { pass1, pass2 })
+}
+
+/// The frame-rate mode both passes of a two-pass encode run at: the one
+/// ffmpeg picks for `to` itself, a constant rate for mp4 and mov (their
+/// muxer has no variable-rate flag) and the timestamps as they are for
+/// Matroska. Left to choose, pass 1's null muxer takes neither, and ffmpeg
+/// 6.1 then encodes a different number of frames in each pass: x264's
+/// statistics come up short and pass 2 hangs or crashes. `-fps_mode` is
+/// ffmpeg 5.1's name for the option; 9.0 no longer takes `-vsync`.
+fn two_pass_fps_mode(to: Format) -> &'static str {
+    match to {
+        Format::Mp4 | Format::Mov => "cfr",
+        _ => "vfr",
+    }
 }
 
 /// Pass 1's argv and pass 2's full invocation.
@@ -1242,17 +1260,52 @@ mod tests {
             t.pass1.join(" "),
             format!(
                 "-i in.mov -map 0:v:0 -vf {chain} -c:v libx264 -b:v 1190000 -pass 1 \
-                 -passlogfile /s/out.convkit-pass -pix_fmt yuv420p -an -sn -dn -f null -"
+                 -passlogfile /s/out.convkit-pass -fps_mode cfr -pix_fmt yuv420p \
+                 -an -sn -dn -f null -"
             )
         );
         assert_eq!(
             t.pass2.argv.join(" "),
             format!(
                 "-i in.mov -map 0:v:0 -map 0:a? -vf {chain} -c:v libx264 -b:v 1190000 \
-                 -pass 2 -passlogfile /s/out.convkit-pass -pix_fmt yuv420p \
+                 -pass 2 -passlogfile /s/out.convkit-pass -fps_mode cfr -pix_fmt yuv420p \
                  -c:a aac -b:a 96k -movflags +faststart -y /s/out.mp4"
             )
         );
+    }
+
+    /// Pass 2's statistics are read frame by frame, so both passes must
+    /// encode the same frames. Left to itself, ffmpeg picks a frame-rate
+    /// mode from the output format: timestamps as they are for pass 1's
+    /// null muxer, a constant rate for mp4. ffmpeg 6.1 then duplicates a
+    /// frame in pass 2 alone, x264 finds its statistics a frame short, and
+    /// ffmpeg hangs or crashes. Both passes name the mode pass 2's format
+    /// would pick, so neither is left to choose.
+    #[test]
+    fn both_passes_encode_at_the_same_frame_rate_mode() {
+        for (to, flag, mode) in [
+            (Format::Mp4, "-fps_mode", "cfr"),
+            (Format::Mov, "-fps_mode", "cfr"),
+            (Format::Mkv, "-fps_mode:v:0", "vfr"),
+            (Format::Webm, "-fps_mode", "vfr"),
+        ] {
+            let t = two_pass_invocations(
+                to,
+                &h264_aac(),
+                &ResolvedVideo::default(),
+                500_000,
+                Some(96),
+                Path::new("/s/o.convkit-pass"),
+                Path::new("in.mkv"),
+                Path::new("/s/o"),
+            )
+            .unwrap();
+            for argv in [&t.pass1, &t.pass2.argv] {
+                assert!(has(argv, [flag, mode]), "{to:?}: {argv:?}");
+                let modes = argv.iter().filter(|x| x.starts_with("-fps_mode")).count();
+                assert_eq!(modes, 1, "{to:?}: {argv:?}");
+            }
+        }
     }
 
     #[test]
