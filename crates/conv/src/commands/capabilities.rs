@@ -56,10 +56,14 @@ pub fn run(cli: &Cli, format: Option<&str>) -> i32 {
     0
 }
 
-/// The tuning flags whose slots a pair's recipe carries, as flag names.
-/// Scanned from the recipe's own args — the same slots `plan::build_tuned`
-/// validates against, so this listing can never drift from what actually
-/// works.
+/// The tuning flags that apply to a pair, as flag names.
+///
+/// Most are scanned from the recipe's own args: the same slots
+/// `plan::build_tuned` validates against, so those entries cannot drift
+/// from what actually works. Two are keyed on the target instead, because
+/// nothing in the recipe carries them: webm's `--resize` and `--fps`
+/// (its chain is composed at run time) and `--max-size` (a policy over a
+/// whole video conversion, not a slot in one recipe).
 fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     let Some(recipe) = registry::lookup(from, to) else {
         return Vec::new();
@@ -94,6 +98,11 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     if to == Format::Webm {
         push_flag(&mut flags, "--resize");
         push_flag(&mut flags, "--fps");
+    }
+    // --max-size is a policy over a whole video conversion rather than a
+    // slot in one recipe, so it is keyed on the target, not scanned.
+    if convkit_core::sized::is_video_target(to) {
+        push_flag(&mut flags, "--max-size");
     }
     flags
 }

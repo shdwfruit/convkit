@@ -1696,6 +1696,31 @@ fn capabilities_advertises_the_video_chain_flags_for_webm_targets() {
     }
 }
 
+/// `--max-size` sizes the four video targets and nothing else, so it is
+/// listed for mp4 and webm and not for gif, which refuses it by name.
+#[test]
+fn capabilities_lists_max_size_for_video_targets_only() {
+    let assert = conv()
+        .args(["capabilities", "mkv", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let row = |to: &str| {
+        v["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["to"] == to)
+            .unwrap()["tuning"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert!(row("mp4").iter().any(|f| f == "--max-size"));
+    assert!(row("webm").iter().any(|f| f == "--max-size"));
+    assert!(!row("gif").iter().any(|f| f == "--max-size"));
+}
+
 #[test]
 fn a_frame_rate_accepts_integers_decimals_and_rationals() {
     for good in ["24", "30", "29.97", "60", "30000/1001"] {
