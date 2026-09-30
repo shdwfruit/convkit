@@ -1,6 +1,6 @@
 //! Builds the `convkit_core::Resolver` this whole crate runs conversions
-//! and inspections through. Per the brief: "Resolve them via convkit-core's
-//! Resolver rather than assuming PATH" -- every `magick`/`ffmpeg`/`ffprobe`
+//! and inspections through. It resolves them via convkit-core's Resolver
+//! rather than assuming PATH: every `magick`/`ffmpeg`/`ffprobe`
 //! invocation in this crate goes through a `ResolvedBackend` from this
 //! resolver, never a bare `Command::new("magick")`.
 //!

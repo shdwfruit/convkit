@@ -1,10 +1,10 @@
 //! Counts distinct RGB24 triplets in a raw `rgb24` frame dump.
 //!
-//! Built for Task 15's GIF palette calibration
+//! Built for the GIF palette calibration
 //! (`docs/defaults-calibration.md` §2, "GIF via generated palette"): with
 //! no ImageMagick (`magick identify -format %k`) available on the machine
-//! that calibration was measured on, this is the "ffmpeg-based colour
-//! analysis" the task brief allows in its place. It is a general-purpose
+//! that calibration was measured on, this is an ffmpeg-based colour
+//! analysis in its place. It is a general-purpose
 //! measurement tool, not a test -- there is nothing here to assert against,
 //! since the expected colour count depends entirely on the input.
 //!

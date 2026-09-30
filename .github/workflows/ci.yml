@@ -17,8 +17,8 @@ env:
 
 jobs:
   # Runs on a bare runner with NO conversion backends installed. This is the
-  # whole point: convkit's primary test suite (the recipe-snapshot tests --
-  # see docs/superpowers/specs/2026-08-29-convkit-design.md §10.1) asserts
+  # whole point: convkit's primary test suite (the recipe-snapshot tests in
+  # crates/convkit-core/tests/recipes.rs) asserts
   # the exact argv convkit would hand to ffmpeg/magick/pandoc/soffice
   # without ever invoking them, so it must be green with zero backends on
   # PATH on every platform. If this job needs a backend to pass, the
@@ -90,6 +90,9 @@ jobs:
   integration:
     name: integration (ubuntu, real backends)
     runs-on: ubuntu-latest
+    # A few minutes when healthy. A hung backend otherwise holds the job for
+    # GitHub's six-hour default, and its log only appears once the job ends.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -154,6 +157,8 @@ jobs:
     name: integration (windows, real backends)
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: windows-latest
+    # As on ubuntu; the LibreOffice install makes this one slower.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

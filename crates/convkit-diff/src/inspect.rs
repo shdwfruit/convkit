@@ -1,6 +1,6 @@
 //! ImageMagick-backed inspection of a conversion's output: dimensions,
 //! colourspace, orientation, and embedded ICC profile. ImageMagick is the
-//! oracle throughout (per the brief), never the `image` crate or convkit's
+//! oracle throughout, never the `image` crate or convkit's
 //! own backends -- this has to stay independent of whatever engine convkit
 //! is using in order to validly judge it.
 

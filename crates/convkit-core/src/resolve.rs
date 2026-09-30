@@ -118,7 +118,7 @@ pub struct Resolver {
     /// Production code never sets this — see `candidates`'s use of
     /// `managed_dir_for` — so behaviour outside tests is unchanged. It
     /// exists because `%LOCALAPPDATA%\convkit\bin` (or its XDG equivalent)
-    /// is real, shared, and — since Task 14 shipped `conv install` — can
+    /// is real, shared, and — since `conv install` exists — can
     /// genuinely contain a real installed binary on whatever machine the
     /// test suite happens to run on; a test asserting "this backend
     /// resolves to nothing" (or "resolves to exactly this fixture") needs a
@@ -150,7 +150,7 @@ pub struct Resolver {
     probe_timeout_override: Option<Duration>,
     /// Successful resolutions, keyed by backend. `Mutex` rather than
     /// `RefCell` because a `Resolver` is expected to be shared across
-    /// threads in Task 12's rayon batch mode — plain interior mutability
+    /// threads in the rayon batch mode — plain interior mutability
     /// would make `Resolver` `!Sync` and fail to compile there.
     cache: Mutex<HashMap<Backend, ResolvedBackend>>,
 }
@@ -316,8 +316,8 @@ impl Resolver {
     /// `<exe>.exe` on Windows, bare `<exe>` elsewhere. Factored out so
     /// `managed_path` and `candidates` share one spelling of this rule
     /// rather than each independently writing `if cfg!(windows) { ... }`
-    /// (see Task 14 review finding 5: two independent copies is exactly the
-    /// kind of thing that silently drifts).
+    /// (two independent copies are exactly the kind of thing that silently
+    /// drifts).
     fn managed_filename(backend: Backend) -> String {
         let exe = backend.exe_name();
         if cfg!(windows) {
@@ -461,8 +461,7 @@ impl Resolver {
     /// probes `soffice.com` explicitly first, falling back to `soffice.exe`
     /// only when no `.com` is on `PATH` at all -- the same precedence
     /// `well_known` uses for the fixed install locations, applied to `PATH`
-    /// too, per the fix brief's "do the same anywhere else a soffice path
-    /// is constructed or discovered, including the PATH lookup."
+    /// too, as anywhere else a soffice path is constructed or discovered.
     fn which_backend(backend: Backend, exe: &str) -> std::result::Result<PathBuf, which::Error> {
         if cfg!(windows) && backend == Backend::Soffice {
             which::which("soffice.com").or_else(|_| which::which("soffice.exe"))
@@ -1079,8 +1078,8 @@ mod tests {
         assert_eq!(e.remediation.unwrap().managed, None);
     }
 
-    // --- Controller review round 3: version_of used the wrong flag and
-    // ignored stderr, so a real ffmpeg was reported as "unknown" -------------
+    // --- version_of once used the wrong flag and ignored stderr, so a real
+    // ffmpeg was reported as "unknown" ---------------------------------------
 
     /// Writes a script that echoes its *first* argument, with a `-9`
     /// suffix, to stdout and exits 0, so a test can observe exactly which
@@ -1325,8 +1324,8 @@ mod tests {
         assert_eq!(resolved.version, "banner-9.0");
     }
 
-    // --- Controller review round 5: extract a version token, not the
-    // whole banner line, so doctor's tabular column can't be blown out ----
+    // --- Extract a version token, not the whole banner line, so doctor's
+    // tabular column can't be blown out -----------------------------------
 
     #[test]
     fn extracts_the_version_token_from_a_real_ffmpeg_banner() {
@@ -1555,7 +1554,7 @@ mod tests {
         assert!(r.magick_convert_fallback().is_none());
     }
 
-    // --- Task 2: AvailableBackends / check_availability --------------------
+    // --- AvailableBackends / check_availability ----------------------------
 
     #[test]
     fn available_backends_collects_from_an_iterator_of_backends() {
@@ -1670,11 +1669,11 @@ mod tests {
         );
     }
 
-    /// The interaction the fix brief calls out by name: `overrides_only`
+    /// The interaction that matters most here: `overrides_only`
     /// and `Source::Env` must not both apply. It is not enough for
     /// `overrides_only` to happen to work when `CONVKIT_SOFFICE` is unset in
-    /// whatever environment the suite happens to run in -- a developer (or,
-    /// per the fix brief, this project's own dev machine) with
+    /// whatever environment the suite happens to run in -- a developer (or
+    /// this project's own dev machine) with
     /// `CONVKIT_SOFFICE` genuinely exported must see it ignored too, or
     /// `overrides_only` silently stops doing its job on exactly the
     /// machines it exists to guard against.

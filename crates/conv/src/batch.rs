@@ -63,6 +63,29 @@ fn single_job_spinner(cli: &Cli, job_count: usize) -> Option<indicatif::Progress
     Some(pb)
 }
 
+/// The spinner text for a step that is starting: which backend, which step
+/// of how many for a multi-step recipe, and `retry` (see `retry_label`) once
+/// a sized encode has come out over and is being run again.
+fn step_message(name: &str, index: usize, total: usize, retry: Option<&str>) -> String {
+    let detail = match (total > 1, retry) {
+        (true, Some(r)) => format!(" (step {}/{total}, {r})", index + 1),
+        (true, None) => format!(" (step {}/{total})", index + 1),
+        (false, Some(r)) => format!(" ({r})"),
+        (false, None) => String::new(),
+    };
+    format!("running {name}{detail}…")
+}
+
+/// Why a sized encode is running again: the attempt about to start, out of
+/// how many at most, and how far over its target the last one came out.
+fn retry_label(attempt: u32, measured: u64, target: u64) -> String {
+    let over = (measured as f64 / target as f64 - 1.0) * 100.0;
+    format!(
+        "attempt {attempt} of {}, over by {over:.1}%",
+        convkit_core::sized::MAX_ATTEMPTS
+    )
+}
+
 /// The batch exit-code rule: 0 if every job succeeded, the underlying
 /// error's own code if every job failed (so a batch that failed only
 /// because a backend is missing still exits 3), or `BatchPartialFailure`
@@ -87,6 +110,9 @@ pub fn exit_code(results: &[JobResult]) -> i32 {
 /// docs for why): this is the "did it hang?" answer Part 2 exists to give,
 /// and it has to wrap the whole parallel batch, not sum each job's own
 /// elapsed time, since jobs overlap.
+///
+/// `allow_extreme` is the answer to the confirmation `commands/convert.rs`
+/// asked for, passed to every job's `Request`.
 /// # Invariant
 ///
 /// Callers must hand this distinct output paths: the rayon fan-out below
@@ -94,7 +120,7 @@ pub fn exit_code(results: &[JobResult]) -> i32 {
 /// enforced at planning time (`jobs_from`'s collision check — today the
 /// only production source of a multi-job batch). A new multi-job source
 /// must run the same check.
-pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
+pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i32, Duration) {
     let batch_start = Instant::now();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(cli.jobs.unwrap_or_else(num_cpus_or_one))
@@ -130,6 +156,7 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                         output: job.output.clone(),
                         overwrite: cli.overwrite,
                         tuning: cli.tuning(),
+                        allow_extreme,
                     };
                     // I8: the `Event` channel used to be threaded all the
                     // way through with a no-op consumer everywhere —
@@ -142,6 +169,13 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                     // step's full transcript to stderr. `suspend` keeps
                     // those prints from being overdrawn by the live
                     // spinner/bar.
+                    //
+                    // `retry` holds the label of a sized encode that came
+                    // out over. The core starts both passes again at once,
+                    // so a message set on the retry itself would be replaced
+                    // before anyone saw it; the label is folded into each
+                    // step's message instead.
+                    let mut retry: Option<String> = None;
                     let mut on_event = |e: exec::Event| match e {
                         exec::Event::StepStarted {
                             backend,
@@ -149,15 +183,12 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                             total,
                         } => {
                             let Some(pb) = &spinner else { return };
-                            let name = backend.exe_name();
-                            if total > 1 {
-                                pb.set_message(format!(
-                                    "running {name} (step {}/{total})…",
-                                    index + 1
-                                ));
-                            } else {
-                                pb.set_message(format!("running {name}…"));
-                            }
+                            pb.set_message(step_message(
+                                backend.exe_name(),
+                                index,
+                                total,
+                                retry.as_deref(),
+                            ));
                         }
                         exec::Event::StepSpawned { program, argv, .. } if cli.verbose => {
                             let line = format!(
@@ -176,6 +207,11 @@ pub fn run(jobs: Vec<Job>, cli: &Cli) -> (Vec<JobResult>, i32, Duration) {
                                 crate::render::verbose_report_human(backend.exe_name(), &report);
                             print_verbose(&spinner, &bar, text.trim_end());
                         }
+                        exec::Event::SizeRetry {
+                            attempt,
+                            measured,
+                            target,
+                        } => retry = Some(retry_label(attempt, measured, target)),
                         _ => {}
                     };
                     exec::run(&req, &resolver, &mut on_event)
@@ -236,6 +272,7 @@ mod tests {
             backends: vec![],
             remuxed: false,
             elapsed_ms: 0,
+            sizing: None,
         })
     }
 
@@ -286,6 +323,9 @@ mod tests {
             resize: None,
             quality: None,
             colors: None,
+            fps: None,
+            crf: None,
+            max_size: None,
             yes: false,
             no_install: false,
             outdir: None,
@@ -346,6 +386,37 @@ mod tests {
         p
     }
 
+    #[test]
+    fn a_step_message_carries_the_retry_label_when_there_is_one() {
+        assert_eq!(
+            step_message("ffmpeg", 0, 2, None),
+            "running ffmpeg (step 1/2)…"
+        );
+        assert_eq!(
+            step_message("ffmpeg", 1, 2, Some("attempt 2 of 3, over by 10.0%")),
+            "running ffmpeg (step 2/2, attempt 2 of 3, over by 10.0%)…"
+        );
+        assert_eq!(step_message("magick", 0, 1, None), "running magick…");
+        assert_eq!(
+            step_message("ffmpeg", 0, 1, Some("attempt 2 of 3, over by 1.5%")),
+            "running ffmpeg (attempt 2 of 3, over by 1.5%)…"
+        );
+    }
+
+    /// The label counts attempts, as the result's note counts passes, so a
+    /// second attempt is never called "retry 2".
+    #[test]
+    fn the_retry_label_names_the_attempt_and_how_far_over() {
+        assert_eq!(
+            retry_label(2, 11_000_000, 10_000_000),
+            "attempt 2 of 3, over by 10.0%"
+        );
+        assert_eq!(
+            retry_label(3, 10_150_000, 10_000_000),
+            "attempt 3 of 3, over by 1.5%"
+        );
+    }
+
     /// Part 2's own wiring: a real (stubbed-backend) successful job must
     /// come back with `elapsed_ms` set to a real, measured value —
     /// `exec::run` itself always hands back `0` (timing is measured here,
@@ -368,7 +439,7 @@ mod tests {
             to: Format::Jpg,
         };
 
-        let (results, code, _elapsed) = run(vec![job], &cli);
+        let (results, code, _elapsed) = run(vec![job], &cli, false);
         assert_eq!(code, 0);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].to, Format::Jpg);

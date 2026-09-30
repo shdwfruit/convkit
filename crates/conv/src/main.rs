@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod input;
 mod install_prompt;
+mod prompt;
 mod render;
 
 use clap::Parser;

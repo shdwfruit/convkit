@@ -11,7 +11,9 @@ use convkit_core::{Resolver, Tuning};
 )]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
-    /// Input paths, then optionally an output path or a bare `.ext`.
+    /// Input paths, then optionally an output path or a bare `.ext`. With
+    /// `--max-size`, a lone input keeps its format and is written as
+    /// NAME-SIZE.EXT (`clip.mp4` -> `clip-10mb.mp4`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -19,10 +21,10 @@ pub struct Cli {
     pub to: Option<String>,
 
     /// Print the backend command instead of running it.
-    ///
-    /// Not `global`: this only means something for the implicit conversion
-    /// path (no subcommand), so it must not show up in `conv doctor --help`,
-    /// `conv install --help`, etc.
+    // Not `global`: this only means something for the implicit conversion
+    // path (no subcommand), so it must not show up in `conv doctor --help`,
+    // `conv install --help`, etc. A `//` comment, not `///`: clap prints a
+    // field's whole doc comment in `--help`.
     #[arg(long)]
     pub dry_run: bool,
 
@@ -31,9 +33,8 @@ pub struct Cli {
     pub json: bool,
 
     /// Overwrite existing outputs.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment; the same reasoning
-    /// applies to every conversion-only flag below it.
+    // Not `global` -- see `dry_run`'s comment; the same reasoning applies to
+    // every conversion-only flag below it.
     #[arg(short = 'y', long)]
     pub overwrite: bool,
 
@@ -44,17 +45,17 @@ pub struct Cli {
     /// Show each backend command as it is spawned (resolved program, final
     /// argv) and the backend's full output afterwards, on stderr.
     ///
-    /// Not `global` -- see `dry_run`'s doc comment. In a parallel batch the
-    /// lines from different jobs interleave; this is a debugging aid, not a
-    /// machine interface (that's --json's `backend_output`).
+    /// In a parallel batch the lines from different jobs interleave; this is
+    /// a debugging aid, not a machine interface (that's --json's
+    /// `backend_output`).
+    // Not `global` -- see `dry_run`'s comment.
     #[arg(short = 'v', long, conflicts_with = "quiet")]
     pub verbose: bool,
 
-    /// Fit the image within this geometry, aspect preserved: `1600x900`,
-    /// `1600x` (width), `x900` (height), or `50%`. Image conversions only.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment; likewise the two flags
-    /// below.
+    /// Fit within this geometry, aspect preserved: `1600x900`, `1600x`
+    /// (width), `x900` (height), or `50%`. On video and GIF targets this is
+    /// a cap: a source already smaller is left alone.
+    // Not `global` -- see `dry_run`'s comment; likewise the four flags below.
     #[arg(long, value_name = "GEOMETRY", value_parser = parse_resize_geometry)]
     pub resize: Option<String>,
 
@@ -68,10 +69,30 @@ pub struct Cli {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(2..=256))]
     pub colors: Option<u16>,
 
-    /// Assume yes when prompted to install a missing backend — for a script
-    /// that wants the install-then-retry behaviour without a TTY to answer
-    /// the interactive prompt. Contradicts `--no-install`, which asks the
-    /// opposite question ("never install"): passing both is a usage error.
+    /// Cap the frame rate; slower sources are left alone. Video and GIF
+    /// targets only.
+    // Not `global` -- see `dry_run`'s comment, as with the three flags above.
+    #[arg(long, value_name = "RATE", value_parser = parse_frame_rate)]
+    pub fps: Option<String>,
+
+    /// Constant-quality anchor for video targets: 0-51 for mp4/mov/mkv,
+    /// 0-63 for webm. Lower is better.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=63))]
+    pub crf: Option<u8>,
+
+    /// Keep each output at or under this size, choosing resolution, frame
+    /// rate and bitrates to fit. Video targets only. SIZE is a number and a
+    /// unit: 500kb, 10mb, 1.5gb, 10mib. A lone input keeps its format and is
+    /// written as NAME-SIZE.EXT, e.g. clip-10mb.mp4.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "SIZE", value_parser = parse_max_size, conflicts_with = "crf")]
+    pub max_size: Option<convkit_core::size::MaxSize>,
+
+    /// Assume yes to every prompt: installing a missing backend, or
+    /// converting an extreme --max-size target. For a script that wants
+    /// either without a terminal to answer. Contradicts `--no-install`,
+    /// which asks the opposite question ("never install"): passing both is
+    /// a usage error.
     #[arg(long, global = true, conflicts_with = "no_install")]
     pub yes: bool,
 
@@ -82,14 +103,12 @@ pub struct Cli {
     pub no_install: bool,
 
     /// Write outputs into this directory.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment.
+    // Not `global` -- see `dry_run`'s comment.
     #[arg(short = 'o', long)]
     pub outdir: Option<PathBuf>,
 
     /// Parallel jobs in batch mode. Defaults to the core count.
-    ///
-    /// Not `global` -- see `dry_run`'s doc comment.
+    // Not `global` -- see `dry_run`'s comment.
     #[arg(short = 'j', long)]
     pub jobs: Option<usize>,
 
@@ -126,8 +145,8 @@ pub enum Command {
     /// pairs, baked-in defaults, and which tuning flags apply.
     Capabilities {
         /// A format extension, e.g. `jpg` — shows what converts to and
-        /// from it, the defaults its recipes use, and the applicable
-        /// tuning flags (--resize/--quality/--colors).
+        /// from it, the defaults its recipes use, and which tuning flags
+        /// apply.
         format: Option<String>,
     },
     /// List the files here and what each one could be converted into.
@@ -185,6 +204,13 @@ changes nothing, and exits non-zero if anything is.")]
     },
 }
 
+/// A dimension past this is not a size any real raster or frame reaches --
+/// JPEG's own dimension fields are 16 bits and top out at 65535, and
+/// nothing else convkit targets goes further. Refusing it here, rather than
+/// letting it reach the `u32` parse downstream, keeps the error at the edge,
+/// where the message can still name the forms this flag accepts.
+const MAX_GEOMETRY_VALUE: u32 = 65_535;
+
 /// Validates `--resize` down to the five geometry forms convkit supports:
 /// `W`, `WxH`, `Wx`, `xH`, `N%`. Strictly digits plus one `x` or a
 /// trailing `%` — ImageMagick's own geometry grammar also accepts `@`,
@@ -193,12 +219,28 @@ changes nothing, and exits non-zero if anything is.")]
 /// promised.
 fn parse_resize_geometry(s: &str) -> Result<String, String> {
     let all_digits = |t: &str| t.chars().all(|c| c.is_ascii_digit());
+    // A dimension of zero passes `all_digits` but is not a size. magick and
+    // ffmpeg each do something different and surprising with it, and
+    // neither is what was asked for. A dimension over MAX_GEOMETRY_VALUE
+    // passes `all_digits` too, and would otherwise overflow `u32::parse`
+    // downstream.
+    let positive = |t: &str| {
+        !t.is_empty()
+            && all_digits(t)
+            && t.chars().any(|c| c != '0')
+            && t.parse::<u32>().is_ok_and(|n| n <= MAX_GEOMETRY_VALUE)
+    };
     let ok = if let Some(pct) = s.strip_suffix('%') {
-        !pct.is_empty() && all_digits(pct)
+        positive(pct)
     } else if let Some((w, h)) = s.split_once('x') {
-        (!w.is_empty() || !h.is_empty()) && all_digits(w) && all_digits(h)
+        match (w.is_empty(), h.is_empty()) {
+            (true, true) => false,
+            (true, false) => positive(h),
+            (false, true) => positive(w),
+            (false, false) => positive(w) && positive(h),
+        }
     } else {
-        !s.is_empty() && all_digits(s)
+        positive(s)
     };
     if ok {
         Ok(s.to_string())
@@ -209,14 +251,56 @@ fn parse_resize_geometry(s: &str) -> Result<String, String> {
     }
 }
 
+/// Validates `--fps` down to the three forms convkit supports: an integer,
+/// a decimal, or an `N/D` rational. ffmpeg's `fps` filter accepts a great
+/// deal more -- expressions, `source_fps`, constants -- and letting those
+/// through would make the flag a side-channel into ffmpeg's filter grammar
+/// this help text never promised, exactly as `parse_resize_geometry`
+/// refuses magick's `@ ! < > ^`.
+///
+/// Zero is refused at both ends: a zero rate is not a slower rate, and a
+/// zero denominator divides by zero wherever the cap is compared.
+fn parse_frame_rate(s: &str) -> Result<String, String> {
+    let bad =
+        || format!("frame rate must be N, N.N, or N/D (e.g. 24, 29.97, 30000/1001), got {s:?}");
+    let positive = |t: &str| -> bool {
+        !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) && t.chars().any(|c| c != '0')
+    };
+    let ok = if let Some((n, d)) = s.split_once('/') {
+        positive(n) && positive(d)
+    } else if let Some((w, f)) = s.split_once('.') {
+        !f.is_empty()
+            && f.chars().all(|c| c.is_ascii_digit())
+            && w.chars().all(|c| c.is_ascii_digit())
+            && (positive(w) || f.chars().any(|c| c != '0'))
+    } else {
+        positive(s)
+    };
+    if ok {
+        Ok(s.to_string())
+    } else {
+        Err(bad())
+    }
+}
+
+/// The whole grammar lives in `convkit_core::size` so a library caller
+/// gets exactly the same answer; this only adapts it to clap.
+fn parse_max_size(s: &str) -> Result<convkit_core::size::MaxSize, String> {
+    convkit_core::size::parse(s)
+}
+
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
-    /// unless one of `--resize`/`--quality`/`--colors` was passed.
+    /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
+    /// `--max-size` was passed.
     pub fn tuning(&self) -> Tuning {
         Tuning {
             resize: self.resize.clone(),
             quality: self.quality,
             colors: self.colors,
+            fps: self.fps.clone(),
+            crf: self.crf,
+            max_size: self.max_size.clone(),
         }
     }
 
@@ -244,6 +328,8 @@ impl Cli {
 mod tests {
     use std::path::Path;
 
+    use clap::Parser;
+
     use super::*;
     use convkit_core::Backend;
 
@@ -259,6 +345,9 @@ mod tests {
             resize: None,
             quality: None,
             colors: None,
+            fps: None,
+            crf: None,
+            max_size: None,
             yes: false,
             no_install: false,
             outdir: None,
@@ -306,5 +395,21 @@ mod tests {
                 "{backend:?}: wrong override made it through Cli::resolver()"
             );
         }
+    }
+
+    #[test]
+    fn max_size_parses_and_rejects_a_bare_number() {
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--max-size", "10MB"]).unwrap();
+        assert_eq!(c.max_size.as_ref().unwrap().bytes, 10_000_000);
+        assert_eq!(c.tuning().max_size, c.max_size);
+        let e = Cli::try_parse_from(["conv", "a.mp4", "--max-size", "10"]).unwrap_err();
+        assert!(e.to_string().contains("add a unit"), "{e}");
+    }
+
+    #[test]
+    fn max_size_and_crf_conflict() {
+        let e = Cli::try_parse_from(["conv", "a.mp4", "--max-size", "10mb", "--crf", "20"])
+            .unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

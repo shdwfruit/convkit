@@ -2,35 +2,19 @@
 //! making the user read a `backend_missing` error, run `conv install
 //! <backend>` by hand, then re-run their original command.
 //!
-//! Everything here lives in the `conv` binary, never in `convkit-core` —
-//! the hard constraint the brief calls out ("`convkit-core` must never
-//! prompt or print"). `convkit-core` keeps returning the same structured
+//! Everything here lives in the `conv` binary, never in `convkit-core`,
+//! which must never prompt or print. `convkit-core` keeps returning the same structured
 //! `ConvError` it always has; this module decides whether to ask the user
 //! about it, and `commands/convert.rs` decides what to do with the answer.
-
-use std::io::{IsTerminal, Write};
 
 use convkit_core::{manifest, Backend};
 
 use crate::cli::Cli;
 
-/// Whether this process can prompt at all: both stdin (where the answer
-/// comes from) and stderr (where the question is printed, matching every
-/// other progress line this binary emits — see `commands/install.rs`'s own
-/// "downloading ..." line) must be real terminals. `std::io::IsTerminal` is
-/// the standard-library detector — correct on a Windows console as well as
-/// a Unix pty, unlike a hand-rolled guess — so piped stdin (a script, a CI
-/// runner, `conv ... < /dev/null`) is reliably detected and never made to
-/// hang waiting for an answer that will never come.
-fn is_interactive_session() -> bool {
-    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
-}
-
-/// The exact text of the yes/no prompt for `backend`. Pulled out of
-/// `prompt_yes_no` as a pure function, with no stdin/stderr of its own, so
-/// its wording can be unit-tested directly rather than only through a real
-/// TTY (which, per `should_install`'s own tests, this suite can't drive
-/// deterministically in CI).
+/// The exact text of the yes/no prompt for `backend`. A pure function, with
+/// no stdin/stderr of its own, so its wording can be unit-tested directly
+/// rather than only through a real TTY (which, per `should_install`'s own
+/// tests, this suite can't drive deterministically in CI).
 ///
 /// When `backend`'s managed download also provisions another backend (see
 /// `manifest::bundled_with` — today: `ffprobe` and `ffmpeg` share one
@@ -49,22 +33,6 @@ fn prompt_message(backend: Backend) -> String {
         "{} is required for this conversion and isn't installed.\nInstall it now?{also} [y/N] ",
         backend.exe_name()
     )
-}
-
-/// Prints the yes/no prompt to stderr and reads one line of stdin. Any read
-/// failure (EOF, a stream error) is treated as "no" — the same conservative
-/// default an unanswered prompt gets — rather than propagating an error
-/// through a path that must never panic or hang.
-fn prompt_yes_no(backend: Backend) -> bool {
-    let mut stderr = std::io::stderr();
-    let _ = write!(stderr, "{}", prompt_message(backend));
-    let _ = stderr.flush();
-
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// Decides whether to install `backend` and retry, for a conversion that
@@ -98,7 +66,7 @@ pub fn should_install(cli: &Cli, backend: Backend) -> bool {
     if cli.yes {
         return true;
     }
-    is_interactive_session() && prompt_yes_no(backend)
+    crate::prompt::is_interactive_session() && crate::prompt::ask(&prompt_message(backend))
 }
 
 #[cfg(test)]
@@ -113,7 +81,7 @@ mod tests {
     /// overrides.
     ///
     /// Deliberately never exercises the final `is_interactive_session() &&
-    /// prompt_yes_no(...)` fall-through: that branch reads the real
+    /// ask(...)` fall-through: that branch reads the real
     /// process's stdin, and under `cargo test` stdin's terminal-ness
     /// depends on how the test binary itself was launched — inside a real
     /// interactive console, reaching that branch would call `read_line`
@@ -135,6 +103,9 @@ mod tests {
             resize: None,
             quality: None,
             colors: None,
+            fps: None,
+            crf: None,
+            max_size: None,
             yes,
             no_install,
             outdir: None,

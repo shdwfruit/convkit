@@ -101,6 +101,31 @@ problem or a scope multiplier:
 - Any cloud or API-key-based conversion path
 - A GUI
 
+### 3.1 Video and GIF knob non-goals
+
+Decided later, during the video-tuning-knobs work that added `--fps` and
+`--crf` and widened `--resize` to video — recorded here rather than left
+in one session's notes, which is how a decision gets silently
+re-litigated:
+
+- **No frame interpolation.** `minterpolate` is enormously expensive and
+  invents motion that was never recorded — warped edges, artefacts
+  around occlusion. `--fps` only ever removes frames; interpolation, if
+  ever wanted, is a different flag with a different name, so nobody
+  reaches for it by accident.
+- **No exact frame rate.** `--fps` is a cap. Forcing a slow source up to
+  a declared rate duplicates frames to no benefit.
+- **`--pad` deferred, not dropped.** It is the operation nearest the
+  crop-and-distort family this project refuses — `--resize` always fits
+  within the target geometry with aspect preserved, never cropping to
+  it or stretching to it — so `--pad` needs its own rationale before it
+  needs an implementation. Until now this deferral existed only in one
+  session's notes.
+- **Video `--resize` caps where image `--resize` scales up.** Measured:
+  `magick -resize 1600x900` on a 320x240 source produces 1200x900.
+  Upscaling an image is cheap and occasionally wanted; upscaling video
+  invents no detail and pays for the invention in every frame.
+
 ## 4. Product shape
 
 One sentence: *the file conversion command you should have typed, that works
@@ -212,6 +237,47 @@ Rules:
 `rayon`, bounded to the core count by default and overridable with `-j`.
 `indicatif` for progress. Continue on error; collect failures into a summary
 table (or a JSON array under `--json`) and exit non-zero.
+
+### 5.7 Size targets
+
+Added after v1, for the four video targets. `--max-size` is a policy over
+the knobs rather than another knob: given a size, it chooses their values.
+The budget weighs every combination of a resolution step, an even division
+of the source frame rate, and an audio rate, scoring each on one quality
+scale anchored to VMAF: picture loss (resolution and compression artefacts
+together), frame-rate loss and audio loss, with each curve steeper the
+further it falls. Loss is measured from what the user allowed, not from the
+source, so a `--resize` or `--fps` ceiling is a limit the choice stays
+within and its own reduction is not counted as damage. Convexity is the
+whole design: it makes many small cuts cheaper than one large one, so loss
+spreads across the dials without a rule saying it should. There is one
+rule, for a target too small to look good: there the picture scores near
+zero whatever it is given, the cost stops weighing frames against pictures,
+and the cheapest choice would keep every frame of a 144 fps clip at 240p.
+So such a choice keeps no faster frame rate than the choice at the size
+conv suggests instead, and the frames it drops are still counted as loss.
+A retry that has stepped the picture down so far that no size would look
+good has no suggestion of its own; it takes the frame rate from the size
+conv would suggest without that step.
+
+The target is a ceiling, met by a two-pass encode at the chosen bitrate and
+measured afterwards. A result that comes out over is planned again against
+a smaller budget and encoded again, both passes, so that pass 1's statistics
+always describe the encode they guide. Re-running pass 2 alone does not
+converge on footage the encoder cannot compress further at that picture
+size: it saturates, and only a smaller picture gets under. So an attempt
+whose video overshot the rate it was asked for also steps the next one down
+a resolution. There are at most three attempts, and a result still over is
+kept and flagged, never discarded.
+
+A target too small to look good is not refused; conv asks first, because
+the result is usually not worth keeping, and a script opts in with `--yes`.
+Consent holds through the retries: a re-plan never escalates to extreme
+compression the user has not allowed, and stops with the last attempt kept
+and flagged instead. The core holds that gate itself, as it holds overwrite,
+so a frontend that skips the prompt cannot skip the question. The
+calibration behind the curves, and where the line for "too small" sits, is
+in [defaults-calibration.md](defaults-calibration.md#size-targets---max-size).
 
 ## 6. The v1 conversion table
 

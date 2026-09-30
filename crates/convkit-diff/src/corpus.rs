@@ -1,7 +1,7 @@
 //! Corpus handling: walking an arbitrary directory of files (synthetic or
 //! user-supplied -- "the owner may point this at a real photo library
-//! later"), and `gen-corpus`'s synthesis of the adversarial fixtures named
-//! in the harness brief: every EXIF orientation, a non-sRGB ICC profile,
+//! later"), and `gen-corpus`'s synthesis of the adversarial fixtures this
+//! harness needs: every EXIF orientation, a non-sRGB ICC profile,
 //! progressive/CMYK JPEG, palette/16-bit/alpha PNG, palette/grayscale
 //! TIFF, a transparent SVG, and a multi-frame GIF -- plus the two real
 //! fixtures already in the repo (`photo.heic`, `clip.mp4`).
@@ -90,7 +90,7 @@ fn workspace_fixture(name: &str) -> Option<PathBuf> {
 }
 
 /// Generates the full adversarial + real-fixture corpus described in the
-/// harness brief into `out_dir` (created if missing). Returns every file
+/// module docs into `out_dir` (created if missing). Returns every file
 /// written, plus human-readable notes about anything skipped (a real
 /// fixture that couldn't be located) -- never a hard error for that case,
 /// since a corpus missing one nice-to-have fixture is still a working

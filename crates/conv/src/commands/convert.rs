@@ -1,8 +1,9 @@
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use convkit_core::{
-    plan, probe, registry, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe, Outcome,
-    Resolver,
+    plan, probe, registry, sized, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe,
+    Outcome, Resolver, Tuning,
 };
 use serde_json::json;
 
@@ -11,6 +12,7 @@ use crate::cli::Cli;
 use crate::commands::install;
 use crate::input;
 use crate::install_prompt;
+use crate::prompt::{self, Gate};
 use crate::render;
 
 pub fn run(cli: &Cli) -> i32 {
@@ -26,11 +28,19 @@ pub fn run(cli: &Cli) -> i32 {
         return dry_run(&jobs, cli);
     }
 
+    let (allow_extreme, mut shown) = match confirm_extreme(&jobs, cli) {
+        Ok(c) => (c.allowed || cli.yes, c.shown),
+        Err(e) => {
+            render::print_error(cli.json, &e);
+            return e.code.exit_code();
+        }
+    };
+
     // Kept alongside `results` so a retry below can re-run exactly the jobs
     // that failed on a missing backend — `JobResult` alone has nothing to
     // hand back to `batch::run`, only what came out of it.
     let original_jobs = jobs.clone();
-    let (mut results, mut code, mut elapsed) = batch::run(jobs, cli);
+    let (mut results, mut code, mut elapsed) = batch::run(jobs, cli, allow_extreme);
 
     // --- Part 1: offer to install a missing backend, then retry once -----
     //
@@ -56,7 +66,26 @@ pub fn run(cli: &Cli) -> i32 {
                         .iter()
                         .map(|&i| original_jobs[i].clone())
                         .collect();
-                    let (retry_results, _, _) = batch::run(retry_jobs, cli);
+                    // An answer already given stands for the retried jobs
+                    // too. Only when the first pass could not preview (it
+                    // needs ffprobe, which may be exactly what was just
+                    // installed) is there nothing to reuse, so ask now.
+                    let allow = if allow_extreme {
+                        true
+                    } else {
+                        match confirm_extreme(&retry_jobs, cli) {
+                            Ok(c) => {
+                                shown.extend(c.shown);
+                                c.allowed
+                            }
+                            Err(e) => {
+                                render::print_error(cli.json, &e);
+                                print_results(&results, cli, elapsed, &shown);
+                                return e.code.exit_code();
+                            }
+                        }
+                    };
+                    let (retry_results, _, _) = batch::run(retry_jobs, cli, allow);
                     for (idx, new_result) in retry_indices.into_iter().zip(retry_results) {
                         results[idx] = new_result;
                     }
@@ -82,8 +111,119 @@ pub fn run(cli: &Cli) -> i32 {
         }
     }
 
-    print_results(&results, cli, elapsed);
+    print_results(&results, cli, elapsed, &shown);
     code
+}
+
+/// What `confirm_extreme` decided, and what it printed.
+#[derive(Debug, Default)]
+struct Confirmation {
+    /// Extreme jobs may run. False when nothing extreme was found (a preview
+    /// that fails is not an answer; the real run reports that failure
+    /// itself).
+    allowed: bool,
+    /// The warning printed for each extreme job, by input, before it ran.
+    /// Its result carries the same sentence as a note, which the human
+    /// output does not print twice.
+    shown: Vec<(PathBuf, String)>,
+}
+
+/// Previews every `--max-size` job and, when any is extreme, prints why and
+/// asks once for the whole batch. `Err`: not confirmed, so nothing may run.
+fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvError> {
+    if cli.max_size.is_none() {
+        return Ok(Confirmation::default());
+    }
+    let resolver = cli.resolver();
+    let tuning = cli.tuning();
+    let extreme: Vec<(&input::Job, sized::SizingPlan)> = jobs
+        .iter()
+        .filter_map(|job| {
+            // Cannot run, and `batch::run` will say so; not worth a question.
+            if job.output.exists() && !cli.overwrite {
+                return None;
+            }
+            let sz = sized::preview(job.from, job.to, &job.inputs[0], &tuning, &resolver)
+                .ok()
+                .flatten()?;
+            // The core words every extreme choice; a plan with nothing to
+            // say has nothing to ask about.
+            sz.warning.as_ref()?;
+            sz.choice
+                .as_ref()
+                .is_some_and(|c| c.extreme)
+                .then_some((job, sz))
+        })
+        .collect();
+    if extreme.is_empty() {
+        return Ok(Confirmation::default());
+    }
+    let mut shown = Vec::new();
+    if !cli.json {
+        let args = typed_args();
+        let entries: Vec<(&Path, &str, Option<&str>)> = extreme
+            .iter()
+            .filter_map(|(job, sz)| {
+                Some((
+                    job.inputs[0].as_path(),
+                    sz.warning.as_deref()?,
+                    sz.suggested.as_deref(),
+                ))
+            })
+            .collect();
+        eprint!(
+            "{}",
+            render::extreme_warnings_human(&entries, jobs.len(), &args, render::stderr_styled())
+        );
+        shown = entries
+            .iter()
+            .map(|(input, warning, _)| (input.to_path_buf(), (*warning).to_string()))
+            .collect();
+    }
+    let allowed = Confirmation {
+        allowed: true,
+        shown,
+    };
+    let refusal = || {
+        if let [(job, sz)] = extreme.as_slice() {
+            if jobs.len() == 1 {
+                return sized::confirmation_error(&job.inputs[0], sz);
+            }
+        }
+        ConvError::new(
+            ErrorCode::ConfirmationRequired,
+            format!(
+                "extreme compression not confirmed for {} of {} files; pass --yes to convert anyway",
+                extreme.len(),
+                jobs.len()
+            ),
+        )
+    };
+    match prompt::extreme_gate(
+        cli.yes,
+        cli.json,
+        cli.quiet,
+        prompt::is_interactive_session(),
+    ) {
+        Gate::Proceed => Ok(allowed),
+        Gate::Refuse => Err(refusal()),
+        Gate::Ask => {
+            let question = if jobs.len() == 1 {
+                "Convert anyway? [y/N] ".to_string()
+            } else {
+                format!(
+                    "{} of {} conversions are extreme. Convert anyway? [y/N] ",
+                    extreme.len(),
+                    jobs.len()
+                )
+            };
+            if prompt::ask(&question) {
+                Ok(allowed)
+            } else {
+                Err(refusal())
+            }
+        }
+    }
 }
 
 /// The single backend to offer installing, given this batch's results —
@@ -114,15 +254,35 @@ fn failed_on_missing_backend(result: &Result<Outcome, ConvError>, backend: Backe
 }
 
 /// Probes the input when, and only when, this pair might be satisfiable by a
-/// stream copy — mirrors `exec::run`'s own gate exactly (`registry::
-/// needs_probe`), so `--dry-run` and the real run it previews always agree
-/// on whether a probe happens at all. `ffprobe` missing, or the probe itself
-/// failing, is swallowed into `None` here exactly as it is in `exec::run`:
-/// both conservatively fall back to a transcode preview rather than turning
-/// "no ffprobe" into its own dry-run failure mode.
-fn probed_for(resolver: &Resolver, job: &input::Job) -> Option<MediaProbe> {
-    if !registry::needs_probe(job.from, job.to) {
-        return None;
+/// stream copy, or a video knob needs a source to cap against — mirrors
+/// `exec::run`'s own gate exactly (`registry::needs_probe_tuned`), so
+/// `--dry-run` and the real run it previews always agree on whether a probe
+/// happens at all. Where a probe is optional, `ffprobe` missing or the probe
+/// itself failing is swallowed into `None` here exactly as it is in
+/// `exec::run`: both conservatively fall back to a transcode preview rather
+/// than turning "no ffprobe" into its own dry-run failure mode. Where a knob
+/// can *only* be honoured with a probe (`registry::requires_probe`), that
+/// failure is the preview's real answer, as it is `exec::run`'s.
+fn probed_for(
+    resolver: &Resolver,
+    job: &input::Job,
+    tuning: &Tuning,
+) -> Result<Option<MediaProbe>, ConvError> {
+    // A knob that can only be honoured with a probe: a missing ffprobe or
+    // a missing input is this preview's real answer, exactly as it is
+    // `exec::run`'s (see `registry::requires_probe`).
+    if registry::requires_probe(job.from, job.to, tuning) {
+        if !job.inputs[0].is_file() {
+            return Err(ConvError::new(
+                ErrorCode::InputNotFound,
+                format!("input not found: {}", job.inputs[0].display()),
+            ));
+        }
+        let ffprobe = resolver.resolve(Backend::Ffprobe)?;
+        return probe::run(&ffprobe.path, &job.inputs[0]).map(Some);
+    }
+    if !registry::needs_probe_tuned(job.from, job.to, tuning) {
+        return Ok(None);
     }
     // `--dry-run` is documented as inert, but ffprobe honours URLs and
     // device paths, so probing the raw positional would turn a preview of
@@ -131,12 +291,12 @@ fn probed_for(resolver: &Resolver, job: &input::Job) -> Option<MediaProbe> {
     // anything else falls back to the conservative transcode preview the
     // no-probe path already produces.
     if !job.inputs[0].is_file() {
-        return None;
+        return Ok(None);
     }
-    resolver
+    Ok(resolver
         .resolve(Backend::Ffprobe)
         .ok()
-        .and_then(|p| probe::run(&p.path, &job.inputs[0]).ok())
+        .and_then(|p| probe::run(&p.path, &job.inputs[0]).ok()))
 }
 
 /// Checks backend availability when, and only when, this pair has more
@@ -159,25 +319,36 @@ fn available_for(resolver: &Resolver, job: &input::Job) -> Option<AvailableBacke
 /// human mode. A bad job among several others never erases the preview for
 /// the rest, the same tolerance `batch::run` gives a real execution.
 ///
-/// C3: probes first on any pair that might remux (`probed_for`, gated on
-/// `registry::needs_probe` exactly like `exec::run`), so the preview shown
-/// here is the *exact* command a real run would use — not the conservative
-/// transcode `plan::build` falls back to with no probe. `plan::build`
-/// itself stays pure; the probe runs here, in the caller, and its result is
-/// passed in, the same split `exec::run` already uses between itself and
-/// `plan::build`.
+/// C3: probes first on any pair that might remux, or that a video knob
+/// needs a source to cap against (`probed_for`, gated on
+/// `registry::needs_probe_tuned` exactly like `exec::run`), so the preview
+/// shown here is the *exact* command a real run would use — not the
+/// conservative transcode `plan::build` falls back to with no probe.
+/// `plan::build` itself stays pure; the probe runs here, in the caller, and
+/// its result is passed in, the same split `exec::run` already uses between
+/// itself and `plan::build`.
 ///
-/// Task 2 applies the identical lesson to backend availability: a docx/odt
-/// -> pdf dry-run must preview the pandoc+typst command when soffice is
+/// The same holds for backend availability: a docx/odt -> pdf dry-run must
+/// preview the pandoc+typst command when soffice is
 /// absent, not the (unusable) soffice one — `available_for` (gated on
 /// `registry::has_fallback` exactly like `exec::run`'s own check) is what
 /// makes that true.
+///
+/// A knob that wanted a probe but did not get one (`ffprobe` missing, the
+/// probe itself failing, or the input not being a real file) gets no note
+/// of its own here. `video::resolve` runs above `plan::build_tuned`'s probe
+/// branch, on *every* path, including this one with `probed: None`, and
+/// pushes "Source frame rate could not be determined; --fps N was applied
+/// as given." onto the plan's own warnings for exactly this case, on a real
+/// run and not only a preview. A note here as well would print two notes
+/// about one missing probe.
 fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
     let resolver = cli.resolver();
+    let tuning = cli.tuning();
     let results: Vec<_> = jobs
         .iter()
         .map(|job| {
-            let probed = probed_for(&resolver, job);
+            let probed = probed_for(&resolver, job, &tuning)?;
             let available = available_for(&resolver, job);
             plan::build_tuned(
                 job.from,
@@ -186,7 +357,7 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
                 &job.output,
                 probed.as_ref(),
                 available.as_ref(),
-                &cli.tuning(),
+                &tuning,
             )
         })
         .collect();
@@ -234,7 +405,15 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
 /// per-job failure lines, drop per-job success spam." `--quiet` silences
 /// every success line (single or batch summary) but never a failure line —
 /// "silences everything except errors."
-fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
+///
+/// `shown` is what `confirm_extreme` printed before the run: a note that
+/// repeats it word for word, for the same input, is not printed again.
+fn print_results(
+    results: &[batch::JobResult],
+    cli: &Cli,
+    elapsed: Duration,
+    shown: &[(PathBuf, String)],
+) {
     if cli.json {
         let arr: Vec<serde_json::Value> = results
             .iter()
@@ -255,6 +434,14 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
 
     let styled_out = render::stdout_styled();
     let styled_err = render::stderr_styled();
+    let args = typed_args();
+    let shown_for = |input: &Path| -> Vec<&str> {
+        shown
+            .iter()
+            .filter(|(i, _)| i == input)
+            .map(|(_, w)| w.as_str())
+            .collect()
+    };
 
     if let [r] = results {
         match &r.result {
@@ -266,7 +453,11 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
                 // --quiet: "silences everything except errors" — and a
                 // conversion that dropped your images is in the errors'
                 // half of that bargain, exit code notwithstanding.
-                eprint!("{}", render::conversion_notes_human("", o, styled_err));
+                eprint!(
+                    "{}",
+                    render::conversion_notes_human("", o, &shown_for(&r.input), styled_err)
+                );
+                eprint!("{}", render::sizing_hint_human("", o, &args, styled_err));
             }
             Err(e) => {
                 eprint!(
@@ -291,7 +482,13 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
             }
             Ok(o) => {
                 let label = r.input.display().to_string();
-                err.push_str(&render::conversion_notes_human(&label, o, styled_err));
+                err.push_str(&render::conversion_notes_human(
+                    &label,
+                    o,
+                    &shown_for(&r.input),
+                    styled_err,
+                ));
+                err.push_str(&render::sizing_hint_human(&label, o, &args, styled_err));
             }
         }
     }
@@ -303,6 +500,17 @@ fn print_results(results: &[batch::JobResult], cli: &Cli, elapsed: Duration) {
             render::batch_summary_human(results, elapsed, styled_out)
         );
     }
+}
+
+/// The command line as `main` parsed it, without the program name, for the
+/// "try this instead" lines. Lossy, because the line is only shown, and a byte
+/// sequence that is not UTF-8 (which clap accepts as a path) would panic
+/// `env::args`.
+fn typed_args() -> Vec<String> {
+    wild::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// The batch exit-code rule, shared in spirit with `batch::run`: 0 if every
@@ -330,7 +538,7 @@ mod tests {
     /// Writes a stub standing in for `ffprobe`. Responds to a bare
     /// `-version` probe (as `Resolver::resolve` issues on every backend it
     /// finds) with a no-op success, and to anything else — the real
-    /// `-v quiet -print_format json -show_streams <input>` invocation
+    /// `-v quiet -print_format json -show_streams -show_format <input>` invocation
     /// `probe::run` issues — with a fixed, compatible-codec JSON payload on
     /// stdout. Named arbitrarily (not `ffprobe.exe`/`ffprobe`) because this
     /// is registered via `Resolver::with_override`, which — unlike the
@@ -403,7 +611,9 @@ mod tests {
             from: convkit_core::Format::Mkv,
             to: convkit_core::Format::Mp4,
         };
-        let probed = probed_for(&r, &j).expect("must probe a remuxable pair");
+        let probed = probed_for(&r, &j, &Tuning::default())
+            .unwrap()
+            .expect("must probe a remuxable pair");
         assert_eq!(probed.video_codec.as_deref(), Some("h264"));
         assert_eq!(probed.audio_codec(), Some("aac"));
     }
@@ -426,7 +636,10 @@ mod tests {
                 input,
                 "out.mp4",
             );
-            assert!(probed_for(&r, &j).is_none(), "{input} must not be probed");
+            assert!(
+                probed_for(&r, &j, &Tuning::default()).unwrap().is_none(),
+                "{input} must not be probed"
+            );
         }
     }
 
@@ -442,10 +655,65 @@ mod tests {
             "in.pdf",
             "out.docx",
         );
-        assert!(probed_for(&r, &j).is_none());
+        assert!(probed_for(&r, &j, &Tuning::default()).unwrap().is_none());
     }
 
-    // --- Task 2: available_for -----------------------------------------------
+    /// A webm video knob can only be honoured with a probe
+    /// (`registry::requires_probe`), so the preview, like the real run,
+    /// answers with the real cause instead of a conservative transcode
+    /// preview that would then refuse the flag.
+    #[test]
+    fn probed_for_reports_a_webm_video_knobs_missing_probe_as_the_real_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_ffprobe_stub(dir.path());
+        let fps = Tuning {
+            fps: Some("15".into()),
+            ..Default::default()
+        };
+
+        // Input missing: named, not skipped.
+        let mut with_stub = Resolver::new();
+        with_stub.with_override(Backend::Ffprobe, stub.clone());
+        let j = job(
+            convkit_core::Format::Mp4,
+            convkit_core::Format::Webm,
+            "definitely-missing.mp4",
+            "out.webm",
+        );
+        let e = probed_for(&with_stub, &j, &fps).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InputNotFound, "{}", e.message);
+
+        // Input present, ffprobe resolvable: probed.
+        let input = dir.path().join("in.mp4");
+        std::fs::write(&input, b"x").unwrap();
+        let j = job(
+            convkit_core::Format::Mp4,
+            convkit_core::Format::Webm,
+            input.to_str().unwrap(),
+            "out.webm",
+        );
+        let probed = probed_for(&with_stub, &j, &fps).unwrap().unwrap();
+        assert_eq!(probed.video_codec.as_deref(), Some("h264"));
+
+        // Input present, no ffprobe anywhere: backend_missing, naming it.
+        let mut none = Resolver::new();
+        none.overrides_only();
+        let e = probed_for(&none, &j, &fps).unwrap_err();
+        assert_eq!(e.code, ErrorCode::BackendMissing, "{}", e.message);
+        assert_eq!(e.backend, Some(Backend::Ffprobe));
+
+        // The same missing ffprobe is still swallowed where a probe is only
+        // an optimisation (an untuned remux, or a tuned mp4 target).
+        let j = job(
+            convkit_core::Format::Mkv,
+            convkit_core::Format::Mp4,
+            input.to_str().unwrap(),
+            "out.mp4",
+        );
+        assert!(probed_for(&none, &j, &fps).unwrap().is_none());
+    }
+
+    // --- available_for -------------------------------------------------------
 
     /// A minimal script that exits 0 no matter what it's invoked with
     /// (including a bare version probe, either dash convention) — stands in
@@ -543,6 +811,7 @@ mod tests {
                 backends: vec![],
                 remuxed: false,
                 elapsed_ms: 1,
+                sizing: None,
             }),
         }
     }

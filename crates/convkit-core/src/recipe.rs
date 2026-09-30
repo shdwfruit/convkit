@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::video::ResolvedVideo;
 use crate::Backend;
 
 /// User-facing tuning for one invocation — the first parameter surface in
@@ -24,11 +25,97 @@ pub struct Tuning {
     pub quality: Option<u8>,
     /// 2–256, palette reduction on raster targets.
     pub colors: Option<u16>,
+    /// Frame-rate cap for video and GIF targets: `24`, `29.97`, or
+    /// `30000/1001`. A cap, never a floor -- see `video::resolve`.
+    ///
+    /// Held as the user's own string, not a parsed rational: the exact
+    /// text reaches ffmpeg, so `30000/1001` stays exact in the argv.
+    pub fps: Option<String>,
+    /// Constant-quality anchor for video targets. Unlike the two geometry
+    /// knobs this is not clamped against the source: it is an anchor, not
+    /// a bound.
+    pub crf: Option<u8>,
+    /// A size ceiling for video targets. Not a knob but a policy: when set,
+    /// `plan::build_tuned` hands the conversion to `sized::plan`, which
+    /// chooses the resolution, frame rate and bitrates itself.
+    pub max_size: Option<crate::size::MaxSize>,
 }
 
 impl Tuning {
     pub fn is_empty(&self) -> bool {
-        self.resize.is_none() && self.quality.is_none() && self.colors.is_none()
+        self.resize.is_none()
+            && self.quality.is_none()
+            && self.colors.is_none()
+            && self.fps.is_none()
+            && self.crf.is_none()
+            && self.max_size.is_none()
+    }
+}
+
+/// How a recipe spells its width cap, and what it scales with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScaleStyle {
+    /// No authored scale. A tuned cap composes in front of `tail`, which
+    /// for every libx264 target is the even-dimension guard.
+    Guarded,
+    /// GIF's capped lanczos downscale, whose width the tuning overrides.
+    /// Needs no even guard, for one reason and not two: GIF has no
+    /// yuv420p constraint at all. (`h=-2` appears in only one of the four
+    /// geometry forms, so it cannot be the reason.)
+    CappedLanczos { default_width: &'static str },
+}
+
+/// The parts of one `-vf` value, so it can be composed at render time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoChainSpec {
+    /// Filters that must run before the tuned head. Empty for every recipe
+    /// but the GIF tonemap sibling, whose HDR->SDR mapping has to see the
+    /// source signal before anything decimates or resamples it. Carries its
+    /// own trailing comma.
+    pub prefix: &'static str,
+    /// The frame-rate cap this recipe authored. GIF authors "15"; the
+    /// transcodes carry the source rate and author `None`.
+    pub fps: Option<&'static str>,
+    /// How this recipe spells a width cap.
+    pub scale: ScaleStyle,
+    /// Everything after the tuned head, verbatim.
+    pub tail: &'static str,
+}
+
+impl VideoChainSpec {
+    /// Builds the one `-vf` value.
+    ///
+    /// Untuned, this reproduces byte for byte the constant the
+    /// `Arg::VideoChain` variant replaced -- which is not a property to be
+    /// checked afterwards but the reason the struct is shaped head + tail.
+    /// It is what keeps `tests/recipes.rs`'s snapshot green.
+    pub fn compose(&self, resolved: &ResolvedVideo) -> String {
+        let mut out = String::from(self.prefix);
+        if let Some(f) = resolved.fps.as_deref().or(self.fps) {
+            out.push_str("fps=");
+            out.push_str(f);
+            out.push(',');
+        }
+        match (&resolved.scale, &self.scale) {
+            // A user width must not silently downgrade the resampler the
+            // recipe chose.
+            (Some(s), ScaleStyle::CappedLanczos { .. }) => {
+                out.push_str(s);
+                out.push_str(":flags=lanczos,");
+            }
+            (Some(s), ScaleStyle::Guarded) => {
+                out.push_str(s);
+                out.push(',');
+            }
+            (None, ScaleStyle::CappedLanczos { default_width }) => {
+                out.push_str(&format!(
+                    r"scale=w=min({default_width}\,iw):h=-2:flags=lanczos,"
+                ));
+            }
+            (None, ScaleStyle::Guarded) => {}
+        }
+        out.push_str(self.tail);
+        out
     }
 }
 
@@ -42,6 +129,18 @@ pub enum Arg {
     /// number stays authored next to the recipe (`Arg::Quality("92")`),
     /// not buried in the renderer.
     Quality(&'static str),
+    /// The CRF value: the user's `--crf` override when given, the carried
+    /// registry anchor otherwise. Spelled with its anchor for the same
+    /// reason `Quality` is -- the number stays authored beside the recipe
+    /// (`Arg::Crf("20")`) rather than buried in the renderer.
+    Crf(&'static str),
+    /// The `-vf` value, composed at render time.
+    ///
+    /// ffmpeg keeps a single filter chain per output stream, so a second
+    /// `-vf` replaces the first rather than chaining onto it; a knob cannot
+    /// append its own filter, and every chain must be built as one string.
+    /// Holds a reference because `Arg` is `Copy`.
+    VideoChain(&'static VideoChainSpec),
     /// `-resize <geometry>` when `--resize` was given; renders *nothing*
     /// otherwise, keeping untuned argv byte-identical to the static table.
     TuneResize,
@@ -100,6 +199,10 @@ pub enum OutputMode {
     /// The step writes *some* file into the given directory and chooses the
     /// name itself; exec must locate it and move it into place.
     OutDir,
+    /// The step writes nothing the executor keeps: ffmpeg's first pass,
+    /// whose only product is the pass log. `exec` checks its exit status
+    /// but not for an output file.
+    Discard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,11 +235,17 @@ impl Step {
     /// `Arg::Input` or `Arg::Inputs` — `Arg::Input` indexes `inputs[0]`
     /// unchecked and will panic on an empty slice. This function does not
     /// validate that; it stays a pure formatter with no `Result` to thread
-    /// through. The validation boundary is `plan::build` (Task 7), the
+    /// through. The validation boundary is `plan::build`, the
     /// public entry point every caller goes through, which rejects empty
     /// inputs with a typed `ConvError` before any `Step` is ever rendered.
     pub fn render(&self, inputs: &[&Path], output: &Path) -> Vec<String> {
-        self.render_full(inputs, output, &Tuning::default()).argv
+        self.render_full(
+            inputs,
+            output,
+            &Tuning::default(),
+            &ResolvedVideo::default(),
+        )
+        .argv
     }
 
     /// `render` plus the positions of the tokens that are filesystem paths.
@@ -146,7 +255,13 @@ impl Step {
     /// line alone, which is why `render` stays the short spelling and
     /// delegates here rather than the two walking `args` separately and
     /// drifting apart.
-    pub fn render_full(&self, inputs: &[&Path], output: &Path, tuning: &Tuning) -> Rendered {
+    pub fn render_full(
+        &self,
+        inputs: &[&Path],
+        output: &Path,
+        tuning: &Tuning,
+        video: &ResolvedVideo,
+    ) -> Rendered {
         let mut argv = Vec::with_capacity(self.args.len());
         let mut path_args = Vec::new();
         for arg in self.args {
@@ -156,6 +271,11 @@ impl Step {
                     Some(q) => q.to_string(),
                     None => (*default).to_string(),
                 }),
+                Arg::Crf(default) => argv.push(match tuning.crf {
+                    Some(n) => n.to_string(),
+                    None => (*default).to_string(),
+                }),
+                Arg::VideoChain(spec) => argv.push(spec.compose(video)),
                 Arg::TuneResize => {
                     if let Some(g) = &tuning.resize {
                         argv.push("-resize".to_string());
@@ -264,6 +384,7 @@ mod tests {
             &[Path::new("in.mp4")],
             Path::new("out.gif"),
             &Tuning::default(),
+            &ResolvedVideo::default(),
         );
         assert_eq!(r.argv, vec!["-i", "in.mp4", "-y", "out.gif"]);
         assert_eq!(
@@ -289,6 +410,7 @@ mod tests {
             &[Path::new("photo.heic")],
             Path::new("out.jpg"),
             &Tuning::default(),
+            &ResolvedVideo::default(),
         );
         assert_eq!(r.argv[0], "photo.heic[0]");
         assert_eq!(
@@ -310,6 +432,7 @@ mod tests {
             &[Path::new("a/in.docx")],
             Path::new("b/out.pdf"),
             &Tuning::default(),
+            &ResolvedVideo::default(),
         );
         assert_eq!(r.argv, vec!["--outdir", "b", "a/in.docx"]);
         assert_eq!(r.path_args, vec![1, 2], "the out-dir and the input");
@@ -327,6 +450,7 @@ mod tests {
             &[Path::new("in.docx")],
             Path::new("out.pdf"),
             &Tuning::default(),
+            &ResolvedVideo::default(),
         );
         assert_eq!(r.argv, vec!["."]);
         assert_eq!(r.path_args, vec![0]);
@@ -406,8 +530,16 @@ mod tests {
             resize: Some("1600x900".into()),
             quality: Some(70),
             colors: Some(64),
+            fps: None,
+            crf: None,
+            max_size: None,
         };
-        let r = TUNABLE.render_full(&[Path::new("in.png")], Path::new("out.jpg"), &tuning);
+        let r = TUNABLE.render_full(
+            &[Path::new("in.png")],
+            Path::new("out.jpg"),
+            &tuning,
+            &ResolvedVideo::default(),
+        );
         assert_eq!(
             r.argv,
             vec!["in.png", "-resize", "1600x900", "-colors", "64", "-quality", "70", "out.jpg"]
@@ -422,7 +554,12 @@ mod tests {
             resize: Some("50%".into()),
             ..Tuning::default()
         };
-        let r = TUNABLE.render_full(&[Path::new("in.png")], Path::new("out.jpg"), &tuning);
+        let r = TUNABLE.render_full(
+            &[Path::new("in.png")],
+            Path::new("out.jpg"),
+            &tuning,
+            &ResolvedVideo::default(),
+        );
         for &i in &r.path_args {
             assert!(
                 r.argv[i] == "in.png" || r.argv[i] == "out.jpg",
@@ -432,5 +569,104 @@ mod tests {
             );
         }
         assert_eq!(r.path_args.len(), 2, "{:?}", r.path_args);
+    }
+
+    #[test]
+    fn every_tuning_field_on_its_own_makes_the_struct_non_empty() {
+        // is_empty() is the early-return guard in BOTH validators
+        // (plan.rs:219, :243). A field missing from it does not weaken
+        // validation for that field -- it disables validation entirely,
+        // turning a refusal into the silent no-op the project refuses.
+        // This test is the only thing standing between a new field and
+        // that bug; the compiler will not object.
+        let each: Vec<Tuning> = vec![
+            Tuning {
+                resize: Some("640x480".into()),
+                ..Default::default()
+            },
+            Tuning {
+                quality: Some(80),
+                ..Default::default()
+            },
+            Tuning {
+                colors: Some(64),
+                ..Default::default()
+            },
+            Tuning {
+                fps: Some("24".into()),
+                ..Default::default()
+            },
+            Tuning {
+                crf: Some(28),
+                ..Default::default()
+            },
+        ];
+        assert!(Tuning::default().is_empty());
+        for t in &each {
+            assert!(!t.is_empty(), "is_empty() does not know about {t:?}");
+        }
+        // If a field is added without extending this list, this catches it.
+        assert_eq!(
+            each.len(),
+            5,
+            "Tuning gained a field; add it to `each` and to is_empty()"
+        );
+    }
+
+    #[test]
+    fn an_untuned_crf_slot_renders_its_authored_anchor() {
+        let step = Step {
+            backend: Backend::Ffmpeg,
+            args: &[Arg::Lit("-crf"), Arg::Crf("20")],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let out = step.render_full(
+            &[Path::new("in.mp4")],
+            Path::new("out.mp4"),
+            &Tuning::default(),
+            &ResolvedVideo::default(),
+        );
+        assert_eq!(out.argv, vec!["-crf".to_string(), "20".to_string()]);
+    }
+
+    #[test]
+    fn a_tuned_crf_slot_renders_the_users_value() {
+        let step = Step {
+            backend: Backend::Ffmpeg,
+            args: &[Arg::Lit("-crf"), Arg::Crf("20")],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let out = step.render_full(
+            &[Path::new("in.mp4")],
+            Path::new("out.mp4"),
+            &Tuning {
+                crf: Some(28),
+                ..Default::default()
+            },
+            &ResolvedVideo::default(),
+        );
+        assert_eq!(out.argv, vec!["-crf".to_string(), "28".to_string()]);
+    }
+
+    #[test]
+    fn a_size_target_alone_makes_tuning_non_empty() {
+        let t = Tuning {
+            max_size: Some(crate::size::parse("10mb").unwrap()),
+            ..Default::default()
+        };
+        assert!(
+            !t.is_empty(),
+            "the validators' early return would skip --max-size"
+        );
+    }
+
+    #[test]
+    fn discard_serialises_in_the_plan_envelope_spelling() {
+        assert_eq!(
+            serde_json::to_string(&OutputMode::Discard).unwrap(),
+            "\"discard\""
+        );
     }
 }

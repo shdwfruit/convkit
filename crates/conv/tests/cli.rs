@@ -162,7 +162,7 @@ fn doctor_json_marks_imagemagick_as_manual_install_only() {
     assert_eq!(magick["managed_install"], false);
 }
 
-// --- Controller review round 3 -------------------------------------------
+// --- Failing jobs: where they report, and what a dry run still shows ----
 
 /// A real (non-dry-run) failing conversion must report on stderr, never
 /// stdout — a script piping stdout to a file and watching stderr for
@@ -224,11 +224,11 @@ fn dry_run_exits_with_the_underlying_code_when_every_job_fails() {
         .code(2);
 }
 
-// --- Task 14: `conv install` --------------------------------------------
+// --- `conv install` ------------------------------------------------------
 //
 // Only the no-network refusal paths are covered here — a real download is
-// exercised by the task's end-to-end acceptance check, not by a test that
-// would make `cargo test --workspace` depend on network access.
+// checked by hand, not by a test that would make `cargo test --workspace`
+// depend on network access.
 
 /// LibreOffice has no relocatable binary, so `conv install soffice` must
 /// refuse outright — never print a "downloading" line, never attempt a
@@ -274,7 +274,7 @@ fn install_soffice_json_refusal_has_no_managed_remediation() {
     assert!(v["error"]["remediation"]["manual"].is_string());
 }
 
-// --- Task 2: docx/odt -> pdf availability-based recipe selection --------
+// --- docx/odt -> pdf availability-based recipe selection ----------------
 //
 // A previous review found `--dry-run` printing a transcode command for a
 // run that would actually stream-copy; the fix there was to have dry-run
@@ -1035,23 +1035,35 @@ fn update_help_explains_the_pinned_not_latest_design_and_no_self_replace() {
 // --- CLI help papercut: conversion-only flags must not leak into every
 // subcommand's --help -------------------------------------------------------
 //
-// `--dry-run`, `-y/--overwrite`, `-o/--outdir`, and `-j/--jobs` only mean
-// something for the implicit conversion path (no subcommand) -- `conv
-// update --outdir` is meaningless. They used to be `global = true` in
-// `cli.rs`, which made clap attach them to every subcommand, including ones
-// (`doctor`, `install`, `capabilities`, `update`) that can never read them.
+// `--dry-run`, `-y/--overwrite`, `-o/--outdir`, `-j/--jobs`, and the five
+// tuning flags (`--resize`, `--quality`, `--colors`, `--fps`, `--crf`) only
+// mean something for the implicit conversion path (no subcommand) -- `conv
+// update --outdir` is meaningless. They used to be (or, for the tuning
+// flags, would naively become) `global = true` in `cli.rs`, which made clap
+// attach them to every subcommand, including ones (`doctor`, `install`,
+// `capabilities`, `update`) that can never read them.
 // `--json`, `--quiet`, `--yes`/`--no-install`, and the per-backend
 // `--<x>-path` overrides genuinely do mean something on every subcommand
 // (several of them can install a missing backend), so those stay global.
 
-/// None of the four conversion-only flags should appear in `--help` for any
+/// None of the nine conversion-only flags should appear in `--help` for any
 /// subcommand that can never read them.
 #[test]
 fn subcommand_help_never_lists_conversion_only_flags() {
     for subcommand in ["doctor", "install", "capabilities", "update"] {
         let out = conv().args([subcommand, "--help"]).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
-        for flag in ["--dry-run", "--overwrite", "--outdir", "--jobs"] {
+        for flag in [
+            "--dry-run",
+            "--overwrite",
+            "--outdir",
+            "--jobs",
+            "--resize",
+            "--quality",
+            "--colors",
+            "--fps",
+            "--crf",
+        ] {
             assert!(
                 !stdout.contains(flag),
                 "`conv {subcommand} --help` must not list {flag}: {stdout}"
@@ -1584,4 +1596,738 @@ fn capabilities_and_scan_agree_on_the_kind_spelling() {
 
     assert_eq!(caps["kind"], "image", "{caps}");
     assert_eq!(caps["kind"], scan["files"][0]["kind"], "{caps} vs {scan}");
+}
+
+/// `conv capabilities mp4` used to print "defaults: quality 92 (override
+/// with --quality)" for a format where `plan.rs` refuses `--quality`
+/// outright: the default was global (one `IMAGE_QUALITY` constant), not
+/// scoped to what the target's own recipes actually carry.
+#[test]
+fn capabilities_no_longer_advertises_quality_for_video() {
+    let out = conv()
+        .args(["capabilities", "mp4", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert!(
+        v["defaults"].get("quality").is_none(),
+        "a key with no default is omitted, not null: {}",
+        v["defaults"]
+    );
+}
+
+/// `mp4 -> mkv` carries `Arg::VideoChain` (so both `--resize` and `--fps`
+/// apply) and `Arg::Crf` (so `--crf` does too) -- unlike `mp4 -> webm`
+/// (crf only, no chain) or `mp4 -> gif` (chain only, no crf), it is the
+/// mp4-family target that takes all three.
+#[test]
+fn capabilities_lists_the_video_knobs_for_a_video_target() {
+    let out = conv()
+        .args(["capabilities", "mp4", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let row = v["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["to"] == "mkv")
+        .expect("mp4 writes mp4-family targets");
+    let tuning = row["tuning"].as_array().unwrap();
+    for flag in ["--resize", "--fps", "--crf"] {
+        assert!(
+            tuning.iter().any(|t| t == flag),
+            "{flag} missing from {tuning:?}"
+        );
+    }
+}
+
+#[test]
+fn defaults_are_per_target_because_one_format_has_several() {
+    // mkv as a target bakes crf 20; mkv -> webm bakes 32; mkv -> gif bakes
+    // fps 15. One top-level key cannot hold three truths.
+    let out = conv()
+        .args(["capabilities", "mkv", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let by = |f: &str| {
+        v["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["to"] == f)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by("mp4")["defaults"]["crf"], "20");
+    assert_eq!(by("webm")["defaults"]["crf"], "32");
+    assert_eq!(by("gif")["defaults"]["fps"], "15");
+}
+
+/// `VIDEO_TO_WEBM`'s static recipe carries no `Arg::VideoChain` slot -- vp9
+/// needs no even-dimension workaround, so one was never authored -- but
+/// `media::transcoded_invocation` composes `TRANSCODE_CHAIN` for a webm
+/// target unconditionally whenever a probe succeeds, exactly as it does for
+/// mp4/mov/mkv. `--fps`/`--resize` demonstrably work on `* -> webm`
+/// (verified against a real dry run), so the static table's declared slots
+/// are not what actually runs, and advertising only what the static table
+/// declares hides a flag that works.
+#[test]
+fn capabilities_advertises_the_video_chain_flags_for_webm_targets() {
+    let out = conv()
+        .args(["capabilities", "mkv", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let webm = v["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["to"] == "webm")
+        .cloned()
+        .unwrap();
+    let tuning = webm["tuning"].as_array().unwrap();
+    for flag in ["--resize", "--fps", "--crf"] {
+        assert!(
+            tuning.iter().any(|t| t == flag),
+            "{flag} missing from {tuning:?}"
+        );
+    }
+}
+
+/// `--max-size` sizes the four video targets and nothing else, so it is
+/// listed for mp4, mov and webm (mkv is the source here) and not for gif or
+/// an audio target, which refuse it by name.
+#[test]
+fn capabilities_lists_max_size_for_video_targets_only() {
+    let assert = conv()
+        .args(["capabilities", "mkv", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let row = |to: &str| {
+        v["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["to"] == to)
+            .unwrap()["tuning"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert!(row("mp4").iter().any(|f| f == "--max-size"));
+    assert!(row("mov").iter().any(|f| f == "--max-size"));
+    assert!(row("webm").iter().any(|f| f == "--max-size"));
+    assert!(!row("gif").iter().any(|f| f == "--max-size"));
+    assert!(!row("mp3").iter().any(|f| f == "--max-size"));
+}
+
+/// Why a flag is not `global` is a note for whoever edits `cli.rs`, and
+/// clap prints a field's whole doc comment in `--help`.
+#[test]
+fn help_carries_no_notes_meant_for_the_source() {
+    let assert = conv().arg("--help").assert().success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(!out.contains("global"), "{out}");
+    assert!(!out.contains("doc comment"), "{out}");
+    assert!(
+        out.contains("In a parallel batch the lines from different jobs interleave"),
+        "what --verbose's user needs to know stays: {out}"
+    );
+}
+
+/// The mp4 recipe drops subtitles and every audio track past the first, but
+/// a sized conversion maps every stream, so the note that says so must not
+/// read as true of `--max-size` too.
+#[test]
+fn capabilities_say_max_size_keeps_the_tracks_the_mp4_recipe_drops() {
+    let assert = conv().args(["capabilities", "mp4"]).assert().success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        out.contains(
+            "  note: Subtitle tracks and any audio tracks beyond the first are dropped \
+             (--max-size keeps every audio track and every text subtitle).\n"
+        ),
+        "{out}"
+    );
+
+    let assert = conv()
+        .args(["capabilities", "mkv", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    for to in ["mp4", "mov"] {
+        let row = v["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["to"] == to)
+            .unwrap();
+        let notes = row["notes"].as_array().unwrap();
+        assert!(
+            notes.iter().any(|n| n
+                .as_str()
+                .unwrap()
+                .ends_with("(--max-size keeps every audio track and every text subtitle).")),
+            "{to}: {notes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_frame_rate_accepts_integers_decimals_and_rationals() {
+    for good in ["24", "30", "29.97", "60", "30000/1001"] {
+        conv()
+            .args(["--fps", good, "--dry-run", "in.mp4", "out.mp4"])
+            .assert()
+            .stderr(predicates::str::contains("must be").not());
+    }
+}
+
+#[test]
+fn a_nonsense_frame_rate_is_refused_with_the_forms_named() {
+    for bad in ["0", "abc", "30/0", "24fps", ""] {
+        conv()
+            .args(["--fps", bad, "in.mp4", "out.mp4"])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(predicates::str::contains("frame rate must be"));
+    }
+}
+
+/// `-5` never reaches `parse_frame_rate`: clap's own argument parser sees
+/// the leading dash and rejects it as an unknown flag before any value
+/// parser runs, so this is refused a layer earlier than the other bad
+/// values above, with a different message (`unexpected argument`, not
+/// `frame rate must be`). Still exit 2, still refused -- just not by the
+/// validator this file otherwise pins.
+#[test]
+fn a_negative_frame_rate_is_refused_by_the_argument_parser_before_the_validator() {
+    conv()
+        .args(["--fps", "-5", "in.mp4", "out.mp4"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn a_zero_dimension_geometry_is_refused() {
+    // all_digits accepts these today; they reach the backend as degenerate
+    // geometry with backend-specific results, none of which is what was asked.
+    for bad in ["0", "0%", "x0", "0x0"] {
+        conv()
+            .args(["--resize", bad, "in.png", "out.jpg"])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(predicates::str::contains("geometry must be"));
+    }
+}
+
+/// Defect C: a webm knob with no usable ffprobe used to be refused as if
+/// webm were not a video target at all.
+#[test]
+fn a_webm_knob_with_no_ffprobe_names_ffprobe_not_a_false_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("src.mp4");
+    std::fs::write(&input, b"not really a video").unwrap();
+    let assert = conv()
+        .args(["--ffprobe-path", "/nonexistent/ffprobe", "--fps", "15"])
+        .arg(&input)
+        .arg(dir.path().join("out.webm"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("ffprobe"), "{stderr}");
+    assert!(
+        !stderr.contains("it tunes video and GIF targets"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn max_size_on_a_gif_target_is_refused_by_name() {
+    conv()
+        .args(["clip.mp4", "out.gif", "--max-size", "10mb", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("--max-size does not apply to mp4 -> gif"));
+}
+
+#[test]
+fn max_size_without_a_unit_is_a_usage_error() {
+    conv()
+        .args(["clip.mp4", "--max-size", "10", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("add a unit"));
+}
+
+#[test]
+fn max_size_with_an_output_equal_to_the_input_is_refused_even_with_y() {
+    conv()
+        .args([
+            "clip.mp4",
+            "clip.mp4",
+            "--max-size",
+            "10mb",
+            "-y",
+            "--dry-run",
+        ])
+        .assert()
+        .code(2)
+        .stderr(contains("output is the input"));
+}
+
+/// ffprobe stand-in: exits 0 on `-version`, otherwise prints `probe.json`
+/// from its own directory, whatever file it is asked about.
+fn ffprobe_stub(dir: &std::path::Path, json: &str) -> std::path::PathBuf {
+    std::fs::write(dir.join("probe.json"), json).unwrap();
+    let (name, body) = if cfg!(windows) {
+        (
+            "ffprobe_stub.bat",
+            "@echo off\r\nif \"%~1\"==\"-version\" exit /b 0\r\ntype \"%~dp0probe.json\"\r\n",
+        )
+    } else {
+        (
+            "ffprobe_stub.sh",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then exit 0; fi\ncat \"$(dirname \"$0\")/probe.json\"\n",
+        )
+    };
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    p
+}
+
+fn probe_json(secs: u64, file_bytes: u64) -> String {
+    format!(
+        r#"{{"streams":[
+            {{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,
+              "r_frame_rate":"30/1","avg_frame_rate":"30/1"}},
+            {{"codec_type":"audio","codec_name":"aac","bit_rate":"160000"}}],
+          "format":{{"duration":"{secs}.000000","size":"{file_bytes}"}}}}"#
+    )
+}
+
+/// `conv *.mp4 --max-size 8mb` in a folder of two clips reaches conv as
+/// `conv a.mp4 b.mp4 --max-size 8mb`: the `IN OUT` pair. Sized, b.mp4 would
+/// be replaced by a copy of a.mp4, so an existing output of the input's own
+/// format is refused, even with `-y`, and b.mp4 keeps its bytes. The source
+/// is small enough to be copied, so the run needs no ffmpeg to do damage.
+#[test]
+fn an_existing_same_format_output_is_refused_under_max_size_even_with_y() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(60, 6_000_000));
+    let a = dir.path().join("a.mp4");
+    let b = dir.path().join("b.mp4");
+    std::fs::write(&a, b"clip a").unwrap();
+    std::fs::write(&b, b"clip b").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&a)
+        .arg(&b)
+        .args(["--max-size", "8mb", "-y"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(&format!(
+            "{} and {} are both mp4 files; add --to mp4 to size each one, \
+             or remove {} to write a sized copy there",
+            a.display(),
+            b.display(),
+            b.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&b).unwrap(), b"clip b", "b.mp4 is untouched");
+    assert_eq!(std::fs::read(&a).unwrap(), b"clip a");
+}
+
+/// A pair of images is refused as a target `--max-size` cannot size, not
+/// told to add `--to png`, which would be refused the same way.
+#[test]
+fn an_existing_same_format_output_that_cannot_be_sized_is_refused_by_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.png");
+    let b = dir.path().join("b.png");
+    std::fs::write(&a, b"image a").unwrap();
+    std::fs::write(&b, b"image b").unwrap();
+    let assert = conv()
+        .arg(&a)
+        .arg(&b)
+        .args(["--max-size", "1mb", "-y"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("--max-size does not apply to png -> png"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("--to png"), "{stderr}");
+    assert_eq!(std::fs::read(&b).unwrap(), b"image b", "b.png is untouched");
+}
+
+/// Without `--to`, three or more paths are the image-to-PDF merge form, so
+/// a glob of three clips used to be told to name a .pdf; under `--max-size`
+/// the fix is `--to`.
+#[test]
+fn several_videos_under_max_size_without_to_are_told_to_add_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let names = ["a.mp4", "b.mp4", "c.mp4"];
+    for n in names {
+        std::fs::write(dir.path().join(n), n.as_bytes()).unwrap();
+    }
+    let assert = conv()
+        .args(names.map(|n| dir.path().join(n)))
+        .args(["--max-size", "8mb", "-y"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("add --to mp4 to size each file"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(".pdf"), "{stderr}");
+    for n in names {
+        assert_eq!(std::fs::read(dir.path().join(n)).unwrap(), n.as_bytes());
+    }
+}
+
+/// assert_cmd pipes stdin and stderr, so this session is non-interactive:
+/// with no --yes, nobody can be asked, and nothing may be converted.
+#[test]
+fn an_extreme_target_without_yes_writes_nothing_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("Could not get under 5 MB"), "{stderr}");
+    assert!(
+        stderr.contains("For a watchable result, try: conv"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("extreme compression not confirmed"),
+        "{stderr}"
+    );
+    assert!(!dir.path().join("clip-5mb.mp4").exists());
+}
+
+/// assert_cmd is non-interactive whatever the flags, so this does not
+/// exercise the `--json` row of the gate table (the unit table in
+/// `prompt.rs` does). It pins what a script sees when a refusal happens under
+/// `--json`: the `confirmation_required` code, exit 2, and no human block.
+#[test]
+fn a_json_refusal_is_confirmation_required_with_no_human_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb", "--json"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("confirmation_required"), "{stderr}");
+    assert!(
+        !stderr.contains("warning  "),
+        "no human block in --json: {stderr}"
+    );
+}
+
+#[test]
+fn a_batch_with_extreme_jobs_asks_once_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    for n in ["a.mp4", "b.mp4"] {
+        std::fs::write(dir.path().join(n), b"x").unwrap();
+    }
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(dir.path().join("a.mp4"))
+        .arg(dir.path().join("b.mp4"))
+        .args(["--to", "mp4", "--max-size", "5mb"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("2 of 2"), "{stderr}");
+    assert!(!dir.path().join("a-5mb.mp4").exists());
+    assert!(!dir.path().join("b-5mb.mp4").exists());
+}
+
+/// `--yes` is the answer to the question, not a way around the preview: the
+/// warning is still printed, and the conversion goes on to ask ffmpeg, which
+/// is named at a path that does not exist so nothing is encoded.
+#[test]
+fn yes_answers_the_extreme_question_and_the_conversion_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg("--ffmpeg-path")
+        .arg(dir.path().join("no-such-ffmpeg"))
+        .arg(&input)
+        .args(["--max-size", "5mb", "--yes"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("Could not get under 5 MB"), "{stderr}");
+    assert!(stderr.contains("no-such-ffmpeg"), "{stderr}");
+    assert!(!stderr.contains("not confirmed"), "{stderr}");
+    assert!(!stderr.contains("confirmation_required"), "{stderr}");
+}
+
+/// ffmpeg stand-in: exits 0 on `-version` and on pass 1, and otherwise
+/// writes `bytes` bytes to its last argument, the output.
+#[cfg(unix)]
+fn ffmpeg_stub(dir: &std::path::Path, bytes: u64) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join("ffmpeg_stub.sh");
+    std::fs::write(
+        &p,
+        format!(
+            "#!/bin/sh
+             if [ \"$1\" = \"-version\" ]; then exit 0; fi
+             case \" $* \" in *\" -pass 1 \"*) exit 0;; esac
+             for a in \"$@\"; do last=\"$a\"; done
+             head -c {bytes} /dev/zero > \"$last\"
+"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// With `--yes`, the extreme sentence is printed before the encode; the
+/// result carries the same sentence as a note, which is not printed a
+/// second time. The suggested command leaves `--yes` out.
+#[cfg(unix)]
+#[test]
+fn a_confirmed_extreme_conversion_prints_its_warning_once() {
+    let dir = tempfile::tempdir().unwrap();
+    // 20 s of 1080p at 1 MB: extreme, but it fits, and the stub's file does.
+    let probe = ffprobe_stub(dir.path(), &probe_json(20, 50_000_000));
+    let ffmpeg = ffmpeg_stub(dir.path(), 900_000);
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg("--ffmpeg-path")
+        .arg(&ffmpeg)
+        .arg(&input)
+        .args(["--max-size", "1mb", "--yes"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert_eq!(
+        stderr.matches("Extreme compression: 1 MB for 20 s").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("try: conv "), "{stderr}");
+    assert!(!stderr.contains("--yes"), "{stderr}");
+    assert!(dir.path().join("clip-1mb.mp4").is_file());
+}
+
+/// The "try this instead" line is built from the raw command line, which on
+/// Unix may hold bytes that are not UTF-8. Showing it must never panic.
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf8_does_not_break_the_extreme_warning() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let odd_ffmpeg = dir
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"no-ffmpeg-\xff"));
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg("--ffmpeg-path")
+        .arg(&odd_ffmpeg)
+        .arg(&input)
+        .args(["--max-size", "5mb"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(
+        stderr.contains("extreme compression not confirmed"),
+        "{stderr}"
+    );
+}
+
+/// The result printer reads the raw command line for its "try this instead"
+/// line on every human-mode run, sized or not, so a byte sequence that is not
+/// UTF-8 must not panic there either.
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf8_does_not_break_the_result_printer() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let odd_ffmpeg = dir
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"no-ffmpeg-\xff"));
+    let assert = conv()
+        .arg("--ffmpeg-path")
+        .arg(&odd_ffmpeg)
+        .arg(&input)
+        .arg(dir.path().join("out.gif"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(stderr.contains("no-ffmpeg-"), "{stderr}");
+}
+
+/// `--dry-run` is inert: it plans, never asks, and an extreme source is a
+/// plan to show, not a refusal.
+#[test]
+fn dry_run_of_an_extreme_source_plans_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb", "--dry-run"])
+        .assert()
+        .success();
+    let out = assert.get_output();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!both.contains("not confirmed"), "{both}");
+    assert!(!both.contains("Convert anyway"), "{both}");
+}
+
+/// A job that cannot run because its output exists is reported as that, not
+/// asked about; with `-y` it can run, so it is asked about like any other.
+#[test]
+fn a_job_whose_output_exists_is_not_asked_about() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    std::fs::write(dir.path().join("clip-5mb.mp4"), b"old").unwrap();
+
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("exists; pass -y"), "{stderr}");
+    assert!(!stderr.contains("not confirmed"), "{stderr}");
+    assert!(!stderr.contains("warning  "), "{stderr}");
+
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb", "-y"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("not confirmed"), "{stderr}");
+}
+
+#[test]
+fn a_sized_dry_run_shows_both_passes_and_the_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(60, 50_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "10mb", "--dry-run"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(out.contains(" -pass 1 "), "{out}");
+    assert!(out.contains(" -pass 2 "), "{out}");
+    assert!(out.contains("clip-10mb.mp4"), "{out}");
+    assert!(out.contains("Would size to "), "{out}");
+}
+
+#[test]
+fn a_sized_dry_run_of_an_extreme_source_warns_and_suggests() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(45 * 60, 900_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "5mb", "--dry-run"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(out.contains("warning: Could not get under 5 MB"), "{out}");
+    assert!(
+        out.contains("note: For a watchable result, try --max-size "),
+        "{out}"
+    );
+    assert!(out.contains("note: Would size to "), "{out}");
+}
+
+#[test]
+fn a_sized_json_dry_run_carries_the_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = ffprobe_stub(dir.path(), &probe_json(60, 50_000_000));
+    let input = dir.path().join("clip.mp4");
+    std::fs::write(&input, b"x").unwrap();
+    let assert = conv()
+        .arg("--ffprobe-path")
+        .arg(&probe)
+        .arg(&input)
+        .args(["--max-size", "10mb", "--dry-run", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let sizing = &v["plans"][0]["plan"]["sizing"];
+    assert_eq!(sizing["strategy"], "encode");
+    assert!(sizing["choice"]["width"].as_u64().unwrap() > 0);
 }

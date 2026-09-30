@@ -2,8 +2,7 @@
 //!
 //! Every entry below was populated by actually downloading the asset and
 //! hashing the bytes that came back — never invented from a URL that looked
-//! right. See Task 14's report for the exact commands used to derive each
-//! one. Two rules the tests in this module enforce mechanically:
+//! right. Two rules the tests in this module enforce mechanically:
 //!
 //! - No `url` may point at a GitHub `releases/latest` alias. That endpoint
 //!   redirects through the REST API, which is rate-limited to 60

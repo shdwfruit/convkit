@@ -28,6 +28,10 @@ pub enum ErrorCode {
     /// this conversion" apart from "your invocation doesn't parse"; the
     /// spec fixes exit codes, not error codes, so both still exit 2.
     InvalidInvocation,
+    /// An extreme `--max-size` conversion was not confirmed: the user said
+    /// no, or nobody could be asked (no terminal, `--json`, `--quiet`) and
+    /// `--yes` was not given. A usage-family error: the fix is a flag.
+    ConfirmationRequired,
 }
 
 impl ErrorCode {
@@ -39,7 +43,8 @@ impl ErrorCode {
             | ErrorCode::UnknownFormat
             | ErrorCode::InputNotFound
             | ErrorCode::OutputExists
-            | ErrorCode::InvalidInvocation => 2,
+            | ErrorCode::InvalidInvocation
+            | ErrorCode::ConfirmationRequired => 2,
             ErrorCode::BackendMissing => 3,
             ErrorCode::BatchPartialFailure => 4,
         }
@@ -220,8 +225,8 @@ impl ConvError {
 
     /// `backend.is_managed()` is true, but `manifest::lookup` has no
     /// verified asset for the platform this process is running on.
-    /// Deliberately distinct from an unverified manifest entry: per Task
-    /// 14's controller ruling, a missing entry must fail immediately with
+    /// Deliberately distinct from an unverified manifest entry: a missing
+    /// entry must fail immediately with
     /// this remediation, not after a download, with a checksum error the
     /// user cannot act on.
     pub fn no_managed_build(backend: Backend) -> ConvError {
@@ -332,6 +337,15 @@ mod tests {
         assert_eq!(ErrorCode::BackendMissing.exit_code(), 3);
         assert_eq!(ErrorCode::BatchPartialFailure.exit_code(), 4);
         assert_eq!(ErrorCode::InvalidInvocation.exit_code(), 2);
+        assert_eq!(ErrorCode::ConfirmationRequired.exit_code(), 2);
+    }
+
+    #[test]
+    fn confirmation_required_has_a_stable_json_name() {
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::ConfirmationRequired).unwrap(),
+            "\"confirmation_required\""
+        );
     }
 
     #[test]

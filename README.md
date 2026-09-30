@@ -23,6 +23,21 @@ clip up to 71.7× on a 60-second 1080p one. On a real terminal `OK`/`FAIL`
 render as green/red `✓`/`✗`; piped or redirected output (CI, `| tee`) is
 plain ASCII with no escape codes.
 
+**Video file too large?** Give conv the limit and it compresses the file to
+fit under it, for an upload cap or an attachment limit:
+
+```console
+$ conv clip.mp4 --max-size 5mb
+OK clip-5mb.mp4 - 4.97 MB - 24.0s
+  /home/user/Videos/clip-5mb.mp4
+  note  Sized to 1280x720 at 30 fps, 1.81 Mb/s video, 128 kb/s audio; 2 passes.
+```
+
+conv trades resolution, frame rate and bitrate against each other, so the
+file looks as good as that size allows rather than losing everything from
+one of them, and it asks before a limit too tight to look good. More in
+[Size targets](#size-targets).
+
 ## Install
 
 Prebuilt binaries cover Windows x64, macOS x64/arm64, and Linux x64/arm64:
@@ -76,6 +91,7 @@ conv *.heic --to jpg             # batch; globs expanded by conv itself, so this
 conv ./photos --to jpg -o ./out  # folder input, non-recursive, outputs redirected
 conv a.png b.png out.pdf         # merge two or more images into one PDF
 conv scan                        # list the files here and what each can become
+conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -146,8 +162,185 @@ FAIL in.jpg -> png
   png is lossless; --quality applies to jpg/webp/avif targets and image -> pdf
 ```
 
-Video/GIF knobs (fps, CRF) are not implemented yet. `conv capabilities
-<format>` lists which flags apply to which pair.
+`--fps` and `--crf` override two more named defaults on video and GIF
+conversions; `--resize` above widens to both as well:
+
+- `--fps <RATE>` — cap the frame rate; a source already slower is left
+  unchanged.
+- `--crf <N>` — constant-quality anchor for the encoder: 0-51 for
+  mp4/mov/mkv, 0-63 for webm; the default is 20. The 0-51 bound is
+  convkit's own, not libx264's, which accepts far more without
+  complaint.
+
+On video and GIF, `--resize` caps rather than scales up: a source
+already smaller than the geometry is left unchanged. This diverges
+from what `--resize` does to an image — measured: `magick -resize
+1600x900` on a 320x240 source produces 1200x900 — it scales up.
+Upscaling an image is cheap and occasionally wanted; upscaling video
+invents no detail and pays for the invention in every frame.
+
+```console
+$ conv --fps 24 --resize 1280x720 sample.mkv out.mp4
+OK out.mp4 - 62 KB - 0.3s
+  /home/user/Videos/out.mp4
+  note  Re-encoded rather than stream-copied, because a video knob changes the picture; the copy path cannot filter.
+```
+
+Binding any video or GIF knob gives up convkit's auto-remux stream
+copy — ffmpeg refuses a filter alongside `-c:v copy`, so honouring the
+knob means re-encoding — and the note above says so. A cap that does
+not actually bind keeps the copy:
+
+```console
+$ conv --fps 30 slow24.mp4 slow24.mkv
+OK slow24.mkv - 17 KB - 0.2s - stream copy, no re-encode
+  /home/user/Videos/slow24.mkv
+  note  Source is 24 fps; --fps 30 left it unchanged.
+```
+
+An out-of-range `--crf` is refused rather than passed through to the
+encoder:
+
+```console
+$ conv --crf 60 sample.mkv out.mp4
+FAIL sample.mkv -> mp4
+  --crf 60 is out of range for mp4; libx264 takes 0-51, lower is better
+```
+
+A flag that doesn't apply to the requested pair is refused with the
+reason, never silently ignored, on video exactly as on images:
+
+```console
+$ conv --fps 24 photo.png out.jpg
+FAIL photo.png -> jpg
+  --fps does not apply to png -> jpg: it tunes video and GIF targets
+```
+
+`conv capabilities <format>` lists which flags apply to which pair,
+and each pair's own defaults:
+
+```console
+$ conv capabilities mp4
+mp4 (Video)
+
+  as source, converts to:
+    mp4 -> mov      [--resize --fps --crf --max-size]
+    mp4 -> mkv      [--resize --fps --crf --max-size]
+    mp4 -> webm     [--crf --resize --fps --max-size]
+    mp4 -> mp3   
+    mp4 -> m4a   
+    mp4 -> wav   
+    mp4 -> flac  
+    mp4 -> gif      [--resize --fps]
+
+  as target, accepts: mov mkv webm avi gif
+  tuning flags when writing mp4: --resize --fps --crf --max-size
+
+  defaults: crf 20 (override with --crf)
+  note: Subtitle tracks and any audio tracks beyond the first are dropped (--max-size keeps every audio track and every text subtitle).
+  note: A looping GIF becomes a single play in MP4; there is no container-level loop flag to carry it over.
+
+  full pair list: conv capabilities; exact command preview: conv <in> <out> --dry-run
+```
+
+## Size targets
+
+`--max-size` makes a video fit a size, for upload limits and attachments:
+
+```console
+$ conv clip.mp4 --max-size 10mb
+OK clip-10mb.mp4 - 9.99 MB - 23.6s
+  /home/user/Videos/clip-10mb.mp4
+  note  Sized to 1920x1080 at 30 fps, 3.76 Mb/s video, 128 kb/s audio; 2 passes.
+```
+
+conv picks the resolution, frame rate and bitrates together. Each costs
+something, and it takes the combination that costs least in total, so a
+tight target trims a little from everything rather than all of one thing:
+a 144 fps clip loses frame rate long before it drops to 360p. The size is a
+ceiling: `10mb` means 10,000,000 bytes, which also fits a limit enforced as
+10 MiB. `kb`, `mb` and `gb` are decimal; write `kib`, `mib` or `gib` for
+binary units. The targets are mp4, mov, mkv and webm; any other target
+refuses the flag by name.
+
+It encodes in two passes and checks the result. If the file comes out over,
+conv plans again with a smaller budget and runs both passes again, three
+attempts at most. Very detailed footage can stop the encoder short of the
+rate it was asked for at a given picture size; when that happens, the retry
+also steps down to a smaller picture. A result still over after the last
+attempt is kept and flagged, never thrown away, and the exit code stays 0;
+a script reads `over_target` in `--json`. A file already under the target
+is copied rather than re-encoded, or stream-copied into another container
+where that container can hold its video (an H.264 mp4 going to webm is
+re-encoded). A `--resize` or `--fps` limit that would change the file
+forces the encode. A file already under the target that is re-encoded
+aims at its own size, not the target: an encode cannot add quality the
+source lacks, so the result lands within a few percent of the file it came
+from rather than growing toward the target.
+
+With one file and no output name, conv keeps the format and adds the size
+to the name (`clip-10mb.mp4`), but only when the output would otherwise
+land on the input: with `-o` to another directory the name is kept. Name an
+output, or use `--to` for a batch, as usual. An output that is the input
+itself is refused, even with `-y`, and so is an existing output in the
+input's own format: in a folder of two clips, the shell turns
+`conv *.mp4 --max-size 8mb` into `conv a.mp4 b.mp4 --max-size 8mb`, which
+would replace `b.mp4` with a sized copy of `a.mp4`. A batch needs `--to`:
+
+```console
+conv clip.mov small.mp4 --max-size 25mb   # name the output
+conv *.mov --to mp4 --max-size 8mb        # a batch: each file is sized on its own
+```
+
+`--resize` and `--fps` become limits it stays within. What they cut is your
+choice, so it never makes a target count as too small by itself. `--crf`
+asks for the opposite (a constant quality, whatever the size) and cannot be
+combined with `--max-size`.
+
+If a target is too small to look good, conv says so before encoding,
+suggests a size that would, and asks:
+
+```console
+$ conv clip.mp4 --max-size 1mb
+warning  Extreme compression: 1 MB for 20 s of 1080p will look poor (480p, 30 fps).
+         For a watchable result, try: conv clip.mp4 --max-size 2mb
+Convert anyway? [y/N] n
+error: extreme compression not confirmed for clip.mp4; pass --yes to convert anyway, or try --max-size 2mb
+```
+
+Where that line sits, and how it was measured, is in the "Size targets"
+section of [`docs/defaults-calibration.md`](docs/defaults-calibration.md#size-targets---max-size).
+
+Scripts answer with `--yes`. Without a terminal to ask, and without
+`--yes`, nothing is converted and the exit code is 2:
+
+```console
+$ conv clip.mp4 --max-size 1mb < /dev/null
+warning  Extreme compression: 1 MB for 20 s of 1080p will look poor (480p, 30 fps).
+         For a watchable result, try: conv clip.mp4 --max-size 2mb
+error: extreme compression not confirmed for clip.mp4; pass --yes to convert anyway, or try --max-size 2mb
+$ echo $?
+2
+$ conv clip.mp4 --max-size 1mb --yes
+warning  Extreme compression: 1 MB for 20 s of 1080p will look poor (480p, 30 fps).
+         For a watchable result, try: conv clip.mp4 --max-size 2mb
+OK clip-1mb.mp4 - 973.83 KB - 38.6s
+  /home/user/Videos/clip-1mb.mp4
+  note  Sized to 854x480 at 30 fps, 251 kb/s video, 128 kb/s audio; 4 passes (1 retry).
+```
+
+The last run needed a retry, which the note counts. A retry never escalates
+to extreme compression on its own: without `--yes` (or a `y`), an
+over-target result is kept and flagged, with a note naming `--yes` and a
+size to try.
+
+`--json` and `--quiet` also refuse an extreme conversion without `--yes`,
+even on a terminal. A batch asks once for all its extreme files, and a no
+converts none of them.
+
+`--dry-run` probes the file and prints both passes of the first attempt.
+`--json` adds a `sizing` object to each result: the choice it made, the
+number of attempts, and `over_target`.
 
 ## Discovering formats and capabilities
 
@@ -215,9 +408,11 @@ coder, so convkit reads `.jfif` but writes JPEGs as `.jpg`, and asking for a
 `.jfif` output says so rather than writing a file whose bytes do not match
 its name.
 
-`--dry-run` prints the real backend command without running anything — it
-never probes inputs or creates directories. `-v/--verbose` streams each
-spawned command and the backend's full output to stderr as a job runs.
+`--dry-run` prints the real backend command without running the conversion —
+it never creates directories, and it probes the input only where the plan
+depends on its streams, such as a container change, a GIF target, a video
+knob or `--max-size`. `-v/--verbose` streams each spawned command and the
+backend's full output to stderr as a job runs.
 
 ## Batch conversion
 
@@ -297,7 +492,9 @@ typst     0.15.1     /opt/homebrew/bin/typst      (PATH)
 backend. A conversion that fails on a missing managed backend offers to
 install it and retry (interactive sessions only, never under `--json`/
 `--quiet`); `--yes` pre-answers the prompt for scripts, `--no-install`
-always fails with the structured `backend_missing` error instead.
+always fails with the structured `backend_missing` error instead. `--yes`
+also answers the other question conv can ask, about an extreme
+[`--max-size`](#size-targets) target.
 
 ## Updating convkit
 
