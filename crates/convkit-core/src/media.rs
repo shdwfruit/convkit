@@ -87,6 +87,24 @@ pub(crate) enum VideoDisposition<'a> {
         /// companions instead.
         companions: &'static [&'static str],
     },
+    /// Two-pass, bitrate-targeted re-encode: pass 2 of a `--max-size`
+    /// conversion. (Pass 1 is built separately; it maps only the video.)
+    TwoPass {
+        chain: &'a str,
+        encoder: &'static str,
+        bitrate: String,
+        passlog: String,
+        companions: &'static [&'static str],
+    },
+}
+
+/// What happens to the audio tracks.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AudioDisposition {
+    /// Copy what the target holds, re-encode only what it does not.
+    Fit,
+    /// Re-encode every track at this rate, so its size is known in advance.
+    Reencode { kbps: u32 },
 }
 
 /// Emits the video codec and, for a transcode, its filter chain.
@@ -117,6 +135,47 @@ fn push_video_args(argv: &mut Vec<String>, to: Format, video: &VideoDisposition<
             push(argv, &["-crf", crf.as_str()]);
             push(argv, companions);
         }
+        VideoDisposition::TwoPass {
+            chain,
+            encoder,
+            bitrate,
+            passlog,
+            companions,
+        } => {
+            // Scoped to stream 0 on mkv for the same reason the codec is
+            // (see this function's docs): -map 0 also selects cover art,
+            // which is copied, not encoded.
+            if to == Format::Mkv {
+                push(argv, &["-filter:v:0", chain]);
+                push(argv, &["-c:v", "copy"]);
+                push(argv, &["-c:v:0", encoder]);
+                push(argv, &["-b:v:0", bitrate.as_str()]);
+                push(argv, &["-pass:v:0", "2"]);
+                push(argv, &["-passlogfile:v:0", passlog.as_str()]);
+            } else {
+                push(argv, &["-vf", chain]);
+                push(argv, &["-c:v", encoder]);
+                push(argv, &["-b:v", bitrate.as_str()]);
+                push(argv, &["-pass", "2"]);
+                push(argv, &["-passlogfile", passlog.as_str()]);
+            }
+            push(argv, companions);
+        }
+    }
+}
+
+/// Every audio track at one known rate, so the audio's size is arithmetic. A
+/// source with no audio gets no audio arguments at all.
+fn reencode_audio_args(argv: &mut Vec<String>, to: Format, kbps: u32, tracks: usize) {
+    if tracks == 0 {
+        return;
+    }
+    let rate = format!("{kbps}k");
+    if to == Format::Webm {
+        push(argv, &["-c:a", "libopus", "-b:a", &rate]);
+        push(argv, &["-af", registry::OPUS_CHANNEL_LAYOUTS]);
+    } else {
+        push(argv, &["-c:a", "aac", "-b:a", &rate]);
     }
 }
 
@@ -132,6 +191,7 @@ fn mapped_invocation(
     to: Format,
     probe: &MediaProbe,
     video: VideoDisposition<'_>,
+    audio: AudioDisposition,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
@@ -164,7 +224,14 @@ fn mapped_invocation(
         }
 
         push_video_args(&mut argv, to, &video);
-        audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios);
+        match audio {
+            AudioDisposition::Fit => {
+                audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios)
+            }
+            AudioDisposition::Reencode { kbps } => {
+                reencode_audio_args(&mut argv, to, kbps, audios.len())
+            }
+        }
 
         if any_mov_text {
             // mov_text only ever comes from mp4/mov, which cannot hold the
@@ -228,7 +295,14 @@ fn mapped_invocation(
         }
 
         push_video_args(&mut argv, to, &video);
-        audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios);
+        match audio {
+            AudioDisposition::Fit => {
+                audio_codec_args(&mut argv, &mut warnings, to, audio_ok, &audios)
+            }
+            AudioDisposition::Reencode { kbps } => {
+                reencode_audio_args(&mut argv, to, kbps, audios.len())
+            }
+        }
 
         if !kept_subs.is_empty() {
             let target_codec = if to == Format::Webm {
@@ -290,7 +364,14 @@ pub(crate) fn stream_mapped_invocation(
     if !video_ok.contains(&video) {
         return None;
     }
-    mapped_invocation(to, probe, VideoDisposition::Copy, input, output)
+    mapped_invocation(
+        to,
+        probe,
+        VideoDisposition::Copy,
+        AudioDisposition::Fit,
+        input,
+        output,
+    )
 }
 
 /// The same stream mapping, with the video re-encoded.
@@ -334,6 +415,7 @@ pub(crate) fn transcoded_invocation(
                 .unwrap_or_else(|| anchor.to_string()),
             companions,
         },
+        AudioDisposition::Fit,
         input,
         output,
     )?;
@@ -343,6 +425,86 @@ pub(crate) fn transcoded_invocation(
             .to_string(),
     );
     Some(m)
+}
+
+/// Both passes of a bitrate-targeted encode, for `--max-size`.
+///
+/// Pass 1 maps only the first video stream, runs the same filter chain and
+/// encoder settings as pass 2 (the statistics are only valid if it does),
+/// and writes nothing but the pass log: `-f null -` works the same on every
+/// platform, so there is no `/dev/null` versus `NUL` branch. Pass 2 is the
+/// ordinary stream mapping with the rate set by bitrate rather than CRF,
+/// and every audio track re-encoded at `audio_kbps` so its size is known.
+// Nothing outside the tests calls this yet, which also leaves the `TwoPass`
+// and `Reencode` variants it builds unconstructed. Once the sized planner
+// calls it this expectation goes unmet, which is the compiler's cue to
+// delete it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the sized planner is its only caller")
+)]
+#[allow(clippy::too_many_arguments)] // each is a distinct input to one argv
+pub(crate) fn two_pass_invocations(
+    to: Format,
+    probe: &MediaProbe,
+    resolved: &ResolvedVideo,
+    video_bps: u64,
+    audio_kbps: Option<u32>,
+    passlog: &Path,
+    input: &Path,
+    output: &Path,
+) -> Option<TwoPass> {
+    registry::compat_tables(to)?;
+    probe.video_codec.as_deref()?;
+    let (encoder, companions): (&'static str, &'static [&'static str]) = match to {
+        Format::Mp4 | Format::Mov | Format::Mkv => ("libx264", &["-pix_fmt", "yuv420p"]),
+        // No `-b:v 0`: that is libvpx's constant-quality switch, the
+        // opposite of a bitrate target.
+        Format::Webm => ("libvpx-vp9", &["-row-mt", "1", "-threads", "0"]),
+        _ => return None,
+    };
+    let chain = registry::TRANSCODE_CHAIN.compose(resolved);
+    let bitrate = video_bps.to_string();
+    let log = passlog.to_string_lossy().into_owned();
+
+    let mut pass1: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
+    push(
+        &mut pass1,
+        &["-map", "0:v:0", "-vf", &chain, "-c:v", encoder],
+    );
+    push(
+        &mut pass1,
+        &["-b:v", &bitrate, "-pass", "1", "-passlogfile", &log],
+    );
+    push(&mut pass1, companions);
+    push(&mut pass1, &["-an", "-sn", "-dn", "-f", "null", "-"]);
+
+    let audio = match audio_kbps {
+        Some(kbps) => AudioDisposition::Reencode { kbps },
+        None => AudioDisposition::Fit,
+    };
+    let pass2 = mapped_invocation(
+        to,
+        probe,
+        VideoDisposition::TwoPass {
+            chain: &chain,
+            encoder,
+            bitrate,
+            passlog: log,
+            companions,
+        },
+        audio,
+        input,
+        output,
+    )?;
+    Some(TwoPass { pass1, pass2 })
+}
+
+/// Pass 1's argv and pass 2's full invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TwoPass {
+    pub pass1: Vec<String>,
+    pub pass2: MediaInvocation,
 }
 
 /// Emits the audio codec arguments: a plain `-c:a copy` when every track
@@ -1028,5 +1190,148 @@ mod tests {
         assert_eq!(m.argv[0], "-i");
         assert_eq!(m.argv[1], "in.mkv");
         assert_eq!(m.argv.last().unwrap(), "out.mp4");
+    }
+
+    fn h264_aac() -> MediaProbe {
+        MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: vec!["aac".into()],
+            audio_bitrates: vec![Some(160_000)],
+            ..MediaProbe::default()
+        }
+    }
+
+    fn resolved_720p15() -> ResolvedVideo {
+        ResolvedVideo {
+            fps: Some("15/1".into()),
+            scale: Some("scale=w=1280:h=720".into()),
+            notes: vec![],
+        }
+    }
+
+    #[test]
+    fn mp4_two_pass_argv_is_exactly_the_documented_shape() {
+        let t = two_pass_invocations(
+            Format::Mp4,
+            &h264_aac(),
+            &resolved_720p15(),
+            1_190_000,
+            Some(96),
+            Path::new("/s/out.convkit-pass"),
+            Path::new("in.mov"),
+            Path::new("/s/out.mp4"),
+        )
+        .unwrap();
+        let chain = "fps=15/1,scale=w=1280:h=720,scale=trunc(iw/2)*2:trunc(ih/2)*2";
+        assert_eq!(
+            t.pass1.join(" "),
+            format!(
+                "-i in.mov -map 0:v:0 -vf {chain} -c:v libx264 -b:v 1190000 -pass 1 \
+                 -passlogfile /s/out.convkit-pass -pix_fmt yuv420p -an -sn -dn -f null -"
+            )
+        );
+        assert_eq!(
+            t.pass2.argv.join(" "),
+            format!(
+                "-i in.mov -map 0:v:0 -map 0:a? -vf {chain} -c:v libx264 -b:v 1190000 \
+                 -pass 2 -passlogfile /s/out.convkit-pass -pix_fmt yuv420p \
+                 -c:a aac -b:a 96k -movflags +faststart -y /s/out.mp4"
+            )
+        );
+    }
+
+    #[test]
+    fn mkv_scopes_the_rate_options_to_the_encoded_stream() {
+        let t = two_pass_invocations(
+            Format::Mkv,
+            &h264_aac(),
+            &ResolvedVideo::default(),
+            800_000,
+            Some(128),
+            Path::new("/s/o.convkit-pass"),
+            Path::new("in.mp4"),
+            Path::new("/s/o.mkv"),
+        )
+        .unwrap();
+        let a = &t.pass2.argv;
+        assert!(has(a, ["-c:v:0", "libx264"]), "{a:?}");
+        assert!(has(a, ["-b:v:0", "800000"]), "{a:?}");
+        assert!(has(a, ["-pass:v:0", "2"]), "{a:?}");
+        assert!(has(a, ["-passlogfile:v:0", "/s/o.convkit-pass"]), "{a:?}");
+        assert!(!a.iter().any(|x| x == "-crf"), "{a:?}");
+    }
+
+    #[test]
+    fn webm_two_pass_drops_constant_quality_and_sizes_opus() {
+        let t = two_pass_invocations(
+            Format::Webm,
+            &h264_aac(),
+            &ResolvedVideo::default(),
+            500_000,
+            Some(64),
+            Path::new("/s/o.convkit-pass"),
+            Path::new("in.mp4"),
+            Path::new("/s/o.webm"),
+        )
+        .unwrap();
+        for argv in [&t.pass1, &t.pass2.argv] {
+            assert!(has(argv, ["-c:v", "libvpx-vp9"]), "{argv:?}");
+            assert!(
+                !has(argv, ["-b:v", "0"]),
+                "constant-quality mode must be off: {argv:?}"
+            );
+            assert!(!argv.iter().any(|x| x == "-crf"), "{argv:?}");
+        }
+        assert!(has(&t.pass2.argv, ["-c:a", "libopus"]));
+        assert!(has(&t.pass2.argv, ["-b:a", "64k"]));
+        assert!(has(&t.pass2.argv, ["-af", registry::OPUS_CHANNEL_LAYOUTS]));
+    }
+
+    #[test]
+    fn a_silent_source_gets_no_audio_rate() {
+        let silent = MediaProbe {
+            audio_codecs: vec![],
+            audio_bitrates: vec![],
+            ..h264_aac()
+        };
+        let t = two_pass_invocations(
+            Format::Mp4,
+            &silent,
+            &ResolvedVideo::default(),
+            500_000,
+            None,
+            Path::new("p"),
+            Path::new("in.mp4"),
+            Path::new("o.mp4"),
+        )
+        .unwrap();
+        assert!(
+            !t.pass2.argv.iter().any(|x| x == "-b:a"),
+            "{:?}",
+            t.pass2.argv
+        );
+    }
+
+    #[test]
+    fn non_video_targets_and_videoless_sources_get_none() {
+        let args = |to, probe: &MediaProbe| {
+            two_pass_invocations(
+                to,
+                probe,
+                &ResolvedVideo::default(),
+                1,
+                None,
+                Path::new("p"),
+                Path::new("i"),
+                Path::new("o"),
+            )
+        };
+        assert!(args(Format::Gif, &h264_aac()).is_none());
+        let no_video = MediaProbe {
+            video_codec: None,
+            ..h264_aac()
+        };
+        assert!(args(Format::Mp4, &no_video).is_none());
     }
 }
