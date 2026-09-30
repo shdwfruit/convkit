@@ -131,6 +131,7 @@ fn convert_tuned(
         output: output.to_path_buf(),
         overwrite: false,
         tuning: tuning.clone(),
+        allow_extreme: false,
     };
     exec::run(&req, &resolver, &mut |_| {})
 }
@@ -807,6 +808,7 @@ fn heic_to_jpg_succeeds_when_the_input_itself_approaches_max_path() {
         output: output.clone(),
         overwrite: false,
         tuning: Default::default(),
+        allow_extreme: false,
     };
     exec::run(&req, &resolver, &mut |_| {}).unwrap_or_else(|e| {
         panic!(
@@ -848,6 +850,7 @@ fn md_to_pdf_succeeds_in_a_destination_that_approaches_max_path() {
         output: output.clone(),
         overwrite: false,
         tuning: Default::default(),
+        allow_extreme: false,
     };
     exec::run(&req, &resolver, &mut |_| {}).unwrap_or_else(|e| {
         panic!(
@@ -889,6 +892,7 @@ fn docx_to_pdf_succeeds_in_a_deep_destination_directory() {
         output: output.clone(),
         overwrite: false,
         tuning: Default::default(),
+        allow_extreme: false,
     };
     exec::run(&req, &resolver, &mut |_| {})
         .unwrap_or_else(|e| panic!("docx -> pdf into a deep destination directory failed: {e}"));
@@ -958,6 +962,7 @@ fn mp4_to_mkv_with_no_probe_available_transcodes_and_preserves_every_stream() {
         output: out.clone(),
         overwrite: false,
         tuning: Default::default(),
+        allow_extreme: false,
     };
     let outcome = exec::run(&req, &forced, &mut |_| {})
         .unwrap_or_else(|e| panic!("mp4 -> mkv transcode failed: {e}"));

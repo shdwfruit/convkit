@@ -14,6 +14,7 @@ pub mod recipe;
 pub mod registry;
 pub mod resolve;
 pub mod size;
+pub mod sized;
 mod video;
 pub mod winpath;
 

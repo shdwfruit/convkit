@@ -209,7 +209,9 @@ pub fn parse(json: &str) -> MediaProbe {
                 p.audio_bitrates.push(
                     s.get("bit_rate")
                         .and_then(|b| b.as_str())
-                        .and_then(|b| b.parse::<u32>().ok()),
+                        .and_then(|b| b.parse::<u32>().ok())
+                        // ffprobe's own "could not tell" is a zero.
+                        .filter(|&b| b > 0),
                 );
             }
             "subtitle" => p.subtitle_codecs.push(name),
@@ -494,5 +496,18 @@ mod tests {
         assert_eq!(parse_duration_ms("2700.000000"), Some(2_700_000));
         assert_eq!(parse_duration_ms("N/A"), None);
         assert_eq!(parse_duration_ms("1.2e3"), None);
+    }
+
+    /// ffprobe writes `"bit_rate":"0"` for a stream whose rate it could not
+    /// work out. A zero is "unknown", not a track that costs nothing: the
+    /// budget would otherwise skip that track's audio allowance.
+    #[test]
+    fn a_zero_audio_bitrate_is_unknown() {
+        let p = parse(
+            r#"{"streams":[
+                {"codec_type":"audio","codec_name":"aac","bit_rate":"0"},
+                {"codec_type":"audio","codec_name":"aac","bit_rate":"128000"}]}"#,
+        );
+        assert_eq!(p.audio_bitrates, vec![None, Some(128_000)]);
     }
 }

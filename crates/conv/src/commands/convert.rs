@@ -636,6 +636,7 @@ mod tests {
                 backends: vec![],
                 remuxed: false,
                 elapsed_ms: 1,
+                sizing: None,
             }),
         }
     }

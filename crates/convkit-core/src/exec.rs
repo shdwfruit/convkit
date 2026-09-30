@@ -28,6 +28,11 @@ pub struct Request {
     /// registry's own anchors. Validated against the selected recipe's
     /// slots by `plan::build_tuned`.
     pub tuning: crate::Tuning,
+    /// Whether an extreme `--max-size` conversion may run. Refuse-by-default
+    /// in the core for the same reason `overwrite` is (I5): a frontend that
+    /// consumes this crate directly must not skip the confirmation by
+    /// accident. The `conv` binary sets it from the user's answer.
+    pub allow_extreme: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +64,13 @@ pub enum Event {
     },
     StepFinished {
         index: usize,
+    },
+    /// A sized encode came out over its target and pass 2 is about to run
+    /// again at a lower bitrate. `attempt` is the attempt about to start.
+    SizeRetry {
+        attempt: u32,
+        measured: u64,
+        target: u64,
     },
 }
 
@@ -101,6 +113,10 @@ pub struct Outcome {
     /// that never sets it still gets a well-formed, honestly-zero value
     /// instead of an absent one.
     pub elapsed_ms: u64,
+    /// What a `--max-size` conversion chose and how it went. Omitted from
+    /// `--json` for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sizing: Option<crate::sized::SizingReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -552,7 +568,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         let declared = step.output.clone();
 
         let produced = match step.output_mode {
-            OutputMode::Path => declared.clone(),
+            OutputMode::Path | OutputMode::Discard => declared.clone(),
             OutputMode::OutDir => {
                 let dir = declared
                     .parent()
@@ -592,7 +608,10 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             });
         }
 
-        if !out.status.success() || !is_non_empty(&produced) {
+        // A Discard step (ffmpeg's first pass) keeps nothing, so only its
+        // exit status can fail it.
+        let wrote = step.output_mode == OutputMode::Discard || is_non_empty(&produced);
+        if !out.status.success() || !wrote {
             // Prefer the lines the classifier would keep — the actual
             // `width not divisible by 2`, not ffmpeg's trailing progress
             // line — falling back to the last three lines when nothing
@@ -624,7 +643,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                     .map(String::as_str)
                     .chain(step.output.to_str()),
             );
-            let base = if is_non_empty(&produced) {
+            let base = if is_non_empty(&produced) || step.output_mode == OutputMode::Discard {
                 format!(
                     "{} failed ({}): {detail}",
                     step.backend.exe_name(),
@@ -683,6 +702,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         backends,
         remuxed,
         elapsed_ms: 0,
+        sizing: None,
     })
 }
 
@@ -1263,6 +1283,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: dir.path().join("out.jpg"),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
@@ -1308,6 +1329,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: dir.path().join("out.jpg"),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         let mut events: Vec<Event> = Vec::new();
@@ -1348,6 +1370,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: dir.path().join("out.jpg"),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         let mut reports: Vec<String> = Vec::new();
@@ -1381,6 +1404,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: dir.path().join("out.jpg"),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::ConversionFailed);
@@ -1404,6 +1428,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: output.clone(),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         let outcome = run(&req, &r, &mut |_| {}).unwrap();
@@ -1440,6 +1465,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: output.clone(),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
@@ -1473,6 +1499,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: output.clone(),
             overwrite: true,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         run(&req, &r, &mut |_| {}).unwrap();
@@ -1494,6 +1521,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: dir.path().join("out.jpg"),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
         run(&req, &r, &mut |_| {}).unwrap();
 
@@ -1545,6 +1573,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: output.clone(),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         let outcome = run(&req, &r, &mut |_| {}).unwrap();
@@ -1591,6 +1620,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: dir.path().join("out.pdf"),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
@@ -1770,6 +1800,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: dir.path().join("out.pdf"),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         run(&req, &r, &mut |_| {}).unwrap();
@@ -1947,6 +1978,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: dir.path().join("out.pdf"),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         let outcome = run(&req, &r, &mut |_| {}).unwrap();
@@ -2023,6 +2055,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: dir.path().join("out.pdf"),
             overwrite: false,
             tuning: Default::default(),
+            allow_extreme: false,
         };
 
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
@@ -2315,6 +2348,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
                 fps: Some("15".into()),
                 ..Default::default()
             },
+            allow_extreme: false,
         };
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::BackendMissing, "{}", e.message);
@@ -2330,6 +2364,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
                 fps: Some("15".into()),
                 ..Default::default()
             },
+            allow_extreme: false,
         };
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::BackendMissing, "{}", e.message);

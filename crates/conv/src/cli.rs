@@ -289,6 +289,8 @@ impl Cli {
             colors: self.colors,
             fps: self.fps.clone(),
             crf: self.crf,
+            // Task 8 wires `--max-size`.
+            max_size: None,
         }
     }
 

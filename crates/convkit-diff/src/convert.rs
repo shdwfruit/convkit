@@ -53,6 +53,7 @@ pub fn convert_and_inspect(
         output: output_path.clone(),
         overwrite: true,
         tuning: Default::default(),
+        allow_extreme: false,
     };
     let outcome = exec::run(&req, backends.resolver, &mut |_| {}).map_err(|e| e.message)?;
 

@@ -58,6 +58,11 @@ pub struct ConversionPlan {
     pub output: PathBuf,
     pub steps: Vec<PlannedStep>,
     pub warnings: Vec<String>,
+    /// Present only for a `--max-size` conversion. Skipped when absent so
+    /// the published `--json` plan envelope is unchanged for every other
+    /// conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sizing: Option<crate::sized::SizingPlan>,
 }
 
 /// Chooses a recipe and renders it with default tuning. Pure: no
@@ -170,6 +175,7 @@ pub fn build_tuned(
                         path_args,
                     }],
                     warnings: m.warnings,
+                    sizing: None,
                 });
             }
         }
@@ -245,6 +251,7 @@ pub fn build_tuned(
         output: output.to_path_buf(),
         steps,
         warnings,
+        sizing: None,
     })
 }
 
@@ -1020,6 +1027,7 @@ mod tests {
             colors,
             fps: None,
             crf: None,
+            max_size: None,
         }
     }
 
@@ -1627,5 +1635,22 @@ mod tests {
             "{}",
             e.message
         );
+    }
+
+    /// The `--json` plan envelope is a published contract: an unsized plan
+    /// must not grow a `sizing` key.
+    #[test]
+    fn an_unsized_plan_serialises_without_a_sizing_key() {
+        let plan = build(
+            Format::Png,
+            Format::Jpg,
+            &[p("in.png")],
+            Path::new("out.jpg"),
+            None,
+            None,
+        )
+        .unwrap();
+        let v = serde_json::to_value(&plan).unwrap();
+        assert!(v.get("sizing").is_none(), "{v}");
     }
 }

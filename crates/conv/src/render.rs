@@ -519,6 +519,7 @@ mod tests {
             backends: vec![],
             remuxed,
             elapsed_ms: 900,
+            sizing: None,
         }
     }
 

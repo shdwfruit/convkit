@@ -35,6 +35,10 @@ pub struct Tuning {
     /// knobs this is not clamped against the source: it is an anchor, not
     /// a bound.
     pub crf: Option<u8>,
+    /// A size ceiling for video targets. Not a knob but a policy: when set,
+    /// `plan::build_tuned` hands the conversion to `sized::plan`, which
+    /// chooses the resolution, frame rate and bitrates itself.
+    pub max_size: Option<crate::size::MaxSize>,
 }
 
 impl Tuning {
@@ -44,6 +48,7 @@ impl Tuning {
             && self.colors.is_none()
             && self.fps.is_none()
             && self.crf.is_none()
+            && self.max_size.is_none()
     }
 }
 
@@ -194,6 +199,10 @@ pub enum OutputMode {
     /// The step writes *some* file into the given directory and chooses the
     /// name itself; exec must locate it and move it into place.
     OutDir,
+    /// The step writes nothing the executor keeps: ffmpeg's first pass,
+    /// whose only product is the pass log. `exec` checks its exit status
+    /// but not for an output file.
+    Discard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -523,6 +532,7 @@ mod tests {
             colors: Some(64),
             fps: None,
             crf: None,
+            max_size: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],
@@ -638,5 +648,25 @@ mod tests {
             &ResolvedVideo::default(),
         );
         assert_eq!(out.argv, vec!["-crf".to_string(), "28".to_string()]);
+    }
+
+    #[test]
+    fn a_size_target_alone_makes_tuning_non_empty() {
+        let t = Tuning {
+            max_size: Some(crate::size::parse("10mb").unwrap()),
+            ..Default::default()
+        };
+        assert!(
+            !t.is_empty(),
+            "the validators' early return would skip --max-size"
+        );
+    }
+
+    #[test]
+    fn discard_serialises_in_the_plan_envelope_spelling() {
+        assert_eq!(
+            serde_json::to_string(&OutputMode::Discard).unwrap(),
+            "\"discard\""
+        );
     }
 }
