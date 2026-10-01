@@ -22,8 +22,15 @@ use crate::recipe::Tuning;
 pub struct ResolvedVideo {
     /// The `fps=` value, set only when the cap actually binds. `None` means
     /// "leave the recipe's own default alone", which is why a cap that does
-    /// not bind is `None` plus a note rather than the source's own rate.
+    /// not bind is `None` plus a note rather than the source's own rate: a
+    /// filter set to the source's rate would give up a stream copy to
+    /// change nothing.
     pub fps: Option<String>,
+    /// Set when `--fps` was given and the source is already at or under
+    /// it, so `fps` is `None`. A recipe's own authored rate (GIF's 15) must
+    /// not apply either: `--fps` replaces that default whether or not it
+    /// binds, and the output keeps the source's rate, as the note says.
+    pub keep_source_rate: bool,
     /// The whole `scale=...` filter, set whenever `--resize` was given. The
     /// clamp is inside the filter expression rather than decided here,
     /// because ffmpeg knows the true post-autorotation size and convkit
@@ -182,10 +189,13 @@ pub fn resolve(tuning: &Tuning, probe: Option<&MediaProbe>) -> ResolvedVideo {
                 let have = f64::from(source.0) / f64::from(source.1);
                 match asked {
                     Some(a) if a < have => r.fps = Some(want.clone()),
-                    _ => r.notes.push(format!(
-                        "Source is {} fps; --fps {want} left it unchanged.",
-                        show_rate(source)
-                    )),
+                    _ => {
+                        r.keep_source_rate = true;
+                        r.notes.push(format!(
+                            "Source is {} fps; --fps {want} left it unchanged.",
+                            show_rate(source)
+                        ));
+                    }
                 }
             }
             None => {

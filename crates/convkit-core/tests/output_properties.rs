@@ -1165,6 +1165,32 @@ fn a_tuned_gif_still_has_an_optimised_palette() {
     );
 }
 
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_gif_fps_at_or_above_the_source_keeps_the_source_rate() {
+    // GIF authors its own 15 fps. A `--fps` the source already satisfies
+    // must replace that default with the source's rate, not fall back to
+    // it: before, `--fps 29` on this source gave 29 fps and `--fps 30` gave
+    // 15.
+    let dir = tmp();
+    let src = synth_video(&dir, 320, 180, 30);
+    for fps in ["29", "30", "60"] {
+        let out = dir.path().join(format!("f{fps}.gif"));
+        convert_tuned(
+            &src,
+            &out,
+            &Tuning {
+                fps: Some(fps.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (n, d) = probe_rate(&out);
+        let expected = if fps == "29" { 29 } else { 30 };
+        assert_eq!((n / d, n % d), (expected, 0), "--fps {fps}");
+    }
+}
+
 // --- --max-size -----------------------------------------------------------
 
 /// A clip noisy enough that the encoder has to spend the bits it is given:
