@@ -98,6 +98,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The ~400 MB of .deb files the next step installs, kept between runs
+      # so apt only downloads what changed upstream. Ubuntu's mirror has
+      # served them at under 100 kB/s for hours at a time, which no job
+      # timeout survives. The key changes weekly so packages that updates
+      # replaced drop out; the restore key starts each week from the last.
+      - name: Week for the apt cache key
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached apt packages
+        id: apt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/apt-archives
+          key: apt-${{ runner.os }}-${{ steps.week.outputs.week }}
+          restore-keys: apt-${{ runner.os }}-
+
       # Debian/Ubuntu split libheif's HEVC decoder out of the base
       # `imagemagick` -> libheif1 dependency chain and into its own plugin
       # package (a patent-licensing decision upstream, not a packaging
@@ -109,10 +126,29 @@ jobs:
       # it with "Unsupported codec". Installing the plugin explicitly is
       # the fix; see README.md's Backends section for the user-facing
       # version of this.
+      #
+      # A minute or two when healthy. A stalled mirror fails here, by name,
+      # rather than using up the job's budget before any test runs.
       - name: Install backends
+        timeout-minutes: 10
         run: |
+          mkdir -p ~/apt-archives
+          find ~/apt-archives -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives/ {} +
           sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick libheif-plugin-libde265 libreoffice pandoc
+          sudo apt-get install -y -o Acquire::Retries=3 ffmpeg imagemagick libheif-plugin-libde265 libreoffice pandoc
+          # Drop versions an update has replaced, so the cache does not grow
+          # by a week's worth of stale packages each week.
+          sudo apt-get autoclean
+          rm -f ~/apt-archives/*.deb
+          find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-archives/ {} +
+          echo "$(find ~/apt-archives -name '*.deb' | wc -l) packages ready to cache"
+
+      - name: Save apt packages
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/apt-archives
+          key: apt-${{ runner.os }}-${{ steps.week.outputs.week }}
 
       # Isolates "the environment can decode HEIC" from "our recipe is
       # correct": this drives the system ImageMagick binary directly, with
