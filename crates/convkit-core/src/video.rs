@@ -31,11 +31,18 @@ pub struct ResolvedVideo {
     /// not apply either: `--fps` replaces that default whether or not it
     /// binds, and the output keeps the source's rate, as the note says.
     pub keep_source_rate: bool,
-    /// The whole `scale=...` filter, set whenever `--resize` was given. The
-    /// clamp is inside the filter expression rather than decided here,
-    /// because ffmpeg knows the true post-autorotation size and convkit
-    /// only knows what ffprobe reported.
+    /// The whole `scale=...` filter, set when `--resize` was given and the
+    /// source might not already fit within it. The clamp is inside the
+    /// filter expression rather than decided here, because ffmpeg knows the
+    /// true post-autorotation size and convkit only knows what ffprobe
+    /// reported. A source ffprobe shows already fits gets no filter: one
+    /// would give up a stream copy to change nothing.
     pub scale: Option<String>,
+    /// Set when `--resize` was given and the source already fits within
+    /// it, so `scale` is `None`. A recipe's own authored width (GIF's 640)
+    /// must not apply either: `--resize` replaces that default whether or
+    /// not it binds, and the output keeps the source's size.
+    pub keep_source_size: bool,
     /// Lines for `Outcome.warnings`, which render.rs prints as `note  {w}`.
     /// Capitalised sentences with a terminal period, per that register.
     pub notes: Vec<String>,
@@ -210,14 +217,15 @@ pub fn resolve(tuning: &Tuning, probe: Option<&MediaProbe>) -> ResolvedVideo {
     }
 
     if let Some(geometry) = &tuning.resize {
-        r.scale = Some(scale_filter(geometry));
-        if let Some(dims) = probe.and_then(|p| p.display_dimensions()) {
-            if !geometry_binds(geometry, dims) {
+        match probe.and_then(|p| p.display_dimensions()) {
+            Some(dims) if !geometry_binds(geometry, dims) => {
+                r.keep_source_size = true;
                 r.notes.push(format!(
                     "Source is {}x{}; --resize {geometry} left it unchanged.",
                     dims.0, dims.1
                 ));
             }
+            _ => r.scale = Some(scale_filter(geometry)),
         }
     }
 
@@ -334,9 +342,10 @@ mod tests {
     #[test]
     fn the_percentage_form_clamps_too() {
         // parse_resize_geometry accepts any digit string before '%', so
-        // --resize 200% reaches here. Without the min() this is the one
-        // form in five that upscales -- the operation the design refuses.
-        let r = resolve(&tuning_resize("200%"), Some(&probe_at(640, 480, (30, 1))));
+        // --resize 200% reaches here. With no source size to decide
+        // against, the min() is all that stops this one form in five from
+        // upscaling.
+        let r = resolve(&tuning_resize("200%"), None);
         assert_eq!(
             r.scale.as_deref(),
             Some(r"scale=w=min(iw*200/100\,iw):h=min(ih*200/100\,ih)")
@@ -344,15 +353,26 @@ mod tests {
     }
 
     #[test]
-    fn a_resize_that_cannot_bind_says_so() {
+    fn a_resize_that_cannot_bind_adds_no_filter_and_says_so() {
+        // A filter that changes nothing would still give up the stream
+        // copy, which `--fps` already avoids.
         let r = resolve(
             &tuning_resize("1920x1080"),
             Some(&probe_at(640, 480, (30, 1))),
         );
+        assert_eq!(r.scale, None, "a cap that cannot bind must not filter");
+        assert!(r.keep_source_size);
         assert_eq!(
             r.notes,
             vec!["Source is 640x480; --resize 1920x1080 left it unchanged.".to_string()]
         );
+    }
+
+    #[test]
+    fn a_resize_that_binds_does_not_keep_the_source_size() {
+        let r = resolve(&tuning_resize("640x"), Some(&probe_at(1920, 1080, (30, 1))));
+        assert_eq!(r.scale.as_deref(), Some(r"scale=w=min(640\,iw):h=-2"));
+        assert!(!r.keep_source_size);
     }
 
     #[test]

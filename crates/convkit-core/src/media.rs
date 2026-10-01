@@ -1240,6 +1240,7 @@ mod tests {
             scale: Some("scale=w=1280:h=720".into()),
             notes: vec![],
             keep_source_rate: false,
+            keep_source_size: false,
         }
     }
 

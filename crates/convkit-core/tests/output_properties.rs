@@ -1191,6 +1191,49 @@ fn a_gif_fps_at_or_above_the_source_keeps_the_source_rate() {
     }
 }
 
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_resize_that_does_not_bind_keeps_the_stream_copy() {
+    // A size the source already fits within changes nothing, so it must
+    // not cost a re-encode: before, it gave up the copy for an identical
+    // picture.
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffprobe);
+    let mkv = remux_fixture_to("clip.mp4", "mkv");
+    let dir = tmp();
+    let out = dir.path().join("kept.mp4");
+    let outcome = convert_tuned(
+        &mkv,
+        &out,
+        &Tuning {
+            resize: Some("8000x".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(outcome.remuxed, "should have stream-copied");
+    assert_eq!(probe_dims(&out), probe_dims(&mkv));
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_gif_resize_past_the_source_keeps_the_source_size() {
+    // Not the recipe's 640 default, and not enlarged.
+    let dir = tmp();
+    let src = synth_video(&dir, 320, 180, 30);
+    let out = dir.path().join("kept.gif");
+    convert_tuned(
+        &src,
+        &out,
+        &Tuning {
+            resize: Some("4000x".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(probe_dims(&out), (320, 180));
+}
+
 // --- --max-size -----------------------------------------------------------
 
 /// A clip noisy enough that the encoder has to spend the bits it is given:

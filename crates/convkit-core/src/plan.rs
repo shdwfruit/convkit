@@ -340,14 +340,14 @@ fn validate_tuning(
     // - Something to apply (`resolved.fps` or `resolved.scale` is set) that
     //   this recipe cannot carry means the probe-aware path declined for
     //   want of a source to map: no probe ran, or it read no video stream
-    //   (`--resize` always resolves to a scale, and `--fps` does whenever
-    //   the source rate is unknown or the cap binds). Say that, rather than
-    //   the refusal below, which would claim webm is not a video target.
+    //   (each knob resolves to a filter whenever the source is unknown or
+    //   the cap binds). Say that, rather than the refusal below, which would
+    //   claim webm is not a video target.
     // - Nothing to apply means the probe read the source and the cap does
-    //   not bind (`--fps 60` on a 24 fps source): the flag is a no-op that
-    //   `resolved.notes` already explains on the plan's warnings, so the
-    //   `--fps` check below lets it through rather than refusing it.
-    //   (`--resize` cannot land here: it always resolves to a scale.)
+    //   not bind (`--fps 60` on a 24 fps source, `--resize 4000x` on a
+    //   1280x720 one): the flag is a no-op that `resolved.notes` already
+    //   explains on the plan's warnings, so the checks below let it through
+    //   rather than refusing it.
     let probe_routed_webm = to == Format::Webm && registry::needs_probe(from, to);
     if probe_routed_webm && (resolved.fps.is_some() || resolved.scale.is_some()) {
         let flag = if resolved.fps.is_some() {
@@ -364,7 +364,10 @@ fn validate_tuning(
             ),
         ));
     }
-    if tuning.resize.is_some() && !has_slot(|a| matches!(a, Arg::TuneResize | Arg::VideoChain(_))) {
+    if tuning.resize.is_some()
+        && !probe_routed_webm
+        && !has_slot(|a| matches!(a, Arg::TuneResize | Arg::VideoChain(_)))
+    {
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
             format!(
@@ -1347,6 +1350,96 @@ mod tests {
         );
     }
 
+    /// The `--resize` twin of the test above: a size the source already
+    /// fits within keeps the stream copy, as `--fps` does.
+    #[test]
+    fn a_resize_that_does_not_bind_keeps_the_stream_copy() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: vec!["aac".into()],
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &Tuning {
+                resize: Some("4000x".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            !argv.windows(2).any(|w| w == ["-c:v", "libx264"]),
+            "a non-binding cap must not force a re-encode: {argv:?}"
+        );
+        assert!(!argv.iter().any(|a| a.contains("scale=")), "{argv:?}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "Source is 1280x720; --resize 4000x left it unchanged."),
+            "{:?}",
+            plan.warnings
+        );
+        assert!(
+            !plan
+                .warnings
+                .iter()
+                .any(|w| w.contains("Re-encoded rather than stream-copied")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// On GIF, a `--resize` the source already fits within keeps the
+    /// source's size, as it did when the clamp did that inside the filter:
+    /// it still replaces the recipe's 640 default.
+    #[test]
+    fn a_gif_resize_past_the_source_keeps_the_source_size() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Gif,
+            &[p("in.mp4")],
+            Path::new("out.gif"),
+            Some(&probe),
+            None,
+            &Tuning {
+                resize: Some("4000x".into()),
+                ..Default::default()
+            },
+        )
+        .expect("mp4 -> gif is a registered pair");
+        let vf = plan.steps[0].argv.join(" ");
+        assert!(
+            !vf.contains("min(640"),
+            "the 640 default must not return: {vf}"
+        );
+        assert!(vf.contains("split[a][b]"), "{vf}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "Source is 1280x720; --resize 4000x left it unchanged."),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
     /// The 0-51 `--crf` bound in `validate_tuning` once ran only on the
     /// *static* table. Once a video
     /// knob routes a probe-selected pair through `transcoded_invocation`
@@ -1621,6 +1714,44 @@ mod tests {
             plan.warnings
                 .iter()
                 .any(|w| w.contains("Source is 24 fps; --fps 60 left it unchanged.")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// The `--resize` twin of the test above: a size the source already
+    /// fits within resolves to no filter, so the static webm recipe runs
+    /// rather than `--resize` being refused as a flag webm cannot take.
+    #[test]
+    fn a_non_binding_resize_on_a_probed_webm_target_is_a_noted_no_op() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((24, 1)),
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Webm,
+            &[p("in.mp4")],
+            Path::new("out.webm"),
+            Some(&probe),
+            None,
+            &Tuning {
+                resize: Some("4000x".into()),
+                ..Default::default()
+            },
+        )
+        .expect("a cap that does not bind is not a refusal");
+        let argv = &plan.steps[0].argv;
+        assert!(argv.iter().any(|a| a == "libvpx-vp9"), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "-vf"), "{argv:?}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "Source is 1280x720; --resize 4000x left it unchanged."),
             "{:?}",
             plan.warnings
         );

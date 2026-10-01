@@ -109,6 +109,8 @@ impl VideoChainSpec {
                 out.push_str(s);
                 out.push(',');
             }
+            // `--resize` replaced the default width with the source's own.
+            (None, ScaleStyle::CappedLanczos { .. }) if resolved.keep_source_size => {}
             (None, ScaleStyle::CappedLanczos { default_width }) => {
                 out.push_str(&format!(
                     r"scale=w=min({default_width}\,iw):h=-2:flags=lanczos,"
