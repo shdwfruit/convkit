@@ -1205,19 +1205,29 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
     })
 }
 
-/// Whether to read an image's size before converting it: only for
-/// `--resize --upscale` on a pair whose recipe resizes with ImageMagick,
-/// where the size decides whether it enlarges, what the warning says, and
-/// whether to ask first. One `-ping` header read, so an ordinary image
-/// conversion still pays nothing.
-pub fn needs_image_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
-    tuning.upscale
-        && tuning.resize.is_some()
-        && lookup(from, to).is_some_and(|r| {
-            r.steps
-                .iter()
-                .any(|s| s.args.iter().any(|a| matches!(a, Arg::TuneResize)))
-        })
+/// How to read an image's size before converting it, when to at all: only
+/// for `--resize --upscale` on a pair whose recipe resizes with
+/// ImageMagick, where the size decides whether it enlarges, what the
+/// warning says, and whether to ask first. Read off the resizing step's
+/// own args, so the size is taken the way the recipe takes its input: every
+/// input or the first, every page or the first frame, and at the density it
+/// renders a vector source at.
+pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::probe::ImageRead> {
+    if !tuning.upscale || tuning.resize.is_none() {
+        return None;
+    }
+    let step = lookup(from, to)?
+        .steps
+        .iter()
+        .find(|s| s.args.iter().any(|a| matches!(a, Arg::TuneResize)))?;
+    Some(crate::probe::ImageRead {
+        density: step.args.windows(2).find_map(|w| match w {
+            [Arg::Lit("-density"), Arg::Lit(d)] => Some(*d),
+            _ => None,
+        }),
+        every_input: step.args.iter().any(|a| matches!(a, Arg::Inputs)),
+        every_page: !step.args.iter().any(|a| matches!(a, Arg::InputFirstFrame)),
+    })
 }
 
 /// Whether a knob on this pair can only be honoured with a probe, so a
@@ -1263,6 +1273,36 @@ pub(crate) fn compat_tables(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_read_mirrors_how_the_recipe_takes_its_input() {
+        let up = Tuning {
+            resize: Some("2000x".into()),
+            upscale: true,
+            ..Default::default()
+        };
+        let svg = image_read(Format::Svg, Format::Png, &up).unwrap();
+        assert_eq!(svg.density, Some(SVG_DENSITY), "the density it renders at");
+        assert!(!svg.every_input);
+        let pdf = image_read(Format::Png, Format::Pdf, &up).unwrap();
+        assert!(pdf.every_input && pdf.every_page, "{pdf:?}");
+        assert_eq!(pdf.density, None);
+        let png = image_read(Format::Jpg, Format::Png, &up).unwrap();
+        assert!(
+            !png.every_input && !png.every_page,
+            "only the first frame: {png:?}"
+        );
+        let plain = Tuning {
+            upscale: false,
+            ..up.clone()
+        };
+        assert_eq!(image_read(Format::Jpg, Format::Png, &plain), None);
+        assert_eq!(
+            image_read(Format::Mp4, Format::Mkv, &up),
+            None,
+            "video is probed"
+        );
+    }
     use crate::video::ResolvedVideo;
 
     #[test]

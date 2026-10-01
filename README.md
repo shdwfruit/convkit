@@ -233,9 +233,11 @@ error: large upscale not confirmed for clip.mkv; pass --yes to convert anyway
 
 The file size is a rule of thumb and can be off several-fold either
 way. An image's size is read from its header, and only under
-`--upscale`; if it cannot be read, conv warns without the numbers and
-does not ask, unless the geometry is a percentage, whose ratio is
-known regardless.
+`--upscale`: every input and page the conversion takes, an SVG at the
+density it renders at, and the one enlarged most is the one the
+warning names and the question is decided on. If a size cannot be
+read, conv warns without the numbers and does not ask, unless the
+geometry is a percentage, whose ratio is known regardless.
 
 An out-of-range `--crf` is refused rather than passed through to the
 encoder:

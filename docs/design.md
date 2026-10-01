@@ -138,8 +138,11 @@ re-litigated:
   thumb measured with this tool (bits per pixel for video, bytes per
   pixel for GIF and for each image format): wide on purpose, because
   content moves it as much as size does, and the source's own file size
-  is no guide once the format changes. An image's size is read with one
-  `-ping` header read, only under `--upscale`.
+  is no guide once the format changes; a dense video or GIF source raises
+  the top to its own size times the pixel ratio. An image's size is read
+  with `-ping` header reads, only under `--upscale`: every input and page
+  the recipe takes, an SVG scaled to the density the recipe renders it at,
+  and the page enlarged most decides.
 
 ## 4. Product shape
 

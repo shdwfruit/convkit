@@ -193,6 +193,20 @@ fn scaled_size(geometry: &str, (w, h): (u32, u32), target: Target) -> (u32, u32)
     }
 }
 
+/// Of several pages, the one a geometry enlarges most, sized as an image
+/// recipe sizes them: the one an `--upscale` warning is about and its
+/// question is decided on.
+pub(crate) fn most_enlarged(geometry: &str, sizes: &[(u32, u32)]) -> Option<usize> {
+    let ratio = |(w, h): (u32, u32)| {
+        let image = Target::Image {
+            bytes_per_pixel: None,
+        };
+        let (ow, oh) = scaled_size(geometry, (w, h), image);
+        f64::from(ow) * f64::from(oh) / (f64::from(w) * f64::from(h))
+    };
+    (0..sizes.len()).max_by(|&a, &b| ratio(sizes[a]).total_cmp(&ratio(sizes[b])))
+}
+
 /// A pixel ratio for a warning: `9.8` below ten, a whole number above it.
 fn show_ratio(r: f64) -> String {
     if r >= 10.0 {
@@ -332,6 +346,7 @@ pub fn resolve(tuning: &Tuning, probe: Option<&MediaProbe>, target: Target) -> R
 
     if let Some(geometry) = &tuning.resize {
         let dims = probe.and_then(|p| p.display_dimensions());
+        let label = probe.and_then(|p| p.label.as_deref());
         let grown = dims
             .filter(|_| tuning.upscale)
             .map(|d| (d, scaled_size(geometry, d, target)))
@@ -341,8 +356,8 @@ pub fn resolve(tuning: &Tuning, probe: Option<&MediaProbe>, target: Target) -> R
         match (dims, grown) {
             (_, Some((source, output))) => {
                 r.scale = Some(scale_filter(geometry, true));
-                let estimate = estimate(target, output, probe, &r);
-                r.enlarged = Some(enlargement(geometry, source, output, estimate));
+                let estimate = estimate(target, source, output, probe, &r);
+                r.enlarged = Some(enlargement(geometry, label, source, output, estimate));
             }
             (Some((w, h)), None) if !geometry_binds(geometry, (w, h)) => {
                 r.keep_source_size = true;
@@ -355,8 +370,9 @@ pub fn resolve(tuning: &Tuning, probe: Option<&MediaProbe>, target: Target) -> R
                 } else {
                     " (add --upscale to enlarge)"
                 };
+                let subject = label.unwrap_or("Source");
                 r.notes.push(format!(
-                    "Source is {w}x{h}; --resize {geometry} left it unchanged{wider}{hint}."
+                    "{subject} is {w}x{h}; --resize {geometry} left it unchanged{wider}{hint}."
                 ));
             }
             (Some(_), None) => r.scale = Some(scale_filter(geometry, tuning.upscale)),
@@ -375,29 +391,46 @@ pub fn resolve(tuning: &Tuning, probe: Option<&MediaProbe>, target: Target) -> R
 /// The cost of every enlargement, as the warnings end it.
 const COST: &str = "enlarging adds no detail, so expect a soft picture and a much larger file";
 
-/// An enlargement of a source whose size was read.
+/// How many times the source's pixels, for a warning. Just past four,
+/// where the question starts, the rounded figure would read the same as the
+/// four that does not ask, so it says why it asks instead.
+fn ratio_words(ratio: f64, asks: bool) -> String {
+    match show_ratio(ratio) {
+        four if asks && four == "4" => "just over 4 times".to_string(),
+        shown => format!("about {shown} times"),
+    }
+}
+
+/// An enlargement of a source whose size was read. `label` names the input
+/// or page it is, when the conversion takes several.
 fn enlargement(
     geometry: &str,
+    label: Option<&str>,
     (w, h): (u32, u32),
     (ow, oh): (u32, u32),
     estimate: Option<[u64; 2]>,
 ) -> Enlargement {
     let (pixels, source_pixels) = (u64::from(ow) * u64::from(oh), u64::from(w) * u64::from(h));
     let ratio = pixels as f64 / source_pixels as f64;
+    let asks = pixels > 4 * source_pixels;
+    let source = match label {
+        Some(label) => format!("{label} ({w}x{h})"),
+        None => format!("the {w}x{h} source"),
+    };
     let size = estimate
         .map(|[lo, hi]| format!(", very roughly {} to {}", rough_size(lo), rough_size(hi)))
         .unwrap_or_default();
     Enlargement {
         warning: format!(
-            "--resize {geometry} --upscale enlarges the {w}x{h} source to {ow}x{oh}, about {} \
-             times its pixels: {COST}{size}.",
-            show_ratio(ratio)
+            "--resize {geometry} --upscale enlarges {source} to {ow}x{oh}, {} its pixels: \
+             {COST}{size}.",
+            ratio_words(ratio, asks)
         ),
         pixel_ratio: Some(ratio),
         source: Some([w, h]),
         output: Some([ow, oh]),
         estimated_bytes: estimate,
-        needs_confirmation: pixels > 4 * source_pixels,
+        needs_confirmation: asks,
     }
 }
 
@@ -414,9 +447,8 @@ fn unsized_enlargement(geometry: &str) -> Option<Enlargement> {
             }
             let ratio = (p as f64 / 100.0).powi(2);
             let warning = format!(
-                "--resize {geometry} --upscale enlarges the source to about {} times its \
-                 pixels: {COST}.",
-                show_ratio(ratio)
+                "--resize {geometry} --upscale enlarges the source to {} its pixels: {COST}.",
+                ratio_words(ratio, p > 200)
             );
             (warning, Some(ratio), p > 200)
         }
@@ -444,14 +476,21 @@ fn unsized_enlargement(geometry: &str) -> Option<Enlargement> {
 /// 0.1 at the default quality; enlarged pictures sit low, since enlarging
 /// adds no detail to spend bits on), bytes per pixel per frame for a GIF
 /// (0.05 to 0.5), and the target format's bytes per pixel for an image.
-/// `None` when a figure it needs is unknown.
+/// An enlarged video or GIF rarely comes out denser than its source, so the
+/// top is at least the source's own size times the pixel ratio: a dense
+/// source would otherwise land far above it. `None` when a figure it needs
+/// is unknown.
 fn estimate(
     target: Target,
+    (w, h): (u32, u32),
     (ow, oh): (u32, u32),
     probe: Option<&MediaProbe>,
     r: &ResolvedVideo,
 ) -> Option<[u64; 2]> {
     let pixels = f64::from(ow) * f64::from(oh);
+    let as_dense_as_the_source = probe.and_then(|p| p.size_bytes).map_or(0.0, |bytes| {
+        bytes as f64 * pixels / (f64::from(w) * f64::from(h))
+    });
     let frames = |rate: f64| {
         let secs = probe?.duration_ms? as f64 / 1000.0;
         Some(pixels * secs * rate)
@@ -461,7 +500,10 @@ fn estimate(
         .map(|(n, d)| f64::from(n) / f64::from(d));
     let asked_rate = r.fps.as_deref().and_then(rate_value);
     let (amount, (lo, hi)) = match target {
-        Target::Image { bytes_per_pixel } => (pixels, bytes_per_pixel?),
+        Target::Image { bytes_per_pixel } => {
+            let (lo, hi) = bytes_per_pixel?;
+            return Some([(pixels * lo).round() as u64, (pixels * hi).round() as u64]);
+        }
         Target::Video => (
             frames(asked_rate.or(source_rate)?)?,
             (0.01 / 8.0, 0.1 / 8.0),
@@ -476,7 +518,8 @@ fn estimate(
             (frames(rate)?, (0.05, 0.5))
         }
     };
-    Some([(amount * lo).round() as u64, (amount * hi).round() as u64])
+    let top = (amount * hi).max(as_dense_as_the_source);
+    Some([(amount * lo).round() as u64, top.round() as u64])
 }
 
 /// A byte count to two significant figures, in decimal units: `3.4 MB`,
@@ -499,14 +542,20 @@ fn rough_size(bytes: u64) -> String {
     }
 }
 
-/// The refusal for a large upscale run without consent.
-pub fn confirmation_error(input: &std::path::Path) -> crate::ConvError {
+/// The refusal for a large upscale run without consent, naming its inputs:
+/// the first, and how many more, since the one enlarged may be any of them.
+pub fn confirmation_error(inputs: &[std::path::PathBuf]) -> crate::ConvError {
+    let first = inputs
+        .first()
+        .map_or_else(String::new, |p| p.display().to_string());
+    let more = match inputs.len().saturating_sub(1) {
+        0 => String::new(),
+        1 => " and 1 more input".to_string(),
+        n => format!(" and {n} more inputs"),
+    };
     crate::ConvError::new(
         crate::ErrorCode::ConfirmationRequired,
-        format!(
-            "large upscale not confirmed for {}; pass --yes to convert anyway",
-            input.display()
-        ),
+        format!("large upscale not confirmed for {first}{more}; pass --yes to convert anyway"),
     )
 }
 
@@ -882,6 +931,75 @@ mod tests {
             "{}",
             e.warning
         );
+    }
+
+    #[test]
+    fn of_several_pages_the_one_enlarged_most_decides() {
+        assert_eq!(most_enlarged("2000x", &[(3000, 2000), (100, 100)]), Some(1));
+        assert_eq!(most_enlarged("50%", &[(300, 200)]), Some(0));
+        assert_eq!(most_enlarged("2000x", &[]), None);
+    }
+
+    #[test]
+    fn a_page_of_several_is_named_in_the_warning() {
+        let p = MediaProbe {
+            label: Some("tiny.png".into()),
+            ..probe_at(100, 100, (30, 1))
+        };
+        let e = resolve(&tuning_upscale("2000x"), Some(&p), image(None))
+            .enlarged
+            .unwrap();
+        assert!(
+            e.warning.starts_with(
+                "--resize 2000x --upscale enlarges tiny.png (100x100) to 2000x2000, about 400 \
+                 times its pixels"
+            ),
+            "{}",
+            e.warning
+        );
+        assert!(e.needs_confirmation);
+    }
+
+    /// 4.01 rounds to "4", which would read the same as the 4.0 that does
+    /// not ask; the one that asks has to say why.
+    #[test]
+    fn just_past_four_times_says_so() {
+        let e = resolve(
+            &tuning_upscale("1281x"),
+            Some(&probe_at(640, 360, (30, 1))),
+            image(None),
+        )
+        .enlarged
+        .unwrap();
+        assert!(
+            e.warning.contains("just over 4 times its pixels"),
+            "{}",
+            e.warning
+        );
+        let e = resolve(&tuning_upscale("201%"), None, VIDEO)
+            .enlarged
+            .unwrap();
+        assert!(
+            e.warning.contains("just over 4 times its pixels"),
+            "{}",
+            e.warning
+        );
+    }
+
+    /// An enlarged encode rarely comes out denser than its source, so a
+    /// dense source raises the estimate's top to its own size times the
+    /// pixel ratio.
+    #[test]
+    fn a_dense_source_raises_the_top_of_a_video_estimate() {
+        let p = MediaProbe {
+            size_bytes: Some(10_000_000),
+            ..timed(640, 360, (30, 1), 10)
+        };
+        let e = resolve(&tuning_upscale("1920x"), Some(&p), VIDEO)
+            .enlarged
+            .unwrap();
+        // 1920x1080 for 300 frames at 0.01 bits a pixel; 9 times 10 MB.
+        assert_eq!(e.estimated_bytes, Some([777_600, 90_000_000]));
     }
 
     #[test]

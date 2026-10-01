@@ -235,7 +235,7 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
         if let ([only], 1) = (asked.as_slice(), jobs.len()) {
             return match &only.sizing {
                 Some(sz) => sized::confirmation_error(&only.job.inputs[0], sz),
-                None => convkit_core::upscale_confirmation_error(&only.job.inputs[0]),
+                None => convkit_core::upscale_confirmation_error(&only.job.inputs),
             };
         }
         ConvError::new(
@@ -336,16 +336,17 @@ fn probed_for(
         let ffprobe = resolver.resolve(Backend::Ffprobe)?;
         return probe::run(&ffprobe.path, &job.inputs[0]).map(Some);
     }
-    if registry::needs_image_probe(job.from, job.to, tuning) {
+    if let (Some(read), Some(geometry)) = (
+        registry::image_read(job.from, job.to, tuning),
+        tuning.resize.as_deref(),
+    ) {
         // As `exec::run` does: an unreadable size leaves `--upscale` its
-        // general warning rather than failing the preview.
-        if !job.inputs[0].is_file() {
-            return Ok(None);
-        }
+        // general warning rather than failing the preview. `probe::image`
+        // reads only existing regular files.
         return Ok(resolver
             .resolve(Backend::Magick)
             .ok()
-            .and_then(|m| probe::image(&m.path, &job.inputs[0]).ok()));
+            .and_then(|m| probe::image(&m.path, &job.inputs, read, geometry).ok()));
     }
     if !registry::needs_probe_tuned(job.from, job.to, tuning) {
         return Ok(None);

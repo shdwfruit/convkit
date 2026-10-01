@@ -1915,9 +1915,77 @@ fn a_heic_size_is_read_without_decoding_it() {
     let resolver = Resolver::new();
     require_backend(&resolver, Backend::Magick);
     let magick = resolver.resolve(Backend::Magick).unwrap().path;
-    let p = convkit_core::probe::image(&magick, &fixture("photo.heic")).unwrap();
+    let first_frame = convkit_core::probe::ImageRead {
+        density: None,
+        every_input: false,
+        every_page: false,
+    };
+    let p =
+        convkit_core::probe::image(&magick, &[fixture("photo.heic")], first_frame, "1x").unwrap();
     assert_eq!(
         p.display_dimensions(),
         Some(imagemagick_dimensions(&fixture("photo.heic")))
     );
+}
+
+/// The SVG recipes render at 384 dpi, four times what a size read assumes,
+/// so a 100x100 SVG is a 400x400 picture: 300 wide shrinks it, and 800 wide
+/// is exactly four times its pixels.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_svg_is_sized_at_the_density_it_renders_at() {
+    let dir = tmp();
+    let svg = dir.path().join("icon.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#c33"/></svg>"##,
+    )
+    .unwrap();
+    let small = dir.path().join("small.png");
+    let outcome = convert_tuned(&svg, &small, &upscaled("300x")).unwrap();
+    assert_eq!(imagemagick_dimensions(&small), (300, 300));
+    assert_eq!(outcome.enlarged, None, "a shrink, not an enlargement");
+
+    let big = dir.path().join("big.png");
+    let outcome = convert_tuned(&svg, &big, &upscaled("800x")).unwrap();
+    assert_eq!(imagemagick_dimensions(&big), (800, 800));
+    let e = outcome.enlarged.expect("an enlargement warns");
+    assert_eq!(e.source, Some([400, 400]));
+    assert!(!e.needs_confirmation, "exactly four times");
+}
+
+/// image -> pdf takes every input: the small one is enlarged 64 times, so
+/// it decides the question, and the warning names it.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn several_images_into_one_pdf_are_decided_by_the_one_enlarged_most() {
+    let dir = tmp();
+    let big = synth_png(&dir, 600, 400);
+    let big = {
+        let to = dir.path().join("big.png");
+        std::fs::rename(&big, &to).unwrap();
+        to
+    };
+    let tiny = synth_png(&dir, 50, 50);
+    let tiny = {
+        let to = dir.path().join("tiny.png");
+        std::fs::rename(&tiny, &to).unwrap();
+        to
+    };
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+    let req = |allow_extreme| exec::Request {
+        from: Format::Png,
+        to: Format::Pdf,
+        inputs: vec![big.clone(), tiny.clone()],
+        output: dir.path().join("both.pdf"),
+        overwrite: true,
+        tuning: upscaled("400x"),
+        allow_extreme,
+    };
+    let e = exec::run(&req(false), &resolver, &mut |_| {}).unwrap_err();
+    assert_eq!(e.code, convkit_core::ErrorCode::ConfirmationRequired);
+    let outcome = exec::run(&req(true), &resolver, &mut |_| {}).unwrap();
+    let w = outcome.enlarged.unwrap().warning;
+    assert!(w.contains("enlarges tiny.png (50x50) to 400x400"), "{w}");
 }

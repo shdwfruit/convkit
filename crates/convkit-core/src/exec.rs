@@ -438,14 +438,17 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             .resolve(Backend::Ffprobe)
             .ok()
             .and_then(|p| probe::run(&p.path, &req.inputs[0]).ok())
-    } else if registry::needs_image_probe(req.from, req.to, &req.tuning) {
+    } else if let (Some(read), Some(geometry)) = (
+        registry::image_read(req.from, req.to, &req.tuning),
+        req.tuning.resize.as_deref(),
+    ) {
         // A size that cannot be read leaves `--upscale` its general
         // warning, and nothing to ask about: the conversion reports a real
         // fault itself.
         resolver
             .resolve(Backend::Magick)
             .ok()
-            .and_then(|m| probe::image(&m.path, &req.inputs[0]).ok())
+            .and_then(|m| probe::image(&m.path, &req.inputs, read, geometry).ok())
     } else {
         None
     };
@@ -509,7 +512,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         .is_some_and(|e| e.needs_confirmation)
         && !req.allow_extreme
     {
-        return Err(crate::video::confirmation_error(&req.inputs[0]));
+        return Err(crate::video::confirmation_error(&req.inputs));
     }
     let (ran, sizing) = match built.sizing.clone() {
         None => {
@@ -3305,9 +3308,9 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         );
     }
 
-    /// ImageMagick stand-in: answers `-ping` with `ping` (and logs it to
-    /// `pings`), logs every other call to `calls`, and writes a small file
-    /// to its last argument.
+    /// ImageMagick stand-in: answers `-ping` with `<input name>.ping` if
+    /// there is one, else with `ping` (and logs it to `pings`), logs every
+    /// other call to `calls`, and writes a small file to its last argument.
     #[cfg(unix)]
     fn magick_stub(dir: &Path, ping: &str) -> Resolver {
         let bin = dir.join("bin");
@@ -3320,7 +3323,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             "#!/bin/sh\n\
              if [ \"$#\" = \"1\" ] && [ \"$1\" = \"-version\" ]; then echo 'Version: ImageMagick 7.1.1-0'; exit 0; fi\n\
              d=\"$(dirname \"$0\")\"\n\
-             if [ \"$1\" = \"-ping\" ]; then echo \"$*\" >> \"$d/pings\"; cat \"$d/ping\"; exit 0; fi\n\
+             if [ \"$1\" = \"-ping\" ]; then echo \"$*\" >> \"$d/pings\"; f=\"${2%\\[0\\]}\"; b=\"$(basename \"$f\")\"; if [ -f \"$d/$b.ping\" ]; then cat \"$d/$b.ping\"; else cat \"$d/ping\"; fi; exit 0; fi\n\
              echo \"$*\" >> \"$d/calls\"\n\
              for a in \"$@\"; do last=\"$a\"; done\n\
              printf img > \"$last\"\n",
@@ -3357,6 +3360,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         std::fs::read_to_string(dir.join("bin").join("pings"))
             .unwrap_or_default()
             .lines()
+            .filter(|l| l.starts_with("-ping"))
             .count()
     }
 
@@ -3480,6 +3484,140 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         };
         run(&req, &r, &mut |_| {}).unwrap();
         assert_eq!(pings(dir.path()), 1);
+    }
+
+    #[cfg(unix)]
+    fn image_request(
+        dir: &Path,
+        (from, to): (Format, Format),
+        names: &[&str],
+        geometry: &str,
+    ) -> Request {
+        let inputs = names
+            .iter()
+            .map(|n| {
+                let p = dir.join(n);
+                std::fs::write(&p, b"image bytes").unwrap();
+                p
+            })
+            .collect();
+        Request {
+            from,
+            to,
+            inputs,
+            output: dir.join("out").join(format!("out.{}", to.ext())),
+            overwrite: false,
+            tuning: crate::Tuning {
+                resize: Some(geometry.into()),
+                upscale: true,
+                ..Default::default()
+            },
+            allow_extreme: false,
+        }
+    }
+
+    #[cfg(unix)]
+    fn answer_ping(dir: &Path, name: &str, answer: &str) {
+        std::fs::write(dir.join("bin").join(format!("{name}.ping")), answer).unwrap();
+    }
+
+    /// image -> pdf takes every input: a small one among large ones is the
+    /// one enlarged, so it decides the question and is named.
+    #[cfg(unix)]
+    #[test]
+    fn of_several_inputs_the_one_enlarged_most_decides_and_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "");
+        answer_ping(dir.path(), "big.png", "3000 2000 TopLeft 72\n");
+        answer_ping(dir.path(), "tiny.png", "100 100 TopLeft 72\n");
+        let req = image_request(
+            dir.path(),
+            (Format::Png, Format::Pdf),
+            &["big.png", "tiny.png"],
+            "2000x",
+        );
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConfirmationRequired);
+        assert!(
+            e.message.contains("big.png and 1 more input"),
+            "{}",
+            e.message
+        );
+        let req = Request {
+            allow_extreme: true,
+            ..req
+        };
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        let e = o.enlarged.unwrap();
+        assert!(
+            e.warning
+                .starts_with("--resize 2000x --upscale enlarges tiny.png (100x100) to 2000x2000"),
+            "{}",
+            e.warning
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_page_an_input_brings_is_sized() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "");
+        answer_ping(
+            dir.path(),
+            "scan.tiff",
+            "300 200 TopLeft 72\n100 50 TopLeft 72\n",
+        );
+        let req = image_request(
+            dir.path(),
+            (Format::Tiff, Format::Pdf),
+            &["scan.tiff"],
+            "300x",
+        );
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(
+            e.code,
+            ErrorCode::ConfirmationRequired,
+            "page 2 is enlarged 9 times"
+        );
+        let req = Request {
+            allow_extreme: true,
+            ..req
+        };
+        let w = run(&req, &r, &mut |_| {})
+            .unwrap()
+            .enlarged
+            .unwrap()
+            .warning;
+        assert!(w.contains("scan.tiff page 2 (100x50)"), "{w}");
+    }
+
+    /// The SVG recipes render at their own density, four times what `-ping`
+    /// assumes, so a 100x100 SVG is a 400x400 picture.
+    #[cfg(unix)]
+    #[test]
+    fn an_svg_is_sized_at_the_density_it_renders_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "100 100 Undefined 96\n");
+        let req = image_request(
+            dir.path(),
+            (Format::Svg, Format::Png),
+            &["icon.svg"],
+            "300x",
+        );
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(o.enlarged, None, "300 is smaller than 400: a shrink");
+        let req = Request {
+            output: dir.path().join("out").join("big.png"),
+            ..image_request(
+                dir.path(),
+                (Format::Svg, Format::Png),
+                &["icon.svg"],
+                "800x",
+            )
+        };
+        let e = run(&req, &r, &mut |_| {}).unwrap().enlarged.unwrap();
+        assert_eq!(e.source, Some([400, 400]));
+        assert!(!e.needs_confirmation, "exactly four times");
     }
 
     #[cfg(unix)]
