@@ -101,6 +101,7 @@ mod tests {
             quiet,
             verbose: false,
             resize: None,
+            upscale: false,
             quality: None,
             colors: None,
             fps: None,

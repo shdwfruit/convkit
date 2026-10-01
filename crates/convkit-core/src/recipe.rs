@@ -39,11 +39,15 @@ pub struct Tuning {
     /// `plan::build_tuned` hands the conversion to `sized::plan`, which
     /// chooses the resolution, frame rate and bitrates itself.
     pub max_size: Option<crate::size::MaxSize>,
+    /// Lets `resize` enlarge a picture smaller than its geometry. Without
+    /// it, `resize` only ever fits within, on every target.
+    pub upscale: bool,
 }
 
 impl Tuning {
     pub fn is_empty(&self) -> bool {
-        self.resize.is_none()
+        !self.upscale
+            && self.resize.is_none()
             && self.quality.is_none()
             && self.colors.is_none()
             && self.fps.is_none()
@@ -283,7 +287,13 @@ impl Step {
                 Arg::TuneResize => {
                     if let Some(g) = &tuning.resize {
                         argv.push("-resize".to_string());
-                        argv.push(g.clone());
+                        // ImageMagick's `>`: only shrink a larger image.
+                        // `--upscale` drops it, and the plan warns.
+                        argv.push(if tuning.upscale {
+                            g.clone()
+                        } else {
+                            format!("{g}>")
+                        });
                     }
                 }
                 Arg::TuneColors => {
@@ -537,6 +547,7 @@ mod tests {
             fps: None,
             crf: None,
             max_size: None,
+            upscale: false,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],
@@ -546,8 +557,39 @@ mod tests {
         );
         assert_eq!(
             r.argv,
-            vec!["in.png", "-resize", "1600x900", "-colors", "64", "-quality", "70", "out.jpg"]
+            vec![
+                "in.png",
+                "-resize",
+                "1600x900>",
+                "-colors",
+                "64",
+                "-quality",
+                "70",
+                "out.jpg"
+            ]
         );
+    }
+
+    /// ImageMagick's `>` flag is what keeps `-resize` from enlarging, so it
+    /// is there unless `--upscale` asked for that.
+    #[test]
+    fn an_image_resize_only_enlarges_with_upscale() {
+        let render = |upscale| {
+            TUNABLE
+                .render_full(
+                    &[Path::new("in.png")],
+                    Path::new("out.jpg"),
+                    &Tuning {
+                        resize: Some("50%".into()),
+                        upscale,
+                        ..Tuning::default()
+                    },
+                    &ResolvedVideo::default(),
+                )
+                .argv
+        };
+        assert!(render(false).windows(2).any(|w| w == ["-resize", "50%>"]));
+        assert!(render(true).windows(2).any(|w| w == ["-resize", "50%"]));
     }
 
     /// Path positions must stay correct when tune slots expand: the output

@@ -1692,3 +1692,129 @@ mod tests {
         );
     }
 }
+
+// --- --upscale --------------------------------------------------------------
+
+/// A flat `w`x`h` PNG, drawn by ffmpeg like the video fixtures.
+fn synth_png(dir: &tempfile::TempDir, w: u32, h: u32) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+
+    let out = dir.path().join("src.png");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", &format!("testsrc=size={w}x{h}")])
+        .args(["-frames:v", "1"])
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "building the synthetic image fixture failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    out
+}
+
+fn upscaled(geometry: &str) -> Tuning {
+    Tuning {
+        resize: Some(geometry.into()),
+        upscale: true,
+        ..Default::default()
+    }
+}
+
+fn warns_of_enlarging(outcome: &exec::Outcome, start: &str) -> bool {
+    outcome.notes.iter().any(|n| n.starts_with(start))
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_image_resize_only_enlarges_with_upscale() {
+    // ImageMagick enlarges by default: before, this 320x240 came out
+    // 1200x900 with nothing said.
+    let dir = tmp();
+    let src = synth_png(&dir, 320, 240);
+
+    let kept = dir.path().join("kept.jpg");
+    let outcome = convert_tuned(
+        &src,
+        &kept,
+        &Tuning {
+            resize: Some("1600x900".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(imagemagick_dimensions(&kept), (320, 240));
+    assert!(
+        !warns_of_enlarging(&outcome, "--resize"),
+        "{:?}",
+        outcome.notes
+    );
+
+    let big = dir.path().join("big.jpg");
+    let outcome = convert_tuned(&src, &big, &upscaled("1600x900")).unwrap();
+    assert_eq!(imagemagick_dimensions(&big), (1200, 900));
+    assert!(
+        warns_of_enlarging(&outcome, "--resize 1600x900 --upscale enlarges"),
+        "{:?}",
+        outcome.notes
+    );
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn upscale_enlarges_a_video_and_warns() {
+    let dir = tmp();
+    let src = synth_video(&dir, 640, 360, 30);
+    let out = dir.path().join("big.mp4");
+    let outcome = convert_tuned(&src, &out, &upscaled("1280x")).unwrap();
+    assert_eq!(probe_dims(&out), (1280, 720));
+    assert!(
+        warns_of_enlarging(
+            &outcome,
+            "--resize 1280x --upscale enlarges the 640x360 source to about 4 times"
+        ),
+        "{:?}",
+        outcome.notes
+    );
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_gif_resize_only_enlarges_with_upscale() {
+    // 5 fps keeps the enlarged GIF's palette pass to ten frames.
+    let dir = tmp();
+    let src = synth_video(&dir, 1280, 720, 5);
+
+    let kept = dir.path().join("kept.gif");
+    let outcome = convert_tuned(
+        &src,
+        &kept,
+        &Tuning {
+            resize: Some("4000x".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(probe_dims(&kept).0, 1280);
+    assert!(
+        !warns_of_enlarging(&outcome, "--resize"),
+        "{:?}",
+        outcome.notes
+    );
+
+    let big = dir.path().join("big.gif");
+    let outcome = convert_tuned(&src, &big, &upscaled("4000x")).unwrap();
+    assert_eq!(probe_dims(&big).0, 4000);
+    assert!(
+        warns_of_enlarging(
+            &outcome,
+            "--resize 4000x --upscale enlarges the 1280x720 source"
+        ),
+        "{:?}",
+        outcome.notes
+    );
+}

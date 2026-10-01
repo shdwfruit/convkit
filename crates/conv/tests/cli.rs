@@ -1206,7 +1206,10 @@ fn tuning_flags_appear_in_the_dry_run_command() {
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(stdout.contains("-quality 70"), "{stdout}");
-    assert!(stdout.contains("-resize 1600x900"), "{stdout}");
+    assert!(
+        stdout.contains("1600x900>"),
+        "shrink-only by default: {stdout}"
+    );
     assert!(stdout.contains("-colors 64"), "{stdout}");
 
     let assert = conv()
@@ -2330,4 +2333,92 @@ fn a_sized_json_dry_run_carries_the_choice() {
     let sizing = &v["plans"][0]["plan"]["sizing"];
     assert_eq!(sizing["strategy"], "encode");
     assert!(sizing["choice"]["width"].as_u64().unwrap() > 0);
+}
+
+/// `--upscale` only changes what `--resize` may do, so it means nothing
+/// alone; and `--max-size` chooses its own picture, never above the source.
+#[test]
+fn upscale_needs_resize_and_cannot_join_max_size() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+    std::fs::write(dir.path().join("in.mp4"), b"x").unwrap();
+
+    conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "--dry-run", "--upscale"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains("--resize"));
+
+    conv()
+        .current_dir(dir.path())
+        .args([
+            "in.mp4",
+            "--dry-run",
+            "--max-size",
+            "10mb",
+            "--resize",
+            "640x",
+            "--upscale",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains("--max-size"));
+}
+
+/// The preview shows the geometry ImageMagick will get, and the warning a
+/// real run would print.
+#[test]
+fn an_upscaled_image_dry_run_drops_the_shrink_only_flag_and_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+
+    let assert = conv()
+        .current_dir(dir.path())
+        .args([
+            "a.png",
+            "a.jpg",
+            "--dry-run",
+            "--resize",
+            "1600x900",
+            "--upscale",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("-resize 1600x900 "), "{stdout}");
+    assert!(
+        stdout.contains("warning: --resize 1600x900 --upscale enlarges any source smaller"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn capabilities_lists_upscale_wherever_it_lists_resize() {
+    for format in ["jpg", "mp4", "gif"] {
+        let assert = conv()
+            .args(["capabilities", format, "--json"])
+            .assert()
+            .success();
+        let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+        for row in v["targets"].as_array().unwrap() {
+            let tuning: Vec<&str> = row["tuning"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t.as_str())
+                .collect();
+            assert_eq!(
+                tuning.contains(&"--resize"),
+                tuning.contains(&"--upscale"),
+                "{format} -> {}: {tuning:?}",
+                row["to"]
+            );
+        }
+    }
+    let assert = conv().args(["capabilities", "jpg"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("--resize --upscale"), "{stdout}");
 }

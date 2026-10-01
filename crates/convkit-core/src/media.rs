@@ -1241,6 +1241,7 @@ mod tests {
             notes: vec![],
             keep_source_rate: false,
             keep_source_size: false,
+            enlarged: None,
         }
     }
 

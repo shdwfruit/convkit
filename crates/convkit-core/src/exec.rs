@@ -523,6 +523,11 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let bytes = file_len(&temp_final)?;
     std::fs::rename(&temp_final, &req.output).map_err(io_err)?;
 
+    // A note says what convkit chose; this says what `--upscale` costs, so
+    // it goes with the notes the frontend prints as warnings.
+    if let Some(w) = &ran.enlarged {
+        notes.insert(0, w.clone());
+    }
     let mut warnings = ran.warnings;
     let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());

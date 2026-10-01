@@ -282,8 +282,9 @@ pub(crate) const OPUS_CHANNEL_LAYOUTS: &str = "aformat=channel_layouts=7.1|5.1|s
 /// `-vf` value at render time by `VideoChainSpec::compose`, so unlike the
 /// filter text below these are ordinary consts -- `concat!`'s "every
 /// argument must be a literal token" restriction only bound the two now-gone
-/// macros this replaced, not a runtime `String` build. Capped, never
-/// upscaled.
+/// macros this replaced, not a runtime `String` build. The width is a cap,
+/// never an enlargement; a `--resize` replaces it, and only `--upscale`
+/// lets that enlarge.
 const GIF_FPS: &str = "15";
 const GIF_MAX_W: &str = "640";
 /// Everything after the tuned head in the GIF chain, verbatim.

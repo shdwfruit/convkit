@@ -77,6 +77,9 @@ pub fn plan_human(plan: &ConversionPlan) -> String {
         }
         s.push('\n');
     }
+    if let Some(w) = &plan.enlarged {
+        s.push_str(&format!("warning: {w}\n"));
+    }
     for w in &plan.warnings {
         s.push_str(&format!("note: {w}\n"));
     }

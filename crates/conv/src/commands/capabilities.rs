@@ -72,6 +72,7 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     let mut flags = Vec::new();
     if has(|a| matches!(a, Arg::TuneResize)) {
         push_flag(&mut flags, "--resize");
+        push_flag(&mut flags, "--upscale");
     }
     if has(|a| matches!(a, Arg::Quality(_))) {
         push_flag(&mut flags, "--quality");
@@ -85,6 +86,7 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     // takes both.
     if has(|a| matches!(a, Arg::VideoChain(_))) {
         push_flag(&mut flags, "--resize");
+        push_flag(&mut flags, "--upscale");
         push_flag(&mut flags, "--fps");
     }
     if has(|a| matches!(a, Arg::Crf(_))) {
@@ -97,6 +99,7 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     // the static recipe declares. Advertise what actually runs.
     if to == Format::Webm {
         push_flag(&mut flags, "--resize");
+        push_flag(&mut flags, "--upscale");
         push_flag(&mut flags, "--fps");
     }
     // --max-size is a policy over a whole video conversion rather than a

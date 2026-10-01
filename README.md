@@ -156,6 +156,7 @@ Three flags override named defaults on image conversions:
 
 - `--resize <GEOMETRY>` — fit within the geometry, aspect preserved:
   `1600x900`, `1600x` (width only), `x900` (height only), or `50%`.
+  It never enlarges; see `--upscale` below.
 - `--quality <1-100>` — lossy image targets (jpg/webp/avif) and image → pdf;
   the default is 92.
 - `--colors <2-256>` — palette reduction on raster targets.
@@ -179,13 +180,6 @@ conversions; `--resize` above widens to both as well:
   convkit's own, not libx264's, which accepts far more without
   complaint.
 
-On video and GIF, `--resize` caps rather than scales up: a source
-already smaller than the geometry is left unchanged. This diverges
-from what `--resize` does to an image — measured: `magick -resize
-1600x900` on a 320x240 source produces 1200x900 — it scales up.
-Upscaling an image is cheap and occasionally wanted; upscaling video
-invents no detail and pays for the invention in every frame.
-
 ```console
 $ conv --fps 24 --resize 1280x720 sample.mkv out.mp4
 OK out.mp4 - 62 KB - 0.3s
@@ -203,7 +197,28 @@ $ conv --fps 30 slow24.mp4 slow24.mkv
 OK slow24.mkv - 17 KB - 0.2s - stream copy, no re-encode
   /home/user/Videos/slow24.mkv
   note  Source is 24 fps; --fps 30 left it unchanged.
+$ conv --resize 4000x clip.mkv clip.mp4
+OK clip.mp4 - 768 KB - 0.1s - stream copy, no re-encode
+  /home/user/Videos/clip.mp4
+  note  Source is 1280x720; --resize 4000x left it unchanged (add --upscale to enlarge).
 ```
+
+`--resize` never enlarges, on image, video and GIF targets alike: a
+source already smaller than the geometry keeps its own size, and a
+note says so. `--upscale` lets it enlarge, and conv warns when it
+does, because enlarging adds no detail and makes a much larger file:
+
+```console
+$ conv --resize 1920x --upscale clip.mkv big.mp4
+OK big.mp4 - 1.3 MB - 0.9s
+  /home/user/Videos/big.mp4
+  note  Re-encoded rather than stream-copied, because a video knob changes the picture; the copy path cannot filter.
+warning  --resize 1920x --upscale enlarges the 1280x720 source to about 2.2 times its pixels: enlarging adds no detail, so expect a soft picture and a much larger file.
+```
+
+An image's size is not read before converting, so on an image target
+the warning comes with every `--upscale`, since conv cannot tell
+whether it enlarged.
 
 An out-of-range `--crf` is refused rather than passed through to the
 encoder:
@@ -231,17 +246,17 @@ $ conv capabilities mp4
 mp4 (Video)
 
   as source, converts to:
-    mp4 -> mov      [--resize --fps --crf --max-size]
-    mp4 -> mkv      [--resize --fps --crf --max-size]
-    mp4 -> webm     [--crf --resize --fps --max-size]
+    mp4 -> mov      [--resize --upscale --fps --crf --max-size]
+    mp4 -> mkv      [--resize --upscale --fps --crf --max-size]
+    mp4 -> webm     [--crf --resize --upscale --fps --max-size]
     mp4 -> mp3   
     mp4 -> m4a   
     mp4 -> wav   
     mp4 -> flac  
-    mp4 -> gif      [--resize --fps]
+    mp4 -> gif      [--resize --upscale --fps]
 
   as target, accepts: mov mkv webm avi gif
-  tuning flags when writing mp4: --resize --fps --crf --max-size
+  tuning flags when writing mp4: --resize --upscale --fps --crf --max-size
 
   defaults: crf 20 (override with --crf)
   note: Subtitle tracks and any audio tracks beyond the first are dropped (--max-size keeps every audio track and every text subtitle).
@@ -374,11 +389,11 @@ $ conv capabilities jpg
 jpg (Image)
 
   as source, converts to:
-    jpg -> png      [--resize --colors]
-    jpg -> webp     [--resize --quality --colors]
+    jpg -> png      [--resize --upscale --colors]
+    jpg -> webp     [--resize --upscale --quality --colors]
     ...
   as target, accepts: heic heif png webp avif tiff bmp svg
-  tuning flags when writing jpg: --resize --quality --colors
+  tuning flags when writing jpg: --resize --upscale --quality --colors
 
   defaults: quality 92 (override with --quality)
 ```

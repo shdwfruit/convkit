@@ -121,10 +121,17 @@ re-litigated:
   it or stretching to it — so `--pad` needs its own rationale before it
   needs an implementation. Until now this deferral existed only in one
   session's notes.
-- **Video `--resize` caps where image `--resize` scales up.** Measured:
-  `magick -resize 1600x900` on a 320x240 source produces 1200x900.
-  Upscaling an image is cheap and occasionally wanted; upscaling video
-  invents no detail and pays for the invention in every frame.
+- **`--resize` never enlarges; `--upscale` opts in.** This first held for
+  video alone, while image `--resize` scaled up (`magick -resize
+  1600x900` on a 320x240 source produces 1200x900) on the grounds that
+  enlarging an image is cheap and occasionally wanted. That left one
+  flag with two meanings and an image enlarged without a word. Since
+  0.3.0 the rule is one rule for image, video and GIF targets: `--resize`
+  fits within and never enlarges, and `--upscale` is the explicit opt-in,
+  with a warning, because enlarging invents no detail and, on video, pays
+  for the invention in every frame. A flag rather than a prompt: it can
+  be scripted, and asking it is the consent, as `--yes` is for an extreme
+  `--max-size` target.
 
 ## 4. Product shape
 
