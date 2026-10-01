@@ -28,4 +28,7 @@ pub use plan::{ConversionPlan, PlannedStep};
 pub use probe::MediaProbe;
 pub use recipe::{Arg, OutputMode, Recipe, Step, Tuning};
 pub use resolve::{AvailableBackends, ResolvedBackend, Resolver, Source};
-pub use video::{resolve as resolve_video, ResolvedVideo};
+pub use video::{
+    confirmation_error as upscale_confirmation_error, resolve as resolve_video, Enlargement,
+    ResolvedVideo,
+};

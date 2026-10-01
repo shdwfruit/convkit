@@ -206,19 +206,36 @@ OK clip.mp4 - 768 KB - 0.1s - stream copy, no re-encode
 `--resize` never enlarges, on image, video and GIF targets alike: a
 source already smaller than the geometry keeps its own size, and a
 note says so. `--upscale` lets it enlarge, and conv warns when it
-does, because enlarging adds no detail and makes a much larger file:
+does, with the new size, how many times the source's pixels that is,
+and a rough file size, because enlarging adds no detail and makes a
+much larger file:
 
 ```console
 $ conv --resize 1920x --upscale clip.mkv big.mp4
-OK big.mp4 - 1.3 MB - 0.9s
+OK big.mp4 - 13.8 MB - 4.6s
   /home/user/Videos/big.mp4
   note  Re-encoded rather than stream-copied, because a video knob changes the picture; the copy path cannot filter.
-warning  --resize 1920x --upscale enlarges the 1280x720 source to about 2.2 times its pixels: enlarging adds no detail, so expect a soft picture and a much larger file.
+warning  --resize 1920x --upscale enlarges the 1280x720 source to 1920x1080, about 2.2 times its pixels: enlarging adds no detail, so expect a soft picture and a much larger file, very roughly 1.6 MB to 16 MB.
 ```
 
-An image's size is not read before converting, so on an image target
-the warning comes with every `--upscale`, since conv cannot tell
-whether it enlarged.
+Past four times the source's pixels (more than doubling each side),
+conv asks first, as it does for an extreme `--max-size` target:
+`--yes` answers yes, and a run that cannot ask (no terminal, `--json`
+or `--quiet`) converts nothing and exits 2. One question covers a
+whole batch, and `--dry-run` shows the warning without asking.
+
+```console
+$ conv --resize 3840x --upscale clip.mkv big4k.mp4
+warning  --resize 3840x --upscale enlarges the 1280x720 source to 3840x2160, about 9 times its pixels: enlarging adds no detail, so expect a soft picture and a much larger file, very roughly 6.2 MB to 62 MB.
+Convert anyway? [y/N] n
+error: large upscale not confirmed for clip.mkv; pass --yes to convert anyway
+```
+
+The file size is a rule of thumb and can be off several-fold either
+way. An image's size is read from its header, and only under
+`--upscale`; if it cannot be read, conv warns without the numbers and
+does not ask, unless the geometry is a percentage, whose ratio is
+known regardless.
 
 An out-of-range `--crf` is refused rather than passed through to the
 encoder:

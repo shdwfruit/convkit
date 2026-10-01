@@ -115,6 +115,16 @@ fn convert_tuned(
     output: &Path,
     tuning: &Tuning,
 ) -> convkit_core::Result<exec::Outcome> {
+    convert_tuned_with(input, output, tuning, false)
+}
+
+/// `convert_tuned`, answering yes to a question the run asks first.
+fn convert_tuned_with(
+    input: &Path,
+    output: &Path,
+    tuning: &Tuning,
+    allow_extreme: bool,
+) -> convkit_core::Result<exec::Outcome> {
     let from = Format::from_path(input)
         .unwrap_or_else(|| panic!("no known format for {}", input.display()));
     let to = Format::from_path(output)
@@ -132,7 +142,7 @@ fn convert_tuned(
         output: output.to_path_buf(),
         overwrite: false,
         tuning: tuning.clone(),
-        allow_extreme: false,
+        allow_extreme,
     };
     exec::run(&req, &resolver, &mut |_| {})
 }
@@ -1754,14 +1764,28 @@ fn an_image_resize_only_enlarges_with_upscale() {
         outcome.notes
     );
 
+    // 1200x900 is 14 times the pixels, past four: asked first.
     let big = dir.path().join("big.jpg");
-    let outcome = convert_tuned(&src, &big, &upscaled("1600x900")).unwrap();
+    let e = convert_tuned(&src, &big, &upscaled("1600x900")).unwrap_err();
+    assert_eq!(e.code, convkit_core::ErrorCode::ConfirmationRequired);
+    assert!(!big.exists());
+    let outcome = convert_tuned_with(&src, &big, &upscaled("1600x900"), true).unwrap();
     assert_eq!(imagemagick_dimensions(&big), (1200, 900));
     assert!(
-        warns_of_enlarging(&outcome, "--resize 1600x900 --upscale enlarges"),
+        warns_of_enlarging(
+            &outcome,
+            "--resize 1600x900 --upscale enlarges the 320x240 source to 1200x900, about 14 times"
+        ),
         "{:?}",
         outcome.notes
     );
+    assert_eq!(outcome.enlarged.unwrap().output, Some([1200, 900]));
+
+    // Shrinking, --upscale changes nothing and says nothing.
+    let small = dir.path().join("small.jpg");
+    let outcome = convert_tuned(&src, &small, &upscaled("160x")).unwrap();
+    assert_eq!(imagemagick_dimensions(&small), (160, 120));
+    assert_eq!(outcome.enlarged, None);
 }
 
 #[test]
@@ -1775,7 +1799,7 @@ fn upscale_enlarges_a_video_and_warns() {
     assert!(
         warns_of_enlarging(
             &outcome,
-            "--resize 1280x --upscale enlarges the 640x360 source to about 4 times"
+            "--resize 1280x --upscale enlarges the 640x360 source to 1280x720, about 4 times"
         ),
         "{:?}",
         outcome.notes
@@ -1806,8 +1830,11 @@ fn a_gif_resize_only_enlarges_with_upscale() {
         outcome.notes
     );
 
+    // 4000 wide is 9.8 times the pixels, past four: asked first.
     let big = dir.path().join("big.gif");
-    let outcome = convert_tuned(&src, &big, &upscaled("4000x")).unwrap();
+    let e = convert_tuned(&src, &big, &upscaled("4000x")).unwrap_err();
+    assert_eq!(e.code, convkit_core::ErrorCode::ConfirmationRequired);
+    let outcome = convert_tuned_with(&src, &big, &upscaled("4000x"), true).unwrap();
     assert_eq!(probe_dims(&big).0, 4000);
     assert!(
         warns_of_enlarging(
@@ -1816,5 +1843,81 @@ fn a_gif_resize_only_enlarges_with_upscale() {
         ),
         "{:?}",
         outcome.notes
+    );
+}
+
+/// A JPEG whose EXIF says to turn it a quarter: stored 320x240, shown
+/// 240x320. ImageMagick writes no EXIF of its own on a fresh image, so the
+/// orientation tag is spliced in as a one-entry APP1 segment.
+fn synth_jpeg_on_its_side(dir: &tempfile::TempDir) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let plain = dir.path().join("plain.jpg");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240",
+            "-frames:v",
+            "1",
+        ])
+        .arg(&plain)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let jpeg = std::fs::read(&plain).unwrap();
+    assert_eq!(&jpeg[..2], b"\xff\xd8", "a JPEG starts with SOI");
+    // TIFF header, one IFD entry: Orientation (0x0112), SHORT, 1, value 6.
+    let mut tiff = b"II*\0\x08\0\0\0\x01\0".to_vec();
+    tiff.extend_from_slice(&[
+        0x12, 0x01, 0x03, 0x00, 0x01, 0, 0, 0, 0x06, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&tiff);
+    let len = u16::try_from(payload.len() + 2).unwrap().to_be_bytes();
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&[0xff, 0xe1, len[0], len[1]]);
+    out.extend_from_slice(&payload);
+    out.extend_from_slice(&jpeg[2..]);
+    let rotated = dir.path().join("rotated.jpg");
+    std::fs::write(&rotated, out).unwrap();
+    rotated
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_upscaled_photo_on_its_side_is_sized_as_it_is_shown() {
+    let dir = tmp();
+    let src = synth_jpeg_on_its_side(&dir);
+    let out = dir.path().join("big.png");
+    let outcome = convert_tuned(&src, &out, &upscaled("480x")).unwrap();
+    assert_eq!(imagemagick_dimensions(&out), (480, 640));
+    let e = outcome.enlarged.expect("an enlargement warns");
+    assert!(
+        e.warning
+            .starts_with("--resize 480x --upscale enlarges the 240x320 source to 480x640"),
+        "{}",
+        e.warning
+    );
+    assert!(!e.needs_confirmation, "exactly four times warns only");
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_heic_size_is_read_without_decoding_it() {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+    let magick = resolver.resolve(Backend::Magick).unwrap().path;
+    let p = convkit_core::probe::image(&magick, &fixture("photo.heic")).unwrap();
+    assert_eq!(
+        p.display_dimensions(),
+        Some(imagemagick_dimensions(&fixture("photo.heic")))
     );
 }

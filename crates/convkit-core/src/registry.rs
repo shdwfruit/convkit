@@ -1205,6 +1205,21 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
     })
 }
 
+/// Whether to read an image's size before converting it: only for
+/// `--resize --upscale` on a pair whose recipe resizes with ImageMagick,
+/// where the size decides whether it enlarges, what the warning says, and
+/// whether to ask first. One `-ping` header read, so an ordinary image
+/// conversion still pays nothing.
+pub fn needs_image_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
+    tuning.upscale
+        && tuning.resize.is_some()
+        && lookup(from, to).is_some_and(|r| {
+            r.steps
+                .iter()
+                .any(|s| s.args.iter().any(|a| matches!(a, Arg::TuneResize)))
+        })
+}
+
 /// Whether a knob on this pair can only be honoured with a probe, so a
 /// missing or failing ffprobe has to be reported as itself rather than
 /// quietly falling back to a static recipe that refuses the knob.

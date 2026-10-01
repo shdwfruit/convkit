@@ -31,10 +31,13 @@ pub struct Request {
     /// registry's own anchors. Validated against the selected recipe's
     /// slots by `plan::build_tuned`.
     pub tuning: crate::Tuning,
-    /// Whether an extreme `--max-size` conversion may run. Refuse-by-default
-    /// in the core for the same reason `overwrite` is (I5): a frontend that
-    /// consumes this crate directly must not skip the confirmation by
-    /// accident. The `conv` binary sets it from the user's answer.
+    /// Whether a conversion convkit asks about first may run: an extreme
+    /// `--max-size` target, or a `--resize --upscale` past four times the
+    /// source's pixels. The two never meet, since `--upscale` and
+    /// `--max-size` exclude each other. Refuse-by-default in the core for
+    /// the same reason `overwrite` is (I5): a frontend that consumes this
+    /// crate directly must not skip the confirmation by accident. The `conv`
+    /// binary sets it from the user's answer.
     pub allow_extreme: bool,
 }
 
@@ -121,6 +124,10 @@ pub struct Outcome {
     /// `--json` for every other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sizing: Option<crate::sized::SizingReport>,
+    /// What a `--resize --upscale` that enlarged the picture cost, as the
+    /// plan worked it out. Its warning is also first among `notes`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enlarged: Option<crate::video::Enlargement>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -431,6 +438,14 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             .resolve(Backend::Ffprobe)
             .ok()
             .and_then(|p| probe::run(&p.path, &req.inputs[0]).ok())
+    } else if registry::needs_image_probe(req.from, req.to, &req.tuning) {
+        // A size that cannot be read leaves `--upscale` its general
+        // warning, and nothing to ask about: the conversion reports a real
+        // fault itself.
+        resolver
+            .resolve(Backend::Magick)
+            .ok()
+            .and_then(|m| probe::image(&m.path, &req.inputs[0]).ok())
     } else {
         None
     };
@@ -486,6 +501,16 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         backends: Vec::new(),
     };
 
+    // Checked before any step runs, as an extreme `--max-size` plan is:
+    // the flag that lets the user say yes is the same one.
+    if built
+        .enlarged
+        .as_ref()
+        .is_some_and(|e| e.needs_confirmation)
+        && !req.allow_extreme
+    {
+        return Err(crate::video::confirmation_error(&req.inputs[0]));
+    }
     let (ran, sizing) = match built.sizing.clone() {
         None => {
             if built.steps.is_empty() {
@@ -525,9 +550,10 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
 
     // A note says what convkit chose; this says what `--upscale` costs, so
     // it goes with the notes the frontend prints as warnings.
-    if let Some(w) = &ran.enlarged {
-        notes.insert(0, w.clone());
+    if let Some(e) = &ran.enlarged {
+        notes.insert(0, e.warning.clone());
     }
+    let enlarged = ran.enlarged.clone();
     let mut warnings = ran.warnings;
     let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());
@@ -565,6 +591,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         remuxed,
         elapsed_ms: 0,
         sizing,
+        enlarged,
     })
 }
 
@@ -3276,6 +3303,183 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             could_not[0].starts_with("Could not get under 5 MB: the smallest possible is about"),
             "{could_not:?}"
         );
+    }
+
+    /// ImageMagick stand-in: answers `-ping` with `ping` (and logs it to
+    /// `pings`), logs every other call to `calls`, and writes a small file
+    /// to its last argument.
+    #[cfg(unix)]
+    fn magick_stub(dir: &Path, ping: &str) -> Resolver {
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        std::fs::write(bin.join("ping"), ping).unwrap();
+        let p = bin.join("magick_stub.sh");
+        std::fs::write(
+            &p,
+            "#!/bin/sh\n\
+             if [ \"$#\" = \"1\" ] && [ \"$1\" = \"-version\" ]; then echo 'Version: ImageMagick 7.1.1-0'; exit 0; fi\n\
+             d=\"$(dirname \"$0\")\"\n\
+             if [ \"$1\" = \"-ping\" ]; then echo \"$*\" >> \"$d/pings\"; cat \"$d/ping\"; exit 0; fi\n\
+             echo \"$*\" >> \"$d/calls\"\n\
+             for a in \"$@\"; do last=\"$a\"; done\n\
+             printf img > \"$last\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, p);
+        r
+    }
+
+    #[cfg(unix)]
+    fn upscale_request(dir: &Path, geometry: &str, upscale: bool, allow_extreme: bool) -> Request {
+        let input = dir.join("photo.png");
+        std::fs::write(&input, b"png bytes").unwrap();
+        Request {
+            from: Format::Png,
+            to: Format::Jpg,
+            inputs: vec![input],
+            output: dir.join("out").join("photo.jpg"),
+            overwrite: false,
+            tuning: crate::Tuning {
+                resize: Some(geometry.into()),
+                upscale,
+                ..Default::default()
+            },
+            allow_extreme,
+        }
+    }
+
+    #[cfg(unix)]
+    fn pings(dir: &Path) -> usize {
+        std::fs::read_to_string(dir.join("bin").join("pings"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_large_upscale_is_refused_unless_allowed_and_nothing_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "640 360 TopLeft");
+        let req = upscale_request(dir.path(), "1281x", true, false);
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConfirmationRequired);
+        assert!(e.message.contains("pass --yes"), "{}", e.message);
+        assert!(
+            calls(dir.path()).is_empty(),
+            "no conversion before the gate"
+        );
+        assert!(!req.output.exists());
+
+        let req = upscale_request(dir.path(), "1281x", true, true);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert!(o.enlarged.unwrap().needs_confirmation);
+        assert_eq!(calls(dir.path()).len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn four_times_the_pixels_runs_unasked_and_reports_the_enlargement() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "640 360 TopLeft");
+        let o = run(
+            &upscale_request(dir.path(), "1280x", true, false),
+            &r,
+            &mut |_| {},
+        )
+        .unwrap();
+        let e = o.enlarged.expect("the outcome carries the enlargement");
+        assert_eq!(e.output, Some([1280, 720]));
+        assert!(!e.needs_confirmation);
+        assert_eq!(o.notes.first(), Some(&e.warning), "and warns first");
+        assert!(
+            e.warning
+                .starts_with("--resize 1280x --upscale enlarges the 640x360 source"),
+            "{}",
+            e.warning
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_image_on_its_side_is_sized_as_it_will_be_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "320 240 RightTop");
+        let o = run(
+            &upscale_request(dir.path(), "480x", true, false),
+            &r,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(o.enlarged.unwrap().output, Some([480, 640]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_size_warns_generically_and_does_not_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "");
+        let o = run(
+            &upscale_request(dir.path(), "4000x", true, false),
+            &r,
+            &mut |_| {},
+        )
+        .unwrap();
+        let e = o.enlarged.unwrap();
+        assert!(
+            e.warning
+                .starts_with("--resize 4000x --upscale enlarges any source smaller"),
+            "{}",
+            e.warning
+        );
+        assert!(!e.needs_confirmation);
+
+        // A percentage still knows its ratio, so past 4x it still asks.
+        let req = Request {
+            output: dir.path().join("out").join("tripled.jpg"),
+            ..upscale_request(dir.path(), "300%", true, false)
+        };
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConfirmationRequired);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shrinking_upscale_warns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "640 360 TopLeft");
+        let o = run(
+            &upscale_request(dir.path(), "320x", true, false),
+            &r,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(o.enlarged, None);
+        assert!(o.notes.is_empty(), "{:?}", o.notes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_image_is_only_pinged_for_upscale() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "640 360 TopLeft");
+        run(
+            &upscale_request(dir.path(), "320x", false, false),
+            &r,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(pings(dir.path()), 0);
+        let req = Request {
+            output: dir.path().join("out").join("again.jpg"),
+            ..upscale_request(dir.path(), "320x", true, false)
+        };
+        run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(pings(dir.path()), 1);
     }
 
     #[cfg(unix)]

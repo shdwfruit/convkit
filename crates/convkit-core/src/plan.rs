@@ -7,7 +7,7 @@ use crate::media;
 use crate::probe::MediaProbe;
 use crate::recipe::ScaleStyle;
 use crate::resolve::AvailableBackends;
-use crate::video::ResolvedVideo;
+use crate::video::{Enlargement, ResolvedVideo, Target};
 use crate::{registry, Arg, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe, Tuning};
 
 /// The first argv element `build` inserts for every `Soffice` step, in
@@ -64,11 +64,12 @@ pub struct ConversionPlan {
     /// conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sizing: Option<crate::sized::SizingPlan>,
-    /// The warning a `--resize --upscale` carries when it enlarges the
-    /// picture, or might: unlike `warnings`, which are notes, this is
-    /// printed as a warning. Skipped when absent, like `sizing`.
+    /// What a `--resize --upscale` that enlarges the picture, or might,
+    /// costs. Its warning prints as a warning, unlike `warnings`, which are
+    /// notes; a large one is refused without consent. Skipped when absent,
+    /// like `sizing`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub enlarged: Option<String>,
+    pub enlarged: Option<Enlargement>,
 }
 
 /// Chooses a recipe and renders it with default tuning. Pure: no
@@ -129,13 +130,7 @@ pub fn build_tuned(
     // resolves to `ResolvedVideo::default()` with no notes regardless of
     // `probe`, which is what keeps the untuned argv snapshot byte-identical.
     //
-    // GIF's recipe caps the width when no `--resize` is given, so a note
-    // that `--resize` kept a wider source has to say it is wider than that.
-    let gif_width = match (to, registry::TO_GIF_CHAIN.scale) {
-        (Format::Gif, ScaleStyle::CappedLanczos { default_width }) => default_width.parse().ok(),
-        _ => None,
-    };
-    let resolved = crate::video::resolve(tuning, probe, gif_width);
+    let resolved = crate::video::resolve(tuning, probe, target_for(to));
 
     // Probe-aware media paths first: a container change whose video codec
     // already fits the target gets a stream-mapped copy (or hybrid
@@ -273,6 +268,41 @@ pub fn build_tuned(
         sizing: None,
         enlarged: resolved.enlarged.clone(),
     })
+}
+
+/// What kind of picture `to` is, for the notes and the size estimate a
+/// `--upscale` warning gives.
+fn target_for(to: Format) -> Target {
+    if let (Format::Gif, ScaleStyle::CappedLanczos { default_width }) =
+        (to, registry::TO_GIF_CHAIN.scale)
+    {
+        return Target::Gif {
+            default_width: default_width
+                .parse()
+                .expect("an authored width is a number"),
+            default_fps: registry::TO_GIF_CHAIN
+                .fps
+                .and_then(|f| f.parse().ok())
+                .expect("GIF authors a whole frame rate"),
+        };
+    }
+    if crate::sized::is_video_target(to) {
+        return Target::Video;
+    }
+    // Bytes per pixel an enlarged picture came out at in each format,
+    // measured with this tool on film stills and flat graphics at 4 and 16
+    // times the pixels: wide on purpose, since content moves it as much as
+    // size does.
+    let bytes_per_pixel = match to {
+        Format::Jpg => Some((0.05, 0.3)),
+        Format::Webp => Some((0.02, 0.15)),
+        Format::Avif => Some((0.01, 0.1)),
+        Format::Png => Some((0.3, 2.0)),
+        Format::Tiff => Some((1.0, 4.0)),
+        Format::Bmp => Some((3.0, 4.0)),
+        _ => None,
+    };
+    Target::Image { bytes_per_pixel }
 }
 
 /// Refuses the image knobs on the probe-selected media paths. The video
@@ -1448,7 +1478,7 @@ mod tests {
             "{argv:?}"
         );
         assert_eq!(
-            plan.enlarged.as_deref(),
+            plan.enlarged.as_ref().map(|e| e.warning.as_str()),
             Some(
                 "--resize 1600x900 --upscale enlarges any source smaller than that, and this \
                  one's size is not known: enlarging adds no detail, so expect a soft picture \
@@ -1479,11 +1509,14 @@ mod tests {
         .unwrap();
         let vf = plan.steps[0].argv.join(" ");
         assert!(vf.contains("scale=w=4000:h=-2:flags=lanczos"), "{vf}");
-        let warning = plan.enlarged.expect("an enlarged GIF must warn");
+        let e = plan.enlarged.expect("an enlarged GIF must warn");
         assert!(
-            warning.starts_with("--resize 4000x --upscale enlarges the 1280x720 source"),
-            "{warning}"
+            e.warning
+                .starts_with("--resize 4000x --upscale enlarges the 1280x720 source to 4000x2250"),
+            "{}",
+            e.warning
         );
+        assert!(e.needs_confirmation, "9.8 times the pixels asks first");
         assert!(plan.warnings.iter().all(|w| !w.contains("left it")));
     }
 
@@ -1514,11 +1547,11 @@ mod tests {
             "{argv:?}"
         );
         assert_eq!(
-            plan.enlarged.as_deref(),
+            plan.enlarged.as_ref().map(|e| e.warning.as_str()),
             Some(
-                "--resize 1280x --upscale enlarges the 640x360 source to about 4 times its \
-                 pixels: enlarging adds no detail, so expect a soft picture and a much larger \
-                 file."
+                "--resize 1280x --upscale enlarges the 640x360 source to 1280x720, about 4 \
+                 times its pixels: enlarging adds no detail, so expect a soft picture and a \
+                 much larger file."
             )
         );
     }

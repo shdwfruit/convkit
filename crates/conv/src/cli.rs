@@ -60,8 +60,9 @@ pub struct Cli {
     pub resize: Option<String>,
 
     /// Let --resize enlarge a source smaller than its geometry. Enlarging
-    /// adds no detail and makes a larger file, so conv warns when it does.
-    /// Image, video and GIF targets.
+    /// adds no detail and makes a larger file, so conv warns when it does,
+    /// and asks first past four times the source's pixels. Image, video and
+    /// GIF targets.
     #[arg(long, requires = "resize", conflicts_with = "max_size")]
     pub upscale: bool,
 
@@ -95,7 +96,7 @@ pub struct Cli {
     pub max_size: Option<convkit_core::size::MaxSize>,
 
     /// Assume yes to every prompt: installing a missing backend, or
-    /// converting an extreme --max-size target. For a script that wants
+    /// converting an extreme --max-size target or a large --upscale. For a script that wants
     /// either without a terminal to answer. Contradicts `--no-install`,
     /// which asks the opposite question ("never install"): passing both is
     /// a usage error.

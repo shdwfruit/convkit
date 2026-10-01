@@ -135,6 +135,64 @@ fn parse_duration_ms(s: &str) -> Option<u64> {
 /// Parses `ffprobe -show_streams -show_format` JSON: the streams, and the
 /// container's duration and size. Any malformed input yields an empty probe,
 /// which callers treat as "unknown" and therefore transcode.
+/// Reads an image's size from its header with ImageMagick's `-ping`, which
+/// stops before decoding the pixels: one cheap spawn, run only for
+/// `--upscale`, whose warning and question need the size. `-ping` and
+/// `info:` read the same way in ImageMagick 6's `convert` as in 7's
+/// `magick`, so this needs no `identify` binary of its own. Only the first
+/// frame, as the recipes take it.
+pub fn image(magick: &Path, input: &Path) -> Result<MediaProbe> {
+    if !input.is_file() {
+        return Err(ConvError::new(
+            ErrorCode::InputNotFound,
+            format!(
+                "not an existing regular file, refusing to probe: {}",
+                input.display()
+            ),
+        ));
+    }
+    let mut first = input.as_os_str().to_owned();
+    first.push("[0]");
+    let out = backend_command(magick)
+        .arg("-ping")
+        .arg(first)
+        .args(["-format", "%w %h %[orientation]", "info:"])
+        .output()
+        .map_err(|e| {
+            ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!("failed to run ImageMagick: {e}"),
+            )
+        })?;
+    let mut probe = parse_image(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!("ImageMagick could not read the size of {}", input.display()),
+        )
+    })?;
+    probe.size_bytes = std::fs::metadata(input).ok().map(|m| m.len());
+    Ok(probe)
+}
+
+/// Parses `-ping`'s `W H ORIENTATION`. The recipes auto-orient before they
+/// resize, so EXIF orientations 5-8, which turn the picture on its side,
+/// are recorded as a quarter turn and `display_dimensions` swaps them.
+fn parse_image(text: &str) -> Option<MediaProbe> {
+    let mut it = text.split_whitespace();
+    let positive = |t: Option<&str>| t?.parse::<u32>().ok().filter(|&n| n > 0);
+    let (width, height) = (positive(it.next())?, positive(it.next())?);
+    let on_its_side = matches!(
+        it.next(),
+        Some("LeftTop" | "RightTop" | "RightBottom" | "LeftBottom")
+    );
+    Some(MediaProbe {
+        width: Some(width),
+        height: Some(height),
+        rotation: on_its_side.then_some(90),
+        ..MediaProbe::default()
+    })
+}
+
 pub fn parse(json: &str) -> MediaProbe {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return MediaProbe::default();
@@ -285,6 +343,36 @@ pub fn run(ffprobe: &Path, input: &Path) -> Result<MediaProbe> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_reads_its_displayed_size_from_imagemagick() {
+        let p = parse_image("320 240 TopLeft").unwrap();
+        assert_eq!(p.display_dimensions(), Some((320, 240)));
+        let p = parse_image("4032 3024 Undefined").unwrap();
+        assert_eq!(p.display_dimensions(), Some((4032, 3024)));
+        assert!(p.video_codec.is_none() && p.video_streams == 0);
+    }
+
+    /// The recipes auto-orient before resizing, so EXIF orientations 5-8,
+    /// which turn the picture on its side, swap what the user sees.
+    #[test]
+    fn an_image_on_its_side_swaps_width_and_height() {
+        for o in ["LeftTop", "RightTop", "RightBottom", "LeftBottom"] {
+            let p = parse_image(&format!("320 240 {o}")).unwrap();
+            assert_eq!(p.display_dimensions(), Some((240, 320)), "{o}");
+        }
+        for o in ["TopLeft", "TopRight", "BottomRight", "BottomLeft"] {
+            let p = parse_image(&format!("320 240 {o}")).unwrap();
+            assert_eq!(p.display_dimensions(), Some((320, 240)), "{o}");
+        }
+    }
+
+    #[test]
+    fn an_image_answer_that_is_not_a_size_is_none() {
+        assert!(parse_image("").is_none());
+        assert!(parse_image("magick: no decode delegate").is_none());
+        assert!(parse_image("0 240 TopLeft").is_none());
+    }
 
     const SAMPLE: &str = r#"{"streams":[
         {"codec_type":"video","codec_name":"h264"},

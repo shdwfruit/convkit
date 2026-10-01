@@ -77,8 +77,8 @@ pub fn plan_human(plan: &ConversionPlan) -> String {
         }
         s.push('\n');
     }
-    if let Some(w) = &plan.enlarged {
-        s.push_str(&format!("warning: {w}\n"));
+    if let Some(e) = &plan.enlarged {
+        s.push_str(&format!("warning: {}\n", e.warning));
     }
     for w in &plan.warnings {
         s.push_str(&format!("note: {w}\n"));
@@ -133,7 +133,9 @@ pub fn suggestion_command(args: &[String], new_size: &str) -> String {
 }
 
 /// The block printed before the confirmation question, one entry per
-/// extreme conversion: the core's sentence, then what to try instead.
+/// conversion it asks about (an extreme `--max-size` target or a large
+/// `--upscale`): the core's sentence, then what to try instead, if
+/// anything.
 pub fn extreme_warnings_human(
     entries: &[(&Path, &str, Option<&str>)],
     total: usize,
@@ -270,6 +272,9 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     });
     if let Some(s) = &o.sizing {
         v["sizing"] = json!(s);
+    }
+    if let Some(e) = &o.enlarged {
+        v["enlarged"] = json!(e);
     }
     v
 }
@@ -640,6 +645,7 @@ mod tests {
             remuxed,
             elapsed_ms: 900,
             sizing: None,
+            enlarged: None,
         }
     }
 

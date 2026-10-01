@@ -129,9 +129,17 @@ re-litigated:
   0.3.0 the rule is one rule for image, video and GIF targets: `--resize`
   fits within and never enlarges, and `--upscale` is the explicit opt-in,
   with a warning, because enlarging invents no detail and, on video, pays
-  for the invention in every frame. A flag rather than a prompt: it can
-  be scripted, and asking it is the consent, as `--yes` is for an extreme
-  `--max-size` target.
+  for the invention in every frame. A flag rather than a prompt for the
+  opt-in itself: it can be scripted, and passing it is the consent. Past
+  four times the source's pixels, though, a typo (`1000%`) and an intent
+  look alike, so the run also asks y/N, through the same gate and with
+  the same `--yes` as an extreme `--max-size` target. The warning names
+  the new size, the pixel ratio and a file-size range from a rule of
+  thumb measured with this tool (bits per pixel for video, bytes per
+  pixel for GIF and for each image format): wide on purpose, because
+  content moves it as much as size does, and the source's own file size
+  is no guide once the format changes. An image's size is read with one
+  `-ping` header read, only under `--upscale`.
 
 ## 4. Product shape
 

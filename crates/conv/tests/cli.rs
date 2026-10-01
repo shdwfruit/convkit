@@ -2422,3 +2422,196 @@ fn capabilities_lists_upscale_wherever_it_lists_resize() {
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(stdout.contains("--resize --upscale"), "{stdout}");
 }
+
+/// ImageMagick stand-in: answers `-ping` with `ping` (logging it to
+/// `pings`), and otherwise writes a small file to its last argument.
+#[cfg(unix)]
+fn magick_stub(dir: &std::path::Path, ping: &str) -> std::path::PathBuf {
+    std::fs::write(dir.join("ping"), ping).unwrap();
+    let p = dir.join("magick_stub.sh");
+    std::fs::write(
+        &p,
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"-version\" ]; then echo 'Version: ImageMagick 7.1.1-0'; exit 0; fi\n\
+         d=\"$(dirname \"$0\")\"\n\
+         if [ \"$1\" = \"-ping\" ]; then echo \"$*\" >> \"$d/pings\"; cat \"$d/ping\"; exit 0; fi\n\
+         for a in \"$@\"; do last=\"$a\"; done\n\
+         printf img > \"$last\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// A percentage knows its ratio without reading the image, so this needs
+/// no ImageMagick at all: past 200% is past four times the pixels, and
+/// assert_cmd's session is non-interactive, so nothing may be converted.
+#[test]
+fn a_large_percentage_upscale_without_yes_writes_nothing_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+    let assert = conv()
+        .current_dir(dir.path())
+        .args(["a.png", "a.jpg", "--resize", "300%", "--upscale"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(
+            "warning  --resize 300% --upscale enlarges the source to about 9 times its pixels"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("large upscale not confirmed for a.png; pass --yes"),
+        "{stderr}"
+    );
+    assert!(!dir.path().join("a.jpg").exists());
+
+    // At exactly four times, the warning stands alone: no question.
+    let assert = conv()
+        .current_dir(dir.path())
+        .args([
+            "a.png",
+            "a.jpg",
+            "--resize",
+            "200%",
+            "--upscale",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("about 4 times its pixels"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_large_upscale_asks_and_yes_answers_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let magick = magick_stub(dir.path(), "640 360 TopLeft");
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+    let run = |extra: &[&str]| {
+        conv()
+            .current_dir(dir.path())
+            .arg("--magick-path")
+            .arg(&magick)
+            .args(["a.png", "a.jpg", "--resize", "1281x", "--upscale"])
+            .args(extra)
+            .assert()
+    };
+
+    let assert = run(&[]).code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("enlarges the 640x360 source to 1281x721"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("large upscale not confirmed"), "{stderr}");
+    assert!(!dir.path().join("a.jpg").exists(), "nothing converted");
+
+    let assert = run(&["--json"]).code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("confirmation_required"), "{stderr}");
+    assert!(!dir.path().join("a.jpg").exists());
+
+    let assert = run(&["--yes"]).success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert_eq!(
+        stderr.matches("enlarges the 640x360 source").count(),
+        1,
+        "warned once, not again after the run: {stderr}"
+    );
+    assert!(dir.path().join("a.jpg").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn four_times_the_pixels_warns_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let magick = magick_stub(dir.path(), "640 360 TopLeft");
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+    let assert = conv()
+        .current_dir(dir.path())
+        .arg("--magick-path")
+        .arg(&magick)
+        .args(["a.png", "a.jpg", "--resize", "1280x", "--upscale"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("warning  --resize 1280x --upscale enlarges the 640x360 source"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("not confirmed"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_batch_of_large_upscales_asks_once_and_names_each() {
+    let dir = tempfile::tempdir().unwrap();
+    let magick = magick_stub(dir.path(), "640 360 TopLeft");
+    for n in ["a.png", "b.png"] {
+        std::fs::write(dir.path().join(n), b"x").unwrap();
+    }
+    let assert = conv()
+        .current_dir(dir.path())
+        .arg("--magick-path")
+        .arg(&magick)
+        .args([
+            "a.png",
+            "b.png",
+            "--to",
+            "jpg",
+            "--resize",
+            "2000x",
+            "--upscale",
+        ])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    for n in ["a.png", "b.png"] {
+        assert!(
+            stderr.contains(&format!("warning  {n}: --resize 2000x")),
+            "{stderr}"
+        );
+    }
+    assert_eq!(stderr.matches("not confirmed").count(), 1, "{stderr}");
+    assert!(
+        stderr.contains("large upscale not confirmed for 2 of 2 files"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_large_upscale_dry_run_warns_and_never_asks() {
+    let dir = tempfile::tempdir().unwrap();
+    let magick = magick_stub(dir.path(), "640 360 TopLeft");
+    std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+    let assert = conv()
+        .current_dir(dir.path())
+        .arg("--magick-path")
+        .arg(&magick)
+        .args([
+            "a.png",
+            "a.jpg",
+            "--resize",
+            "2000x",
+            "--upscale",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout
+            .contains("warning: --resize 2000x --upscale enlarges the 640x360 source to 2000x1125"),
+        "{stdout}"
+    );
+    assert!(
+        dir.path().join("pings").exists(),
+        "the preview reads the size too"
+    );
+}

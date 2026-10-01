@@ -273,6 +273,7 @@ mod tests {
             remuxed: false,
             elapsed_ms: 0,
             sizing: None,
+            enlarged: None,
         })
     }
 
