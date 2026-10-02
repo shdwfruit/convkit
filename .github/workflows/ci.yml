@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
   # Drives `integration-windows` only -- see that job for why it is not on
   # the push path. Weekly rather than nightly: what this catches is drift
-  # (a new LibreOffice from Chocolatey, a pinned managed download rotting),
-  # which moves on the scale of weeks.
+  # (a new runner image, a pinned managed download rotting), which moves on
+  # the scale of weeks.
   schedule:
     - cron: "17 6 * * 1"
 
@@ -195,6 +195,12 @@ jobs:
     runs-on: windows-latest
     # As on ubuntu; the LibreOffice install makes this one slower.
     timeout-minutes: 30
+    # The LibreOffice installer the job runs, pinned. To move to a newer
+    # LibreOffice, upload its unmodified x64 MSI to this repo's `ci-assets`
+    # pre-release and change both values.
+    env:
+      LIBREOFFICE_VERSION: "26.2.6"
+      LIBREOFFICE_MSI_SHA256: "f9877032fd908beb9c0ddf06df4af5c2e85f419c42e14876c4cce5aae5fb2660"
     steps:
       - uses: actions/checkout@v4
 
@@ -218,17 +224,63 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "conv install $b failed ($LASTEXITCODE)" }
           }
 
+      # The LibreOffice installer comes from the cache, or else from this
+      # repo's own `ci-assets` pre-release, never from LibreOffice's mirror:
+      # that mirror timed out for hours on 2026-10-02 and failed this job
+      # twice, through Chocolatey, which downloads from it. The cache saves
+      # the ~370 MB download; GitHub evicts an entry unused for 7 days,
+      # which a weekly job can just miss, so the release asset is what the
+      # job falls back on. Either way the checksum below is checked before
+      # the installer runs.
+      - name: Restore the cached LibreOffice installer
+        id: lo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/libreoffice
+          key: libreoffice-${{ env.LIBREOFFICE_VERSION }}-win-x64
+
+      - name: Fetch the LibreOffice installer from ci-assets
+        if: steps.lo-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\libreoffice" | Out-Null
+          gh release download ci-assets --repo "${{ github.repository }}" `
+            --pattern "LibreOffice_$($env:LIBREOFFICE_VERSION)_Win_x86-64.msi" `
+            --dir "$env:RUNNER_TEMP\libreoffice"
+          if ($LASTEXITCODE -ne 0) { throw "could not download the LibreOffice installer from ci-assets" }
+
       # ImageMagick ships on some runner images and not others, so this
       # checks rather than assumes. LibreOffice never ships and is always
       # installed; it is what puts `soffice.com` at the well-known path the
       # resolver looks for, which is the Windows-specific behaviour with the
-      # worst track record.
+      # worst track record. The MSI installs where Chocolatey's package put
+      # it, C:\Program Files\LibreOffice, with the same silent arguments.
       - name: Install ImageMagick and LibreOffice
         run: |
           if (-not (Get-Command magick -ErrorAction SilentlyContinue)) {
             choco install imagemagick --no-progress -y
           }
-          choco install libreoffice-fresh --no-progress -y
+          $msi = "$env:RUNNER_TEMP\libreoffice\LibreOffice_$($env:LIBREOFFICE_VERSION)_Win_x86-64.msi"
+          $hash = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
+          if ($hash -ne $env:LIBREOFFICE_MSI_SHA256) {
+            throw "LibreOffice installer checksum mismatch: got $hash"
+          }
+          $log = "$env:RUNNER_TEMP\libreoffice-install.log"
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart /l*v `"$log`"" -Wait -PassThru
+          if ($p.ExitCode -notin 0, 3010) {
+            Get-Content $log -Tail 60
+            throw "LibreOffice install failed ($($p.ExitCode))"
+          }
+
+      # Saved only once the checksum has passed, so a bad download is never
+      # cached.
+      - name: Save the LibreOffice installer to the cache
+        if: steps.lo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/libreoffice
+          key: ${{ steps.lo-cache.outputs.cache-primary-key }}
 
       - name: conv doctor
         run: |
