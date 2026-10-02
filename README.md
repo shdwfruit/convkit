@@ -150,7 +150,23 @@ Exit codes, for scripting: `0` success, `1` conversion failed, `2` usage
 error or unsupported pair, `3` a required backend is missing, `4` a batch
 partly failed.
 
+## Shell completion
+
+`conv completions <shell>` writes a completion script without requiring any conversion
+backends. Generate it again after upgrading conv to pick up new commands and flags.
+
+- Bash: `conv completions bash > ~/.conv-completion.bash`, then add
+  `source ~/.conv-completion.bash` to `~/.bashrc`.
+- Zsh: put `conv completions zsh > ~/.zsh/completions/_conv` in a directory on your
+  `fpath` (create the directory first), and run `autoload -Uz compinit; compinit`
+  after setting `fpath=(~/.zsh/completions $fpath)` in `~/.zshrc`.
+- Fish: create `~/.config/fish/completions`, then run
+  `conv completions fish > ~/.config/fish/completions/conv.fish`.
+- PowerShell: create the parent directory for `$PROFILE` if needed, then append
+  `conv completions powershell | Out-String | Invoke-Expression` to `$PROFILE`.
+
 ## Tuning knobs
+
 
 Three flags override named defaults on image conversions:
 

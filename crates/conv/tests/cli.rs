@@ -9,6 +9,27 @@ fn conv() -> Command {
 }
 
 #[test]
+fn completions_support_every_shell_without_backends() {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        conv()
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .stdout(contains("conv"))
+            .stderr("");
+    }
+}
+
+#[test]
+fn completions_reject_an_unknown_shell() {
+    conv()
+        .args(["completions", "unknown"])
+        .assert()
+        .code(2)
+        .stderr(contains("invalid value"));
+}
+
+#[test]
 fn dry_run_prints_the_expert_ffmpeg_command() {
     conv()
         .args(["in.mp4", "out.gif", "--dry-run"])

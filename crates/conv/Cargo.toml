@@ -25,6 +25,7 @@ path = "src/main.rs"
 [dependencies]
 convkit-core = { path = "../convkit-core", version = "0.3.0" }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 wild = "2"
 # The second pass over positionals that `wild` deliberately leaves alone: a
 # glob the shell quoted (see `input::expand_globs`). Already in the tree as

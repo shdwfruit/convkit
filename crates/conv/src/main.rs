@@ -6,7 +6,7 @@ mod install_prompt;
 mod prompt;
 mod render;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 fn main() {
     // Put the console into its final mode before anything is written to it.
@@ -20,6 +20,15 @@ fn main() {
     // neither cmd.exe nor PowerShell expands them for a native executable.
     let cli = cli::Cli::parse_from(wild::args_os());
     let code = match &cli.command {
+        Some(cli::Command::Completions { shell }) => {
+            clap_complete::generate(
+                *shell,
+                &mut cli::Cli::command(),
+                "conv",
+                &mut std::io::stdout(),
+            );
+            0
+        }
         None => commands::convert::run(&cli),
         Some(cli::Command::Doctor) => commands::doctor::run(&cli),
         Some(cli::Command::Capabilities { ref format }) => {
