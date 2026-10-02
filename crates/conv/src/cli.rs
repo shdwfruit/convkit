@@ -144,6 +144,11 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Print a shell completion script to stdout.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Report which backends are installed and how to install the rest.
     Doctor,
     /// Download and verify a managed backend.
