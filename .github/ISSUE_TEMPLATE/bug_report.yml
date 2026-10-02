@@ -1,0 +1,38 @@
+name: Bug report
+description: A conversion failed, produced a bad file, or conv did something unexpected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran, what you expected, and what you got instead.
+      placeholder: |
+        conv clip.mov clip.gif
+        The GIF plays at double speed.
+    validations:
+      required: true
+  - type: textarea
+    id: dry-run
+    attributes:
+      label: Output of the same command with --dry-run
+      render: console
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of conv --version and conv doctor
+      render: console
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: macOS 15 arm64, Windows 11, Ubuntu 24.04...
+    validations:
+      required: true
+  - type: textarea
+    id: file
+    attributes:
+      label: Anything about the input file
+      description: Where it came from (phone, screen recorder, export from an app), or attach it if you can share it.

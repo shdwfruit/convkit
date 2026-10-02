@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/shdwfruit/convkit/discussions
+    about: Ask how to do something, or float an idea before filing it.
