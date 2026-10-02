@@ -115,6 +115,16 @@ fn convert_tuned(
     output: &Path,
     tuning: &Tuning,
 ) -> convkit_core::Result<exec::Outcome> {
+    convert_tuned_with(input, output, tuning, false)
+}
+
+/// `convert_tuned`, answering yes to a question the run asks first.
+fn convert_tuned_with(
+    input: &Path,
+    output: &Path,
+    tuning: &Tuning,
+    allow_extreme: bool,
+) -> convkit_core::Result<exec::Outcome> {
     let from = Format::from_path(input)
         .unwrap_or_else(|| panic!("no known format for {}", input.display()));
     let to = Format::from_path(output)
@@ -132,7 +142,7 @@ fn convert_tuned(
         output: output.to_path_buf(),
         overwrite: false,
         tuning: tuning.clone(),
-        allow_extreme: false,
+        allow_extreme,
     };
     exec::run(&req, &resolver, &mut |_| {})
 }
@@ -1191,6 +1201,49 @@ fn a_gif_fps_at_or_above_the_source_keeps_the_source_rate() {
     }
 }
 
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_resize_that_does_not_bind_keeps_the_stream_copy() {
+    // A size the source already fits within changes nothing, so it must
+    // not cost a re-encode: before, it gave up the copy for an identical
+    // picture.
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffprobe);
+    let mkv = remux_fixture_to("clip.mp4", "mkv");
+    let dir = tmp();
+    let out = dir.path().join("kept.mp4");
+    let outcome = convert_tuned(
+        &mkv,
+        &out,
+        &Tuning {
+            resize: Some("8000x".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(outcome.remuxed, "should have stream-copied");
+    assert_eq!(probe_dims(&out), probe_dims(&mkv));
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_gif_resize_past_the_source_keeps_the_source_size() {
+    // Not the recipe's 640 default, and not enlarged.
+    let dir = tmp();
+    let src = synth_video(&dir, 320, 180, 30);
+    let out = dir.path().join("kept.gif");
+    convert_tuned(
+        &src,
+        &out,
+        &Tuning {
+            resize: Some("4000x".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(probe_dims(&out), (320, 180));
+}
+
 // --- --max-size -----------------------------------------------------------
 
 /// A clip noisy enough that the encoder has to spend the bits it is given:
@@ -1648,4 +1701,291 @@ mod tests {
             identify_command_for(resolved, cfg!(windows))
         );
     }
+}
+
+// --- --upscale --------------------------------------------------------------
+
+/// A flat `w`x`h` PNG, drawn by ffmpeg like the video fixtures.
+fn synth_png(dir: &tempfile::TempDir, w: u32, h: u32) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+
+    let out = dir.path().join("src.png");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", &format!("testsrc=size={w}x{h}")])
+        .args(["-frames:v", "1"])
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "building the synthetic image fixture failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    out
+}
+
+fn upscaled(geometry: &str) -> Tuning {
+    Tuning {
+        resize: Some(geometry.into()),
+        upscale: true,
+        ..Default::default()
+    }
+}
+
+fn warns_of_enlarging(outcome: &exec::Outcome, start: &str) -> bool {
+    outcome.notes.iter().any(|n| n.starts_with(start))
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_image_resize_only_enlarges_with_upscale() {
+    // ImageMagick enlarges by default: before, this 320x240 came out
+    // 1200x900 with nothing said.
+    let dir = tmp();
+    let src = synth_png(&dir, 320, 240);
+
+    let kept = dir.path().join("kept.jpg");
+    let outcome = convert_tuned(
+        &src,
+        &kept,
+        &Tuning {
+            resize: Some("1600x900".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(imagemagick_dimensions(&kept), (320, 240));
+    assert!(
+        !warns_of_enlarging(&outcome, "--resize"),
+        "{:?}",
+        outcome.notes
+    );
+
+    // 1200x900 is 14 times the pixels, past four: asked first.
+    let big = dir.path().join("big.jpg");
+    let e = convert_tuned(&src, &big, &upscaled("1600x900")).unwrap_err();
+    assert_eq!(e.code, convkit_core::ErrorCode::ConfirmationRequired);
+    assert!(!big.exists());
+    let outcome = convert_tuned_with(&src, &big, &upscaled("1600x900"), true).unwrap();
+    assert_eq!(imagemagick_dimensions(&big), (1200, 900));
+    assert!(
+        warns_of_enlarging(
+            &outcome,
+            "--resize 1600x900 --upscale enlarges the 320x240 source to 1200x900, about 14 times"
+        ),
+        "{:?}",
+        outcome.notes
+    );
+    assert_eq!(outcome.enlarged.unwrap().output, Some([1200, 900]));
+
+    // Shrinking, --upscale changes nothing and says nothing.
+    let small = dir.path().join("small.jpg");
+    let outcome = convert_tuned(&src, &small, &upscaled("160x")).unwrap();
+    assert_eq!(imagemagick_dimensions(&small), (160, 120));
+    assert_eq!(outcome.enlarged, None);
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn upscale_enlarges_a_video_and_warns() {
+    let dir = tmp();
+    let src = synth_video(&dir, 640, 360, 30);
+    let out = dir.path().join("big.mp4");
+    let outcome = convert_tuned(&src, &out, &upscaled("1280x")).unwrap();
+    assert_eq!(probe_dims(&out), (1280, 720));
+    assert!(
+        warns_of_enlarging(
+            &outcome,
+            "--resize 1280x --upscale enlarges the 640x360 source to 1280x720, about 4 times"
+        ),
+        "{:?}",
+        outcome.notes
+    );
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_gif_resize_only_enlarges_with_upscale() {
+    // 5 fps keeps the enlarged GIF's palette pass to ten frames.
+    let dir = tmp();
+    let src = synth_video(&dir, 1280, 720, 5);
+
+    let kept = dir.path().join("kept.gif");
+    let outcome = convert_tuned(
+        &src,
+        &kept,
+        &Tuning {
+            resize: Some("4000x".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(probe_dims(&kept).0, 1280);
+    assert!(
+        !warns_of_enlarging(&outcome, "--resize"),
+        "{:?}",
+        outcome.notes
+    );
+
+    // 4000 wide is 9.8 times the pixels, past four: asked first.
+    let big = dir.path().join("big.gif");
+    let e = convert_tuned(&src, &big, &upscaled("4000x")).unwrap_err();
+    assert_eq!(e.code, convkit_core::ErrorCode::ConfirmationRequired);
+    let outcome = convert_tuned_with(&src, &big, &upscaled("4000x"), true).unwrap();
+    assert_eq!(probe_dims(&big).0, 4000);
+    assert!(
+        warns_of_enlarging(
+            &outcome,
+            "--resize 4000x --upscale enlarges the 1280x720 source"
+        ),
+        "{:?}",
+        outcome.notes
+    );
+}
+
+/// A JPEG whose EXIF says to turn it a quarter: stored 320x240, shown
+/// 240x320. ImageMagick writes no EXIF of its own on a fresh image, so the
+/// orientation tag is spliced in as a one-entry APP1 segment.
+fn synth_jpeg_on_its_side(dir: &tempfile::TempDir) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let plain = dir.path().join("plain.jpg");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240",
+            "-frames:v",
+            "1",
+        ])
+        .arg(&plain)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let jpeg = std::fs::read(&plain).unwrap();
+    assert_eq!(&jpeg[..2], b"\xff\xd8", "a JPEG starts with SOI");
+    // TIFF header, one IFD entry: Orientation (0x0112), SHORT, 1, value 6.
+    let mut tiff = b"II*\0\x08\0\0\0\x01\0".to_vec();
+    tiff.extend_from_slice(&[
+        0x12, 0x01, 0x03, 0x00, 0x01, 0, 0, 0, 0x06, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&tiff);
+    let len = u16::try_from(payload.len() + 2).unwrap().to_be_bytes();
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&[0xff, 0xe1, len[0], len[1]]);
+    out.extend_from_slice(&payload);
+    out.extend_from_slice(&jpeg[2..]);
+    let rotated = dir.path().join("rotated.jpg");
+    std::fs::write(&rotated, out).unwrap();
+    rotated
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_upscaled_photo_on_its_side_is_sized_as_it_is_shown() {
+    let dir = tmp();
+    let src = synth_jpeg_on_its_side(&dir);
+    let out = dir.path().join("big.png");
+    let outcome = convert_tuned(&src, &out, &upscaled("480x")).unwrap();
+    assert_eq!(imagemagick_dimensions(&out), (480, 640));
+    let e = outcome.enlarged.expect("an enlargement warns");
+    assert!(
+        e.warning
+            .starts_with("--resize 480x --upscale enlarges the 240x320 source to 480x640"),
+        "{}",
+        e.warning
+    );
+    assert!(!e.needs_confirmation, "exactly four times warns only");
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_heic_size_is_read_without_decoding_it() {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+    let magick = resolver.resolve(Backend::Magick).unwrap().path;
+    let first_frame = convkit_core::probe::ImageRead {
+        density: None,
+        every_input: false,
+        every_page: false,
+    };
+    let p =
+        convkit_core::probe::image(&magick, &[fixture("photo.heic")], first_frame, "1x").unwrap();
+    assert_eq!(
+        p.display_dimensions(),
+        Some(imagemagick_dimensions(&fixture("photo.heic")))
+    );
+}
+
+/// The SVG recipes render at 384 dpi, four times what a size read assumes,
+/// so a 100x100 SVG is a 400x400 picture: 300 wide shrinks it, and 800 wide
+/// is exactly four times its pixels.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_svg_is_sized_at_the_density_it_renders_at() {
+    let dir = tmp();
+    let svg = dir.path().join("icon.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#c33"/></svg>"##,
+    )
+    .unwrap();
+    let small = dir.path().join("small.png");
+    let outcome = convert_tuned(&svg, &small, &upscaled("300x")).unwrap();
+    assert_eq!(imagemagick_dimensions(&small), (300, 300));
+    assert_eq!(outcome.enlarged, None, "a shrink, not an enlargement");
+
+    let big = dir.path().join("big.png");
+    let outcome = convert_tuned(&svg, &big, &upscaled("800x")).unwrap();
+    assert_eq!(imagemagick_dimensions(&big), (800, 800));
+    let e = outcome.enlarged.expect("an enlargement warns");
+    assert_eq!(e.source, Some([400, 400]));
+    assert!(!e.needs_confirmation, "exactly four times");
+}
+
+/// image -> pdf takes every input: the small one is enlarged 64 times, so
+/// it decides the question, and the warning names it.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn several_images_into_one_pdf_are_decided_by_the_one_enlarged_most() {
+    let dir = tmp();
+    let big = synth_png(&dir, 600, 400);
+    let big = {
+        let to = dir.path().join("big.png");
+        std::fs::rename(&big, &to).unwrap();
+        to
+    };
+    let tiny = synth_png(&dir, 50, 50);
+    let tiny = {
+        let to = dir.path().join("tiny.png");
+        std::fs::rename(&tiny, &to).unwrap();
+        to
+    };
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+    let req = |allow_extreme| exec::Request {
+        from: Format::Png,
+        to: Format::Pdf,
+        inputs: vec![big.clone(), tiny.clone()],
+        output: dir.path().join("both.pdf"),
+        overwrite: true,
+        tuning: upscaled("400x"),
+        allow_extreme,
+    };
+    let e = exec::run(&req(false), &resolver, &mut |_| {}).unwrap_err();
+    assert_eq!(e.code, convkit_core::ErrorCode::ConfirmationRequired);
+    let outcome = exec::run(&req(true), &resolver, &mut |_| {}).unwrap();
+    let w = outcome.enlarged.unwrap().warning;
+    assert!(w.contains("enlarges tiny.png (50x50) to 400x400"), "{w}");
 }

@@ -53,11 +53,18 @@ pub struct Cli {
     pub verbose: bool,
 
     /// Fit within this geometry, aspect preserved: `1600x900`, `1600x`
-    /// (width), `x900` (height), or `50%`. On video and GIF targets this is
-    /// a cap: a source already smaller is left alone.
-    // Not `global` -- see `dry_run`'s comment; likewise the four flags below.
+    /// (width), `x900` (height), or `50%`. Never enlarges: a source already
+    /// smaller is left alone, unless --upscale is given.
+    // Not `global` -- see `dry_run`'s comment; likewise the flags below.
     #[arg(long, value_name = "GEOMETRY", value_parser = parse_resize_geometry)]
     pub resize: Option<String>,
+
+    /// Let --resize enlarge a source smaller than its geometry. Enlarging
+    /// adds no detail and makes a larger file, so conv warns when it does,
+    /// and asks first past four times the source's pixels. Image, video and
+    /// GIF targets.
+    #[arg(long, requires = "resize", conflicts_with = "max_size")]
+    pub upscale: bool,
 
     /// Quality 1-100 for lossy image targets (jpg/webp/avif) and
     /// image -> pdf [default: 92].
@@ -89,7 +96,7 @@ pub struct Cli {
     pub max_size: Option<convkit_core::size::MaxSize>,
 
     /// Assume yes to every prompt: installing a missing backend, or
-    /// converting an extreme --max-size target. For a script that wants
+    /// converting an extreme --max-size target or a large --upscale. For a script that wants
     /// either without a terminal to answer. Contradicts `--no-install`,
     /// which asks the opposite question ("never install"): passing both is
     /// a usage error.
@@ -301,6 +308,7 @@ impl Cli {
             fps: self.fps.clone(),
             crf: self.crf,
             max_size: self.max_size.clone(),
+            upscale: self.upscale,
         }
     }
 
@@ -343,6 +351,7 @@ mod tests {
             quiet: false,
             verbose: false,
             resize: None,
+            upscale: false,
             quality: None,
             colors: None,
             fps: None,

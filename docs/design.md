@@ -121,10 +121,28 @@ re-litigated:
   it or stretching to it — so `--pad` needs its own rationale before it
   needs an implementation. Until now this deferral existed only in one
   session's notes.
-- **Video `--resize` caps where image `--resize` scales up.** Measured:
-  `magick -resize 1600x900` on a 320x240 source produces 1200x900.
-  Upscaling an image is cheap and occasionally wanted; upscaling video
-  invents no detail and pays for the invention in every frame.
+- **`--resize` never enlarges; `--upscale` opts in.** This first held for
+  video alone, while image `--resize` scaled up (`magick -resize
+  1600x900` on a 320x240 source produces 1200x900) on the grounds that
+  enlarging an image is cheap and occasionally wanted. That left one
+  flag with two meanings and an image enlarged without a word. Since
+  0.3.0 the rule is one rule for image, video and GIF targets: `--resize`
+  fits within and never enlarges, and `--upscale` is the explicit opt-in,
+  with a warning, because enlarging invents no detail and, on video, pays
+  for the invention in every frame. A flag rather than a prompt for the
+  opt-in itself: it can be scripted, and passing it is the consent. Past
+  four times the source's pixels, though, a typo (`1000%`) and an intent
+  look alike, so the run also asks y/N, through the same gate and with
+  the same `--yes` as an extreme `--max-size` target. The warning names
+  the new size, the pixel ratio and a file-size range from a rule of
+  thumb measured with this tool (bits per pixel for video, bytes per
+  pixel for GIF and for each image format): wide on purpose, because
+  content moves it as much as size does, and the source's own file size
+  is no guide once the format changes; a dense video or GIF source raises
+  the top to its own size times the pixel ratio. An image's size is read
+  with `-ping` header reads, only under `--upscale`: every input and page
+  the recipe takes, an SVG scaled to the density the recipe renders it at,
+  and the page enlarged most decides.
 
 ## 4. Product shape
 

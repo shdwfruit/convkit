@@ -273,6 +273,7 @@ mod tests {
             remuxed: false,
             elapsed_ms: 0,
             sizing: None,
+            enlarged: None,
         })
     }
 
@@ -321,6 +322,7 @@ mod tests {
             quiet: true,
             verbose: false,
             resize: None,
+            upscale: false,
             quality: None,
             colors: None,
             fps: None,

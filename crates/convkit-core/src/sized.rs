@@ -179,6 +179,7 @@ pub(crate) fn plan(
                 steps: Vec::new(),
                 warnings: Vec::new(),
                 sizing: Some(sizing),
+                enlarged: None,
             });
         }
         if let Some(m) = media::stream_mapped_invocation(to, p.probe, &inputs[0], output) {
@@ -191,6 +192,7 @@ pub(crate) fn plan(
                 steps: vec![ffmpeg_step(m.argv, OutputMode::Path, output.to_path_buf())],
                 warnings: m.warnings,
                 sizing: Some(sizing),
+                enlarged: None,
             });
         }
     }
@@ -396,6 +398,8 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
             .then(|| format!("scale=w={}:h={}", choice.width, choice.height)),
         notes: Vec::new(),
         keep_source_rate: false,
+        keep_source_size: false,
+        enlarged: None,
     };
     let passlog = p.output.with_extension("convkit-pass");
     let two = media::two_pass_invocations(
@@ -448,6 +452,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         ],
         warnings,
         sizing: Some(sizing),
+        enlarged: None,
     })
 }
 

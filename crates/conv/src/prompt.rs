@@ -1,6 +1,7 @@
 //! Yes/no questions on the terminal, shared by the install offer and the
-//! extreme-compression confirmation so the two can never disagree about
-//! when a session is interactive.
+//! "convert anyway?" confirmation (an extreme `--max-size` target or a
+//! large `--upscale`) so they can never disagree about when a session is
+//! interactive.
 
 use std::io::{IsTerminal, Write};
 
@@ -33,7 +34,8 @@ pub enum Gate {
     Refuse,
 }
 
-/// Who answers "convert anyway?" for an extreme `--max-size` conversion.
+/// Who answers "convert anyway?" for an extreme `--max-size` conversion or
+/// a large `--upscale`.
 /// `--yes` answers it; otherwise only a real terminal outside the machine
 /// output modes is asked, and everyone else is refused, never guessed for.
 pub fn extreme_gate(yes: bool, json: bool, quiet: bool, interactive: bool) -> Gate {

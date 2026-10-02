@@ -5,8 +5,9 @@ use serde::Serialize;
 use crate::error::Result;
 use crate::media;
 use crate::probe::MediaProbe;
+use crate::recipe::ScaleStyle;
 use crate::resolve::AvailableBackends;
-use crate::video::ResolvedVideo;
+use crate::video::{Enlargement, ResolvedVideo, Target};
 use crate::{registry, Arg, Backend, ConvError, ErrorCode, Format, OutputMode, Recipe, Tuning};
 
 /// The first argv element `build` inserts for every `Soffice` step, in
@@ -63,6 +64,12 @@ pub struct ConversionPlan {
     /// conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sizing: Option<crate::sized::SizingPlan>,
+    /// What a `--resize --upscale` that enlarges the picture, or might,
+    /// costs. Its warning prints as a warning, unlike `warnings`, which are
+    /// notes; a large one is refused without consent. Skipped when absent,
+    /// like `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enlarged: Option<Enlargement>,
 }
 
 /// Chooses a recipe and renders it with default tuning. Pure: no
@@ -122,7 +129,8 @@ pub fn build_tuned(
     // takes the dynamic branch below). An empty `Tuning`
     // resolves to `ResolvedVideo::default()` with no notes regardless of
     // `probe`, which is what keeps the untuned argv snapshot byte-identical.
-    let resolved = crate::video::resolve(tuning, probe);
+    //
+    let resolved = crate::video::resolve(tuning, probe, target_for(to));
 
     // Probe-aware media paths first: a container change whose video codec
     // already fits the target gets a stream-mapped copy (or hybrid
@@ -181,6 +189,7 @@ pub fn build_tuned(
                     }],
                     warnings: m.warnings,
                     sizing: None,
+                    enlarged: resolved.enlarged.clone(),
                 });
             }
         }
@@ -257,7 +266,43 @@ pub fn build_tuned(
         steps,
         warnings,
         sizing: None,
+        enlarged: resolved.enlarged.clone(),
     })
+}
+
+/// What kind of picture `to` is, for the notes and the size estimate a
+/// `--upscale` warning gives.
+fn target_for(to: Format) -> Target {
+    if let (Format::Gif, ScaleStyle::CappedLanczos { default_width }) =
+        (to, registry::TO_GIF_CHAIN.scale)
+    {
+        return Target::Gif {
+            default_width: default_width
+                .parse()
+                .expect("an authored width is a number"),
+            default_fps: registry::TO_GIF_CHAIN
+                .fps
+                .and_then(|f| f.parse().ok())
+                .expect("GIF authors a whole frame rate"),
+        };
+    }
+    if crate::sized::is_video_target(to) {
+        return Target::Video;
+    }
+    // Bytes per pixel an enlarged picture came out at in each format,
+    // measured with this tool on film stills and flat graphics at 4 and 16
+    // times the pixels: wide on purpose, since content moves it as much as
+    // size does.
+    let bytes_per_pixel = match to {
+        Format::Jpg => Some((0.05, 0.3)),
+        Format::Webp => Some((0.02, 0.15)),
+        Format::Avif => Some((0.01, 0.1)),
+        Format::Png => Some((0.3, 2.0)),
+        Format::Tiff => Some((1.0, 4.0)),
+        Format::Bmp => Some((3.0, 4.0)),
+        _ => None,
+    };
+    Target::Image { bytes_per_pixel }
 }
 
 /// Refuses the image knobs on the probe-selected media paths. The video
@@ -340,14 +385,14 @@ fn validate_tuning(
     // - Something to apply (`resolved.fps` or `resolved.scale` is set) that
     //   this recipe cannot carry means the probe-aware path declined for
     //   want of a source to map: no probe ran, or it read no video stream
-    //   (`--resize` always resolves to a scale, and `--fps` does whenever
-    //   the source rate is unknown or the cap binds). Say that, rather than
-    //   the refusal below, which would claim webm is not a video target.
+    //   (each knob resolves to a filter whenever the source is unknown or
+    //   the cap binds). Say that, rather than the refusal below, which would
+    //   claim webm is not a video target.
     // - Nothing to apply means the probe read the source and the cap does
-    //   not bind (`--fps 60` on a 24 fps source): the flag is a no-op that
-    //   `resolved.notes` already explains on the plan's warnings, so the
-    //   `--fps` check below lets it through rather than refusing it.
-    //   (`--resize` cannot land here: it always resolves to a scale.)
+    //   not bind (`--fps 60` on a 24 fps source, `--resize 4000x` on a
+    //   1280x720 one): the flag is a no-op that `resolved.notes` already
+    //   explains on the plan's warnings, so the checks below let it through
+    //   rather than refusing it.
     let probe_routed_webm = to == Format::Webm && registry::needs_probe(from, to);
     if probe_routed_webm && (resolved.fps.is_some() || resolved.scale.is_some()) {
         let flag = if resolved.fps.is_some() {
@@ -364,11 +409,19 @@ fn validate_tuning(
             ),
         ));
     }
-    if tuning.resize.is_some() && !has_slot(|a| matches!(a, Arg::TuneResize | Arg::VideoChain(_))) {
+    if tuning.resize.is_some()
+        && !probe_routed_webm
+        && !has_slot(|a| matches!(a, Arg::TuneResize | Arg::VideoChain(_)))
+    {
+        let (flags, verb) = if tuning.upscale {
+            ("--resize and --upscale do", "they tune")
+        } else {
+            ("--resize does", "it tunes")
+        };
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
             format!(
-                "--resize does not apply to {} -> {}: it tunes image, video and GIF targets",
+                "{flags} not apply to {} -> {}: {verb} image, video and GIF targets",
                 from.ext(),
                 to.ext(),
             ),
@@ -1033,6 +1086,7 @@ mod tests {
             fps: None,
             crf: None,
             max_size: None,
+            upscale: false,
         }
     }
 
@@ -1050,7 +1104,7 @@ mod tests {
         .unwrap();
         let argv = &plan.steps[0].argv;
         assert!(
-            argv.windows(2).any(|w| w == ["-resize", "1600x900"]),
+            argv.windows(2).any(|w| w == ["-resize", "1600x900>"]),
             "{argv:?}"
         );
         assert!(argv.windows(2).any(|w| w == ["-colors", "64"]), "{argv:?}");
@@ -1121,7 +1175,7 @@ mod tests {
             plan.steps[0]
                 .argv
                 .windows(2)
-                .any(|w| w == ["-resize", "50%"]),
+                .any(|w| w == ["-resize", "50%>"]),
             "{:?}",
             plan.steps[0].argv
         );
@@ -1343,6 +1397,221 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("Re-encoded rather than stream-copied")),
             "a non-binding cap must not claim a re-encode that never happened: {:?}",
+            plan.warnings
+        );
+    }
+
+    /// The `--resize` twin of the test above: a size the source already
+    /// fits within keeps the stream copy, as `--fps` does.
+    #[test]
+    fn a_resize_that_does_not_bind_keeps_the_stream_copy() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: vec!["aac".into()],
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &Tuning {
+                resize: Some("4000x".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            !argv.windows(2).any(|w| w == ["-c:v", "libx264"]),
+            "a non-binding cap must not force a re-encode: {argv:?}"
+        );
+        assert!(!argv.iter().any(|a| a.contains("scale=")), "{argv:?}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "Source is 1280x720; --resize 4000x left it unchanged (add --upscale to enlarge)."),
+            "{:?}",
+            plan.warnings
+        );
+        assert!(
+            !plan
+                .warnings
+                .iter()
+                .any(|w| w.contains("Re-encoded rather than stream-copied")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    fn upscaled(geometry: &str) -> Tuning {
+        Tuning {
+            resize: Some(geometry.into()),
+            upscale: true,
+            ..Default::default()
+        }
+    }
+
+    /// An image's size is not read before converting, so `--upscale` on
+    /// one always carries the warning, worded for a size it cannot know.
+    #[test]
+    fn upscale_lets_an_image_resize_enlarge_and_warns() {
+        let plan = build_tuned(
+            Format::Png,
+            Format::Jpg,
+            &[p("in.png")],
+            Path::new("out.jpg"),
+            None,
+            None,
+            &upscaled("1600x900"),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w == ["-resize", "1600x900"]),
+            "{argv:?}"
+        );
+        assert_eq!(
+            plan.enlarged.as_ref().map(|e| e.warning.as_str()),
+            Some(
+                "--resize 1600x900 --upscale enlarges any source smaller than that, and this \
+                 one's size is not known: enlarging adds no detail, so expect a soft picture \
+                 and a much larger file."
+            )
+        );
+    }
+
+    #[test]
+    fn upscale_lets_a_gif_resize_enlarge_and_warns() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Gif,
+            &[p("in.mp4")],
+            Path::new("out.gif"),
+            Some(&probe),
+            None,
+            &upscaled("4000x"),
+        )
+        .unwrap();
+        let vf = plan.steps[0].argv.join(" ");
+        assert!(vf.contains("scale=w=4000:h=-2:flags=lanczos"), "{vf}");
+        let e = plan.enlarged.expect("an enlarged GIF must warn");
+        assert!(
+            e.warning
+                .starts_with("--resize 4000x --upscale enlarges the 1280x720 source to 4000x2250"),
+            "{}",
+            e.warning
+        );
+        assert!(e.needs_confirmation, "9.8 times the pixels asks first");
+        assert!(plan.warnings.iter().all(|w| !w.contains("left it")));
+    }
+
+    #[test]
+    fn upscale_lets_a_video_resize_enlarge_and_warns() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: vec!["aac".into()],
+            width: Some(640),
+            height: Some(360),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &upscaled("1280x"),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.iter().any(|a| a.contains("scale=w=1280:h=-2")),
+            "{argv:?}"
+        );
+        assert_eq!(
+            plan.enlarged.as_ref().map(|e| e.warning.as_str()),
+            Some(
+                "--resize 1280x --upscale enlarges the 640x360 source to 1280x720, about 4 \
+                 times its pixels: enlarging adds no detail, so expect a soft picture and a \
+                 much larger file."
+            )
+        );
+    }
+
+    #[test]
+    fn upscale_is_named_when_a_pair_takes_no_resize() {
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Mp3,
+            &[p("in.mp4")],
+            Path::new("out.mp3"),
+            None,
+            None,
+            &upscaled("50%"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.message,
+            "--resize and --upscale do not apply to mp4 -> mp3: they tune image, video and GIF \
+             targets"
+        );
+    }
+
+    /// On GIF, a `--resize` the source already fits within keeps the
+    /// source's size, as it did when the clamp did that inside the filter:
+    /// it still replaces the recipe's 640 default.
+    #[test]
+    fn a_gif_resize_past_the_source_keeps_the_source_size() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((30, 1)),
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Gif,
+            &[p("in.mp4")],
+            Path::new("out.gif"),
+            Some(&probe),
+            None,
+            &Tuning {
+                resize: Some("4000x".into()),
+                ..Default::default()
+            },
+        )
+        .expect("mp4 -> gif is a registered pair");
+        let vf = plan.steps[0].argv.join(" ");
+        assert!(
+            !vf.contains("min(640"),
+            "the 640 default must not return: {vf}"
+        );
+        assert!(vf.contains("split[a][b]"), "{vf}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "Source is 1280x720; --resize 4000x left it unchanged, wider than the GIF default of 640 (add --upscale to enlarge)."),
+            "{:?}",
             plan.warnings
         );
     }
@@ -1621,6 +1890,44 @@ mod tests {
             plan.warnings
                 .iter()
                 .any(|w| w.contains("Source is 24 fps; --fps 60 left it unchanged.")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// The `--resize` twin of the test above: a size the source already
+    /// fits within resolves to no filter, so the static webm recipe runs
+    /// rather than `--resize` being refused as a flag webm cannot take.
+    #[test]
+    fn a_non_binding_resize_on_a_probed_webm_target_is_a_noted_no_op() {
+        let probe = MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((24, 1)),
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Webm,
+            &[p("in.mp4")],
+            Path::new("out.webm"),
+            Some(&probe),
+            None,
+            &Tuning {
+                resize: Some("4000x".into()),
+                ..Default::default()
+            },
+        )
+        .expect("a cap that does not bind is not a refusal");
+        let argv = &plan.steps[0].argv;
+        assert!(argv.iter().any(|a| a == "libvpx-vp9"), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "-vf"), "{argv:?}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "Source is 1280x720; --resize 4000x left it unchanged (add --upscale to enlarge)."),
             "{:?}",
             plan.warnings
         );

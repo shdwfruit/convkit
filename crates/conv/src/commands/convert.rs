@@ -128,73 +128,121 @@ struct Confirmation {
     shown: Vec<(PathBuf, String)>,
 }
 
-/// Previews every `--max-size` job and, when any is extreme, prints why and
-/// asks once for the whole batch. `Err`: not confirmed, so nothing may run.
+/// One job the question is about: its input, the core's warning, and what
+/// to try instead, when there is something.
+struct Asked<'a> {
+    job: &'a input::Job,
+    warning: String,
+    suggested: Option<String>,
+    /// The `--max-size` plan, whose refusal names the size to try.
+    sizing: Option<sized::SizingPlan>,
+}
+
+/// Previews every job a question can be about -- an extreme `--max-size`
+/// target, or a `--resize --upscale` past four times the source's pixels --
+/// and, when any is, prints why and asks once for the whole batch. The two
+/// never meet in one run: `--upscale` and `--max-size` exclude each other.
+/// `Err`: not confirmed, so nothing may run.
 fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvError> {
-    if cli.max_size.is_none() {
-        return Ok(Confirmation::default());
-    }
     let resolver = cli.resolver();
     let tuning = cli.tuning();
-    let extreme: Vec<(&input::Job, sized::SizingPlan)> = jobs
-        .iter()
-        .filter_map(|job| {
-            // Cannot run, and `batch::run` will say so; not worth a question.
-            if job.output.exists() && !cli.overwrite {
-                return None;
-            }
-            let sz = sized::preview(job.from, job.to, &job.inputs[0], &tuning, &resolver)
-                .ok()
-                .flatten()?;
-            // The core words every extreme choice; a plan with nothing to
-            // say has nothing to ask about.
-            sz.warning.as_ref()?;
-            sz.choice
-                .as_ref()
-                .is_some_and(|c| c.extreme)
-                .then_some((job, sz))
-        })
-        .collect();
-    if extreme.is_empty() {
+    // Cannot run, and `batch::run` will say so; not worth a question.
+    let runnable = |job: &&input::Job| !job.output.exists() || cli.overwrite;
+    let sizing = cli.max_size.is_some();
+    let asked: Vec<Asked> = if sizing {
+        jobs.iter()
+            .filter(runnable)
+            .filter_map(|job| {
+                let sz = sized::preview(job.from, job.to, &job.inputs[0], &tuning, &resolver)
+                    .ok()
+                    .flatten()?;
+                // The core words every extreme choice; a plan with nothing
+                // to say has nothing to ask about.
+                let warning = sz.warning.clone()?;
+                sz.choice
+                    .as_ref()
+                    .is_some_and(|c| c.extreme)
+                    .then(|| Asked {
+                        job,
+                        warning,
+                        suggested: sz.suggested.clone(),
+                        sizing: Some(sz.clone()),
+                    })
+            })
+            .collect()
+    } else if tuning.upscale {
+        jobs.iter()
+            .filter(runnable)
+            .filter_map(|job| {
+                let probed = probed_for(&resolver, job, &tuning).ok().flatten();
+                let plan = plan::build_tuned(
+                    job.from,
+                    job.to,
+                    &job.inputs,
+                    &job.output,
+                    probed.as_ref(),
+                    None,
+                    &tuning,
+                )
+                .ok()?;
+                let e = plan.enlarged.filter(|e| e.needs_confirmation)?;
+                Some(Asked {
+                    job,
+                    warning: e.warning,
+                    suggested: None,
+                    sizing: None,
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if asked.is_empty() {
         return Ok(Confirmation::default());
     }
     let mut shown = Vec::new();
     if !cli.json {
         let args = typed_args();
-        let entries: Vec<(&Path, &str, Option<&str>)> = extreme
+        let entries: Vec<(&Path, &str, Option<&str>)> = asked
             .iter()
-            .filter_map(|(job, sz)| {
-                Some((
-                    job.inputs[0].as_path(),
-                    sz.warning.as_deref()?,
-                    sz.suggested.as_deref(),
-                ))
+            .map(|a| {
+                (
+                    a.job.inputs[0].as_path(),
+                    a.warning.as_str(),
+                    a.suggested.as_deref(),
+                )
             })
             .collect();
         eprint!(
             "{}",
             render::extreme_warnings_human(&entries, jobs.len(), &args, render::stderr_styled())
         );
-        shown = entries
+        shown = asked
             .iter()
-            .map(|(input, warning, _)| (input.to_path_buf(), (*warning).to_string()))
+            .map(|a| (a.job.inputs[0].clone(), a.warning.clone()))
             .collect();
     }
     let allowed = Confirmation {
         allowed: true,
         shown,
     };
+    let what = if sizing {
+        "extreme compression"
+    } else {
+        "large upscale"
+    };
     let refusal = || {
-        if let [(job, sz)] = extreme.as_slice() {
-            if jobs.len() == 1 {
-                return sized::confirmation_error(&job.inputs[0], sz);
-            }
+        if let ([only], 1) = (asked.as_slice(), jobs.len()) {
+            return match &only.sizing {
+                Some(sz) => sized::confirmation_error(&only.job.inputs[0], sz),
+                None => convkit_core::upscale_confirmation_error(&only.job.inputs),
+            };
         }
         ConvError::new(
             ErrorCode::ConfirmationRequired,
             format!(
-                "extreme compression not confirmed for {} of {} files; pass --yes to convert anyway",
-                extreme.len(),
+                "{what} not confirmed for {} of {} files; pass --yes to convert anyway",
+                asked.len(),
                 jobs.len()
             ),
         )
@@ -210,10 +258,17 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
         Gate::Ask => {
             let question = if jobs.len() == 1 {
                 "Convert anyway? [y/N] ".to_string()
-            } else {
+            } else if sizing {
                 format!(
                     "{} of {} conversions are extreme. Convert anyway? [y/N] ",
-                    extreme.len(),
+                    asked.len(),
+                    jobs.len()
+                )
+            } else {
+                format!(
+                    "{} of {} conversions enlarge past four times their source's pixels. \
+                     Convert anyway? [y/N] ",
+                    asked.len(),
                     jobs.len()
                 )
             };
@@ -280,6 +335,18 @@ fn probed_for(
         }
         let ffprobe = resolver.resolve(Backend::Ffprobe)?;
         return probe::run(&ffprobe.path, &job.inputs[0]).map(Some);
+    }
+    if let (Some(read), Some(geometry)) = (
+        registry::image_read(job.from, job.to, tuning),
+        tuning.resize.as_deref(),
+    ) {
+        // As `exec::run` does: an unreadable size leaves `--upscale` its
+        // general warning rather than failing the preview. `probe::image`
+        // reads only existing regular files.
+        return Ok(resolver
+            .resolve(Backend::Magick)
+            .ok()
+            .and_then(|m| probe::image(&m.path, &job.inputs, read, geometry).ok()));
     }
     if !registry::needs_probe_tuned(job.from, job.to, tuning) {
         return Ok(None);
@@ -812,6 +879,7 @@ mod tests {
                 remuxed: false,
                 elapsed_ms: 1,
                 sizing: None,
+                enlarged: None,
             }),
         }
     }

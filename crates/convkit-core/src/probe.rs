@@ -54,6 +54,10 @@ pub struct MediaProbe {
     pub duration_ms: Option<u64>,
     /// The file's size in bytes as ffprobe reports it (`format.size`).
     pub size_bytes: Option<u64>,
+    /// Which input or page `width` and `height` are of, when an image
+    /// conversion takes several: the one a `--resize --upscale` enlarges
+    /// most. `None` for a single picture.
+    pub label: Option<String>,
     /// Each audio stream's bitrate in bits per second, in stream order and
     /// always the same length as `audio_codecs`, `None` where the container
     /// does not say (mkv usually does not) or reports zero.
@@ -282,9 +286,194 @@ pub fn run(ffprobe: &Path, input: &Path) -> Result<MediaProbe> {
     Ok(parse(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// How a recipe reads an image, so its pages can be sized the same way:
+/// whether it takes every input, every page of its input or only the first,
+/// and the density it renders a vector source at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageRead {
+    pub density: Option<&'static str>,
+    pub every_input: bool,
+    pub every_page: bool,
+}
+
+/// Reads the size of every page a `--resize --upscale` will scale, with
+/// ImageMagick's `-ping`, which reads headers and stops before the pixels:
+/// one cheap spawn per input, run only for `--upscale`, whose warning and
+/// question need the sizes. `-ping` and `info:` read the same way in
+/// ImageMagick 6's `convert` as in 7's `magick`, so this needs no
+/// `identify` binary of its own.
+///
+/// Returns the page that enlarges most -- the one the warning is about and
+/// the question is decided on -- labelled with its input, and its page when
+/// an input has several, whenever there is more than one. A page that
+/// cannot be read fails the whole read, so a run is never decided on part
+/// of its pages.
+pub fn image(
+    magick: &Path,
+    inputs: &[std::path::PathBuf],
+    read: ImageRead,
+    geometry: &str,
+) -> Result<MediaProbe> {
+    let inputs = if read.every_input {
+        inputs
+    } else {
+        &inputs[..inputs.len().min(1)]
+    };
+    let mut pages: Vec<(String, (u32, u32))> = Vec::new();
+    for input in inputs {
+        let sizes = image_pages(magick, input, read)?;
+        let name = input.file_name().map_or_else(
+            || input.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let several = sizes.len() > 1;
+        for (i, size) in sizes.into_iter().enumerate() {
+            let label = if several {
+                format!("{name} page {}", i + 1)
+            } else {
+                name.clone()
+            };
+            pages.push((label, size));
+        }
+    }
+    let sizes: Vec<(u32, u32)> = pages.iter().map(|&(_, s)| s).collect();
+    let i = crate::video::most_enlarged(geometry, &sizes).ok_or_else(|| {
+        ConvError::new(ErrorCode::ConversionFailed, "no image to read a size from")
+    })?;
+    let several = pages.len() > 1;
+    let (label, (width, height)) = pages.swap_remove(i);
+    Ok(MediaProbe {
+        width: Some(width),
+        height: Some(height),
+        label: several.then_some(label),
+        ..MediaProbe::default()
+    })
+}
+
+/// One input's pages, each at the size the recipe will render it: every
+/// page, or only the first frame, as the recipe takes them.
+fn image_pages(magick: &Path, input: &Path, read: ImageRead) -> Result<Vec<(u32, u32)>> {
+    if !input.is_file() {
+        return Err(ConvError::new(
+            ErrorCode::InputNotFound,
+            format!(
+                "not an existing regular file, refusing to probe: {}",
+                input.display()
+            ),
+        ));
+    }
+    let mut target = input.as_os_str().to_owned();
+    if !read.every_page {
+        target.push("[0]");
+    }
+    let out = backend_command(magick)
+        .arg("-ping")
+        .arg(target)
+        .args(["-format", "%w %h %[orientation] %x\n", "info:"])
+        .output()
+        .map_err(|e| {
+            ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!("failed to run ImageMagick: {e}"),
+            )
+        })?;
+    let density = read.density.and_then(|d| d.parse::<f64>().ok());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let pages: Option<Vec<(u32, u32)>> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| parse_page(l, density))
+        .collect();
+    pages.filter(|p| !p.is_empty()).ok_or_else(|| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!("ImageMagick could not read the size of {}", input.display()),
+        )
+    })
+}
+
+/// Parses one `-ping` line, `W H ORIENTATION XRES`, into the size the
+/// recipe produces. The recipes auto-orient before they resize, so EXIF
+/// orientations 5-8, which turn the picture on its side, swap it. A vector
+/// source is pinged at the density ImageMagick assumed, which `XRES`
+/// reports, and rendered at the recipe's own `density`; a raster's
+/// resolution is only a tag, so with no `density` it never scales.
+/// ImageMagick 6 may follow `XRES` with its unit, which is ignored.
+fn parse_page(line: &str, density: Option<f64>) -> Option<(u32, u32)> {
+    let mut it = line.split_whitespace();
+    let positive = |t: Option<&str>| t?.parse::<u32>().ok().filter(|&n| n > 0);
+    let (w, h) = (positive(it.next())?, positive(it.next())?);
+    let on_its_side = matches!(
+        it.next(),
+        Some("LeftTop" | "RightTop" | "RightBottom" | "LeftBottom")
+    );
+    let (w, h) = match density {
+        None => (w, h),
+        Some(rendered) => {
+            let assumed = it.next()?.parse::<f64>().ok().filter(|&x| x > 0.0)?;
+            let scale = |v: u32| (f64::from(v) * rendered / assumed).round() as u32;
+            (scale(w), scale(h))
+        }
+    };
+    Some(if on_its_side { (h, w) } else { (w, h) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_reads_its_displayed_size() {
+        assert_eq!(parse_page("320 240 TopLeft 72", None), Some((320, 240)));
+        assert_eq!(
+            parse_page("4032 3024 Undefined 72", None),
+            Some((4032, 3024))
+        );
+    }
+
+    /// The recipes auto-orient before resizing, so EXIF orientations 5-8,
+    /// which turn the picture on its side, swap what the user sees.
+    #[test]
+    fn a_page_on_its_side_swaps_width_and_height() {
+        for o in ["LeftTop", "RightTop", "RightBottom", "LeftBottom"] {
+            assert_eq!(
+                parse_page(&format!("320 240 {o} 72"), None),
+                Some((240, 320)),
+                "{o}"
+            );
+        }
+        for o in ["TopLeft", "TopRight", "BottomRight", "BottomLeft"] {
+            assert_eq!(
+                parse_page(&format!("320 240 {o} 72"), None),
+                Some((320, 240)),
+                "{o}"
+            );
+        }
+    }
+
+    /// `-ping` sizes a vector source at the density it assumed, which it
+    /// reports; the recipe renders at its own. A raster's resolution is
+    /// only a tag, and never scales it.
+    #[test]
+    fn a_vector_page_is_sized_at_the_recipes_density() {
+        assert_eq!(
+            parse_page("100 100 Undefined 96", Some(384.0)),
+            Some((400, 400))
+        );
+        // ImageMagick 6 may follow the resolution with its unit.
+        assert_eq!(
+            parse_page("100 100 Undefined 72 PixelsPerInch", Some(384.0)),
+            Some((533, 533))
+        );
+        assert_eq!(parse_page("100 100 Undefined 0", Some(384.0)), None);
+    }
+
+    #[test]
+    fn a_page_answer_that_is_not_a_size_is_none() {
+        assert!(parse_page("", None).is_none());
+        assert!(parse_page("magick: no decode delegate", None).is_none());
+        assert!(parse_page("0 240 TopLeft 72", None).is_none());
+    }
 
     const SAMPLE: &str = r#"{"streams":[
         {"codec_type":"video","codec_name":"h264"},
