@@ -1,0 +1,16 @@
+name: Feature request
+description: A format pair, flag or behaviour you'd like
+labels: [enhancement]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What are you trying to do
+      description: The conversion or workflow, and what you do today instead.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How you'd want it to work
+      description: The command you'd like to type, if you have one in mind.

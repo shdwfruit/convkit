@@ -622,6 +622,14 @@ manual package-manager command, in plain output and in `--json`.
   art, why Rust, and the non-goals list. Marked historical: it records where
   the implementation has since diverged from it.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for building, testing and adding a
+conversion pair. Issues labelled
+[good first issue](https://github.com/shdwfruit/convkit/labels/good%20first%20issue)
+are a good place to start, and questions go in
+[Discussions](https://github.com/shdwfruit/convkit/discussions).
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), your
