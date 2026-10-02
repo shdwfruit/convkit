@@ -1244,6 +1244,108 @@ fn a_gif_resize_past_the_source_keeps_the_source_size() {
     assert_eq!(probe_dims(&out), (320, 180));
 }
 
+// --- Notes that depend on the source ----------------------------------------
+
+/// Writes `out` in `dir` with ImageMagick, from `args`.
+fn synth_image(dir: &tempfile::TempDir, args: &[&str], out: &str) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+    let magick = resolver.resolve(Backend::Magick).unwrap().path;
+    let path = dir.path().join(out);
+    let result = Command::new(&magick)
+        .args(args)
+        .arg(&path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ImageMagick: {e}"));
+    assert!(
+        result.status.success(),
+        "building {out} failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    path
+}
+
+/// A phone photo gets no note; a transparent PNG the alpha half; a
+/// multi-page TIFF the frame half, plus the alpha half, which a TIFF's
+/// header read cannot rule out.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn image_notes_say_only_what_the_source_holds() {
+    let said = |o: &exec::Outcome, what: &str| o.warnings.iter().any(|w| w.contains(what));
+    let (_, photo) = convert_path(&fixture("photo.heic"), "jpg");
+    assert!(photo.warnings.is_empty(), "{:?}", photo.warnings);
+
+    let dir = tmp();
+    let transparent = synth_image(
+        &dir,
+        &[
+            "-size",
+            "64x64",
+            "xc:none",
+            "-fill",
+            "red",
+            "-draw",
+            "circle 32,32 32,8",
+        ],
+        "transparent.png",
+    );
+    let (_, o) = convert_path(&transparent, "jpg");
+    assert!(said(&o, "Transparency"), "{:?}", o.warnings);
+    assert!(!said(&o, "first frame"), "{:?}", o.warnings);
+
+    let pages = synth_image(&dir, &["-size", "32x32", "xc:red", "xc:blue"], "pages.tiff");
+    let (_, o) = convert_path(&pages, "png");
+    assert!(said(&o, "first frame"), "{:?}", o.warnings);
+    let (_, o) = convert_path(&pages, "jpg");
+    assert!(said(&o, "first frame"), "{:?}", o.warnings);
+    assert!(said(&o, "Transparency"), "{:?}", o.warnings);
+
+    let opaque = synth_image(&dir, &["-size", "32x32", "xc:red"], "opaque.png");
+    let (_, o) = convert_path(&opaque, "bmp");
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+}
+
+/// The GIF buffering note is for a source past 30 seconds.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn the_gif_buffering_note_is_for_long_sources_only() {
+    let (_, short) = convert_path(&fixture("clip.mp4"), "gif");
+    assert!(short.warnings.is_empty(), "{:?}", short.warnings);
+
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let dir = tmp();
+    let long = dir.path().join("long.mp4");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x90:rate=15:duration=31",
+        ])
+        .args([
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+        ])
+        .arg(&long)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(result.status.success(), "{result:?}");
+    let (_, o) = convert_path(&long, "gif");
+    assert_eq!(o.warnings.len(), 1, "{:?}", o.warnings);
+    assert!(
+        o.warnings[0].contains("buffered in memory"),
+        "{:?}",
+        o.warnings
+    );
+}
+
 // --- --max-size -----------------------------------------------------------
 
 /// A clip noisy enough that the encoder has to spend the bits it is given:

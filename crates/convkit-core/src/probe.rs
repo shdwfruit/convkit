@@ -65,6 +65,20 @@ pub struct MediaProbe {
     /// Bytes carried by attachment streams (fonts in mkv), which a remux
     /// or re-encode passes through untouched.
     pub attachment_bytes: u64,
+    /// What an image source holds that a single-image target drops, read
+    /// by `image_traits`. `None` when the source was not read.
+    pub image: Option<ImageTraits>,
+}
+
+/// What a jpg/png/bmp target cannot keep from its source, for the notes
+/// that say so (`registry::notes_for`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageTraits {
+    /// Whether the first frame has an alpha channel. `None` where a header
+    /// read cannot tell (see `parse_traits`).
+    pub alpha: Option<bool>,
+    /// Whether there is more than one frame or page.
+    pub multi_frame: bool,
 }
 
 impl MediaProbe {
@@ -418,9 +432,109 @@ fn parse_page(line: &str, density: Option<f64>) -> Option<(u32, u32)> {
     Some(if on_its_side { (h, w) } else { (w, h) })
 }
 
+/// Reads an image's `ImageTraits` with `-ping`, which stops before the
+/// pixels, over its first two frames only: enough to tell one frame from
+/// several, so a long animation costs what a still does. Run only for the
+/// pairs whose notes depend on it (`registry::notes_need_image`). Any
+/// failure is an error, which callers take as "not read", keeping those
+/// notes whole.
+pub fn image_traits(magick: &Path, input: &Path) -> Result<ImageTraits> {
+    if !input.is_file() {
+        return Err(ConvError::new(
+            ErrorCode::InputNotFound,
+            format!(
+                "not an existing regular file, refusing to probe: {}",
+                input.display()
+            ),
+        ));
+    }
+    let mut target = input.as_os_str().to_owned();
+    target.push("[0-1]");
+    let out = backend_command(magick)
+        .arg("-ping")
+        .arg(target)
+        .args(["-format", "%m %A %n\n", "info:"])
+        .output()
+        .map_err(|e| {
+            ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!("failed to run ImageMagick: {e}"),
+            )
+        })?;
+    out.status
+        .success()
+        .then(|| parse_traits(&String::from_utf8_lossy(&out.stdout)))
+        .flatten()
+        .ok_or_else(|| {
+            ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!("ImageMagick could not read {}", input.display()),
+            )
+        })
+}
+
+/// Parses the first `-ping` line, `CODER ALPHA FRAMES`. ImageMagick 7 names
+/// the alpha trait (`Undefined` for none); 6 says `True` or `False`. "No
+/// alpha" is believed only from coders that set alpha before a ping stops:
+/// TIFF's does not, and says `Undefined` for a transparent file too.
+fn parse_traits(text: &str) -> Option<ImageTraits> {
+    let mut it = text.lines().next()?.split_whitespace();
+    let coder = it.next()?;
+    let alpha = match it.next()? {
+        "Undefined" | "False" => false,
+        "Blend" | "Copy" | "Update" | "True" => true,
+        _ => return None,
+    };
+    let frames = it.next()?.parse::<u32>().ok().filter(|&n| n > 0)?;
+    let trusted = matches!(
+        coder,
+        "JPEG" | "PNG" | "WEBP" | "AVIF" | "HEIC" | "HEIF" | "BMP" | "BMP2" | "BMP3"
+    );
+    Some(ImageTraits {
+        alpha: (alpha || trusted).then_some(alpha),
+        multi_frame: frames > 1,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traits_read_alpha_and_whether_a_second_frame_follows() {
+        let t = |text| parse_traits(text).unwrap();
+        assert_eq!(
+            t("HEIC Undefined 1\n"),
+            ImageTraits {
+                alpha: Some(false),
+                multi_frame: false
+            }
+        );
+        assert_eq!(t("PNG Blend 1\n").alpha, Some(true));
+        assert!(t("WEBP Blend 2\nWEBP Blend 2\n").multi_frame);
+        // ImageMagick 6, and a Windows line ending.
+        assert_eq!(t("PNG False 1\r\n").alpha, Some(false));
+        assert_eq!(t("BMP3 True 1\r\n").alpha, Some(true));
+    }
+
+    /// A TIFF ping leaves alpha unset whatever the file holds, so its "no
+    /// alpha" is unknown; its frame count still reads.
+    #[test]
+    fn a_tiff_ping_cannot_rule_alpha_out() {
+        let tiff = parse_traits("TIFF Undefined 2\nTIFF Undefined 2\n").unwrap();
+        assert_eq!(tiff.alpha, None);
+        assert!(tiff.multi_frame);
+        assert_eq!(parse_traits("TIFF Blend 1\n").unwrap().alpha, Some(true));
+    }
+
+    #[test]
+    fn a_traits_answer_that_is_not_one_is_none() {
+        assert_eq!(parse_traits(""), None);
+        assert_eq!(parse_traits("640 360 TopLeft"), None);
+        assert_eq!(parse_traits("PNG Blend"), None);
+        assert_eq!(parse_traits("PNG Blend 0"), None);
+        assert_eq!(parse_traits("magick: no decode delegate"), None);
+    }
 
     #[test]
     fn a_page_reads_its_displayed_size() {

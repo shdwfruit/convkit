@@ -343,11 +343,11 @@ mod tests {
     }
 
     /// Writes a script standing in for `magick`: on a bare version probe
-    /// (`Resolver::resolve`'s own check) it no-ops and exits 0; otherwise it
-    /// writes one byte to whatever its last argument names. Mirrors
-    /// `exec::tests::stub_that_creates_its_output`'s own reasoning; can't
-    /// reuse that helper directly since it's private to `convkit-core`'s own
-    /// test module.
+    /// (`Resolver::resolve`'s own check) or a `-ping` it no-ops and exits 0;
+    /// otherwise it writes one byte to whatever its last argument names.
+    /// Mirrors `exec::tests::stub_that_creates_its_output`'s own reasoning;
+    /// can't reuse that helper directly since it's private to
+    /// `convkit-core`'s own test module.
     fn magick_stub(dir: &Path) -> PathBuf {
         let (name, body) = if cfg!(windows) {
             (
@@ -357,6 +357,7 @@ mod tests {
                  if \"%~1\"==\"--version\" exit /b 0\r\n\
                  if \"%~1\"==\"-version\" exit /b 0\r\n\
                  :notversion\r\n\
+                 if \"%~1\"==\"-ping\" exit /b 0\r\n\
                  :loop\r\n\
                  if \"%~1\"==\"\" goto done\r\n\
                  set \"last=%~1\"\r\n\
@@ -373,6 +374,7 @@ mod tests {
                  if [ \"$#\" = \"1\" ] && { [ \"$1\" = \"--version\" ] || [ \"$1\" = \"-version\" ]; }; then\n\
                  \x20   exit 0\n\
                  fi\n\
+                 if [ \"$1\" = \"-ping\" ]; then exit 0; fi\n\
                  for a in \"$@\"; do last=\"$a\"; done\n\
                  printf x > \"$last\"\n",
             )

@@ -50,6 +50,21 @@ const IMG_LOSSY: Recipe = Recipe {
     warnings: &[],
 };
 
+/// `IMG_TO_JPG`'s note. `notes_for` narrows it to the half that applies, or
+/// drops it, once the source has been read.
+const FLATTEN_FIRST_FRAME_NOTE: &str = "Transparency is flattened onto a white background, \
+     and only the first frame/page of a multi-frame source is kept; JPEG has neither alpha \
+     nor animation.";
+
+/// The alpha half on its own. Also `SVG_TO_LOSSY`'s note, which is always
+/// shown: a ping does not render an SVG, so it cannot see transparency.
+const FLATTEN_NOTE: &str =
+    "Transparency is flattened onto a white background; JPEG has no alpha channel.";
+
+/// The frame half on its own, and `IMG_LOSSLESS_SINGLE_FRAME`'s note.
+const FIRST_FRAME_NOTE: &str =
+    "Only the first frame/page of a multi-frame source is kept; this target holds a single image.";
+
 /// The JPEG target is its own recipe because JPEG can hold neither
 /// transparency nor more than one frame, and both defaults used to be
 /// wrong: a transparent PNG/WebP/AVIF landed on a *black* field (the same
@@ -76,11 +91,7 @@ const IMG_TO_JPG: Recipe = Recipe {
             Arg::Output,
         ]
     )],
-    warnings: &[
-        "Transparency is flattened onto a white background, and only the first \
-         frame/page of a multi-frame source is kept; JPEG has neither alpha nor \
-         animation.",
-    ],
+    warnings: &[FLATTEN_FIRST_FRAME_NOTE],
 };
 
 /// Lossless targets that keep frames as-is (tiff holds multi-page sources
@@ -114,10 +125,7 @@ const IMG_LOSSLESS_SINGLE_FRAME: Recipe = Recipe {
             Arg::Output,
         ]
     )],
-    warnings: &[
-        "Only the first frame/page of a multi-frame source is kept; this target \
-         holds a single image.",
-    ],
+    warnings: &[FIRST_FRAME_NOTE],
 };
 
 /// `-background white` plus `-alpha remove -alpha off` composites onto a
@@ -147,7 +155,7 @@ const SVG_TO_LOSSY: Recipe = Recipe {
             Arg::Output,
         ]
     )],
-    warnings: &["Transparency is flattened onto a white background; JPEG has no alpha channel."],
+    warnings: &[FLATTEN_NOTE],
 };
 
 const SVG_TO_LOSSLESS: Recipe = Recipe {
@@ -567,6 +575,18 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
     warnings: &[],
 };
 
+/// The GIF recipes' note about palette generation, shown only for a source
+/// longer than `GIF_BUFFER_NOTE_AFTER_MS` (see `notes_for`).
+const GIF_BUFFER_NOTE: &str = "The whole filtered stream is buffered in memory for palette \
+     generation, so very long inputs are slow and memory-hungry rather than being silently \
+     truncated.";
+
+/// `palettegen` holds every frame until the stream ends, so memory grows
+/// with length. At the defaults ffmpeg's peak grows by ~14 MiB per second
+/// of a landscape 1080p source and ~44 MiB of a portrait one: 30 s peaks
+/// near 0.5 and 1.4 GiB. See docs/defaults-calibration.md.
+const GIF_BUFFER_NOTE_AFTER_MS: u64 = 30_000;
+
 const TO_GIF: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
@@ -581,11 +601,7 @@ const TO_GIF: Recipe = Recipe {
             Arg::Output,
         ]
     )],
-    warnings: &[
-        "The whole filtered stream is buffered in memory for palette generation, \
-         so very long inputs are slow and memory-hungry rather than being \
-         silently truncated.",
-    ],
+    warnings: &[GIF_BUFFER_NOTE],
 };
 
 /// `GIF_FILTER` with the HDR->SDR mapping prefixed. Kept only as the oracle
@@ -619,9 +635,7 @@ pub const TO_GIF_TONEMAP: Recipe = Recipe {
     )],
     warnings: &[
         "HDR source tonemapped to SDR for GIF; colors are approximated, not exact.",
-        "The whole filtered stream is buffered in memory for palette generation, \
-         so very long inputs are slow and memory-hungry rather than being \
-         silently truncated.",
+        GIF_BUFFER_NOTE,
     ],
 };
 
@@ -1230,6 +1244,46 @@ pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::pr
     })
 }
 
+/// Whether a note on this pair depends on what the source image holds, so
+/// the caller should read it with `probe::image_traits` before planning.
+pub fn notes_need_image(from: Format, to: Format) -> bool {
+    lookup(from, to).is_some_and(|r| {
+        r.warnings
+            .iter()
+            .any(|&w| matches!(w, FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE))
+    })
+}
+
+/// The recipe's notes for this source: a note about something the source
+/// might hold is dropped, or narrowed to the part that applies, only when
+/// the probe shows it does not hold it. Unread or unknown keeps the note
+/// whole. Keyed on the note's text, as `conv capabilities` keys
+/// `TRACKS_DROPPED_NOTE`; that view still shows every note in full.
+pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> Vec<String> {
+    let image = probe.and_then(|p| p.image);
+    let alpha = image.is_none_or(|i| i.alpha != Some(false));
+    let frames = image.is_none_or(|i| i.multi_frame);
+    let long = probe
+        .and_then(|p| p.duration_ms)
+        .is_none_or(|ms| ms > GIF_BUFFER_NOTE_AFTER_MS);
+    recipe
+        .warnings
+        .iter()
+        .filter_map(|&note| match note {
+            FLATTEN_FIRST_FRAME_NOTE => match (alpha, frames) {
+                (true, true) => Some(note),
+                (true, false) => Some(FLATTEN_NOTE),
+                (false, true) => Some(FIRST_FRAME_NOTE),
+                (false, false) => None,
+            },
+            FIRST_FRAME_NOTE => frames.then_some(note),
+            GIF_BUFFER_NOTE => long.then_some(note),
+            _ => Some(note),
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// Whether a knob on this pair can only be honoured with a probe, so a
 /// missing or failing ffprobe has to be reported as itself rather than
 /// quietly falling back to a static recipe that refuses the knob.
@@ -1303,6 +1357,151 @@ mod tests {
             "video is probed"
         );
     }
+
+    fn read_image(alpha: Option<bool>, multi_frame: bool) -> crate::MediaProbe {
+        crate::MediaProbe {
+            image: Some(crate::probe::ImageTraits { alpha, multi_frame }),
+            ..crate::MediaProbe::default()
+        }
+    }
+
+    fn notes(from: Format, to: Format, probe: Option<&crate::MediaProbe>) -> Vec<String> {
+        notes_for(&lookup(from, to).unwrap(), probe)
+    }
+
+    /// A phone photo has neither alpha nor a second frame, so a jpg target
+    /// says nothing; each half of the note shows only for what the source
+    /// holds.
+    #[test]
+    fn a_jpg_target_notes_only_what_the_source_holds() {
+        for (alpha, multi, want) in [
+            (Some(false), false, None),
+            (Some(true), false, Some(FLATTEN_NOTE)),
+            (Some(false), true, Some(FIRST_FRAME_NOTE)),
+            (Some(true), true, Some(FLATTEN_FIRST_FRAME_NOTE)),
+            // A TIFF's ping cannot rule alpha out.
+            (None, false, Some(FLATTEN_NOTE)),
+            (None, true, Some(FLATTEN_FIRST_FRAME_NOTE)),
+        ] {
+            let probe = read_image(alpha, multi);
+            let want: Vec<String> = want.into_iter().map(str::to_string).collect();
+            assert_eq!(
+                notes(Format::Heic, Format::Jpg, Some(&probe)),
+                want,
+                "alpha {alpha:?}, multi-frame {multi}"
+            );
+        }
+    }
+
+    /// Unread is not "has none": with no read, or a probe without one, the
+    /// whole note stays.
+    #[test]
+    fn an_unread_image_keeps_the_whole_note() {
+        assert_eq!(
+            notes(Format::Png, Format::Jpg, None),
+            vec![FLATTEN_FIRST_FRAME_NOTE]
+        );
+        let no_read = crate::MediaProbe::default();
+        assert_eq!(
+            notes(Format::Png, Format::Jpg, Some(&no_read)),
+            vec![FLATTEN_FIRST_FRAME_NOTE]
+        );
+        assert_eq!(
+            notes(Format::Webp, Format::Png, None),
+            vec![FIRST_FRAME_NOTE]
+        );
+    }
+
+    #[test]
+    fn png_and_bmp_targets_note_only_a_multi_frame_source() {
+        for to in [Format::Png, Format::Bmp] {
+            let still = read_image(Some(true), false);
+            assert!(notes(Format::Webp, to, Some(&still)).is_empty(), "{to:?}");
+            let animated = read_image(Some(false), true);
+            assert_eq!(
+                notes(Format::Webp, to, Some(&animated)),
+                vec![FIRST_FRAME_NOTE],
+                "{to:?}"
+            );
+        }
+    }
+
+    /// Only the jpg/png/bmp targets read the image, and not from an SVG,
+    /// whose transparency a ping cannot see: its note always shows.
+    #[test]
+    fn only_single_image_raster_targets_read_the_source() {
+        for &from in RASTER {
+            for to in [Format::Jpg, Format::Png, Format::Bmp] {
+                if from != to {
+                    assert!(notes_need_image(from, to), "{from:?} -> {to:?}");
+                }
+            }
+            for to in [Format::Webp, Format::Avif, Format::Tiff, Format::Pdf] {
+                if from != to {
+                    assert!(!notes_need_image(from, to), "{from:?} -> {to:?}");
+                }
+            }
+        }
+        assert!(!notes_need_image(Format::Svg, Format::Jpg));
+        assert!(!notes_need_image(Format::Mp4, Format::Gif));
+        let opaque = read_image(Some(false), false);
+        assert_eq!(
+            notes(Format::Svg, Format::Jpg, Some(&opaque)),
+            vec![FLATTEN_NOTE]
+        );
+    }
+
+    fn lasting(ms: Option<u64>) -> crate::MediaProbe {
+        crate::MediaProbe {
+            video_codec: Some("h264".into()),
+            duration_ms: ms,
+            ..crate::MediaProbe::default()
+        }
+    }
+
+    /// The buffering note is for long sources; an unknown length keeps it.
+    #[test]
+    fn the_gif_buffering_note_shows_only_past_the_threshold() {
+        let buffered = vec![GIF_BUFFER_NOTE.to_string()];
+        for (ms, want) in [
+            (Some(2_000), vec![]),
+            (Some(GIF_BUFFER_NOTE_AFTER_MS), vec![]),
+            (Some(GIF_BUFFER_NOTE_AFTER_MS + 1), buffered.clone()),
+            (Some(600_000), buffered.clone()),
+            (None, buffered.clone()),
+        ] {
+            assert_eq!(notes_for(&TO_GIF, Some(&lasting(ms))), want, "{ms:?} ms");
+        }
+        assert_eq!(notes_for(&TO_GIF, None), buffered);
+        // The HDR sibling keeps its own note either way.
+        let short = notes_for(&TO_GIF_TONEMAP, Some(&lasting(Some(2_000))));
+        assert_eq!(short.len(), 1, "{short:?}");
+        assert!(short[0].starts_with("HDR source"), "{short:?}");
+        let long = notes_for(&TO_GIF_TONEMAP, Some(&lasting(Some(120_000))));
+        assert_eq!(long.len(), 2, "{long:?}");
+    }
+
+    /// Every other note is a fact about the pair, not the source.
+    #[test]
+    fn notes_about_the_pair_never_depend_on_the_source() {
+        let probe = crate::MediaProbe {
+            duration_ms: Some(1_000),
+            ..read_image(Some(false), false)
+        };
+        for (from, to) in all_pairs() {
+            let r = lookup(from, to).unwrap();
+            let kept = notes_for(&r, Some(&probe));
+            for &w in r.warnings {
+                if !matches!(
+                    w,
+                    FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE | GIF_BUFFER_NOTE
+                ) {
+                    assert!(kept.iter().any(|k| k == w), "{from:?} -> {to:?}: {w}");
+                }
+            }
+        }
+    }
+
     use crate::video::ResolvedVideo;
 
     #[test]

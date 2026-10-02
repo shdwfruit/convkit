@@ -617,10 +617,10 @@ fn piped_stdin_never_prompts_even_for_a_genuinely_offerable_backend() {
 // --- Part 2: informative success/failure/batch output -----------------------
 
 /// Writes a script standing in for `magick`: on a bare version probe
-/// (`Resolver::resolve`'s own check) it no-ops and exits 0; otherwise it
-/// writes one byte to whatever its last argument names. Lets these tests
-/// exercise the real success-rendering path without depending on whether a
-/// real ImageMagick happens to be on this machine's PATH.
+/// (`Resolver::resolve`'s own check) or a `-ping` it no-ops and exits 0;
+/// otherwise it writes one byte to whatever its last argument names. Lets
+/// these tests exercise the real success-rendering path without depending
+/// on whether a real ImageMagick happens to be on this machine's PATH.
 fn write_magick_stub(dir: &std::path::Path) -> std::path::PathBuf {
     let (name, body) = if cfg!(windows) {
         (
@@ -630,6 +630,7 @@ fn write_magick_stub(dir: &std::path::Path) -> std::path::PathBuf {
              if \"%~1\"==\"--version\" exit /b 0\r\n\
              if \"%~1\"==\"-version\" exit /b 0\r\n\
              :notversion\r\n\
+             if \"%~1\"==\"-ping\" exit /b 0\r\n\
              :loop\r\n\
              if \"%~1\"==\"\" goto done\r\n\
              set \"last=%~1\"\r\n\
@@ -646,6 +647,7 @@ fn write_magick_stub(dir: &std::path::Path) -> std::path::PathBuf {
              if [ \"$#\" = \"1\" ] && { [ \"$1\" = \"--version\" ] || [ \"$1\" = \"-version\" ]; }; then\n\
              \x20   exit 0\n\
              fi\n\
+             if [ \"$1\" = \"-ping\" ]; then exit 0; fi\n\
              for a in \"$@\"; do last=\"$a\"; done\n\
              printf x > \"$last\"\n",
         )
@@ -2614,4 +2616,138 @@ fn a_large_upscale_dry_run_warns_and_never_asks() {
         dir.path().join("pings").exists(),
         "the preview reads the size too"
     );
+}
+
+/// A jpg target's note says only what the source holds, and the same in a
+/// conversion, its preview and `--json`. The stub answers the image read.
+#[cfg(unix)]
+#[test]
+fn a_jpg_targets_note_says_only_what_the_source_holds() {
+    const ALPHA: &str =
+        "Transparency is flattened onto a white background; JPEG has no alpha channel.";
+    const FRAMES: &str =
+        "Only the first frame/page of a multi-frame source is kept; this target holds a single image.";
+    const BOTH: &str = "Transparency is flattened onto a white background, and only the first \
+                        frame/page of a multi-frame source is kept; JPEG has neither alpha nor animation.";
+    for (ping, want) in [
+        ("HEIC Undefined 1", None),
+        ("PNG Blend 1", Some(ALPHA)),
+        ("WEBP Undefined 2\nWEBP Undefined 2", Some(FRAMES)),
+        ("WEBP Blend 2\nWEBP Blend 2", Some(BOTH)),
+        // No answer: the whole note.
+        ("640 360 TopLeft", Some(BOTH)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let magick = magick_stub(dir.path(), ping);
+        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+        let run = |args: &[&str]| {
+            let out = conv()
+                .current_dir(dir.path())
+                .arg("--magick-path")
+                .arg(&magick)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{ping}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let notes = |stdout: &str, prefix: &str| -> Vec<String> {
+            stdout
+                .lines()
+                .filter_map(|l| l.trim_start().strip_prefix(prefix))
+                .map(str::to_string)
+                .collect()
+        };
+        let want: Vec<String> = want.into_iter().map(str::to_string).collect();
+
+        let preview = run(&["a.png", "a.jpg", "--dry-run"]);
+        assert_eq!(notes(&preview, "note: "), want, "{ping}: {preview}");
+        let plan: serde_json::Value =
+            serde_json::from_str(&run(&["a.png", "a.jpg", "--dry-run", "--json"])).unwrap();
+        assert_eq!(
+            plan["plans"][0]["plan"]["warnings"],
+            serde_json::json!(want),
+            "{ping}"
+        );
+
+        let converted = run(&["a.png", "a.jpg"]);
+        assert_eq!(notes(&converted, "note  "), want, "{ping}: {converted}");
+        let result: serde_json::Value =
+            serde_json::from_str(&run(&["a.png", "b.jpg", "--json"])).unwrap();
+        assert_eq!(
+            result["results"][0]["warnings"],
+            serde_json::json!(want),
+            "{ping}"
+        );
+    }
+}
+
+/// A png/bmp target notes a multi-frame source only.
+#[cfg(unix)]
+#[test]
+fn a_png_target_notes_only_a_multi_frame_source() {
+    for (ping, noted) in [("PNG Blend 1", false), ("WEBP Blend 2\nWEBP Blend 2", true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let magick = magick_stub(dir.path(), ping);
+        std::fs::write(dir.path().join("a.webp"), b"x").unwrap();
+        let assert = conv()
+            .current_dir(dir.path())
+            .arg("--magick-path")
+            .arg(&magick)
+            .args(["a.webp", "a.png"])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+        assert_eq!(
+            stdout.contains("note  Only the first frame"),
+            noted,
+            "{ping}: {stdout}"
+        );
+        assert_eq!(
+            stdout.matches("note").count(),
+            usize::from(noted),
+            "{stdout}"
+        );
+    }
+}
+
+/// The GIF buffering note is for a long source, by the probed duration.
+#[test]
+fn the_gif_buffering_note_shows_only_for_a_long_source() {
+    for (secs, noted) in [(2, false), (30, false), (31, true), (600, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let ffprobe = ffprobe_stub(dir.path(), &probe_json(secs, 1_000_000));
+        let ffmpeg = write_magick_stub(dir.path());
+        std::fs::write(dir.path().join("a.mp4"), b"x").unwrap();
+        let run = |args: &[&str]| {
+            let out = conv()
+                .current_dir(dir.path())
+                .arg("--ffprobe-path")
+                .arg(&ffprobe)
+                .arg("--ffmpeg-path")
+                .arg(&ffmpeg)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{secs} s: {out:?}");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let preview = run(&["a.mp4", "a.gif", "--dry-run"]);
+        assert_eq!(
+            preview.contains("note: The whole filtered stream is buffered"),
+            noted,
+            "{secs} s: {preview}"
+        );
+        let plan: serde_json::Value =
+            serde_json::from_str(&run(&["a.mp4", "a.gif", "--dry-run", "--json"])).unwrap();
+        let warnings = plan["plans"][0]["plan"]["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), usize::from(noted), "{secs} s: {warnings:?}");
+        // A batch-file stand-in is not trusted with the filter graph's `;`.
+        if cfg!(unix) {
+            let result: serde_json::Value =
+                serde_json::from_str(&run(&["a.mp4", "a.gif", "--json"])).unwrap();
+            let warnings = result["results"][0]["warnings"].as_array().unwrap();
+            assert_eq!(warnings.len(), usize::from(noted), "{secs} s: {warnings:?}");
+        }
+    }
 }

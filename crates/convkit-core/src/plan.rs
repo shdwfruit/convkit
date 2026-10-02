@@ -252,7 +252,8 @@ pub fn build_tuned(
         });
     }
 
-    let mut warnings: Vec<String> = recipe.warnings.iter().map(|w| (*w).to_string()).collect();
+    // Only the notes that apply to this source, as far as the probe knows.
+    let mut warnings = registry::notes_for(&recipe, probe);
     // Mirrors the dynamic branch above (`m.warnings.extend(resolved.notes...)`)
     // -- a static recipe carrying an `Arg::VideoChain` slot gets the same
     // honesty about a cap that did not bind or a probe that never ran.
@@ -640,6 +641,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.warnings.len(), 1);
+    }
+
+    /// The plan carries only the notes that apply to the source the probe
+    /// read, and its argv does not change with them.
+    #[test]
+    fn a_plan_carries_only_the_notes_its_source_needs() {
+        let photo = MediaProbe {
+            image: Some(crate::probe::ImageTraits {
+                alpha: Some(false),
+                multi_frame: false,
+            }),
+            ..MediaProbe::default()
+        };
+        let plan_for = |probe: Option<&MediaProbe>| {
+            build(
+                Format::Heic,
+                Format::Jpg,
+                &[p("a.heic")],
+                Path::new("a.jpg"),
+                probe,
+                None,
+            )
+            .unwrap()
+        };
+        let (read, unread) = (plan_for(Some(&photo)), plan_for(None));
+        assert!(read.warnings.is_empty(), "{:?}", read.warnings);
+        assert_eq!(unread.warnings.len(), 1, "{:?}", unread.warnings);
+        assert_eq!(read.steps, unread.steps);
+
+        let clip = MediaProbe {
+            video_codec: Some("h264".into()),
+            duration_ms: Some(2_000),
+            ..MediaProbe::default()
+        };
+        let gif = build(
+            Format::Mp4,
+            Format::Gif,
+            &[p("a.mp4")],
+            Path::new("a.gif"),
+            Some(&clip),
+            None,
+        )
+        .unwrap();
+        assert!(gif.warnings.is_empty(), "{:?}", gif.warnings);
     }
 
     #[test]

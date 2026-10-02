@@ -1103,3 +1103,58 @@ a 160 kb/s track (AAC) or a 128 kb/s one (Opus), and a 60 fps source cut to
 12 fps pays 36. It is a judgement, not a measured threshold: the fits above do
 not know the content, so a choice just under the line can still look worse
 than one just over it on a different clip.
+
+---
+
+## GIF memory note (`GIF_BUFFER_NOTE_AFTER_MS`)
+
+Measured 2026-10-02 on the same Apple M2 (8 GiB, macOS 26.6.2) as the size
+targets above, with Homebrew's ffmpeg 9.0.1.
+
+The GIF recipes build their palette with `palettegen`, which emits nothing
+until the stream ends, so the `paletteuse` branch of the `split` holds every
+filtered frame in memory until then. The note that says so is shown only for
+a source longer than `GIF_BUFFER_NOTE_AFTER_MS` (`registry.rs`), 30 seconds,
+or one whose length is unknown.
+
+Sources were `testsrc2` at 30 fps, 1080p landscape and portrait, `$s` seconds
+long:
+
+```
+ffmpeg -f lavfi -i "testsrc2=d=$s:r=30:s=1920x1080" -f lavfi -i "sine=d=$s" -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -c:a aac -shortest "src_$s.mp4"
+ffmpeg -f lavfi -i "testsrc2=d=$s:r=30:s=1080x1920" -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p "port_$s.mp4"
+```
+
+each converted with convkit's default GIF command, under `/usr/bin/time -l`:
+
+```
+/usr/bin/time -l ffmpeg -v error -i src_60.mp4 -vf 'fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3' -loop 0 -y out.gif
+```
+
+The figure taken is "peak memory footprint". macOS compresses idle pages,
+so "maximum resident set size" understates what the buffer costs: a 120 s
+run reported 482 MiB resident against a 1.74 GiB footprint.
+
+| Source | Length | Peak footprint | Wall | CPU |
+|---|---|---|---|---|
+| 1920x1080 (GIF 640x360) | 2 s | 115 MiB | 0.2 s | 0.5 s |
+| | 10 s | 238 MiB | 0.8 s | 2.1 s |
+| | 30 s | 536 MiB | 2.1 s | 6.1 s |
+| | 60 s | 968 MiB | 4.2 s | 12.1 s |
+| | 120 s | 1,810 MiB | 8.3 s | 23.8 s |
+| | 240 s | 3,451 MiB | 15.5 s | 47.0 s |
+| 1080x1920 (GIF 640x1138) | 10 s | 557 MiB | 1.8 s | 3.9 s |
+| | 30 s | 1,446 MiB | 5.2 s | 11.3 s |
+| | 60 s | 2,745 MiB | 10.6 s | 22.4 s |
+
+The footprint grows by about 14 MiB per second of landscape source and 44
+MiB per second of portrait, close to 15 frames a second of 640-wide RGBA
+(13.2 and 41.7 MiB): the buffered frames account for it.
+
+30 seconds is where the note starts because below it even a portrait phone
+clip stays under 1.5 GiB and about five seconds here, while past it the cost
+keeps growing: a four-minute landscape clip took 3.4 GiB, over 40% of this
+machine's memory. The line is drawn on length because that is what a person
+knows about their clip; at 60 s, a portrait source would already pass 2.7
+GiB with no note. It is set at the defaults: `--fps 30` doubles the buffer
+and `--resize` scales it with the frame's area.
