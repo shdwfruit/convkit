@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for taking a look. Issues labelled
+Thanks for viewing my repo, please contribute! Issues labelled
 [good first issue](https://github.com/shdwfruit/convkit/labels/good%20first%20issue)
 are scoped so you can pick one up without knowing the whole codebase.
 Comment on the issue before you start so two people don't do the same work.
@@ -73,7 +73,7 @@ one is there.
 Let people do what they ask, but make sure they know what they're getting.
 A flag that doesn't apply to a pair is an error, not silently ignored. A
 lossy or surprising result gets a note. Something drastic needs an explicit
-flag or a `[y/N]`. A failure always says how to fix it.
+flag or a `[y/N]`. A failure should always tell the user how to fix it.
 
 ## Pull requests
 
