@@ -430,7 +430,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     // real error and is returned as one, so the install prompt can offer
     // the fix, rather than being swallowed into a refusal that blames the
     // flag.
-    let probed = if registry::requires_probe(req.from, req.to, &req.tuning) {
+    let mut probed = if registry::requires_probe(req.from, req.to, &req.tuning) {
         let ffprobe = resolver.resolve(Backend::Ffprobe)?;
         Some(probe::run(&ffprobe.path, &req.inputs[0])?)
     } else if registry::needs_probe_tuned(req.from, req.to, &req.tuning) {
@@ -452,6 +452,17 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     } else {
         None
     };
+    // Whether a jpg/png/bmp target's notes apply. A read that fails keeps
+    // them whole.
+    if registry::notes_need_image(req.from, req.to) {
+        let traits = resolver
+            .resolve(Backend::Magick)
+            .ok()
+            .and_then(|m| probe::image_traits(&m.path, &req.inputs[0]).ok());
+        if let Some(t) = traits {
+            probed.get_or_insert_with(MediaProbe::default).image = Some(t);
+        }
+    }
 
     // Likewise: only check backend availability when this pair actually has
     // more than one recipe to choose between (today: docx/odt -> pdf). An
@@ -1303,6 +1314,10 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     /// and exit 0 explicitly, since `set /p` reading from `nul` otherwise
     /// leaves `%errorlevel%` at 1 and would make a successful stub look like
     /// a failed backend.
+    ///
+    /// An ImageMagick `-ping` is answered with nothing, for the same reason:
+    /// its last argument is `info:`, which would be created in the working
+    /// directory.
     fn stub_that_creates_its_output(dir: &Path) -> PathBuf {
         let (name, body) = if cfg!(windows) {
             (
@@ -1312,6 +1327,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
                  if \"%~1\"==\"--version\" exit /b 0\r\n\
                  if \"%~1\"==\"-version\" exit /b 0\r\n\
                  :notversion\r\n\
+                 if \"%~1\"==\"-ping\" exit /b 0\r\n\
                  :loop\r\n\
                  if \"%~1\"==\"\" goto done\r\n\
                  set \"last=%~1\"\r\n\
@@ -1328,6 +1344,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
                  if [ \"$#\" = \"1\" ] && { [ \"$1\" = \"--version\" ] || [ \"$1\" = \"-version\" ]; }; then\n\
                  \x20   exit 0\n\
                  fi\n\
+                 if [ \"$1\" = \"-ping\" ]; then exit 0; fi\n\
                  for a in \"$@\"; do last=\"$a\"; done\n\
                  printf x > \"$last\"\n",
             )
@@ -3466,9 +3483,21 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert!(o.notes.is_empty(), "{:?}", o.notes);
     }
 
+    /// The `-ping` lines that read a size, not the notes' read.
+    #[cfg(unix)]
+    fn size_pings(dir: &Path) -> usize {
+        std::fs::read_to_string(dir.join("bin").join("pings"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with("-ping") && l.contains("%w %h"))
+            .count()
+    }
+
+    /// The size is read for `--upscale` alone. A jpg target's notes take
+    /// one read of their own either way.
     #[cfg(unix)]
     #[test]
-    fn an_image_is_only_pinged_for_upscale() {
+    fn an_image_is_only_sized_for_upscale() {
         let dir = tempfile::tempdir().unwrap();
         let r = magick_stub(dir.path(), "640 360 TopLeft");
         run(
@@ -3477,13 +3506,39 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             &mut |_| {},
         )
         .unwrap();
-        assert_eq!(pings(dir.path()), 0);
+        assert_eq!(size_pings(dir.path()), 0);
+        assert_eq!(pings(dir.path()), 1, "the notes' read");
         let req = Request {
             output: dir.path().join("out").join("again.jpg"),
             ..upscale_request(dir.path(), "320x", true, false)
         };
         run(&req, &r, &mut |_| {}).unwrap();
-        assert_eq!(pings(dir.path()), 1);
+        assert_eq!(size_pings(dir.path()), 1);
+        assert_eq!(pings(dir.path()), 3);
+    }
+
+    /// A jpg target's note says what the read found the source holds, and
+    /// stays whole when the read gives no answer.
+    #[cfg(unix)]
+    #[test]
+    fn a_jpg_targets_note_follows_the_image_read() {
+        for (answer, alpha, frames) in [
+            ("PNG Undefined 1", false, false),
+            ("PNG Blend 1", true, false),
+            ("PNG Undefined 2\nPNG Undefined 2", false, true),
+            ("PNG Blend 2\nPNG Blend 2", true, true),
+            ("no answer", true, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let r = magick_stub(dir.path(), answer);
+            let mut req = upscale_request(dir.path(), "320x", false, false);
+            req.tuning = crate::Tuning::default();
+            let o = run(&req, &r, &mut |_| {}).unwrap();
+            let said = |what: &str| o.warnings.iter().any(|w| w.contains(what));
+            assert_eq!(said("Transparency"), alpha, "{answer}: {:?}", o.warnings);
+            assert_eq!(said("first frame"), frames, "{answer}: {:?}", o.warnings);
+            assert!(o.warnings.len() <= 1, "one sentence: {:?}", o.warnings);
+        }
     }
 
     #[cfg(unix)]

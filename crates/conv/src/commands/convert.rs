@@ -318,7 +318,31 @@ fn failed_on_missing_backend(result: &Result<Outcome, ConvError>, backend: Backe
 /// than turning "no ffprobe" into its own dry-run failure mode. Where a knob
 /// can *only* be honoured with a probe (`registry::requires_probe`), that
 /// failure is the preview's real answer, as it is `exec::run`'s.
+///
+/// A jpg/png/bmp target also has its source image read for the notes that
+/// depend on it, as `exec::run` does, so a preview and `--json` carry the
+/// same notes as the conversion.
 fn probed_for(
+    resolver: &Resolver,
+    job: &input::Job,
+    tuning: &Tuning,
+) -> Result<Option<MediaProbe>, ConvError> {
+    let mut probed = media_probed_for(resolver, job, tuning)?;
+    if registry::notes_need_image(job.from, job.to) {
+        let traits = resolver
+            .resolve(Backend::Magick)
+            .ok()
+            .and_then(|m| probe::image_traits(&m.path, &job.inputs[0]).ok());
+        if let Some(t) = traits {
+            probed.get_or_insert_with(MediaProbe::default).image = Some(t);
+        }
+    }
+    Ok(probed)
+}
+
+/// `probed_for` before the image read for notes: the media probe, or an
+/// `--upscale` size read.
+fn media_probed_for(
     resolver: &Resolver,
     job: &input::Job,
     tuning: &Tuning,
@@ -778,6 +802,67 @@ mod tests {
             "out.mp4",
         );
         assert!(probed_for(&none, &j, &fps).unwrap().is_none());
+    }
+
+    /// A `magick` stand-in that answers `-ping` with `answer`. Unix only, as
+    /// the read's `-format` argument holds a newline, which Rust will not
+    /// pass to a batch file.
+    #[cfg(unix)]
+    fn write_magick_ping_stub(dir: &Path, answer: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("magick_stub.sh");
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\nif [ \"$1\" = \"-ping\" ]; then echo '{answer}'; fi\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// A jpg target's preview reads the image for its notes, as the real
+    /// run does; a pair whose notes do not depend on it, or an input that
+    /// is not a file, is not read.
+    #[cfg(unix)]
+    #[test]
+    fn probed_for_reads_the_image_a_jpg_targets_notes_depend_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_magick_ping_stub(dir.path(), "PNG Blend 1");
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub);
+        let input = dir.path().join("in.png");
+        std::fs::write(&input, b"x").unwrap();
+        let input = input.to_str().unwrap();
+
+        let j = job(
+            convkit_core::Format::Png,
+            convkit_core::Format::Jpg,
+            input,
+            "out.jpg",
+        );
+        let probed = probed_for(&r, &j, &Tuning::default())
+            .unwrap()
+            .expect("a jpg target reads its source");
+        let traits = probed.image.expect("the read's answer");
+        assert_eq!(traits.alpha, Some(true));
+        assert!(!traits.multi_frame);
+
+        let webp = job(
+            convkit_core::Format::Png,
+            convkit_core::Format::Webp,
+            input,
+            "out.webp",
+        );
+        assert!(probed_for(&r, &webp, &Tuning::default()).unwrap().is_none());
+        let missing = job(
+            convkit_core::Format::Png,
+            convkit_core::Format::Jpg,
+            "definitely-missing.png",
+            "out.jpg",
+        );
+        assert!(probed_for(&r, &missing, &Tuning::default())
+            .unwrap()
+            .is_none());
     }
 
     // --- available_for -------------------------------------------------------

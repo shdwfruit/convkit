@@ -108,7 +108,18 @@ result landed at:
 $ conv clip.mp4 clip.gif
 OK clip.gif - 492 KB - 0.2s
   /home/user/Videos/clip.gif
-  note  The whole filtered stream is buffered in memory for palette generation, so very long inputs are slow and memory-hungry rather than being silently truncated.
+```
+
+A note follows when there is something to know about converting this
+particular source: a transparent PNG flattened into a JPEG, say, or a GIF
+made from a long video, which takes a lot of memory. A phone photo converted
+to JPEG gets none.
+
+```console
+$ conv logo.png logo.jpg
+OK logo.jpg - 5 KB - 0.0s
+  /home/user/Pictures/logo.jpg
+  note  Transparency is flattened onto a white background; JPEG has no alpha channel.
 ```
 
 `--dry-run` prints the exact backend command instead of running it — here,
@@ -117,7 +128,6 @@ the per-clip palette generation behind convkit's GIF default:
 ```console
 $ conv clip.mp4 clip.gif --dry-run
 ffmpeg -i clip.mp4 -vf 'fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3' -loop 0 -y clip.gif
-note: The whole filtered stream is buffered in memory for palette generation, so very long inputs are slow and memory-hungry rather than being silently truncated.
 ```
 
 Multi-step recipes are automatic: `md → pdf` needs no LaTeX — pandoc renders
@@ -587,14 +597,16 @@ one parseable document; the exit code signals pass/fail. A success element:
   "ok": true, "input": "clip.mp4", "output": "clip.gif",
   "bytes": 504183, "elapsed_ms": 168, "remuxed": false,
   "backends": [{"backend": "ffmpeg", "version": "9.0.1"}],
-  "warnings": ["The whole filtered stream is buffered in memory ..."],
+  "warnings": [],
   "notes": [],
   "backend_output": [{"backend": "ffmpeg", "stderr": "ffmpeg version 9.0.1 ..."}]
 }
 ```
 
 A failure carries a structured `error` with a stable `code` (e.g.
-`backend_missing`), a message, and remediation commands. `backend_output`
+`backend_missing`), a message, and remediation commands. `warnings` holds
+the notes the human output prints under the path, the same ones a
+`--dry-run` plan carries, so it is empty when nothing applies. `backend_output`
 always holds each step's raw output, tail-capped at 16 KiB; `notes` is the
 small distilled subset worth a person's attention, usually empty on a clean
 run. For the full shapes of every command, run it with `--json` — the binary
