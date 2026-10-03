@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1 - 2026-10-02
+
+### Changed
+
+- **Notes only when they apply.** Converting to jpg, png or bmp no longer
+  warns about transparency or extra frames the source doesn't have, so a
+  phone photo converts without a note. A GIF made from a video of 30 seconds
+  or less no longer gets the memory note. When conv can't tell, the note
+  still shows. `warnings` in `--json` follows the same rule, so it can now be
+  empty where it wasn't before.
+
 ## 0.3.0 - 2026-10-02
 
 ### New
