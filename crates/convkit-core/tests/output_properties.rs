@@ -1346,6 +1346,274 @@ fn the_gif_buffering_note_is_for_long_sources_only() {
     );
 }
 
+// --- CSV and workbooks ----------------------------------------------------
+
+/// Runs LibreOffice directly, as `synth_media` runs ffmpeg, to build a test
+/// source. Its own profile, so it never collides with a running
+/// LibreOffice.
+fn soffice_build(dir: &tempfile::TempDir, input: &Path, filter: &str, ext: &str) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Soffice);
+    let soffice = resolver.resolve(Backend::Soffice).unwrap().path;
+    let profile = tempfile::tempdir().unwrap();
+    let url = format!(
+        "file:///{}",
+        profile
+            .path()
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    );
+    let out_dir = dir.path().join(format!("built-{ext}"));
+    let result = Command::new(&soffice)
+        .arg(format!("-env:UserInstallation={url}"))
+        .args([
+            "--headless",
+            "--norestore",
+            "--convert-to",
+            filter,
+            "--outdir",
+        ])
+        .arg(&out_dir)
+        .arg(input)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run soffice: {e}"));
+    let built = out_dir.join(input.with_extension(ext).file_name().unwrap());
+    assert!(
+        built.is_file(),
+        "building {} failed: {}",
+        built.display(),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    built
+}
+
+fn write_bytes(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// One file inside a zip, as text.
+fn zip_text(path: &Path, name: &str) -> String {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut text = String::new();
+    zip.by_name(name)
+        .unwrap_or_else(|e| panic!("{name} in {}: {e}", path.display()))
+        .read_to_string(&mut text)
+        .unwrap();
+    text
+}
+
+/// A cell of an .xlsx, as Excel will see it.
+#[derive(Debug, PartialEq)]
+enum Cell {
+    Text(String),
+    Number(f64),
+}
+
+/// The cells of an .xlsx's first sheet by reference (`A2`), read from its
+/// XML: a shared string is text, anything else with a value a number.
+fn xlsx_cells(path: &Path) -> std::collections::BTreeMap<String, Cell> {
+    let unescape = |s: &str| {
+        s.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&amp;", "&")
+    };
+    let between = |s: &str, open: &str, close: &str| -> Option<String> {
+        let start = s.find(open)? + open.len();
+        let len = s[start..].find(close)?;
+        Some(s[start..start + len].to_string())
+    };
+    let shared: Vec<String> = zip_text(path, "xl/sharedStrings.xml")
+        .split("<si>")
+        .skip(1)
+        .map(|si| {
+            let si = &si[..si.find("</si>").unwrap()];
+            let mut text = String::new();
+            for part in si.split("<t").skip(1) {
+                let body = &part[part.find('>').unwrap() + 1..];
+                text.push_str(&unescape(&body[..body.find("</t>").unwrap()]));
+            }
+            text
+        })
+        .collect();
+    zip_text(path, "xl/worksheets/sheet1.xml")
+        .split("<c ")
+        .skip(1)
+        .filter_map(|c| {
+            let open = &c[..c.find('>')?];
+            let reference = between(open, "r=\"", "\"")?;
+            let value = between(c, "<v>", "</v>")?;
+            let cell = if open.contains("t=\"s\"") {
+                Cell::Text(shared[value.parse::<usize>().unwrap()].clone())
+            } else {
+                Cell::Number(value.parse().unwrap())
+            };
+            Some((reference, cell))
+        })
+        .collect()
+}
+
+fn text(s: &str) -> Cell {
+    Cell::Text(s.to_string())
+}
+
+/// The CSV every import test reads: a zip code with a leading zero, a
+/// quantity, an ISO date, a fraction-looking ratio, a formula and a card
+/// number.
+const ORDERS_CSV: &str = "zip,qty,shipped,ratio,note,card\n\
+                          02134,3,2024-01-15,1/2,=1+1,4111111111111111\n\
+                          10001,12,2024-02-01,3-4,ok,12\n";
+
+/// Leading zeros and long numbers survive as text, numbers and ISO dates
+/// are numbers, and nothing is turned into a date or run as a formula.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_csv_keeps_its_digits_and_types_the_rest() {
+    let dir = tmp();
+    let csv = write_bytes(&dir, "orders.csv", ORDERS_CSV.as_bytes());
+    let (xlsx, o) = convert_path(&csv, "xlsx");
+    let cells = xlsx_cells(&xlsx);
+    assert_eq!(cells["A2"], text("02134"));
+    assert_eq!(cells["A3"], text("10001"), "the whole column is text");
+    assert_eq!(cells["B2"], Cell::Number(3.0));
+    assert_eq!(cells["C2"], Cell::Number(45306.0), "2024-01-15 is a date");
+    assert_eq!(cells["D2"], text("1/2"), "not the 2nd of January");
+    assert_eq!(cells["E2"], text("=1+1"), "not run");
+    assert_eq!(cells["F2"], text("4111111111111111"), "every digit");
+    assert_eq!(cells["F3"], text("12"));
+    assert!(!cells.contains_key("A4"), "three rows: {cells:?}");
+    assert!(
+        o.warnings
+            .iter()
+            .any(|w| w.starts_with("The zip and card columns are kept as text")),
+        "{:?}",
+        o.warnings
+    );
+    assert!(
+        o.warnings
+            .iter()
+            .any(|w| w.contains("formulas in a CSV are not run")),
+        "{:?}",
+        o.warnings
+    );
+}
+
+/// A semicolon-separated Windows-1252 file with decimal commas, as a
+/// European Excel writes it, and a UTF-16 one with tabs, as Excel's
+/// "Unicode Text" writes it.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_csv_is_read_in_the_encoding_and_separators_it_was_written_in() {
+    let dir = tmp();
+    let euro = write_bytes(
+        &dir,
+        "prices.csv",
+        b"name;price\nCaf\xe9;1,5\nTh\xe9;12,25\n",
+    );
+    let (xlsx, o) = convert_path(&euro, "xlsx");
+    let cells = xlsx_cells(&xlsx);
+    assert_eq!(cells["A2"], text("Café"));
+    assert_eq!(cells["B2"], Cell::Number(1.5));
+    assert_eq!(cells["B3"], Cell::Number(12.25));
+    assert_eq!(o.warnings.len(), 2, "{:?}", o.warnings);
+
+    let mut wide = vec![0xFF, 0xFE];
+    wide.extend(
+        "id\tname\n007\tZoë\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes),
+    );
+    let wide = write_bytes(&dir, "wide.csv", &wide);
+    let cells = xlsx_cells(&convert_path(&wide, "xlsx").0);
+    assert_eq!(cells["A2"], text("007"));
+    assert_eq!(cells["B2"], text("Zoë"));
+
+    let bom = write_bytes(&dir, "bom.csv", b"\xEF\xBB\xBFname\nok\n");
+    let cells = xlsx_cells(&convert_path(&bom, "xlsx").0);
+    assert_eq!(cells["A1"], text("name"), "the byte-order mark is not data");
+}
+
+/// The same import into .ods: the zip code is a string cell.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_csv_to_ods_keeps_its_digits_too() {
+    let dir = tmp();
+    let csv = write_bytes(&dir, "orders.csv", ORDERS_CSV.as_bytes());
+    let (ods, _) = convert_path(&csv, "ods");
+    let content = zip_text(&ods, "content.xml");
+    assert!(
+        content.contains(
+            r#"office:value-type="string" calcext:value-type="string"><text:p>02134</text:p>"#
+        ),
+        "{content}"
+    );
+    assert!(content.contains(r#"office:value-type="float" office:value="3""#));
+}
+
+/// A workbook of two sheets, the first with a formula and a zip code kept
+/// as text, as flat ODS XML for LibreOffice to turn into .xlsx and .ods.
+const ORDERS_FODS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" office:version="1.2" office:mimetype="application/vnd.oasis.opendocument.spreadsheet">
+ <office:body><office:spreadsheet>
+  <table:table table:name="Orders">
+   <table:table-row><table:table-cell office:value-type="string"><text:p>zip</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>qty</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>total</text:p></table:table-cell></table:table-row>
+   <table:table-row><table:table-cell office:value-type="string"><text:p>02134</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="3"><text:p>3</text:p></table:table-cell><table:table-cell table:formula="of:=[.B2]*2.5" office:value-type="float" office:value="7.5"><text:p>7.5</text:p></table:table-cell></table:table-row>
+  </table:table>
+  <table:table table:name="Notes"><table:table-row><table:table-cell office:value-type="string"><text:p>second sheet</text:p></table:table-cell></table:table-row></table:table>
+ </office:spreadsheet></office:body>
+</office:document>
+"#;
+
+/// A workbook writes its first sheet, as values, and says what it left
+/// behind: the second sheet and the formula.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_workbook_writes_its_first_sheet_as_values() {
+    let dir = tmp();
+    let fods = write_bytes(&dir, "orders.fods", ORDERS_FODS.as_bytes());
+    for (filter, ext) in [
+        ("xlsx:Calc MS Excel 2007 XML", "xlsx"),
+        ("ods:calc8", "ods"),
+    ] {
+        let book = soffice_build(&dir, &fods, filter, ext);
+        let (csv, o) = convert_path(&book, "csv");
+        let written = std::fs::read_to_string(&csv).unwrap();
+        assert_eq!(
+            written.lines().collect::<Vec<_>>(),
+            ["zip,qty,total", "02134,3,7.5"],
+            "{ext}"
+        );
+        assert_eq!(
+            o.warnings,
+            [
+                "Only the first sheet, Orders, is written; the workbook has 2 and a CSV holds one.",
+                "Formulas are written as their values; a CSV holds no formulas.",
+            ],
+            "{ext}"
+        );
+    }
+}
+
+/// csv -> xlsx -> csv gives back the same file: no digit lost on the way.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_csv_survives_a_round_trip_through_xlsx() {
+    let dir = tmp();
+    let original = "zip,qty,card\n02134,3,4111111111111111\n00501,12,5500000000000004\n";
+    let csv = write_bytes(&dir, "orders.csv", original.as_bytes());
+    let (xlsx, _) = convert_path(&csv, "xlsx");
+    let (back, o) = convert_path(&xlsx, "csv");
+    assert_eq!(std::fs::read_to_string(&back).unwrap(), original);
+    assert!(
+        o.warnings.is_empty(),
+        "one sheet, no formulas: {:?}",
+        o.warnings
+    );
+}
+
 // --- --max-size -----------------------------------------------------------
 
 /// A clip noisy enough that the encoder has to spend the bits it is given:

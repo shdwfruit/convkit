@@ -15,6 +15,7 @@ pub mod registry;
 pub mod resolve;
 pub mod size;
 pub mod sized;
+pub mod table;
 mod video;
 pub mod winpath;
 

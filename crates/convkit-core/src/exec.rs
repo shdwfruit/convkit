@@ -463,6 +463,13 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             probed.get_or_insert_with(MediaProbe::default).image = Some(t);
         }
     }
+    // How to import a CSV, or what a workbook holds that a CSV cannot. A
+    // plain file read, no backend.
+    if registry::reads_table(req.from, req.to) {
+        if let Some(t) = crate::table::read(&req.inputs[0], req.from) {
+            probed.get_or_insert_with(MediaProbe::default).table = Some(t);
+        }
+    }
 
     // Likewise: only check backend availability when this pair actually has
     // more than one recipe to choose between (today: docx/odt -> pdf). An

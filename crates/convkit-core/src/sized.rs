@@ -400,6 +400,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         keep_source_rate: false,
         keep_source_size: false,
         enlarged: None,
+        ..ResolvedVideo::default()
     };
     let passlog = p.output.with_extension("convkit-pass");
     let two = media::two_pass_invocations(

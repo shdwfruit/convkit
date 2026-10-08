@@ -50,6 +50,7 @@ pub enum Format {
     Pptx,
     Odt,
     Ods,
+    Csv,
     Html,
     Md,
 }
@@ -92,6 +93,7 @@ const TABLE: &[(Format, Kind, &[&str], &[&str])] = &[
     (Format::Pptx, Kind::Document, &["pptx"], &[]),
     (Format::Odt, Kind::Document, &["odt"], &[]),
     (Format::Ods, Kind::Document, &["ods"], &[]),
+    (Format::Csv, Kind::Document, &["csv"], &[]),
     (Format::Html, Kind::Document, &["html", "htm"], &[]),
     (Format::Md, Kind::Document, &["md", "markdown"], &[]),
 ];

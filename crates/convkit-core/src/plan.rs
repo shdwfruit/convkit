@@ -130,7 +130,12 @@ pub fn build_tuned(
     // resolves to `ResolvedVideo::default()` with no notes regardless of
     // `probe`, which is what keeps the untuned argv snapshot byte-identical.
     //
-    let resolved = crate::video::resolve(tuning, probe, target_for(to));
+    let mut resolved = crate::video::resolve(tuning, probe, target_for(to));
+    // A CSV source adds the import options read from it (`table::resolve`);
+    // with no probe, as in the snapshot, it keeps the default.
+    if from == Format::Csv {
+        crate::table::resolve(probe, &mut resolved);
+    }
 
     // Probe-aware media paths first: a container change whose video codec
     // already fits the target gets a stream-mapped copy (or hybrid
@@ -627,6 +632,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.steps[0].program, "magick");
+    }
+
+    /// A CSV is imported with the options read from it; unread, with the
+    /// default shape, which is what the snapshot shows.
+    #[test]
+    fn a_csv_is_imported_with_the_options_read_from_it() {
+        let read = MediaProbe {
+            table: Some(crate::table::TableShape::Csv(crate::table::CsvShape {
+                delimiter: b';',
+                text_columns: vec![(2, "zip".into())],
+                ..crate::table::CsvShape::default()
+            })),
+            ..MediaProbe::default()
+        };
+        let infilter = |probe: Option<&MediaProbe>| {
+            let plan = build(
+                Format::Csv,
+                Format::Xlsx,
+                &[p("in.csv")],
+                Path::new("out.xlsx"),
+                probe,
+                None,
+            )
+            .unwrap();
+            plan.steps[0]
+                .argv
+                .iter()
+                .find(|a| a.starts_with("--infilter="))
+                .cloned()
+                .unwrap()
+        };
+        assert!(
+            infilter(Some(&read)).contains(":59,34,76,1,2/2,1033,"),
+            "{}",
+            infilter(Some(&read))
+        );
+        assert!(infilter(None).contains(":44,34,76,1,,1033,"));
     }
 
     #[test]

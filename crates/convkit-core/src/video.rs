@@ -95,6 +95,10 @@ pub struct ResolvedVideo {
     /// Set when `--upscale` enlarges the picture, or might because the
     /// source size is unknown.
     pub enlarged: Option<Enlargement>,
+    /// The `--infilter` value a CSV is imported with, built from what was
+    /// read of it (`table::import_filter`). `None` renders the default
+    /// shape's.
+    pub csv_import: Option<String>,
 }
 
 /// Parses a user frame rate (`24`, `29.97`, `30000/1001`) into a float for

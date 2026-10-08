@@ -68,6 +68,9 @@ pub struct MediaProbe {
     /// What an image source holds that a single-image target drops, read
     /// by `image_traits`. `None` when the source was not read.
     pub image: Option<ImageTraits>,
+    /// What a CSV or a workbook holds, read by `table::read`. `None` when
+    /// the source was not read.
+    pub table: Option<crate::table::TableShape>,
 }
 
 /// What a jpg/png/bmp target cannot keep from its source, for the notes
