@@ -129,8 +129,10 @@ pub fn build_tuned(
     // takes the dynamic branch below). An empty `Tuning`
     // resolves to `ResolvedVideo::default()` with no notes regardless of
     // `probe`, which is what keeps the untuned argv snapshot byte-identical.
-    //
-    let resolved = crate::video::resolve(tuning, probe, target_for(to));
+    // An icon pair adds what it read of the source (`icon::resolve`); with
+    // no probe, as in the snapshot, that is nothing.
+    let mut resolved = crate::video::resolve(tuning, probe, target_for(to));
+    crate::icon::resolve(from, to, probe, &mut resolved);
 
     // Probe-aware media paths first: a container change whose video codec
     // already fits the target gets a stream-mapped copy (or hybrid
@@ -377,6 +379,29 @@ fn validate_tuning(
 ) -> Result<()> {
     if tuning.is_empty() {
         return Ok(());
+    }
+    // An icon has no knob: its sizes are fixed, and it is lossless. Said
+    // here, since the general refusals below would call ico something it
+    // is not ("--resize ... tunes image, video and GIF targets").
+    if to == Format::Ico {
+        let flag = [
+            ("--resize", tuning.resize.is_some()),
+            ("--quality", tuning.quality.is_some()),
+            ("--colors", tuning.colors.is_some()),
+            ("--fps", tuning.fps.is_some()),
+            ("--crf", tuning.crf.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(flag, given)| given.then_some(flag));
+        if let Some(flag) = flag {
+            return Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "{flag} does not apply to {} -> ico: an icon holds fixed sizes, 16 to 256 px",
+                    from.ext()
+                ),
+            ));
+        }
     }
     let has_slot =
         |wanted: fn(&Arg) -> bool| recipe.steps.iter().any(|s| s.args.iter().any(&wanted));
@@ -685,6 +710,92 @@ mod tests {
         )
         .unwrap();
         assert!(gif.warnings.is_empty(), "{:?}", gif.warnings);
+    }
+
+    /// An icon is squared at its source's own size, warns about the sizes
+    /// it enlarges without asking, and reads an .ico's largest frame.
+    #[test]
+    fn an_icon_plan_follows_what_was_read_of_the_source() {
+        let read = |w, h| MediaProbe {
+            width: Some(w),
+            height: Some(h),
+            ..MediaProbe::default()
+        };
+        let icon = |probe: &MediaProbe| {
+            build(
+                Format::Png,
+                Format::Ico,
+                &[p("in.png")],
+                Path::new("out.ico"),
+                Some(probe),
+                None,
+            )
+            .unwrap()
+        };
+        let banner = icon(&read(1200, 630));
+        assert!(
+            banner.steps[0]
+                .argv
+                .windows(2)
+                .any(|w| w == ["-extent", "1200x1200"]),
+            "{:?}",
+            banner.steps[0].argv
+        );
+        assert_eq!(banner.enlarged, None);
+        let small = icon(&read(32, 32));
+        let e = small.enlarged.expect("32 px is smaller than four sizes");
+        assert!(!e.needs_confirmation);
+
+        let favicon = MediaProbe {
+            frames: vec![(16, 16, 8), (32, 32, 8), (48, 48, 8)],
+            ..MediaProbe::default()
+        };
+        let back = build(
+            Format::Ico,
+            Format::Png,
+            &[p("favicon.ico")],
+            Path::new("favicon.png"),
+            Some(&favicon),
+            None,
+        )
+        .unwrap();
+        assert_eq!(back.steps[0].argv[0], "favicon.ico[2]");
+    }
+
+    #[test]
+    fn a_knob_on_an_icon_is_refused_with_the_reason() {
+        for tuning in [
+            Tuning {
+                resize: Some("64x64".into()),
+                ..Tuning::default()
+            },
+            Tuning {
+                quality: Some(80),
+                ..Tuning::default()
+            },
+            Tuning {
+                colors: Some(16),
+                ..Tuning::default()
+            },
+        ] {
+            let e = build_tuned(
+                Format::Png,
+                Format::Ico,
+                &[p("in.png")],
+                Path::new("out.ico"),
+                None,
+                None,
+                &tuning,
+            )
+            .unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation);
+            assert!(
+                e.message
+                    .ends_with("an icon holds fixed sizes, 16 to 256 px"),
+                "{}",
+                e.message
+            );
+        }
     }
 
     #[test]

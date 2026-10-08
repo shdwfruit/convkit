@@ -68,6 +68,66 @@ pub struct MediaProbe {
     /// What an image source holds that a single-image target drops, read
     /// by `image_traits`. `None` when the source was not read.
     pub image: Option<ImageTraits>,
+    /// Every frame of an .ico, in file order, as `(width, height, depth)`,
+    /// read by `frame_sizes`. Empty when the source was not read.
+    pub frames: Vec<(u32, u32, u32)>,
+}
+
+/// The index of the largest of `sizes`, by area. The first wins a tie.
+fn largest(sizes: &[(u32, u32)]) -> Option<usize> {
+    (0..sizes.len()).max_by_key(|&i| {
+        let (w, h) = sizes[i];
+        (u64::from(w) * u64::from(h), std::cmp::Reverse(i))
+    })
+}
+
+/// Every frame's size and bit depth, with `-ping`, which reads an .ico's
+/// directory and stops before the pixels. Old icons hold the same size
+/// twice, at 4 and at 32 bits, which is why the depth is kept.
+pub fn frame_sizes(magick: &Path, input: &Path) -> Result<Vec<(u32, u32, u32)>> {
+    if !input.is_file() {
+        return Err(ConvError::new(
+            ErrorCode::InputNotFound,
+            format!(
+                "not an existing regular file, refusing to probe: {}",
+                input.display()
+            ),
+        ));
+    }
+    let out = backend_command(magick)
+        .arg("-ping")
+        .arg(input)
+        .args(["-format", "%w %h %z\n", "info:"])
+        .output()
+        .map_err(|e| {
+            ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!("failed to run ImageMagick: {e}"),
+            )
+        })?;
+    parse_frames(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!(
+                "ImageMagick could not list the frames of {}",
+                input.display()
+            ),
+        )
+    })
+}
+
+/// Parses `frame_sizes`' lines, `W H DEPTH`. Any line that does not parse
+/// fails the whole read, so a frame is never chosen from part of the list.
+fn parse_frames(text: &str) -> Option<Vec<(u32, u32, u32)>> {
+    let frames: Option<Vec<_>> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let mut it = l.split_whitespace().map(|t| t.parse::<u32>().ok());
+            Some((it.next()??, it.next()??, it.next()??))
+        })
+        .collect();
+    frames.filter(|f| !f.is_empty())
 }
 
 /// What a jpg/png/bmp target cannot keep from its source, for the notes
@@ -308,6 +368,9 @@ pub struct ImageRead {
     pub density: Option<&'static str>,
     pub every_input: bool,
     pub every_page: bool,
+    /// The recipe reads the largest frame, not the first: every frame is
+    /// pinged and only the largest kept.
+    pub largest_frame: bool,
 }
 
 /// Reads the size of every page a `--resize --upscale` will scale, with
@@ -377,7 +440,7 @@ fn image_pages(magick: &Path, input: &Path, read: ImageRead) -> Result<Vec<(u32,
         ));
     }
     let mut target = input.as_os_str().to_owned();
-    if !read.every_page {
+    if !read.every_page && !read.largest_frame {
         target.push("[0]");
     }
     let out = backend_command(magick)
@@ -398,6 +461,10 @@ fn image_pages(magick: &Path, input: &Path, read: ImageRead) -> Result<Vec<(u32,
         .filter(|l| !l.trim().is_empty())
         .map(|l| parse_page(l, density))
         .collect();
+    let pages = match pages {
+        Some(p) if read.largest_frame => largest(&p).map(|i| vec![p[i]]),
+        p => p,
+    };
     pages.filter(|p| !p.is_empty()).ok_or_else(|| {
         ConvError::new(
             ErrorCode::ConversionFailed,
@@ -736,6 +803,23 @@ mod tests {
                 "width":1280,"height":720,"r_frame_rate":"30/1"}]}"#,
         );
         assert_eq!(p.display_dimensions(), Some((1280, 720)));
+    }
+
+    #[test]
+    fn an_icons_frames_parse_whole_or_not_at_all() {
+        assert_eq!(
+            parse_frames("16 16 8\n32 32 4\n48 48 8\n"),
+            Some(vec![(16, 16, 8), (32, 32, 4), (48, 48, 8)])
+        );
+        assert_eq!(parse_frames("16 16 8\n32 32\n"), None);
+        assert_eq!(parse_frames(""), None);
+    }
+
+    #[test]
+    fn the_largest_size_wins_and_the_first_wins_a_tie() {
+        assert_eq!(largest(&[(16, 16), (48, 48), (32, 32)]), Some(1));
+        assert_eq!(largest(&[(48, 48), (48, 48)]), Some(0));
+        assert_eq!(largest(&[]), None);
     }
 
     #[test]
