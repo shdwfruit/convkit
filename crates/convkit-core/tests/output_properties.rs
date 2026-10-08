@@ -1265,7 +1265,8 @@ fn synth_image(dir: &tempfile::TempDir, args: &[&str], out: &str) -> PathBuf {
     path
 }
 
-/// A phone photo gets no note; a transparent PNG the alpha half; a
+/// A phone photo gets no frame or alpha note, only the one saying it
+/// records where it was taken; a transparent PNG the alpha half; a
 /// multi-page TIFF the frame half, plus the alpha half, which a TIFF's
 /// header read cannot rule out.
 #[test]
@@ -1273,7 +1274,11 @@ fn synth_image(dir: &tempfile::TempDir, args: &[&str], out: &str) -> PathBuf {
 fn image_notes_say_only_what_the_source_holds() {
     let said = |o: &exec::Outcome, what: &str| o.warnings.iter().any(|w| w.contains(what));
     let (_, photo) = convert_path(&fixture("photo.heic"), "jpg");
-    assert!(photo.warnings.is_empty(), "{:?}", photo.warnings);
+    assert_eq!(
+        photo.warnings,
+        ["The source records a GPS location, and the jpg keeps it; add \
+          --strip-metadata to remove it."]
+    );
 
     let dir = tmp();
     let transparent = synth_image(
