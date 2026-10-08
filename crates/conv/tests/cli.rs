@@ -2873,3 +2873,56 @@ fn a_malformed_time_names_the_forms_that_work() {
         .code(2)
         .stderr(contains("seconds after a colon run 0-59"));
 }
+
+/// One range applies to every file in a batch; a file too short for it
+/// fails on its own, with its length, and the rest still convert (exit 4).
+/// Needs a real ffmpeg: the one `CONVKIT_FFMPEG` names, else `ffmpeg` on
+/// PATH, which is also what conv resolves.
+#[test]
+#[ignore]
+fn a_batch_cut_fails_only_the_file_too_short_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ffmpeg = std::env::var_os("CONVKIT_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+    for (name, secs) in [("long.mp4", "20"), ("short.mp4", "5")] {
+        let ok = std::process::Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc2=size=160x90:rate=30:duration={secs}"),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(dir.path().join(name))
+            .status()
+            .unwrap();
+        assert!(ok.success());
+    }
+    conv()
+        .current_dir(dir.path())
+        .args([
+            "long.mp4",
+            "short.mp4",
+            "--to",
+            "mkv",
+            "--start",
+            "0:10",
+            "--end",
+            "0:12",
+        ])
+        .assert()
+        .code(4)
+        .stderr(contains(
+            "--start 0:10 is past the end of short.mp4, which is 0:05 long",
+        ));
+    let clips = dir.path().join("10s-12s");
+    assert!(clips.join("long.mkv").is_file());
+    assert!(!clips.join("short.mkv").exists());
+}

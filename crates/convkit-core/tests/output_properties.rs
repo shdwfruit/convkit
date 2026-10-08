@@ -2666,3 +2666,261 @@ fn stripped_audio_keeps_its_title_and_artist() {
     assert_eq!(tag(&tags, "title"), Some("Song"), "{tags:?}");
     assert_eq!(tag(&tags, "artist"), Some("Band"), "{tags:?}");
 }
+
+// --- Cutting a range (--start / --end / --duration) -----------------------
+
+/// A `secs`-second h264+aac clip with a keyframe every 5 s exactly, so a
+/// stream copy that started anywhere but a keyframe would show it.
+fn synth_cuttable(
+    dir: &tempfile::TempDir,
+    name: &str,
+    rate: &str,
+    secs: u32,
+    extra: &[&str],
+) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let out = dir.path().join(name);
+    let gop = "150";
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size=320x180:rate={rate}"),
+        ])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+        .args(["-t", &secs.to_string()])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args([
+            "-g",
+            gop,
+            "-keyint_min",
+            gop,
+            "-sc_threshold",
+            "0",
+            "-c:a",
+            "aac",
+        ])
+        .args(extra)
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    out
+}
+
+fn ranged(start: Option<&str>, end: Option<&str>) -> Tuning {
+    Tuning {
+        range: convkit_core::trim::Range::new(
+            start.map(|s| convkit_core::trim::parse_time(s).unwrap()),
+            end.map(|s| convkit_core::trim::parse_time(s).unwrap()),
+            None,
+        )
+        .unwrap(),
+        ..Tuning::default()
+    }
+}
+
+/// Frames actually decoded, which an edit list cannot hide.
+fn decoded_frames(path: &Path) -> u64 {
+    let ffprobe = Resolver::new().resolve(Backend::Ffprobe).unwrap().path;
+    let out = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+fn duration_ms(path: &Path) -> u64 {
+    probe_media(path).duration_ms.unwrap()
+}
+
+#[test]
+#[ignore]
+fn a_cut_after_zero_is_frame_exact_in_every_video_container() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 20, &[]);
+    for ext in ["mp4", "mkv", "mov", "webm"] {
+        let out = dir.path().join(format!("cut.{ext}"));
+        convert_tuned(&src, &out, &ranged(Some("7"), Some("10"))).unwrap();
+        assert_eq!(
+            decoded_frames(&out),
+            90,
+            "{ext}: 3 s at 30 fps, nothing from the keyframe at 5 s"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn a_cut_from_zero_is_a_stream_copy() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 20, &[]);
+    let out = dir.path().join("cut.mkv");
+    let o = convert_tuned(&src, &out, &ranged(None, Some("10"))).unwrap();
+    assert!(o.remuxed, "{:?}", o.warnings);
+    let d = duration_ms(&out);
+    assert!((9_900..=10_200).contains(&d), "{d}");
+}
+
+#[test]
+#[ignore]
+fn a_trim_into_the_same_format_works() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 20, &[]);
+    let out = dir.path().join("src-7s-10s.mp4");
+    convert_tuned(&src, &out, &ranged(Some("7"), Some("10"))).unwrap();
+    assert_eq!(decoded_frames(&out), 90);
+}
+
+#[test]
+#[ignore]
+fn a_cut_to_gif_and_to_audio_is_the_length_asked_for() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 20, &[]);
+    let gif = dir.path().join("cut.gif");
+    convert_tuned(&src, &gif, &ranged(Some("7"), Some("10"))).unwrap();
+    assert_eq!(decoded_frames(&gif), 45, "3 s at the GIF default of 15 fps");
+    for ext in ["mp3", "m4a", "wav", "flac"] {
+        let out = dir.path().join(format!("cut.{ext}"));
+        convert_tuned(&src, &out, &ranged(Some("7"), Some("10"))).unwrap();
+        let d = duration_ms(&out);
+        assert!((2_950..=3_100).contains(&d), "{ext}: {d} ms");
+    }
+}
+
+#[test]
+#[ignore]
+fn a_2997_cut_lands_within_a_frame() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mov", "30000/1001", 20, &[]);
+    let out = dir.path().join("cut.mp4");
+    convert_tuned(&src, &out, &ranged(Some("6.5"), Some("9.5"))).unwrap();
+    let frames = decoded_frames(&out);
+    assert!(
+        (89..=91).contains(&frames),
+        "3 s at 29.97 fps is ~90 frames, got {frames}"
+    );
+}
+
+/// A file whose timestamps start at 3 s: `--start 8` is 8 s into what a
+/// player shows, leaving 2 s, not 8 s of absolute time (which would leave
+/// 5). Written to mkv, whose variable-rate output keeps the frames as they
+/// are; ffmpeg 6.1's constant-rate mp4 output adds a frame to any mkv
+/// source's millisecond timestamps, cut or not.
+#[test]
+#[ignore]
+fn a_cut_of_an_offset_source_is_relative_to_what_a_player_shows() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mkv", "30", 10, &["-output_ts_offset", "3"]);
+    let out = dir.path().join("cut.mkv");
+    convert_tuned(&src, &out, &ranged(Some("8"), None)).unwrap();
+    assert_eq!(decoded_frames(&out), 60, "the last 2 s, at 30 fps");
+}
+
+#[test]
+#[ignore]
+fn a_cut_mp3_keeps_its_cover_art() {
+    let dir = tmp();
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let art = synth_png(&dir, 64, 64);
+    let src = dir.path().join("song.mp3");
+    let r = Command::new(&ffmpeg)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=20",
+            "-i",
+        ])
+        .arg(&art)
+        .args([
+            "-map",
+            "0:a",
+            "-map",
+            "1:v",
+            "-c:a",
+            "libmp3lame",
+            "-c:v",
+            "png",
+            "-disposition:v",
+            "attached_pic",
+        ])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let out = dir.path().join("song-5s-10s.mp3");
+    convert_tuned(&src, &out, &ranged(Some("5"), Some("10"))).unwrap();
+    let streams = probe_streams_json(&resolver.resolve(Backend::Ffprobe).unwrap().path, &out);
+    assert!(
+        streams.iter().any(|s| s["codec_type"] == "video"),
+        "cover art lost: {streams:?}"
+    );
+}
+
+#[test]
+#[ignore]
+fn a_sized_cut_is_sized_for_the_clip() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 20, &[]);
+    let out = dir.path().join("cut.mp4");
+    let mut t = ranged(Some("5"), Some("15"));
+    t.max_size = Some(convkit_core::size::parse("300kb").unwrap());
+    let o = convert_tuned(&src, &out, &t).unwrap();
+    assert!(o.bytes <= 300_000, "{}", o.bytes);
+    let d = duration_ms(&out);
+    assert!((9_900..=10_100).contains(&d), "{d}");
+}
+
+#[test]
+#[ignore]
+fn the_gif_memory_note_follows_the_cut() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 40, &[]);
+    let o = convert_tuned(
+        &src,
+        &dir.path().join("cut.gif"),
+        &ranged(Some("0:05"), Some("0:10")),
+    )
+    .unwrap();
+    assert!(
+        o.warnings.iter().all(|w| !w.contains("buffered in memory")),
+        "{:?}",
+        o.warnings
+    );
+}
