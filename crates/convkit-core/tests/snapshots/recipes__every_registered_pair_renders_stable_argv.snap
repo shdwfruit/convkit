@@ -23,6 +23,8 @@ bmp -> pdf: magick in.bmp -auto-orient -compress jpeg -quality 92 out.pdf
 bmp -> png: magick in.bmp[0] -auto-orient out.png
 bmp -> tiff: magick in.bmp -auto-orient out.tiff
 bmp -> webp: magick in.bmp -auto-orient -quality 92 out.webp
+doc -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to docx:MS Word 2007 XML --outdir . in.doc
+doc -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.doc
 docx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.docx
 flac -> m4a: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
 flac -> mp3: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
@@ -91,6 +93,8 @@ png -> jpg: magick in.png[0] -auto-orient -background white -alpha remove -alpha
 png -> pdf: magick in.png -auto-orient -compress jpeg -quality 92 out.pdf
 png -> tiff: magick in.png -auto-orient out.tiff
 png -> webp: magick in.png -auto-orient -quality 92 out.webp
+ppt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.ppt
+ppt -> pptx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pptx:Impress MS PowerPoint 2007 XML --outdir . in.ppt
 pptx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.pptx
 svg -> jpg: magick -density 384 -background white in.svg -alpha remove -alpha off -flatten -quality 92 out.jpg
 svg -> png: magick -density 384 -background none in.svg out.png
@@ -117,4 +121,6 @@ webp -> jpg: magick in.webp[0] -auto-orient -background white -alpha remove -alp
 webp -> pdf: magick in.webp -auto-orient -compress jpeg -quality 92 out.pdf
 webp -> png: magick in.webp[0] -auto-orient out.png
 webp -> tiff: magick in.webp -auto-orient out.tiff
+xls -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.xls
+xls -> xlsx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to xlsx:Calc MS Excel 2007 XML --outdir . in.xls
 xlsx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.xlsx

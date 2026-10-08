@@ -7,6 +7,7 @@ pub mod format;
 pub mod install;
 pub mod manifest;
 mod media;
+pub mod office;
 pub mod plan;
 pub mod probe;
 mod procutil;

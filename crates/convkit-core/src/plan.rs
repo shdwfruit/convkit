@@ -115,6 +115,18 @@ pub fn build_tuned(
         ));
     }
 
+    // A password-protected .docx/.xlsx/.pptx is refused before LibreOffice
+    // sees it: one LibreOffice does not recognise as encrypted is imported
+    // as plain text, and the result is pages of the encrypted bytes with
+    // an exit status of 0. An encrypted .doc/.xls/.ppt is still handed
+    // over, because LibreOffice opens one encrypted with Office's built-in
+    // default password; `exec::run` explains the failure if it does not.
+    if probe.and_then(|p| p.office).is_some_and(|o| o.encrypted)
+        && matches!(from, Format::Docx | Format::Xlsx | Format::Pptx)
+    {
+        return Err(ConvError::password_protected(&inputs[0], from));
+    }
+
     // A size target is a policy, not a knob: it chooses the knob values
     // itself, so it takes the whole conversion (sized.rs).
     if let Some(max) = &tuning.max_size {
@@ -627,6 +639,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.steps[0].program, "magick");
+    }
+
+    /// A password-protected .docx/.xlsx/.pptx is refused while planning, so
+    /// `--dry-run` says so too. A legacy one is planned: LibreOffice opens
+    /// files encrypted with Office's default password.
+    #[test]
+    fn a_password_protected_ooxml_source_is_refused_and_a_legacy_one_is_not() {
+        let locked = MediaProbe {
+            office: Some(crate::office::OfficeTraits {
+                encrypted: true,
+                macros: false,
+            }),
+            ..MediaProbe::default()
+        };
+        for from in [Format::Docx, Format::Xlsx, Format::Pptx] {
+            let input = p(&format!("in.{}", from.ext()));
+            let e = build(
+                from,
+                Format::Pdf,
+                &[input],
+                Path::new("out.pdf"),
+                Some(&locked),
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(e.code, ErrorCode::PasswordProtected, "{from:?}");
+        }
+        for from in [Format::Doc, Format::Xls, Format::Ppt] {
+            let input = p(&format!("in.{}", from.ext()));
+            build(
+                from,
+                Format::Pdf,
+                &[input],
+                Path::new("out.pdf"),
+                Some(&locked),
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{from:?}: {e}"));
+        }
     }
 
     #[test]

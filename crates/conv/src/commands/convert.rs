@@ -337,6 +337,13 @@ fn probed_for(
             probed.get_or_insert_with(MediaProbe::default).image = Some(t);
         }
     }
+    // As `exec::run` does, so the preview refuses a password-protected
+    // .docx and carries the same macro note.
+    if registry::reads_office(job.from, job.to) {
+        if let Some(t) = convkit_core::office::traits(&job.inputs[0]) {
+            probed.get_or_insert_with(MediaProbe::default).office = Some(t);
+        }
+    }
     Ok(probed)
 }
 

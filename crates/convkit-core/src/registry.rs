@@ -999,6 +999,35 @@ const PDF_TO_DOCX: Recipe = Recipe {
     ],
 };
 
+/// The notes on an Office 97-2003 file going to its current format. Kept
+/// by `notes_for` only when `office::traits` found a VBA project in the
+/// source, or could not read it.
+const DOC_MACROS_NOTE: &str = "Macros are dropped; a .docx file cannot hold them.";
+const XLS_MACROS_NOTE: &str = "Macros are dropped; an .xlsx file cannot hold them.";
+const PPT_MACROS_NOTE: &str = "Macros are dropped; a .pptx file cannot hold them.";
+
+/// Word, Excel and PowerPoint 97-2003 to their current formats. The export
+/// filter is named rather than left to the extension, for two reasons. A
+/// bare `docx` picks LibreOffice's "Office Open XML Text" filter, not the
+/// "Word 2007-365" one its own Save As uses. And an old `.doc` that is
+/// really HTML (Word saved web pages that way) opens as a Writer/Web
+/// document, for which a bare `docx` finds no export filter and fails. One
+/// that is really RTF opens in Writer and needs nothing special.
+const DOC_TO_DOCX: Recipe = Recipe {
+    steps: &[soffice_step!("docx:MS Word 2007 XML")],
+    warnings: &[DOC_MACROS_NOTE],
+};
+
+const XLS_TO_XLSX: Recipe = Recipe {
+    steps: &[soffice_step!("xlsx:Calc MS Excel 2007 XML")],
+    warnings: &[XLS_MACROS_NOTE],
+};
+
+const PPT_TO_PPTX: Recipe = Recipe {
+    steps: &[soffice_step!("pptx:Impress MS PowerPoint 2007 XML")],
+    warnings: &[PPT_MACROS_NOTE],
+};
+
 /// Mirrors `soffice_step!`: the plain pandoc invocation shared by
 /// `MD_TO_DOCX` and `MD_TO_HTML`, plus a variant that tags an intermediate
 /// file's extension for a multi-step recipe like `MD_TO_PDF`.
@@ -1062,6 +1091,9 @@ const OFFICE_SOURCES: &[Format] = &[
     Format::Pptx,
     Format::Odt,
     Format::Ods,
+    Format::Doc,
+    Format::Xls,
+    Format::Ppt,
 ];
 
 /// Fallback for `docx`/`odt` → `pdf` when LibreOffice isn't installed:
@@ -1105,6 +1137,9 @@ fn insert_document_family(t: &mut Table) {
     for &from in OFFICE_SOURCES {
         t.insert((from, Format::Pdf), OFFICE_TO_PDF);
     }
+    t.insert((Format::Doc, Format::Docx), DOC_TO_DOCX);
+    t.insert((Format::Xls, Format::Xlsx), XLS_TO_XLSX);
+    t.insert((Format::Ppt, Format::Pptx), PPT_TO_PPTX);
     t.insert((Format::Pdf, Format::Docx), PDF_TO_DOCX);
     t.insert((Format::Md, Format::Docx), MD_TO_DOCX);
     t.insert((Format::Md, Format::Html), MD_TO_HTML);
@@ -1254,6 +1289,18 @@ pub fn notes_need_image(from: Format, to: Format) -> bool {
     })
 }
 
+/// Whether to read an Office source with `office::traits` before planning:
+/// a password-protected one has to be reported as that, and a note says
+/// when its macros are dropped. Every pair from these sources runs through
+/// LibreOffice (or, for docx -> pdf, pandoc), and the read is a few
+/// header reads, so it is not narrowed further.
+pub fn reads_office(from: Format, to: Format) -> bool {
+    matches!(
+        from,
+        Format::Doc | Format::Xls | Format::Ppt | Format::Docx | Format::Xlsx | Format::Pptx
+    ) && lookup(from, to).is_some()
+}
+
 /// The recipe's notes for this source: a note about something the source
 /// might hold is dropped, or narrowed to the part that applies, only when
 /// the probe shows it does not hold it. Unread or unknown keeps the note
@@ -1266,6 +1313,7 @@ pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> V
     let long = probe
         .and_then(|p| p.duration_ms)
         .is_none_or(|ms| ms > GIF_BUFFER_NOTE_AFTER_MS);
+    let macros = probe.and_then(|p| p.office).is_none_or(|o| o.macros);
     recipe
         .warnings
         .iter()
@@ -1278,6 +1326,7 @@ pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> V
             },
             FIRST_FRAME_NOTE => frames.then_some(note),
             GIF_BUFFER_NOTE => long.then_some(note),
+            DOC_MACROS_NOTE | XLS_MACROS_NOTE | PPT_MACROS_NOTE => macros.then_some(note),
             _ => Some(note),
         })
         .map(str::to_string)
@@ -1494,7 +1543,12 @@ mod tests {
             for &w in r.warnings {
                 if !matches!(
                     w,
-                    FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE | GIF_BUFFER_NOTE
+                    FLATTEN_FIRST_FRAME_NOTE
+                        | FIRST_FRAME_NOTE
+                        | GIF_BUFFER_NOTE
+                        | DOC_MACROS_NOTE
+                        | XLS_MACROS_NOTE
+                        | PPT_MACROS_NOTE
                 ) {
                     assert!(kept.iter().any(|k| k == w), "{from:?} -> {to:?}: {w}");
                 }
@@ -2075,6 +2129,73 @@ mod tests {
             ..Default::default()
         };
         assert!(!needs_probe_tuned(Format::Png, Format::Jpg, &t));
+    }
+
+    const LEGACY: [(Format, Format, &str); 3] = [
+        (Format::Doc, Format::Docx, "docx:MS Word 2007 XML"),
+        (Format::Xls, Format::Xlsx, "xlsx:Calc MS Excel 2007 XML"),
+        (
+            Format::Ppt,
+            Format::Pptx,
+            "pptx:Impress MS PowerPoint 2007 XML",
+        ),
+    ];
+
+    /// Each Office 97-2003 format goes to its current format through the
+    /// export filter LibreOffice's own Save As uses, and to PDF. pandoc
+    /// reads none of them, so there is no fallback.
+    #[test]
+    fn legacy_office_names_its_export_filter() {
+        for (from, to, filter) in LEGACY {
+            let r = lookup(from, to).unwrap();
+            let argv = r.steps[0].render(&[Path::new("in")], Path::new("out"));
+            assert!(
+                argv.windows(2).any(|w| w == ["--convert-to", filter]),
+                "{argv:?}"
+            );
+            assert_eq!(lookup(from, Format::Pdf), Some(OFFICE_TO_PDF));
+            assert!(!has_fallback(from, Format::Pdf), "{from:?}");
+        }
+    }
+
+    fn office_probe(macros: bool) -> crate::MediaProbe {
+        crate::MediaProbe {
+            office: Some(crate::office::OfficeTraits {
+                encrypted: false,
+                macros,
+            }),
+            ..crate::MediaProbe::default()
+        }
+    }
+
+    /// The macro note is for a source with a VBA project, or one that
+    /// could not be read. A PDF never held macros, so it never says so.
+    #[test]
+    fn the_macro_note_shows_only_for_a_source_with_macros() {
+        for (from, to, _) in LEGACY {
+            assert_eq!(notes(from, to, Some(&office_probe(true))).len(), 1);
+            assert!(notes(from, to, Some(&office_probe(false))).is_empty());
+            assert_eq!(notes(from, to, None).len(), 1, "unread keeps it");
+            assert!(notes(from, Format::Pdf, None).is_empty(), "{from:?}");
+        }
+    }
+
+    #[test]
+    fn office_sources_are_read_before_planning() {
+        for from in [
+            Format::Doc,
+            Format::Xls,
+            Format::Ppt,
+            Format::Docx,
+            Format::Xlsx,
+            Format::Pptx,
+        ] {
+            assert!(reads_office(from, Format::Pdf), "{from:?}");
+        }
+        assert!(reads_office(Format::Doc, Format::Docx));
+        assert!(!reads_office(Format::Odt, Format::Pdf));
+        assert!(!reads_office(Format::Md, Format::Docx));
+        assert!(!reads_office(Format::Doc, Format::Xlsx), "not a pair");
     }
 
     #[test]

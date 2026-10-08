@@ -1346,6 +1346,213 @@ fn the_gif_buffering_note_is_for_long_sources_only() {
     );
 }
 
+// --- Office 97-2003 ---------------------------------------------------------
+
+/// Three pages of text. RTF's `\page` is a hard page break, so the page
+/// count survives every format in between.
+const THREE_PAGES_RTF: &str = r"{\rtf1\ansi Page one\page Page two\page Page three\par}";
+
+/// Runs LibreOffice directly, as `synth_media` runs ffmpeg, to build a test
+/// source in a format convkit only reads. Its own profile, so it never
+/// collides with a running LibreOffice.
+fn soffice_build(dir: &tempfile::TempDir, input: &Path, args: &[&str], ext: &str) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Soffice);
+    let soffice = resolver.resolve(Backend::Soffice).unwrap().path;
+    let profile = tempfile::tempdir().unwrap();
+    let url = format!(
+        "file:///{}",
+        profile
+            .path()
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    );
+    let out_dir = dir.path().join(format!("built-{ext}"));
+    let result = Command::new(&soffice)
+        .arg(format!("-env:UserInstallation={url}"))
+        .args(["--headless", "--norestore"])
+        .args(args)
+        .arg("--outdir")
+        .arg(&out_dir)
+        .arg(input)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run soffice: {e}"));
+    let built = out_dir.join(input.with_extension(ext).file_name().unwrap());
+    assert!(
+        built.is_file(),
+        "building {} failed: {}",
+        built.display(),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    built
+}
+
+fn write_file(dir: &tempfile::TempDir, name: &str, text: &str) -> PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// A PDF's page count: the page objects, `/Type /Page` but not `/Pages`.
+fn pdf_pages(path: &Path) -> usize {
+    let bytes = std::fs::read(path).unwrap();
+    let mut pages = 0;
+    for (i, w) in bytes.windows(5).enumerate() {
+        if w != b"/Type" {
+            continue;
+        }
+        let rest = &bytes[i + 5..];
+        let rest = &rest[rest.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
+        if rest.starts_with(b"/Page") && rest.get(5) != Some(&b's') {
+            pages += 1;
+        }
+    }
+    pages
+}
+
+/// The names of the files in a zip (an Office Open XML document).
+fn zip_names(path: &Path) -> Vec<String> {
+    let zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    zip.file_names().map(str::to_string).collect()
+}
+
+/// One file inside a zip, as text.
+fn zip_text(path: &Path, name: &str) -> String {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut text = String::new();
+    zip.by_name(name)
+        .unwrap_or_else(|e| panic!("{name} in {}: {e}", path.display()))
+        .read_to_string(&mut text)
+        .unwrap();
+    text
+}
+
+/// A Word 97 file keeps its pages into PDF and its text into .docx. With
+/// no macros, there is no note.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_word_97_file_keeps_its_pages_and_text() {
+    let dir = tmp();
+    let rtf = write_file(&dir, "letter.rtf", THREE_PAGES_RTF);
+    let doc = soffice_build(&dir, &rtf, &["--convert-to", "doc:MS Word 97"], "doc");
+    let (pdf, o) = convert_path(&doc, "pdf");
+    assert_eq!(pdf_pages(&pdf), 3);
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+    let (docx, o) = convert_path(&doc, "docx");
+    assert!(zip_text(&docx, "word/document.xml").contains("Page two"));
+    assert!(
+        o.warnings.is_empty(),
+        "no macros, no note: {:?}",
+        o.warnings
+    );
+}
+
+/// Old .doc files are sometimes RTF, or a web page Word saved as .doc.
+/// LibreOffice opens both by their content; the HTML one only exports to
+/// .docx because the recipe names Word's filter.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_doc_that_is_really_rtf_or_html_converts() {
+    let dir = tmp();
+    let rtf = write_file(&dir, "memo.doc", THREE_PAGES_RTF);
+    let (pdf, _) = convert_path(&rtf, "pdf");
+    assert_eq!(pdf_pages(&pdf), 3);
+    let (docx, _) = convert_path(&rtf, "docx");
+    assert!(zip_text(&docx, "word/document.xml").contains("Page three"));
+
+    let html = write_file(
+        &dir,
+        "page.doc",
+        "<html><body><h1>Saved from Word</h1><p>As a web page.</p></body></html>",
+    );
+    let (docx, _) = convert_path(&html, "docx");
+    assert!(zip_text(&docx, "word/document.xml").contains("Saved from Word"));
+    let (pdf, _) = convert_path(&html, "pdf");
+    assert_eq!(pdf_pages(&pdf), 1);
+}
+
+/// An Excel 97 workbook keeps its cells, as values, into .xlsx and PDF.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_excel_97_workbook_keeps_its_cells() {
+    let dir = tmp();
+    let csv = write_file(&dir, "stock.csv", "item,qty\nwidget,3\ngadget,12\n");
+    let xls = soffice_build(&dir, &csv, &["--convert-to", "xls:MS Excel 97"], "xls");
+    let (xlsx, o) = convert_path(&xls, "xlsx");
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+    assert!(zip_names(&xlsx).contains(&"xl/worksheets/sheet1.xml".to_string()));
+    let strings = zip_text(&xlsx, "xl/sharedStrings.xml");
+    assert!(
+        strings.contains("widget") && strings.contains("gadget"),
+        "{strings}"
+    );
+    assert!(zip_text(&xlsx, "xl/worksheets/sheet1.xml").contains("<v>12</v>"));
+    let (pdf, _) = convert_path(&xls, "pdf");
+    assert_eq!(pdf_pages(&pdf), 1);
+}
+
+/// A PowerPoint 97 deck keeps its slides. The deck is built by importing a
+/// three-page PDF into Impress, one slide per page.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_powerpoint_97_deck_keeps_its_slides() {
+    let dir = tmp();
+    let rtf = write_file(&dir, "deck.rtf", THREE_PAGES_RTF);
+    let pdf = soffice_build(&dir, &rtf, &["--convert-to", "pdf"], "pdf");
+    let ppt = soffice_build(
+        &dir,
+        &pdf,
+        &[
+            "--infilter=impress_pdf_import",
+            "--convert-to",
+            "ppt:MS PowerPoint 97",
+        ],
+        "ppt",
+    );
+    let (pptx, o) = convert_path(&ppt, "pptx");
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+    let slides = zip_names(&pptx)
+        .iter()
+        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+        .count();
+    assert_eq!(slides, 3);
+    let (out, _) = convert_path(&ppt, "pdf");
+    assert_eq!(pdf_pages(&out), 3);
+}
+
+/// A password-protected file fails with an error that says so, whether
+/// LibreOffice tried it (.doc, .xls) or conv refused it first (.docx),
+/// and nothing is written.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_password_protected_office_file_fails_and_says_why() {
+    for (name, to) in [
+        ("encrypted.doc", "docx"),
+        ("encrypted.xls", "pdf"),
+        ("encrypted.docx", "pdf"),
+    ] {
+        let out = scratch_output(&format!("out.{to}"));
+        let e = convert_tuned(&fixture(name), &out, &Tuning::default()).unwrap_err();
+        assert_eq!(
+            e.code,
+            convkit_core::ErrorCode::PasswordProtected,
+            "{name}: {e}"
+        );
+        assert!(!out.exists(), "{name}");
+    }
+}
+
+/// A workbook encrypted with Excel's default password carries the same
+/// encryption record, but LibreOffice opens it without asking. Refusing it
+/// up front would refuse a file that converts.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_workbook_with_excels_default_password_still_converts() {
+    let (xlsx, _) = convert_path(&fixture("default-password.xls"), "xlsx");
+    assert!(zip_text(&xlsx, "xl/sharedStrings.xml").contains("velvet"));
+}
+
 // --- --max-size -----------------------------------------------------------
 
 /// A clip noisy enough that the encoder has to spend the bits it is given:
