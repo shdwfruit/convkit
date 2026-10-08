@@ -128,6 +128,10 @@ pub struct Outcome {
     /// plan worked it out. Its warning is also first among `notes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enlarged: Option<crate::video::Enlargement>,
+    /// The cut a `--start`/`--end`/`--duration` conversion made. Omitted
+    /// from `--json` for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<crate::trim::RangeReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -570,6 +574,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         notes.insert(0, e.warning.clone());
     }
     let enlarged = ran.enlarged.clone();
+    let range = ran.range.clone();
     let mut warnings = ran.warnings;
     let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());
@@ -608,6 +613,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         elapsed_ms: 0,
         sizing,
         enlarged,
+        range,
     })
 }
 

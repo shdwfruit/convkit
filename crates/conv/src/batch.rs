@@ -274,6 +274,7 @@ mod tests {
             elapsed_ms: 0,
             sizing: None,
             enlarged: None,
+            range: None,
         })
     }
 

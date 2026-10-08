@@ -983,6 +983,7 @@ mod tests {
                 elapsed_ms: 1,
                 sizing: None,
                 enlarged: None,
+                range: None,
             }),
         }
     }
