@@ -19,18 +19,15 @@ pub fn run(cli: &Cli, args: &MergeArgs) -> i32 {
             return e.code.exit_code();
         }
     };
-    let qpdf = match pdf_support::resolve_qpdf(cli, !args.dry_run) {
-        Ok(q) => q,
-        Err(e) => {
-            render::print_error(cli.json, &e);
-            return e.code.exit_code();
-        }
-    };
     let subject = json!({ "inputs": inputs, "output": output });
     let header = output
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| output.display().to_string());
+    let qpdf = match pdf_support::resolve_qpdf(cli, !args.dry_run) {
+        Ok(q) => q,
+        Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
+    };
 
     let plan = match pdf::plan_merge(&qpdf.path, &inputs, &output) {
         Ok(p) => p,
