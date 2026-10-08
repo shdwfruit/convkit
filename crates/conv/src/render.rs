@@ -507,25 +507,8 @@ pub fn conversion_success_human(o: &Outcome, styled: bool) -> String {
     s
 }
 
-/// Renders one job's failure for a real (non-`--dry-run`) conversion:
-///
-/// ```text
-/// ✗ report.docx → pdf
-///   soffice not found
-///   try  winget install TheDocumentFoundation.LibreOffice
-/// ```
-///
-/// Shows at most one remediation line — `remediation.managed` (the fix this
-/// binary can run itself, e.g. `conv install ffmpeg`) when offered, else
-/// `remediation.manual` — never both: two remediation lines back to back
-/// reads like a checklist the user has to pick from, and one honest "try
-/// this" is more actionable. `input`'s file name (not its full path — the
-/// arrow line is a short header, not the detail) pairs with `to_ext`, the
-/// target format alone, mirroring how a person would describe the
-/// conversion they asked for out loud.
 /// A failure block with any header: `FAIL <header>`, the message, and at
 /// most one `try` line (see `conversion_failure_human` for why only one).
-#[allow(dead_code)] // used by conv merge/split
 pub fn failure_human(header: &str, e: &ConvError, styled: bool) -> String {
     let mut s = String::new();
     let glyph = if styled {
@@ -548,6 +531,22 @@ pub fn failure_human(header: &str, e: &ConvError, styled: bool) -> String {
     s
 }
 
+/// Renders one job's failure for a real (non-`--dry-run`) conversion:
+///
+/// ```text
+/// ✗ report.docx → pdf
+///   soffice not found
+///   try  winget install TheDocumentFoundation.LibreOffice
+/// ```
+///
+/// Shows at most one remediation line — `remediation.managed` (the fix this
+/// binary can run itself, e.g. `conv install ffmpeg`) when offered, else
+/// `remediation.manual` — never both: two remediation lines back to back
+/// reads like a checklist the user has to pick from, and one honest "try
+/// this" is more actionable. `input`'s file name (not its full path — the
+/// arrow line is a short header, not the detail) pairs with `to_ext`, the
+/// target format alone, mirroring how a person would describe the
+/// conversion they asked for out loud.
 pub fn conversion_failure_human(input: &Path, to_ext: &str, e: &ConvError, styled: bool) -> String {
     let name = input
         .file_name()
@@ -574,7 +573,6 @@ fn pages_text(n: usize) -> String {
 /// `--dry-run` for merge and split: each qpdf call as a pasteable command
 /// line, then the warnings and notes a real run would print, in
 /// `plan_human`'s `warning:`/`note:` style.
-#[allow(dead_code)] // used by conv merge/split
 pub fn pdf_plan_human(plan: &convkit_core::pdf::PdfPlan) -> String {
     let mut s = String::new();
     for argv in plan.commands() {
@@ -592,7 +590,6 @@ pub fn pdf_plan_human(plan: &convkit_core::pdf::PdfPlan) -> String {
 
 /// One `plans` element for `--dry-run --json`. Notes go in `warnings` and
 /// warnings in `notes`, the same swap a conversion's JSON has.
-#[allow(dead_code)] // used by conv merge/split
 pub fn pdf_plan_json(plan: &convkit_core::pdf::PdfPlan) -> serde_json::Value {
     let commands: Vec<Vec<String>> = plan
         .commands()
@@ -631,7 +628,6 @@ pub fn pdf_plan_json(plan: &convkit_core::pdf::PdfPlan) -> serde_json::Value {
 ///
 /// One output reads like a conversion (its pages, its path). Several are
 /// listed by name up to three, else first ... last, with their folder.
-#[allow(dead_code)] // used by conv merge/split
 pub fn pdf_success_human(
     o: &convkit_core::pdf::PdfOutcome,
     elapsed: Duration,
@@ -677,7 +673,6 @@ pub fn pdf_success_human(
 }
 
 /// A finished run's warnings, for stderr: `warning  ...` per line.
-#[allow(dead_code)] // used by conv merge/split
 pub fn pdf_warnings_human(o: &convkit_core::pdf::PdfOutcome, styled: bool) -> String {
     let mut s = String::new();
     for w in &o.warnings {
@@ -690,7 +685,6 @@ pub fn pdf_warnings_human(o: &convkit_core::pdf::PdfOutcome, styled: bool) -> St
 /// One `results` element for a finished merge (`output`, `pages` as a
 /// count) or split (`outputs`, each with its source pages). The caller adds
 /// `inputs` or `input`.
-#[allow(dead_code)] // used by conv merge/split
 pub fn pdf_outcome_json(o: &convkit_core::pdf::PdfOutcome, elapsed: Duration) -> serde_json::Value {
     let mut v = json!({
         "ok": true,

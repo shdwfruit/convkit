@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use convkit_core::{Resolver, Tuning};
 
 #[derive(Parser, Debug)]
@@ -212,6 +212,38 @@ changes nothing, and exits non-zero if anything is.")]
         #[arg(long)]
         check: bool,
     },
+    /// Join PDFs into one, in the order given: `conv merge a.pdf b.pdf out.pdf`.
+    #[command(long_about = "\
+Joins PDFs into one, in the order given. The last argument is the output; it \
+must end in .pdf, and conv refuses to replace an existing file unless -y is \
+given. A folder adds every PDF directly inside it, in natural order (p2 \
+before p10).
+
+qpdf does the work, rewriting the files' structure rather than re-rendering \
+pages, so text stays selectable and links keep working. The first file's \
+bookmarks are kept; later files' bookmarks and every file's permission \
+restrictions are not, and conv prints a note when that happens.")]
+    Merge(MergeArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct MergeArgs {
+    /// PDFs to join, then the output file: `a.pdf b.pdf out.pdf`. A folder
+    /// adds every PDF in it.
+    #[arg(required = true, value_name = "PDF")]
+    pub paths: Vec<PathBuf>,
+
+    /// Overwrite the output if it exists.
+    #[arg(short = 'y', long)]
+    pub overwrite: bool,
+
+    /// Print the qpdf command instead of running it.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Show the qpdf command as it runs, and qpdf's own output.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 }
 
 /// A dimension past this is not a size any real raster or frame reaches --

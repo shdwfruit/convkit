@@ -2751,3 +2751,47 @@ fn the_gif_buffering_note_shows_only_for_a_long_source() {
         }
     }
 }
+
+// --- conv merge ---------------------------------------------------------
+
+#[test]
+fn merge_needs_an_output() {
+    conv()
+        .args(["merge", "a.pdf"])
+        .assert()
+        .code(2)
+        .stderr(contains("expected PDFs and then an output"));
+}
+
+#[test]
+fn merge_points_images_at_the_image_merge() {
+    conv()
+        .args(["merge", "a.png", "b.pdf", "out.pdf"])
+        .assert()
+        .code(2)
+        .stderr(contains("a.png is not one").and(contains("conv a.png b.png out.pdf")));
+}
+
+#[test]
+fn merge_rejects_conversion_flags() {
+    conv()
+        .args(["merge", "a.pdf", "b.pdf", "out.pdf", "--quality", "80"])
+        .assert()
+        .code(2)
+        .stderr(contains("--quality"));
+}
+
+#[test]
+fn merge_without_qpdf_reports_it_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.pdf"), b"%PDF").unwrap();
+    std::fs::write(dir.path().join("b.pdf"), b"%PDF").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["merge", "a.pdf", "b.pdf", "out.pdf", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3)
+        .stderr(contains("qpdf not found"));
+    assert!(!dir.path().join("out.pdf").exists());
+}
