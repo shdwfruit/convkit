@@ -312,8 +312,9 @@ impl Resolver {
         Self::managed_dir()
     }
 
-    /// The platform-specific filename `Source::Managed` looks for —
-    /// `<exe>.exe` on Windows, bare `<exe>` elsewhere. Factored out so
+    /// The path under the managed dir that `Source::Managed` looks for:
+    /// `<exe>` (`<exe>.exe` on Windows), nested as `qpdf/bin/qpdf` for
+    /// folder backends. Factored out so
     /// `managed_path` and `candidates` share one spelling of this rule
     /// rather than each independently writing `if cfg!(windows) { ... }`
     /// (two independent copies are exactly the kind of thing that silently
@@ -709,10 +710,10 @@ impl Resolver {
     /// only from stdout, so a loader failure (which prints to stderr and
     /// exits non-zero) is never mistaken for a version banner. It shares
     /// `run_with_timeout`, so a hung program is still killed.
-    pub(crate) fn probe_version_strict(path: &Path) -> Option<String> {
+    pub(crate) fn probe_version_strict(path: &Path, timeout: Duration) -> Option<String> {
         let mut cmd = crate::procutil::backend_command(path);
         cmd.arg("--version");
-        let out = Self::run_with_timeout(cmd, VERSION_PROBE_TIMEOUT)?;
+        let out = Self::run_with_timeout(cmd, timeout)?;
         if !out.status.success() {
             return None;
         }

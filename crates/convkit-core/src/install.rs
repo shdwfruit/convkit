@@ -255,15 +255,17 @@ fn codesign(path: &Path) -> Result<()> {
     let outcome = std::process::Command::new("codesign")
         .args(["--force", "--sign", "-"])
         .arg(path)
-        .status();
+        .output();
     match outcome {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(ConvError::new(
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(ConvError::new(
             ErrorCode::ConversionFailed,
             format!(
-                "codesign exited with {status} while signing {}; \
+                "codesign exited with {} while signing {}: {}; \
                  an unsigned arm64 binary will be killed on launch",
-                path.display()
+                out.status,
+                path.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
             ),
         )),
         Err(e) => Err(ConvError::new(
@@ -587,6 +589,15 @@ fn install_folder(
     entries: &[FolderEntry],
     check: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<()> {
+    if !dest_exe.ends_with(exe_rel) {
+        return Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!(
+                "refusing to install a folder backend at {}: the path does not end in {exe_rel}",
+                dest_exe.display()
+            ),
+        ));
+    }
     let folder = dest_exe.parent().and_then(Path::parent).ok_or_else(|| {
         ConvError::new(
             ErrorCode::ConversionFailed,
@@ -609,11 +620,16 @@ fn install_folder(
     swap_into_place(&tmp, folder)
 }
 
+/// The one-time run check after unpacking is allowed longer than a routine
+/// version probe: antivirus may scan a fresh exe and its libraries on first
+/// launch.
+const INSTALL_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The run check for a freshly unpacked folder backend: its `--version`
 /// must answer. On Linux the usual reason it does not is a glibc older than
 /// the one upstream built against; qpdf 12.4.2's Linux builds need 2.34.
 fn check_runs(backend: Backend, exe: &Path) -> Result<()> {
-    if crate::resolve::Resolver::probe_version_strict(exe).is_some() {
+    if crate::resolve::Resolver::probe_version_strict(exe, INSTALL_CHECK_TIMEOUT).is_some() {
         return Ok(());
     }
     let mut message = format!(
@@ -1321,7 +1337,7 @@ mod tests {
             ),
         ]);
         let managed = tempfile::tempdir().unwrap();
-        let dest = program_dest(managed.path());
+        let dest = managed.path().join("qpdf").join("bin").join("qpdf.exe");
 
         install_verified(
             &folder_asset("qpdf-12.4.2-msvc64/bin/qpdf.exe"),
@@ -1398,6 +1414,21 @@ mod tests {
         );
         assert!(!folder.join("stale.txt").exists());
         assert_eq!(entries_in(managed.path()), vec!["qpdf"]);
+    }
+
+    #[test]
+    fn a_flat_destination_is_refused_and_nothing_is_touched() {
+        let managed = tempfile::tempdir().unwrap();
+        let dest = managed.path().join("qpdf");
+        let entries = vec![FolderEntry::File {
+            rel: "bin/qpdf".into(),
+            bytes: b"program".to_vec(),
+        }];
+
+        let err = install_folder(&dest, "bin/qpdf", &entries, &|_| Ok(())).unwrap_err();
+
+        assert!(err.message.contains(&dest.display().to_string()));
+        assert!(entries_in(managed.path()).is_empty());
     }
 
     #[cfg(unix)]
