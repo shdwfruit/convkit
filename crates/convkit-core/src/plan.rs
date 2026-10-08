@@ -2832,4 +2832,79 @@ mod tests {
         .unwrap();
         assert!(serde_json::to_value(&plan).unwrap().get("range").is_none());
     }
+
+    #[test]
+    fn a_video_cut_into_its_own_format_copies_from_zero_and_encodes_after() {
+        let from_zero = cut_plan(Format::Mp4, Format::Mp4, &ranged(None, Some("30")), 600).unwrap();
+        assert!(from_zero.steps[0]
+            .argv
+            .windows(2)
+            .any(|w| w == ["-c:v", "copy"]));
+        let later = cut_plan(Format::Mp4, Format::Mp4, &ranged(Some("1:02"), None), 600).unwrap();
+        assert!(later.steps[0]
+            .argv
+            .windows(2)
+            .any(|w| w == ["-c:v", "libx264"]));
+        assert_eq!(&later.steps[0].argv[..3], ["-ss", "62", "-i"]);
+    }
+
+    #[test]
+    fn an_audio_file_cut_into_its_own_format_copies_what_it_can() {
+        let mut probe = clip_probe(600);
+        probe.video_codec = None;
+        probe.video_streams = 0;
+        probe.audio_codecs = vec!["aac".into()];
+        let plan = build_tuned(
+            Format::M4a,
+            Format::M4a,
+            &[p("memo.m4a")],
+            Path::new("o.m4a"),
+            Some(&probe),
+            None,
+            &ranged(Some("10"), Some("20")),
+        )
+        .unwrap();
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:a", "copy"]),
+            "{:?}",
+            plan.steps[0].argv
+        );
+
+        // pcm_s24le does not fit TO_WAV's pcm_s16le copy gate: the target's
+        // own recipe, cut.
+        probe.audio_codecs = vec!["pcm_s24le".into()];
+        let plan = build_tuned(
+            Format::Wav,
+            Format::Wav,
+            &[p("take.wav")],
+            Path::new("o.wav"),
+            Some(&probe),
+            None,
+            &ranged(Some("10"), Some("20")),
+        )
+        .unwrap();
+        assert_eq!(
+            &plan.steps[0].argv[..6],
+            ["-ss", "10", "-t", "10", "-i", "take.wav"]
+        );
+        assert!(plan.steps[0]
+            .argv
+            .windows(2)
+            .any(|w| w == ["-c:a", "pcm_s16le"]));
+    }
+
+    #[test]
+    fn a_format_into_itself_without_a_range_is_still_no_conversion() {
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Mp4,
+            &[p("a.mp4")],
+            Path::new("b.mp4"),
+            Some(&clip_probe(60)),
+            None,
+            &Tuning::default(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::UnsupportedPair);
+    }
 }
