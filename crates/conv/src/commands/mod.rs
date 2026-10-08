@@ -6,4 +6,5 @@ pub mod merge;
 pub mod pdf_support;
 pub mod qr;
 pub mod scan;
+pub mod split;
 pub mod update;
