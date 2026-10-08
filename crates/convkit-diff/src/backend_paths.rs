@@ -81,7 +81,12 @@ mod tests {
                 "{backend:?}: wrong override made it through BackendPaths::resolver()"
             );
         }
-        for backend in [Backend::Pandoc, Backend::Soffice, Backend::Typst] {
+        for backend in [
+            Backend::Pandoc,
+            Backend::Soffice,
+            Backend::Typst,
+            Backend::Qpdf,
+        ] {
             let candidates = r.candidates(backend);
             assert!(
                 !candidates

@@ -36,6 +36,7 @@ pub struct BackendOverrides {
     pub pandoc: Option<PathBuf>,
     pub soffice: Option<PathBuf>,
     pub typst: Option<PathBuf>,
+    pub qpdf: Option<PathBuf>,
 }
 
 impl BackendOverrides {
@@ -70,6 +71,7 @@ impl BackendOverrides {
             (&self.pandoc, Backend::Pandoc),
             (&self.soffice, Backend::Soffice),
             (&self.typst, Backend::Typst),
+            (&self.qpdf, Backend::Qpdf),
         ] {
             if let Some(p) = path {
                 r.with_override(backend, p.clone());
@@ -126,6 +128,7 @@ mod tests {
             Backend::Pandoc,
             Backend::Soffice,
             Backend::Typst,
+            Backend::Qpdf,
         ] {
             assert_eq!(
                 built.candidates(backend),
@@ -176,6 +179,13 @@ mod tests {
                 },
                 Backend::Typst,
             ),
+            (
+                BackendOverrides {
+                    qpdf: Some(PathBuf::from("/o/qpdf")),
+                    ..Default::default()
+                },
+                Backend::Qpdf,
+            ),
         ] {
             let r = set.resolver();
             let candidates = r.candidates(backend);
@@ -191,6 +201,7 @@ mod tests {
                 Backend::Pandoc,
                 Backend::Soffice,
                 Backend::Typst,
+                Backend::Qpdf,
             ] {
                 if other == backend {
                     continue;
