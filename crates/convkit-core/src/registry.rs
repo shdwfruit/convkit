@@ -1337,13 +1337,19 @@ pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::pr
 }
 
 /// Whether a note on this pair depends on what the source image holds, so
-/// the caller should read it with `probe::image_traits` before planning.
-pub fn notes_need_image(from: Format, to: Format) -> bool {
-    lookup(from, to).is_some_and(|r| {
+/// the caller should read it with `probe::image_traits` before planning:
+/// the frame and alpha notes, and the location note wherever the target
+/// keeps an EXIF GPS and the flag is not taking it out.
+pub fn notes_need_image(from: Format, to: Format, tuning: &Tuning) -> bool {
+    let frame_notes = lookup(from, to).is_some_and(|r| {
         r.warnings
             .iter()
             .any(|&w| matches!(w, FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE))
-    })
+    });
+    frame_notes
+        || (!tuning.strip_metadata
+            && lookup(from, to).is_some()
+            && crate::metadata::keeps_exif_location(from, to))
 }
 
 /// The recipe's notes for this source: a note about something the source
@@ -1452,7 +1458,11 @@ mod tests {
 
     fn read_image(alpha: Option<bool>, multi_frame: bool) -> crate::MediaProbe {
         crate::MediaProbe {
-            image: Some(crate::probe::ImageTraits { alpha, multi_frame }),
+            image: Some(crate::probe::ImageTraits {
+                alpha,
+                multi_frame,
+                location: false,
+            }),
             ..crate::MediaProbe::default()
         }
     }
@@ -1518,24 +1528,42 @@ mod tests {
         }
     }
 
-    /// Only the jpg/png/bmp targets read the image, and not from an SVG,
-    /// whose transparency a ping cannot see: its note always shows.
+    /// jpg/png/bmp targets read the image for their frame and alpha notes;
+    /// webp/avif/pdf targets read it only for the location note, so not
+    /// under --strip-metadata, and not from a source that keeps no EXIF
+    /// there. Never an SVG, whose transparency a ping cannot see, and never
+    /// for a tiff target, which keeps no EXIF.
     #[test]
-    fn only_single_image_raster_targets_read_the_source() {
+    fn a_source_is_read_only_where_its_notes_depend_on_it() {
+        let off = Tuning::default();
+        let on = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
         for &from in RASTER {
             for to in [Format::Jpg, Format::Png, Format::Bmp] {
                 if from != to {
-                    assert!(notes_need_image(from, to), "{from:?} -> {to:?}");
+                    assert!(notes_need_image(from, to, &off), "{from:?} -> {to:?}");
+                    assert!(notes_need_image(from, to, &on), "{from:?} -> {to:?}");
                 }
             }
-            for to in [Format::Webp, Format::Avif, Format::Tiff, Format::Pdf] {
+            for to in [Format::Webp, Format::Avif, Format::Pdf] {
                 if from != to {
-                    assert!(!notes_need_image(from, to), "{from:?} -> {to:?}");
+                    let keeps_exif = !matches!(from, Format::Bmp | Format::Tiff);
+                    assert_eq!(
+                        notes_need_image(from, to, &off),
+                        keeps_exif,
+                        "{from:?} -> {to:?}"
+                    );
+                    assert!(!notes_need_image(from, to, &on), "{from:?} -> {to:?}");
                 }
+            }
+            if from != Format::Tiff {
+                assert!(!notes_need_image(from, Format::Tiff, &off), "{from:?}");
             }
         }
-        assert!(!notes_need_image(Format::Svg, Format::Jpg));
-        assert!(!notes_need_image(Format::Mp4, Format::Gif));
+        assert!(!notes_need_image(Format::Svg, Format::Jpg, &off));
+        assert!(!notes_need_image(Format::Mp4, Format::Gif, &off));
         let opaque = read_image(Some(false), false);
         assert_eq!(
             notes(Format::Svg, Format::Jpg, Some(&opaque)),

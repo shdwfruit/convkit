@@ -172,6 +172,8 @@ pub fn build_tuned(
             if let Some(mut m) = dynamic {
                 validate_tuning_for_dynamic_media(from, to, tuning)?;
                 m.warnings.extend(resolved.notes.iter().cloned());
+                m.warnings
+                    .extend(crate::metadata::location_note(from, to, probe, tuning));
                 // Every invocation `media.rs` builds opens with
                 // `-i <input>` and closes with the output path, so the
                 // path positions (for the Windows long-path rewriter) are
@@ -270,6 +272,7 @@ pub fn build_tuned(
     // honesty about a cap that did not bind or a probe that never ran.
     warnings.extend(resolved.notes.iter().cloned());
     warnings.extend(crate::metadata::tags_unread_note(to, tuning, probe));
+    warnings.extend(crate::metadata::location_note(from, to, probe, tuning));
 
     Ok(ConversionPlan {
         from,
@@ -790,6 +793,7 @@ mod tests {
             image: Some(crate::probe::ImageTraits {
                 alpha: Some(false),
                 multi_frame: false,
+                location: false,
             }),
             ..MediaProbe::default()
         };

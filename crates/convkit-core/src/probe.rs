@@ -99,6 +99,10 @@ pub struct ImageTraits {
     pub alpha: Option<bool>,
     /// Whether there is more than one frame or page.
     pub multi_frame: bool,
+    /// Whether any input's EXIF has a GPS latitude, for the location note.
+    /// Only a positive answer counts: a WebP's `-ping` loads no EXIF, so a
+    /// WebP reads as having none.
+    pub location: bool,
 }
 
 impl MediaProbe {
@@ -476,27 +480,38 @@ fn parse_page(line: &str, density: Option<f64>) -> Option<(u32, u32)> {
 }
 
 /// Reads an image's `ImageTraits` with `-ping`, which stops before the
-/// pixels, over its first two frames only: enough to tell one frame from
-/// several, so a long animation costs what a still does. Run only for the
-/// pairs whose notes depend on it (`registry::notes_need_image`). Any
-/// failure is an error, which callers take as "not read", keeping those
-/// notes whole.
-pub fn image_traits(magick: &Path, input: &Path) -> Result<ImageTraits> {
-    if !input.is_file() {
-        return Err(ConvError::new(
-            ErrorCode::InputNotFound,
-            format!(
-                "not an existing regular file, refusing to probe: {}",
-                input.display()
-            ),
-        ));
+/// pixels, over the first two frames of each input only: enough to tell
+/// one frame from several, so a long animation costs what a still does.
+/// Every input is read in the one spawn, for a merge's location note. Run
+/// only for the pairs whose notes depend on it
+/// (`registry::notes_need_image`). Any failure is an error, which callers
+/// take as "not read", keeping the frame and alpha notes whole.
+///
+/// `%[EXIF:GPSLatitude]` is read from the EXIF the header holds. An image
+/// without one makes magick warn on stderr and still exit 0, so the other
+/// answers stand.
+pub fn image_traits(magick: &Path, inputs: &[std::path::PathBuf]) -> Result<ImageTraits> {
+    let mut cmd = backend_command(magick);
+    cmd.arg("-ping");
+    for input in inputs {
+        if !input.is_file() {
+            return Err(ConvError::new(
+                ErrorCode::InputNotFound,
+                format!(
+                    "not an existing regular file, refusing to probe: {}",
+                    input.display()
+                ),
+            ));
+        }
+        let mut target = input.as_os_str().to_owned();
+        target.push("[0-1]");
+        cmd.arg(target);
     }
-    let mut target = input.as_os_str().to_owned();
-    target.push("[0-1]");
-    let out = backend_command(magick)
-        .arg("-ping")
-        .arg(target)
-        .args(["-format", "%m %A %n\n", "info:"])
+    let first = inputs
+        .first()
+        .ok_or_else(|| ConvError::new(ErrorCode::InputNotFound, "no input files were given"))?;
+    let out = cmd
+        .args(["-format", "%m %A %n [%[EXIF:GPSLatitude]]\n", "info:"])
         .output()
         .map_err(|e| {
             ConvError::new(
@@ -506,21 +521,25 @@ pub fn image_traits(magick: &Path, input: &Path) -> Result<ImageTraits> {
         })?;
     out.status
         .success()
-        .then(|| parse_traits(&String::from_utf8_lossy(&out.stdout)))
+        .then(|| parse_traits(&String::from_utf8_lossy(&out.stdout), inputs.len()))
         .flatten()
         .ok_or_else(|| {
             ConvError::new(
                 ErrorCode::ConversionFailed,
-                format!("ImageMagick could not read {}", input.display()),
+                format!("ImageMagick could not read {}", first.display()),
             )
         })
 }
 
-/// Parses the first `-ping` line, `CODER ALPHA FRAMES`. ImageMagick 7 names
-/// the alpha trait (`Undefined` for none); 6 says `True` or `False`. "No
-/// alpha" is believed only from coders that set alpha before a ping stops:
-/// TIFF's does not, and says `Undefined` for a transparent file too.
-fn parse_traits(text: &str) -> Option<ImageTraits> {
+/// Parses the `-ping` lines, `CODER ALPHA FRAMES [GPS LATITUDE]`, one per
+/// frame read. Alpha and frames come from the first line. ImageMagick 7
+/// names the alpha trait (`Undefined` for none); 6 says `True` or `False`.
+/// "No alpha" is believed only from coders that set alpha before a ping
+/// stops: TIFF's does not, and says `Undefined` for a transparent file too.
+/// `%n` counts the whole list, so with several inputs it says nothing about
+/// any one input's frames; only a merge reads several, and its pdf target
+/// keeps every frame anyway.
+fn parse_traits(text: &str, inputs: usize) -> Option<ImageTraits> {
     let mut it = text.lines().next()?.split_whitespace();
     let coder = it.next()?;
     let alpha = match it.next()? {
@@ -533,9 +552,15 @@ fn parse_traits(text: &str) -> Option<ImageTraits> {
         coder,
         "JPEG" | "PNG" | "WEBP" | "AVIF" | "HEIC" | "HEIF" | "BMP" | "BMP2" | "BMP3"
     );
+    let location = text.lines().any(|line| {
+        line.split_once('[')
+            .and_then(|(_, rest)| rest.rsplit_once(']'))
+            .is_some_and(|(gps, _)| !gps.trim().is_empty())
+    });
     Some(ImageTraits {
         alpha: (alpha || trusted).then_some(alpha),
-        multi_frame: frames > 1,
+        multi_frame: inputs == 1 && frames > 1,
+        location,
     })
 }
 
@@ -573,12 +598,13 @@ mod tests {
 
     #[test]
     fn traits_read_alpha_and_whether_a_second_frame_follows() {
-        let t = |text| parse_traits(text).unwrap();
+        let t = |text| parse_traits(text, 1).unwrap();
         assert_eq!(
             t("HEIC Undefined 1\n"),
             ImageTraits {
                 alpha: Some(false),
-                multi_frame: false
+                multi_frame: false,
+                location: false,
             }
         );
         assert_eq!(t("PNG Blend 1\n").alpha, Some(true));
@@ -588,23 +614,43 @@ mod tests {
         assert_eq!(t("BMP3 True 1\r\n").alpha, Some(true));
     }
 
+    /// The bracketed field is the EXIF GPS latitude; empty when there is
+    /// none, which magick reports with a warning on stderr and exit 0.
+    #[test]
+    fn traits_read_a_gps_latitude_and_ignore_an_empty_one() {
+        let t = |text, inputs| parse_traits(text, inputs).unwrap();
+        assert!(t("JPEG Undefined 1 [51/1,30/1,63/25]\n", 1).location);
+        assert!(!t("JPEG Undefined 1 []\n", 1).location);
+        assert!(!t("JPEG Undefined 1\n", 1).location);
+        // ImageMagick 6 may space the rationals out.
+        assert!(t("JPEG False 1 [51/1, 30/1, 63/25]\n", 1).location);
+        // A merge: any input carrying one counts, and `%n` counts the whole
+        // list, so it says nothing about any one input's frames.
+        let merged = t(
+            "JPEG Undefined 2 []\nHEIC Undefined 2 [35/1,43/1,2388/100]\n",
+            2,
+        );
+        assert!(merged.location);
+        assert!(!merged.multi_frame);
+    }
+
     /// A TIFF ping leaves alpha unset whatever the file holds, so its "no
     /// alpha" is unknown; its frame count still reads.
     #[test]
     fn a_tiff_ping_cannot_rule_alpha_out() {
-        let tiff = parse_traits("TIFF Undefined 2\nTIFF Undefined 2\n").unwrap();
+        let tiff = parse_traits("TIFF Undefined 2\nTIFF Undefined 2\n", 1).unwrap();
         assert_eq!(tiff.alpha, None);
         assert!(tiff.multi_frame);
-        assert_eq!(parse_traits("TIFF Blend 1\n").unwrap().alpha, Some(true));
+        assert_eq!(parse_traits("TIFF Blend 1\n", 1).unwrap().alpha, Some(true));
     }
 
     #[test]
     fn a_traits_answer_that_is_not_one_is_none() {
-        assert_eq!(parse_traits(""), None);
-        assert_eq!(parse_traits("640 360 TopLeft"), None);
-        assert_eq!(parse_traits("PNG Blend"), None);
-        assert_eq!(parse_traits("PNG Blend 0"), None);
-        assert_eq!(parse_traits("magick: no decode delegate"), None);
+        assert_eq!(parse_traits("", 1), None);
+        assert_eq!(parse_traits("640 360 TopLeft", 1), None);
+        assert_eq!(parse_traits("PNG Blend", 1), None);
+        assert_eq!(parse_traits("PNG Blend 0", 1), None);
+        assert_eq!(parse_traits("magick: no decode delegate", 1), None);
     }
 
     #[test]

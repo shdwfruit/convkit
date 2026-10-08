@@ -149,6 +149,8 @@ struct Prepared<'a> {
     /// `--strip-metadata`: the file is never byte-copied, and the pass that
     /// writes it clears the tags.
     strip: bool,
+    /// The location note, decided once so every attempt's plan carries it.
+    location_note: Option<String>,
 }
 
 /// The plan for a `--max-size` conversion. Pure: the probe is the caller's.
@@ -182,7 +184,7 @@ pub(crate) fn plan(
                 inputs: inputs.to_vec(),
                 output: output.to_path_buf(),
                 steps: Vec::new(),
-                warnings: Vec::new(),
+                warnings: p.location_note.iter().cloned().collect(),
                 sizing: Some(sizing),
                 enlarged: None,
             });
@@ -195,7 +197,11 @@ pub(crate) fn plan(
                 inputs: inputs.to_vec(),
                 output: output.to_path_buf(),
                 steps: vec![ffmpeg_step(m.argv, OutputMode::Path, output.to_path_buf())],
-                warnings: m.warnings,
+                warnings: m
+                    .warnings
+                    .into_iter()
+                    .chain(p.location_note.clone())
+                    .collect(),
                 sizing: Some(sizing),
                 enlarged: None,
             });
@@ -362,6 +368,7 @@ fn prepare<'a>(
         limits,
         max,
         strip: tuning.strip_metadata,
+        location_note: crate::metadata::location_note(from, to, Some(probe), tuning),
     })
 }
 
@@ -429,6 +436,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         )
     })?;
     let mut warnings = two.pass2.warnings;
+    warnings.extend(p.location_note.clone());
     // GIF's static recipes carry the one fact the stream mapping cannot
     // know: a looping GIF becomes a single play.
     if p.from == Format::Gif {
