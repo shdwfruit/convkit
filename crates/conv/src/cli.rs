@@ -221,8 +221,8 @@ replaces a file already there.")]
         #[arg(long)]
         dry_run: bool,
         /// How to draw the picture. By default it is told from the
-        /// terminal: kitty's protocol in kitty, Ghostty and WezTerm, iTerm2's
-        /// in iTerm2, half blocks elsewhere.
+        /// terminal: kitty's protocol in kitty and Ghostty, iTerm2's in
+        /// iTerm2 and WezTerm, half blocks elsewhere and under tmux.
         #[arg(long, value_name = "HOW", value_parser = ["blocks", "kitty", "iterm"])]
         graphics: Option<String>,
     },
