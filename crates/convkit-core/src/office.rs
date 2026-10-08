@@ -33,6 +33,11 @@ pub struct OfficeTraits {
 /// be a compound file but is damaged, so a caller keeps the notes that
 /// depend on it.
 pub fn traits(path: &Path) -> Option<OfficeTraits> {
+    // Only a regular file, as `probe::run` insists: a FIFO named `x.doc`
+    // would block a --dry-run forever.
+    if !path.is_file() {
+        return None;
+    }
     let mut file = File::open(path).ok()?;
     let mut magic = [0u8; 8];
     match file.read_exact(&mut magic) {
