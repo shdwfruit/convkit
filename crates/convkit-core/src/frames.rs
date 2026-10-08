@@ -3,6 +3,7 @@
 
 use std::ffi::OsString;
 use std::io::Read;
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::{Child, Stdio};
 
@@ -118,8 +119,13 @@ const BUCKET_BYTES: usize = (RATE * BUCKET_MS / 1000) as usize * 2;
 
 /// Decodes the first audio track and calls `each` with the RMS of every
 /// 10 ms bucket (linear, 0 to 1), a batch at a time as ffmpeg delivers
-/// them. Returns once the file has been read to its end.
-pub fn loudness(ffmpeg: &Path, input: &Path, each: &mut dyn FnMut(&[f32])) -> Result<()> {
+/// them. Returns once the file has been read to its end, or as soon as
+/// `each` breaks, when ffmpeg is stopped rather than left decoding.
+pub fn loudness(
+    ffmpeg: &Path,
+    input: &Path,
+    each: &mut dyn FnMut(&[f32]) -> ControlFlow<()>,
+) -> Result<()> {
     let mut args: Vec<OsString> = QUIET.iter().map(OsString::from).collect();
     args.push("-i".into());
     args.push(input.as_os_str().to_owned());
@@ -139,12 +145,14 @@ pub fn loudness(ffmpeg: &Path, input: &Path, each: &mut dyn FnMut(&[f32])) -> Re
             break;
         }
         let batch = buckets.push(&buf[..n]);
-        if !batch.is_empty() {
-            each(&batch);
+        if !batch.is_empty() && each(&batch).is_break() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
         }
     }
     if let Some(last) = buckets.finish() {
-        each(&[last]);
+        let _ = each(&[last]);
     }
     let status = child.wait().map_err(io_err)?;
     if !status.success() {

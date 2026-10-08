@@ -3073,6 +3073,7 @@ fn a_trim_frame_is_grabbed_over_a_pipe() {
 #[ignore]
 fn a_trim_loudness_tells_sound_from_silence() {
     use convkit_core::frames::{dbfs, loudness};
+    use std::ops::ControlFlow;
     let dir = tmp();
     let resolver = Resolver::new();
     require_backend(&resolver, Backend::Ffmpeg);
@@ -3088,7 +3089,11 @@ fn a_trim_loudness_tells_sound_from_silence() {
         .unwrap();
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
     let mut levels = Vec::new();
-    loudness(&ffmpeg, &src, &mut |batch| levels.extend_from_slice(batch)).unwrap();
+    loudness(&ffmpeg, &src, &mut |batch| {
+        levels.extend_from_slice(batch);
+        ControlFlow::Continue(())
+    })
+    .unwrap();
     assert!(
         (195..=210).contains(&levels.len()),
         "{} buckets",
@@ -3098,6 +3103,37 @@ fn a_trim_loudness_tells_sound_from_silence() {
     let loud = levels[10..90].iter().all(|&l| dbfs(l) > -25.0);
     let quiet = levels[110..190].iter().all(|&l| dbfs(l) < -60.0);
     assert!(loud && quiet, "{levels:?}");
+}
+
+/// When conv trim's session ends, the loudness stops being read, rather
+/// than ffmpeg decoding the rest of a long file while the clips are cut.
+#[test]
+#[ignore]
+fn a_trim_loudness_stops_when_asked() {
+    use convkit_core::frames::loudness;
+    use std::ops::ControlFlow;
+    let dir = tmp();
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let src = dir.path().join("long.wav");
+    let r = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=60"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let mut calls = 0;
+    loudness(&ffmpeg, &src, &mut |_| {
+        calls += 1;
+        ControlFlow::Break(())
+    })
+    .unwrap();
+    assert_eq!(
+        calls, 1,
+        "a minute of sound takes many reads; one was asked for"
+    );
 }
 
 /// conv trim's video-only clips: no audio track in any video container,

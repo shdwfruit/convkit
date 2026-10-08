@@ -16,6 +16,7 @@ pub mod term;
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -202,7 +203,7 @@ fn interact(session: &mut Session, info: &Info, source: &Source, graphics: Graph
         )
     });
     if source.has_audio {
-        loudness_worker(source, tx.clone());
+        loudness_worker(source, tx.clone(), Arc::clone(&done));
     }
     drop(tx);
 
@@ -451,8 +452,10 @@ fn strip_worker(
     tx
 }
 
-/// Reads the loudness of the whole file once, sending it as it comes.
-fn loudness_worker(source: &Source, events: Sender<Event>) {
+/// Reads the loudness of the whole file once, sending it as it comes, and
+/// stops ffmpeg when the session ends: a long file would otherwise go on
+/// being decoded while its clips are cut.
+fn loudness_worker(source: &Source, events: Sender<Event>, done: Arc<AtomicBool>) {
     let (ffmpeg, file) = (source.ffmpeg.to_path_buf(), source.file.to_path_buf());
     std::thread::spawn(move || {
         // Sent 5 s of sound at a time: ffmpeg's reads hand over a few
@@ -462,10 +465,18 @@ fn loudness_worker(source: &Source, events: Sender<Event>) {
         // A sound that cannot be read leaves the bar empty; the clips are
         // still cut by the times on screen.
         let _ = frames::loudness(&ffmpeg, &file, &mut |batch| {
-            pending.extend_from_slice(batch);
-            if pending.len() >= SEND_EVERY {
-                let _ = events.send(Event::Loudness(std::mem::take(&mut pending)));
+            if done.load(Ordering::SeqCst) {
+                return ControlFlow::Break(());
             }
+            pending.extend_from_slice(batch);
+            if pending.len() >= SEND_EVERY
+                && events
+                    .send(Event::Loudness(std::mem::take(&mut pending)))
+                    .is_err()
+            {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
         });
         if !pending.is_empty() {
             let _ = events.send(Event::Loudness(pending));
