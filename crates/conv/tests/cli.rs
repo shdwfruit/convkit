@@ -876,7 +876,7 @@ fn update_check_json_reports_a_never_installed_backend_as_not_installed_and_ok()
         serde_json::from_slice(&output.stdout).expect("stdout must be valid JSON");
     assert_eq!(v["ok"], true);
     let backends = v["backends"].as_array().expect("backends must be an array");
-    assert_eq!(backends.len(), 6, "{v}");
+    assert_eq!(backends.len(), 7, "{v}");
     let ffmpeg = backends
         .iter()
         .find(|b| b["backend"] == "ffmpeg")
@@ -943,7 +943,7 @@ fn update_check_json_envelope_lands_on_stderr_when_a_managed_backend_is_outdated
         serde_json::from_slice(&output.stderr).expect("stderr must be valid JSON");
     assert_eq!(v["ok"], false);
     let backends = v["backends"].as_array().expect("backends must be an array");
-    assert_eq!(backends.len(), 6, "{v}");
+    assert_eq!(backends.len(), 7, "{v}");
     let typst = backends
         .iter()
         .find(|b| b["backend"] == "typst")

@@ -137,6 +137,9 @@ pub struct Cli {
     /// Use this typst binary instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     pub typst_path: Option<PathBuf>,
+    /// Use this qpdf binary instead of the resolved one.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub qpdf_path: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -172,7 +175,7 @@ Files convkit does not recognise are listed with `--` rather than hidden, so an 
     },
     /// Update managed backends to the versions this convkit pins.
     #[command(long_about = "\
-Brings managed backends (ffmpeg, ffprobe, pandoc, typst) in line with the \
+Brings managed backends (ffmpeg, ffprobe, pandoc, typst, qpdf) in line with the \
 exact versions THIS BUILD of convkit has pinned and verified -- not the \
 latest versions available upstream. Every managed backend is installed \
 from a pinned URL with a verified SHA-256 checksum; chasing latest \
@@ -316,7 +319,7 @@ impl Cli {
     /// through, from whichever `--<backend>-path` flags were passed. The
     /// actual override-application and ffprobe-sibling-inference logic
     /// lives in `convkit_core::BackendOverrides` -- this just maps this
-    /// struct's own six flag fields onto its six fields, so `conv`'s CLI
+    /// struct's own seven flag fields onto its seven fields, so `conv`'s CLI
     /// surface (flag names, `#[arg(...)]` attributes, doc comments shown in
     /// `--help`) stays exactly where it already was, on `Cli` itself.
     pub fn resolver(&self) -> Resolver {
@@ -327,6 +330,7 @@ impl Cli {
             pandoc: self.pandoc_path.clone(),
             soffice: self.soffice_path.clone(),
             typst: self.typst_path.clone(),
+            qpdf: self.qpdf_path.clone(),
         }
         .resolver()
     }
@@ -367,6 +371,7 @@ mod tests {
             pandoc_path: None,
             soffice_path: None,
             typst_path: None,
+            qpdf_path: None,
             command: None,
         }
     }
@@ -388,6 +393,7 @@ mod tests {
         c.pandoc_path = Some(PathBuf::from("/o/pandoc"));
         c.soffice_path = Some(PathBuf::from("/o/soffice"));
         c.typst_path = Some(PathBuf::from("/o/typst"));
+        c.qpdf_path = Some(PathBuf::from("/o/qpdf"));
 
         let r = c.resolver();
         for (backend, expected) in [
@@ -397,6 +403,7 @@ mod tests {
             (Backend::Pandoc, "/o/pandoc"),
             (Backend::Soffice, "/o/soffice"),
             (Backend::Typst, "/o/typst"),
+            (Backend::Qpdf, "/o/qpdf"),
         ] {
             assert_eq!(
                 r.candidates(backend).first().map(|(p, _)| p.as_path()),

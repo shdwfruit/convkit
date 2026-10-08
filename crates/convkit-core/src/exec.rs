@@ -324,6 +324,10 @@ fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
                         || line.contains("rejected"))
             }
             Backend::Typst => line.contains("warning:") || line.contains("error:"),
+            // qpdf's own reports: `qpdf: <file>: <reason>` on failure and
+            // `WARNING: <file>: ...` when it repairs a damaged file. Only
+            // used for failure detail; `pdf` writes its own sentences.
+            Backend::Qpdf => line.starts_with("qpdf: ") || line.starts_with("WARNING: "),
         }
     };
 
@@ -1020,6 +1024,7 @@ const KNOWN_BACKENDS: &[Backend] = &[
     Backend::Soffice,
     Backend::Pandoc,
     Backend::Typst,
+    Backend::Qpdf,
 ];
 
 /// Substitutes the real, resolved absolute path for every
