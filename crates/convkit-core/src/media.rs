@@ -32,6 +32,20 @@ fn input_args(cut: Option<&Cut>, input: &Path) -> Vec<String> {
     argv
 }
 
+/// `-copypriorss:a 0` for a cut that starts after 0. An input `-ss` seeks
+/// the video, and the mov and matroska demuxers move every other stream to
+/// that video keyframe, so copied audio would otherwise start there and
+/// not at the cut: in an mkv the sound plays seconds before the picture,
+/// and an mp4 hides those seconds behind an edit list that not every player
+/// honours. 0 drops the copied packets before the cut. Re-encoded audio is
+/// trimmed exactly by the decoder and needs nothing; copied video never
+/// follows a cut after 0 (see `plan::build_tuned`).
+fn push_cut_audio(argv: &mut Vec<String>, cut: Option<&Cut>) {
+    if cut.is_some_and(|c| c.start_ms > 0) {
+        push(argv, &["-copypriorss:a", "0"]);
+    }
+}
+
 /// Where the input path sits in an invocation built here: right after
 /// `-i`, which a cut's `-ss`/`-t` push back from argv[1]. For the Windows
 /// long-path rewriter, which must rewrite paths and only paths.
@@ -378,6 +392,11 @@ fn mapped_invocation(
             push(&mut argv, &crate::metadata::KEEP_ATTACHMENT_TAGS);
         }
     }
+    // Only where audio may be copied: a track re-encoded at a set rate is
+    // trimmed by its decoder.
+    if !audios.is_empty() && !matches!(audio, AudioDisposition::Reencode { .. }) {
+        push_cut_audio(&mut argv, cut);
+    }
     if matches!(to, Format::Mp4 | Format::Mov) {
         push(&mut argv, &["-movflags", "+faststart"]);
     }
@@ -714,8 +733,9 @@ pub(crate) fn same_format_copy(
 /// video source drops the video stream.
 ///
 /// A cut keeps the copy here whatever its start: every audio packet decodes
-/// on its own, so a copied audio cut lands within one frame, about 21-26 ms
-/// for AAC and MP3.
+/// on its own, so with the packets before the cut dropped (see
+/// `push_cut_audio`) a copied audio cut lands within one frame, about
+/// 21-26 ms for AAC and MP3.
 pub(crate) fn audio_copy_invocation(
     from: Format,
     to: Format,
@@ -747,6 +767,7 @@ pub(crate) fn audio_copy_invocation(
     if strip {
         argv.extend(crate::metadata::ffmpeg_args(&probe.kept_tags));
     }
+    push_cut_audio(&mut argv, cut);
     push(&mut argv, &["-y"]);
     argv.push(output.to_string_lossy().into_owned());
 
@@ -894,6 +915,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(&m.argv[..4], ["-t", "30", "-i", "in"], "{:?}", m.argv);
+        assert!(
+            !m.argv.iter().any(|a| a == "-copypriorss:a"),
+            "a cut from 0 has nothing before it to drop: {:?}",
+            m.argv
+        );
+    }
+
+    /// An input `-ss` seeks the video, and a copied audio stream otherwise
+    /// keeps every packet back to that keyframe: in an mkv the sound starts
+    /// seconds before the picture.
+    #[test]
+    fn copied_audio_drops_what_comes_before_a_cut() {
+        let cut = crate::trim::Cut {
+            start_ms: 62_000,
+            end_ms: 70_000,
+            source_ms: 600_000,
+        };
+        let resolved = ResolvedVideo {
+            cut: Some(cut),
+            ..ResolvedVideo::default()
+        };
+        let p = probe(Some("h264"), &["aac"], &[], 0);
+        let has_flag = |argv: &[String]| has(argv, ["-copypriorss:a", "0"]);
+        for to in [Format::Mp4, Format::Mkv] {
+            let m = transcoded_invocation(
+                to,
+                &p,
+                &resolved,
+                None,
+                false,
+                &PathBuf::from("in"),
+                &PathBuf::from("out"),
+            )
+            .unwrap();
+            assert!(has(&m.argv, ["-c:a", "copy"]), "{to:?}: {:?}", m.argv);
+            assert!(has_flag(&m.argv), "{to:?}: {:?}", m.argv);
+        }
+        let m = audio_copy_invocation(
+            Format::Mp4,
+            Format::M4a,
+            &p,
+            false,
+            Some(&cut),
+            &PathBuf::from("in"),
+            &PathBuf::from("out"),
+        )
+        .unwrap();
+        assert!(has_flag(&m.argv), "{:?}", m.argv);
+        let out = m.argv.len() - 1;
+        assert!(
+            m.argv.iter().position(|a| a == "-copypriorss:a").unwrap() < out,
+            "an output option, before the output: {:?}",
+            m.argv
+        );
     }
 
     /// The flagship bug: a two-audio-track source must map *both* tracks

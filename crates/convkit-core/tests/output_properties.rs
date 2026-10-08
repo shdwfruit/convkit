@@ -2779,6 +2779,48 @@ fn a_cut_after_zero_is_frame_exact_in_every_video_container() {
     }
 }
 
+/// An `ffprobe -show_entries` value, read with edit lists ignored when
+/// asked, so audio an mp4 only hides is still counted.
+fn probe_value(path: &Path, entries: &str, select: &str, ignore_editlist: bool) -> f64 {
+    let ffprobe = Resolver::new().resolve(Backend::Ffprobe).unwrap().path;
+    let mut cmd = Command::new(ffprobe);
+    cmd.args(["-v", "error"]);
+    if ignore_editlist {
+        cmd.args(["-ignore_editlist", "1"]);
+    }
+    let out = cmd
+        .args(["-select_streams", select, "-show_entries", entries])
+        .args(["-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("{} {entries}: {text:?}: {e}", path.display()))
+}
+
+/// An input `-ss` seeks the video; copied audio must still start at the
+/// cut, not at the keyframe 2 s before it.
+#[test]
+#[ignore]
+fn a_cut_with_copied_audio_starts_the_sound_at_the_cut() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 20, &[]);
+    let mkv = dir.path().join("cut.mkv");
+    convert_tuned(&src, &mkv, &ranged(Some("7"), Some("10"))).unwrap();
+    // Matroska has no edit lists: early sound pushes the picture later
+    // and makes the file longer than the cut.
+    let video_start = probe_value(&mkv, "stream=start_time", "v:0", false);
+    assert!(video_start < 0.1, "mkv picture starts at {video_start} s");
+    let length = probe_media(&mkv).duration_ms.unwrap();
+    assert!(length < 3_100, "a 3 s cut is {length} ms long");
+    let m4a = dir.path().join("cut.m4a");
+    convert_tuned(&src, &m4a, &ranged(Some("7"), Some("10"))).unwrap();
+    let held = probe_value(&m4a, "stream=duration", "a:0", true);
+    assert!(held < 3.1, "m4a holds {held} s of audio, edit list aside");
+}
+
 #[test]
 #[ignore]
 fn a_cut_from_zero_is_a_stream_copy() {
