@@ -703,6 +703,13 @@ impl Resolver {
         extract_version_token(&first_line).map(str::to_string)
     }
 
+    /// `backend`'s version as its own `--version` reports it, or `None` when
+    /// the program at `path` does not run. `install` uses this to check a
+    /// freshly unpacked folder backend before swapping it into place.
+    pub(crate) fn probe_version(backend: Backend, path: &Path) -> Option<String> {
+        Self::version_of(backend, path, VERSION_PROBE_TIMEOUT)
+    }
+
     /// Runs `path` with `flag` and returns the first line of its version
     /// banner (stdout, falling back to stderr when stdout came back empty —
     /// see `version_of`'s docs on why). Factored out of `version_of` so
