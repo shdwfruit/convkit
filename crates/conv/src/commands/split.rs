@@ -28,6 +28,15 @@ pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
         Ok(q) => q,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
+    let plan = match pdf::plan_split(&qpdf.path, &input, &ranges, args.outdir.as_deref()) {
+        Ok(p) => p,
+        Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
+    };
+    if args.dry_run {
+        pdf_support::print_dry_run(cli, &plan);
+        return 0;
+    }
+
     if let Some(dir) = args.outdir.as_ref().filter(|_| !args.dry_run) {
         if let Err(e) = std::fs::create_dir_all(dir) {
             let e = ConvError {
@@ -45,15 +54,6 @@ pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
             render::print_error(cli.json, &e);
             return e.code.exit_code();
         }
-    }
-
-    let plan = match pdf::plan_split(&qpdf.path, &input, &ranges, args.outdir.as_deref()) {
-        Ok(p) => p,
-        Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
-    };
-    if args.dry_run {
-        pdf_support::print_dry_run(cli, &plan);
-        return 0;
     }
 
     let start = Instant::now();
@@ -77,7 +77,7 @@ fn name_of(p: &Path) -> String {
 /// *.pdf` matched several.
 fn looks_like_a_file(arg: &str) -> bool {
     let p = Path::new(arg);
-    Format::from_path(p) == Some(Format::Pdf) || p.is_file()
+    pdf::parse_range(arg).is_err() && (Format::from_path(p) == Some(Format::Pdf) || p.is_file())
 }
 
 /// One PDF and its parsed ranges. The input's glob is expanded here
@@ -131,6 +131,15 @@ mod tests {
         assert_eq!(input, PathBuf::from("report.pdf"));
         let texts: Vec<_> = ranges.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(texts, vec!["1-3", "11-z"]);
+    }
+
+    #[test]
+    fn a_valid_range_is_never_another_file() {
+        assert!(!looks_like_a_file("5"));
+        assert!(!looks_like_a_file("1-3"));
+        assert!(!looks_like_a_file("z"));
+        assert!(looks_like_a_file("b.pdf"));
+        assert!(!looks_like_a_file("notes"));
     }
 
     #[test]
