@@ -159,11 +159,15 @@ pub fn build_tuned(
             // and silently discard the flag.
             let wants_video =
                 resolved.fps.is_some() || resolved.scale.is_some() || tuning.crf.is_some();
+            let strip = tuning.strip_metadata;
             let dynamic = if wants_video {
-                media::transcoded_invocation(to, p, &resolved, tuning.crf, &inputs[0], output)
+                media::transcoded_invocation(
+                    to, p, &resolved, tuning.crf, strip, &inputs[0], output,
+                )
             } else {
-                media::stream_mapped_invocation(to, p, &inputs[0], output)
-                    .or_else(|| media::audio_copy_invocation(from, to, p, &inputs[0], output))
+                media::stream_mapped_invocation(to, p, strip, &inputs[0], output).or_else(|| {
+                    media::audio_copy_invocation(from, to, p, strip, &inputs[0], output)
+                })
             };
             if let Some(mut m) = dynamic {
                 validate_tuning_for_dynamic_media(from, to, tuning)?;
@@ -203,6 +207,8 @@ pub fn build_tuned(
         recipe
     };
     validate_tuning(&recipe, from, to, tuning, &resolved)?;
+    // The tags `--strip-metadata` writes back on an ffmpeg step.
+    let kept = probe.map_or(&[][..], |p| p.kept_tags.as_slice());
 
     let last = recipe.steps.len() - 1;
 
@@ -233,7 +239,7 @@ pub fn build_tuned(
         let crate::recipe::Rendered {
             mut argv,
             mut path_args,
-        } = step.render_full(&inputs_here, &step_outputs[i], tuning, &resolved, &[]);
+        } = step.render_full(&inputs_here, &step_outputs[i], tuning, &resolved, kept);
         if step.backend == Backend::Soffice {
             // See `USER_INSTALLATION_PLACEHOLDER`'s docs: every real
             // Soffice invocation gets this flag from `exec::run`, so the
@@ -263,6 +269,7 @@ pub fn build_tuned(
     // -- a static recipe carrying an `Arg::VideoChain` slot gets the same
     // honesty about a cap that did not bind or a probe that never ran.
     warnings.extend(resolved.notes.iter().cloned());
+    warnings.extend(crate::metadata::tags_unread_note(to, tuning, probe));
 
     Ok(ConversionPlan {
         from,
@@ -587,6 +594,77 @@ mod tests {
         assert_eq!(plan.steps.len(), 2);
         assert_eq!(plan.steps[0].output, Path::new("a.convkit-step0.tiff"));
         assert_eq!(plan.steps[1].argv, ["a.convkit-step0.tiff", "a.png"]);
+    }
+
+    /// With no probe there is nothing to write back, so every tag goes and
+    /// the note says title and artist went with them.
+    #[test]
+    fn without_a_probe_a_stripped_audio_conversion_says_its_tags_went_too() {
+        let t = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        let plan = build_tuned(
+            Format::Flac,
+            Format::Mp3,
+            &[p("a.flac")],
+            Path::new("a.mp3"),
+            None,
+            None,
+            &t,
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w == ["-map_metadata", "-1"]),
+            "{argv:?}"
+        );
+        assert!(
+            plan.warnings.iter().any(|w| w.contains("title and artist")),
+            "{:?}",
+            plan.warnings
+        );
+        // A gif holds no tags, so there is nothing to say.
+        let gif = build_tuned(
+            Format::Mp4,
+            Format::Gif,
+            &[p("a.mp4")],
+            Path::new("a.gif"),
+            None,
+            None,
+            &t,
+        )
+        .unwrap();
+        assert!(gif.warnings.iter().all(|w| !w.contains("title")));
+    }
+
+    /// A static recipe writes back what the probe read.
+    #[test]
+    fn a_stripped_transcode_writes_back_the_kept_tags() {
+        let probe = MediaProbe {
+            audio_codecs: vec!["flac".into()],
+            kept_tags: vec![("title".into(), "Song".into())],
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Flac,
+            Format::Mp3,
+            &[p("a.flac")],
+            Path::new("a.mp3"),
+            Some(&probe),
+            None,
+            &Tuning {
+                strip_metadata: true,
+                ..Tuning::default()
+            },
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w == ["-metadata", "title=Song"]),
+            "{argv:?}"
+        );
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
     }
 
     #[test]

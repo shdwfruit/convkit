@@ -475,6 +475,7 @@ const VIDEO_TO_MP4: Recipe = Recipe {
             Arg::Lit("-sn"),
             Arg::Lit("-movflags"),
             Arg::Lit("+faststart"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -547,6 +548,7 @@ macro_rules! video_to_mkv_recipe {
                 Arg::Lit(AUDIO_BITRATE),
                 Arg::Lit("-c:s"),
                 Arg::Lit($sub_codec),
+                Arg::StripMetadata,
                 Arg::Lit("-y"),
                 Arg::Output,
             ]
@@ -645,6 +647,7 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
             Arg::Lit(WEBM_AUDIO_BITRATE),
             Arg::Lit("-af"),
             Arg::Lit(OPUS_CHANNEL_LAYOUTS),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -674,6 +677,7 @@ const TO_GIF: Recipe = Recipe {
             Arg::VideoChain(&TO_GIF_CHAIN),
             Arg::Lit("-loop"),
             Arg::Lit("0"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -706,6 +710,7 @@ pub const TO_GIF_TONEMAP: Recipe = Recipe {
             Arg::VideoChain(&TO_GIF_TONEMAP_CHAIN),
             Arg::Lit("-loop"),
             Arg::Lit("0"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -762,6 +767,7 @@ const GIF_TO_MP4: Recipe = Recipe {
             Arg::Lit("yuv420p"),
             Arg::Lit("-movflags"),
             Arg::Lit("+faststart"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -789,6 +795,7 @@ macro_rules! audio_recipe {
                     Arg::Lit("-i"), Arg::Input,
                     Arg::Lit("-vn"),
                     $($codec,)*
+                    Arg::StripMetadata,
                     Arg::Lit("-y"), Arg::Output,
                 ]
             )],
@@ -805,6 +812,7 @@ macro_rules! audio_recipe {
                     Arg::Lit("-map"), Arg::Lit("0:v?"),
                     Arg::Lit("-c:v"), Arg::Lit("copy"),
                     $($codec,)*
+                    Arg::StripMetadata,
                     Arg::Lit("-y"), Arg::Output,
                 ]
             )],
@@ -847,6 +855,7 @@ const TO_WAV: Recipe = Recipe {
             Arg::Lit("-vn"),
             Arg::Lit("-c:a"),
             Arg::Lit("pcm_s16le"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -1283,6 +1292,12 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
     if needs_probe(from, to) {
         return true;
     }
+    // --strip-metadata writes back the content tags the probe reads.
+    if tuning.strip_metadata
+        && lookup(from, to).is_some_and(|r| r.steps.iter().any(|s| s.backend == Backend::Ffmpeg))
+    {
+        return true;
+    }
     if tuning.fps.is_none() && tuning.resize.is_none() {
         return false;
     }
@@ -1581,17 +1596,17 @@ mod tests {
 
     use crate::video::ResolvedVideo;
 
-    /// Every ImageMagick recipe carries the strip slot, so the flag is
-    /// refused only where it truly does not apply, and strips only after
-    /// the picture is oriented: `-auto-orient` reads the EXIF orientation
-    /// the strip removes.
+    /// Every ImageMagick and ffmpeg recipe carries the strip slot, so the
+    /// flag is refused only where it truly does not apply (documents), and
+    /// an image recipe strips only after orienting the picture:
+    /// `-auto-orient` reads the EXIF orientation the strip removes.
     #[test]
-    fn the_strip_slot_follows_auto_orient_in_every_image_recipe() {
+    fn every_image_and_media_recipe_strips_and_only_after_orienting() {
         for (from, to) in all_pairs() {
             let r = lookup(from, to).unwrap();
             for s in r.steps {
                 let strip = s.args.iter().position(|a| *a == Arg::StripMetadata);
-                if s.backend == Backend::Magick {
+                if matches!(s.backend, Backend::Magick | Backend::Ffmpeg) {
                     assert!(strip.is_some(), "{from:?} -> {to:?}");
                 }
                 if strip.is_some() {

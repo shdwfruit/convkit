@@ -219,6 +219,7 @@ fn mapped_invocation(
     probe: &MediaProbe,
     video: VideoDisposition<'_>,
     audio: AudioDisposition,
+    strip: bool,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
@@ -351,6 +352,9 @@ fn mapped_invocation(
         }
     }
 
+    if strip {
+        argv.extend(crate::metadata::ffmpeg_args(&probe.kept_tags));
+    }
     if matches!(to, Format::Mp4 | Format::Mov) {
         push(&mut argv, &["-movflags", "+faststart"]);
     }
@@ -369,6 +373,7 @@ fn mapped_invocation(
 pub(crate) fn stream_mapped_invocation(
     to: Format,
     probe: &MediaProbe,
+    strip: bool,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
@@ -382,6 +387,7 @@ pub(crate) fn stream_mapped_invocation(
         probe,
         VideoDisposition::Copy,
         AudioDisposition::Fit,
+        strip,
         input,
         output,
     )
@@ -400,6 +406,7 @@ pub(crate) fn transcoded_invocation(
     probe: &MediaProbe,
     resolved: &ResolvedVideo,
     crf: Option<u8>,
+    strip: bool,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
@@ -429,6 +436,7 @@ pub(crate) fn transcoded_invocation(
             companions,
         },
         AudioDisposition::Fit,
+        strip,
         input,
         output,
     )?;
@@ -465,6 +473,7 @@ pub(crate) fn two_pass_invocations(
     video_bps: u64,
     audio_kbps: Option<u32>,
     passlog: &Path,
+    strip: bool,
     input: &Path,
     output: &Path,
 ) -> Option<TwoPass> {
@@ -490,8 +499,16 @@ pub(crate) fn two_pass_invocations(
     };
 
     let pass1 = if to == Format::Mkv {
-        let mut argv =
-            mapped_invocation(to, probe, video(1), AudioDisposition::Copy, input, output)?.argv;
+        let mut argv = mapped_invocation(
+            to,
+            probe,
+            video(1),
+            AudioDisposition::Copy,
+            false,
+            input,
+            output,
+        )?
+        .argv;
         // The mapping ends `-y <output>`; pass 1 writes nowhere.
         argv.pop();
         push(&mut argv, &["-f", "null", "-"]);
@@ -516,7 +533,7 @@ pub(crate) fn two_pass_invocations(
         Some(kbps) => AudioDisposition::Reencode { kbps },
         None => AudioDisposition::Fit,
     };
-    let pass2 = mapped_invocation(to, probe, video(2), audio, input, output)?;
+    let pass2 = mapped_invocation(to, probe, video(2), audio, strip, input, output)?;
     Some(TwoPass { pass1, pass2 })
 }
 
@@ -636,6 +653,7 @@ pub(crate) fn audio_copy_invocation(
     from: Format,
     to: Format,
     probe: &MediaProbe,
+    strip: bool,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
@@ -657,7 +675,11 @@ pub(crate) fn audio_copy_invocation(
         // WAV can't carry an attached picture; everything else keeps it.
         push(&mut argv, &["-map", "0:v?", "-c:v", "copy"]);
     }
-    push(&mut argv, &["-c:a", "copy", "-y"]);
+    push(&mut argv, &["-c:a", "copy"]);
+    if strip {
+        argv.extend(crate::metadata::ffmpeg_args(&probe.kept_tags));
+    }
+    push(&mut argv, &["-y"]);
     argv.push(output.to_string_lossy().into_owned());
 
     let mut warnings = Vec::new();
@@ -693,11 +715,54 @@ mod tests {
     }
 
     fn invoke(to: Format, p: &MediaProbe) -> Option<MediaInvocation> {
-        stream_mapped_invocation(to, p, &PathBuf::from("in"), &PathBuf::from("out"))
+        stream_mapped_invocation(to, p, false, &PathBuf::from("in"), &PathBuf::from("out"))
     }
 
     fn has(argv: &[String], pair: [&str; 2]) -> bool {
         argv.windows(2).any(|w| w == pair)
+    }
+
+    /// The tags go and the kept ones come back, and it stays a copy.
+    #[test]
+    fn a_stripped_remux_clears_the_tags_and_writes_back_the_kept_ones() {
+        let mut p = probe(Some("h264"), &["aac"], &[], 0);
+        p.kept_tags = vec![("title".into(), "Clip".into())];
+        let (i, o) = (PathBuf::from("in.mov"), PathBuf::from("out.mp4"));
+        let m = stream_mapped_invocation(Format::Mp4, &p, true, &i, &o).unwrap();
+        assert!(has(&m.argv, ["-map_metadata", "-1"]), "{:?}", m.argv);
+        assert!(has(&m.argv, ["-metadata", "title=Clip"]), "{:?}", m.argv);
+        assert!(has(&m.argv, ["-c:v", "copy"]), "{:?}", m.argv);
+        assert_eq!(m.argv.last().unwrap(), "out.mp4");
+        let plain = stream_mapped_invocation(Format::Mp4, &p, false, &i, &o).unwrap();
+        assert!(!plain.argv.iter().any(|a| a == "-map_metadata"));
+    }
+
+    #[test]
+    fn a_stripped_audio_copy_clears_the_tags_before_the_output() {
+        let mut p = probe(None, &["mp3"], &[], 0);
+        p.kept_tags = vec![("artist".into(), "Band".into())];
+        let m = audio_copy_invocation(
+            Format::Mp3,
+            Format::Mp3,
+            &p,
+            true,
+            &PathBuf::from("in.mp3"),
+            &PathBuf::from("out.mp3"),
+        )
+        .unwrap();
+        let n = m.argv.len();
+        assert_eq!(
+            m.argv[n - 6..],
+            [
+                "-map_metadata",
+                "-1",
+                "-metadata",
+                "artist=Band",
+                "-y",
+                "out.mp3"
+            ]
+        );
+        assert!(has(&m.argv, ["-c:a", "copy"]), "{:?}", m.argv);
     }
 
     /// The flagship bug: a two-audio-track source must map *both* tracks
@@ -934,7 +999,14 @@ mod tests {
     // --- audio extraction (F6) ------------------------------------------
 
     fn audio_invoke(from: Format, to: Format, p: &MediaProbe) -> Option<MediaInvocation> {
-        audio_copy_invocation(from, to, p, &PathBuf::from("in"), &PathBuf::from("out"))
+        audio_copy_invocation(
+            from,
+            to,
+            p,
+            false,
+            &PathBuf::from("in"),
+            &PathBuf::from("out"),
+        )
     }
 
     /// mp4 → m4a used to re-encode AAC to AAC; a matching codec must be a
@@ -1042,6 +1114,7 @@ mod tests {
             &probe_h264_with(&["aac"], &[]),
             &chain(),
             None,
+            false,
             Path::new("in.mkv"),
             Path::new("out.mp4"),
         )
@@ -1091,6 +1164,7 @@ mod tests {
             &probe_h264_with(&["aac", "ac3"], &["mov_text"]),
             &chain(),
             None,
+            false,
             Path::new("in.mkv"),
             Path::new("out.mp4"),
         )
@@ -1124,6 +1198,7 @@ mod tests {
             &probe_h264_with(&["aac"], &[]),
             &chain(),
             None,
+            false,
             Path::new("in.mp4"),
             Path::new("out.mkv"),
         )
@@ -1153,6 +1228,7 @@ mod tests {
             &probe_h264_with(&["aac"], &[]),
             &chain(),
             None,
+            false,
             Path::new("in.mp4"),
             Path::new("out.webm"),
         )
@@ -1181,6 +1257,7 @@ mod tests {
             &probe_h264_with(&["aac"], &[]),
             &chain(),
             Some(28),
+            false,
             Path::new("in.mkv"),
             Path::new("out.mp4"),
         )
@@ -1199,6 +1276,7 @@ mod tests {
             &probe_h264_with(&["aac"], &[]),
             &chain(),
             None,
+            false,
             Path::new("in.mp4"),
             Path::new("out.mp3"),
         )
@@ -1215,6 +1293,7 @@ mod tests {
             &probe_h264_with(&["aac"], &[]),
             &chain(),
             None,
+            false,
             Path::new("in.mkv"),
             Path::new("out.mp4"),
         )
@@ -1254,6 +1333,7 @@ mod tests {
             1_190_000,
             Some(96),
             Path::new("/s/out.convkit-pass"),
+            false,
             Path::new("in.mov"),
             Path::new("/s/out.mp4"),
         )
@@ -1299,6 +1379,7 @@ mod tests {
                 500_000,
                 Some(96),
                 Path::new("/s/o.convkit-pass"),
+                false,
                 Path::new("in.mkv"),
                 Path::new("/s/o"),
             )
@@ -1320,6 +1401,7 @@ mod tests {
             800_000,
             Some(128),
             Path::new("/s/o.convkit-pass"),
+            false,
             Path::new("in.mp4"),
             Path::new("/s/o.mkv"),
         )
@@ -1364,6 +1446,7 @@ mod tests {
             800_000,
             Some(128),
             Path::new("/s/o.convkit-pass"),
+            false,
             Path::new("in.mkv"),
             Path::new("/s/o.mkv"),
         )
@@ -1396,6 +1479,7 @@ mod tests {
             500_000,
             Some(64),
             Path::new("/s/o.convkit-pass"),
+            false,
             Path::new("in.mp4"),
             Path::new("/s/o.webm"),
         )
@@ -1428,6 +1512,7 @@ mod tests {
             500_000,
             None,
             Path::new("p"),
+            false,
             Path::new("in.mp4"),
             Path::new("o.mp4"),
         )
@@ -1456,6 +1541,7 @@ mod tests {
                 500_000,
                 Some(96),
                 Path::new("p"),
+                false,
                 Path::new("in.mp4"),
                 Path::new("o"),
             )
@@ -1484,6 +1570,7 @@ mod tests {
             500_000,
             Some(128),
             Path::new("p"),
+            false,
             Path::new("in.mp4"),
             Path::new("o.mp4"),
         )
@@ -1505,6 +1592,7 @@ mod tests {
                 1,
                 None,
                 Path::new("p"),
+                false,
                 Path::new("i"),
                 Path::new("o"),
             )

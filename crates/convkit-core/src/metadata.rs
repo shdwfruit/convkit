@@ -5,6 +5,8 @@
 //! `com.apple.quicktime.location.accuracy.horizontal`, and GoPro, DJI and
 //! Android each have their own. A privacy flag has to fail closed.
 
+use crate::{Format, Kind, MediaProbe, Tuning};
+
 /// ImageMagick's half, rendered right after `-auto-orient`, which has to
 /// read the EXIF orientation before it goes.
 ///
@@ -43,6 +45,22 @@ pub(crate) fn ffmpeg_args(kept: &[(String, String)]) -> Vec<String> {
         argv.push(format!("{key}={value}"));
     }
     argv
+}
+
+/// Said when the flag cleared a video or audio file's tags with no probe to
+/// read the kept ones from: ffprobe is missing, or could not read the file.
+pub(crate) const TAGS_UNREAD_NOTE: &str = "ffprobe could not read the tags, so all of them \
+     were removed, title and artist included.";
+
+/// `TAGS_UNREAD_NOTE` when it applies: the flag is on, the target holds
+/// tags (a gif holds none), and there is no probe.
+pub(crate) fn tags_unread_note(
+    to: Format,
+    tuning: &Tuning,
+    probe: Option<&MediaProbe>,
+) -> Option<String> {
+    let holds_tags = matches!(to.kind(), Kind::Video | Kind::Audio);
+    (tuning.strip_metadata && holds_tags && probe.is_none()).then(|| TAGS_UNREAD_NOTE.to_string())
 }
 
 #[cfg(test)]

@@ -146,6 +146,9 @@ struct Prepared<'a> {
     src: Source,
     limits: Limits,
     max: &'a MaxSize,
+    /// `--strip-metadata`: the file is never byte-copied, and the pass that
+    /// writes it clears the tags.
+    strip: bool,
 }
 
 /// The plan for a `--max-size` conversion. Pure: the probe is the caller's.
@@ -169,7 +172,9 @@ pub(crate) fn plan(
             u64::from(r.0) * u64::from(src_rate.1) < u64::from(src_rate.0) * u64::from(r.1)
         });
     if !caps_bind && p.probe.size_bytes.is_some_and(|b| b <= max.bytes) {
-        if from == to {
+        // A byte copy carries every tag along, so a stripped file is
+        // remuxed instead, which clears them.
+        if from == to && !p.strip {
             sizing.strategy = Strategy::Copy;
             return Ok(ConversionPlan {
                 from,
@@ -182,7 +187,7 @@ pub(crate) fn plan(
                 enlarged: None,
             });
         }
-        if let Some(m) = media::stream_mapped_invocation(to, p.probe, &inputs[0], output) {
+        if let Some(m) = media::stream_mapped_invocation(to, p.probe, p.strip, &inputs[0], output) {
             sizing.strategy = Strategy::Remux;
             return Ok(ConversionPlan {
                 from,
@@ -356,6 +361,7 @@ fn prepare<'a>(
         src,
         limits,
         max,
+        strip: tuning.strip_metadata,
     })
 }
 
@@ -409,6 +415,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         choice.video_bps,
         choice.audio_kbps,
         &passlog,
+        p.strip,
         &p.inputs[0],
         p.output,
     )
@@ -957,6 +964,33 @@ mod tests {
         .unwrap();
         assert_eq!(plan.sizing.unwrap().strategy, Strategy::Copy);
         assert!(plan.steps.is_empty());
+    }
+
+    /// A byte copy would carry every tag along, so a stripped file already
+    /// under the target is remuxed with its tags cleared instead.
+    #[test]
+    fn a_stripped_source_already_under_the_target_is_remuxed_not_copied() {
+        let t = Tuning {
+            strip_metadata: true,
+            ..tuned("10mb")
+        };
+        let plan = build(Format::Mp4, Format::Mp4, &probe(60, 6_000_000), &t).unwrap();
+        assert_eq!(plan.sizing.unwrap().strategy, Strategy::Remux);
+        assert!(has(&plan.steps[0].argv, ["-c:v", "copy"]));
+        assert!(has(&plan.steps[0].argv, ["-map_metadata", "-1"]));
+    }
+
+    /// An encode clears the tags in the pass that writes the file.
+    #[test]
+    fn a_stripped_encode_clears_the_tags_in_pass_two() {
+        let t = Tuning {
+            strip_metadata: true,
+            ..tuned("1mb")
+        };
+        let plan = build(Format::Mov, Format::Mp4, &probe(60, 60_000_000), &t).unwrap();
+        assert_eq!(plan.steps.len(), 2);
+        assert!(!plan.steps[0].argv.iter().any(|a| a == "-map_metadata"));
+        assert!(has(&plan.steps[1].argv, ["-map_metadata", "-1"]));
     }
 
     #[test]

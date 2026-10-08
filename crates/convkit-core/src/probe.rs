@@ -68,6 +68,26 @@ pub struct MediaProbe {
     /// What an image source holds that a single-image target drops, read
     /// by `image_traits`. `None` when the source was not read.
     pub image: Option<ImageTraits>,
+    /// The container's tags that `--strip-metadata` keeps
+    /// (`metadata::KEPT_TAGS`), keys lower-cased, in that list's order, to
+    /// be written back after every tag is cleared.
+    pub kept_tags: Vec<(String, String)>,
+    /// Which location tags the container carries.
+    pub location: LocationTags,
+}
+
+/// The two ways a video or audio file records where it was made. Outputs
+/// keep them differently: ffmpeg's mov muxer writes `location` (as `©xyz`
+/// in mov, `loci` in mp4 and m4a) but drops Apple's mdta keys unless
+/// `-movflags use_metadata_tags` asks it not to, which conv never passes;
+/// Matroska, WebM, ID3 and Vorbis comments keep both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LocationTags {
+    /// `location`, `location-eng`, Matroska's `LOCATION`.
+    pub classic: bool,
+    /// `com.apple.quicktime.location.ISO6709`, as iPhones write it, and its
+    /// siblings (`...location.accuracy.horizontal`).
+    pub apple: bool,
 }
 
 /// What a jpg/png/bmp target cannot keep from its source, for the notes
@@ -254,8 +274,31 @@ pub fn parse(json: &str) -> MediaProbe {
             .get("size")
             .and_then(|s| s.as_str())
             .and_then(|s| s.parse().ok());
+        if let Some(tags) = format.get("tags").and_then(|t| t.as_object()) {
+            read_tags(&mut p, tags);
+        }
     }
     p
+}
+
+/// The container's tags, as `--strip-metadata` and the location note need
+/// them. Keys are matched without case, as ffmpeg itself matches them:
+/// Matroska spells them `TITLE` and `LOCATION`.
+fn read_tags(p: &mut MediaProbe, tags: &serde_json::Map<String, serde_json::Value>) {
+    for key in tags.keys() {
+        let key = key.to_ascii_lowercase();
+        p.location.classic |= key == "location" || key.starts_with("location-");
+        p.location.apple |= key.starts_with("com.apple.quicktime.location");
+    }
+    for &kept in crate::metadata::KEPT_TAGS {
+        let found = tags
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(kept))
+            .and_then(|(_, v)| v.as_str());
+        if let Some(value) = found {
+            p.kept_tags.push((kept.to_string(), value.to_string()));
+        }
+    }
 }
 
 /// Runs ffprobe. This is the one place in core that spawns a process outside
@@ -499,6 +542,34 @@ fn parse_traits(text: &str) -> Option<ImageTraits> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kept tags in `KEPT_TAGS` order, lower-cased, whatever case the
+    /// container spells them in; and both kinds of location tag.
+    #[test]
+    fn format_tags_yield_the_kept_tags_and_the_location_kinds() {
+        let p = parse(
+            r#"{"streams":[],"format":{"tags":{
+                "artist":"Band","TITLE":"Song","date":"2024","encoder":"Lavf",
+                "com.apple.quicktime.location.ISO6709":"+51.5007-000.1246+010.000/",
+                "location-eng":"+51.5007-000.1246/"}}}"#,
+        );
+        assert_eq!(
+            p.kept_tags,
+            [
+                ("title".to_string(), "Song".to_string()),
+                ("artist".to_string(), "Band".to_string())
+            ]
+        );
+        assert_eq!(
+            p.location,
+            LocationTags {
+                classic: true,
+                apple: true
+            }
+        );
+        let plain = parse(r#"{"streams":[],"format":{"tags":{"title":"x"}}}"#);
+        assert_eq!(plain.location, LocationTags::default());
+    }
 
     #[test]
     fn traits_read_alpha_and_whether_a_second_frame_follows() {
