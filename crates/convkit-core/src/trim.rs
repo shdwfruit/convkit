@@ -7,6 +7,13 @@
 //! a float, for the same reason `probe::parse_duration_ms` is: a float would
 //! turn `0.3` into something that does not print back as `0.3`.
 
+use std::path::Path;
+
+use serde::Serialize;
+
+use crate::probe::MediaProbe;
+use crate::{ConvError, ErrorCode};
+
 /// A time as typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Time {
@@ -250,6 +257,211 @@ pub fn name_suffix(range: &Range) -> String {
     format!("{start}-{end}")
 }
 
+/// A range resolved against one source: what ffmpeg actually cuts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cut {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// The source's length. A cut ending here runs to the end and needs no
+    /// `-t`.
+    pub source_ms: u64,
+}
+
+/// Whole milliseconds as ffmpeg's seconds: `62`, `62.5`, `7.75`.
+fn seconds(ms: u64) -> String {
+    format!("{}{}", ms / 1000, fraction(ms))
+}
+
+impl Cut {
+    pub fn len_ms(&self) -> u64 {
+        self.end_ms - self.start_ms
+    }
+
+    /// The cut as ffmpeg input options, to go before `-i`: `-ss` when it
+    /// starts after 0, `-t` when it stops before the end.
+    ///
+    /// Input options rather than output ones, so that every read of the
+    /// input sees the same range: both passes of a two-pass encode, and the
+    /// palette pass of a GIF. An input `-ss` also seeks rather than decoding
+    /// everything before the start, and with a re-encode it is still exact:
+    /// ffmpeg decodes from the keyframe before and drops the frames up to
+    /// the start (measured: 90 frames for `-ss 7 -t 3` at 30 fps, on 6.1
+    /// and 9.0 alike).
+    pub fn input_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.start_ms > 0 {
+            args.extend(["-ss".to_string(), seconds(self.start_ms)]);
+        }
+        if self.end_ms < self.source_ms {
+            args.extend(["-t".to_string(), seconds(self.len_ms())]);
+        }
+        args
+    }
+}
+
+/// The times as typed, for `--json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Requested {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+}
+
+/// What `--json` says about a range: the cut made, after any clamping, and
+/// the times as typed, so a script can see where the two differ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RangeReport {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub requested: Requested,
+}
+
+/// A range resolved for one source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clip {
+    /// `None` when the range covers the whole source: nothing is cut.
+    pub cut: Option<Cut>,
+    /// The probe as everything after the cut should see it: the clip's
+    /// length, and the source's size scaled to it. The `--max-size` budget,
+    /// the GIF memory note and the `--upscale` estimate all read these.
+    pub probe: MediaProbe,
+    /// Notes for this source only: a clamped end or start, a range that
+    /// covers everything.
+    pub notes: Vec<String>,
+    pub report: RangeReport,
+}
+
+/// Resolves `range` against the probed source. `keeps_video` is whether
+/// the target has frames, so a cut shorter than one is refused there and
+/// nowhere else.
+pub fn resolve(
+    range: &Range,
+    probe: &MediaProbe,
+    input: &Path,
+    keeps_video: bool,
+) -> crate::Result<Clip> {
+    let name = input.display();
+    let src = probe.duration_ms.filter(|&d| d > 0).ok_or_else(|| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!(
+                "cannot read the duration of {name}; {} needs it to place the cut",
+                range.flag()
+            ),
+        )
+    })?;
+    let length = format_time(src);
+    let mut notes = Vec::new();
+    let start = match &range.start {
+        None => 0,
+        Some(t) if t.from_end && t.ms > src => {
+            notes.push(format!(
+                "Source is {length} long, so the cut starts at its beginning \
+                 rather than at --start {}.",
+                t.text
+            ));
+            0
+        }
+        Some(t) if t.from_end => src - t.ms,
+        Some(t) if t.ms >= src => {
+            return Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "--start {} is past the end of {name}, which is {length} long",
+                    t.text
+                ),
+            ))
+        }
+        Some(t) => t.ms,
+    };
+    let (asked_end, end_words) = match &range.end {
+        None => (src, None),
+        Some(End::At(t)) if t.from_end => (src.saturating_sub(t.ms), None),
+        Some(End::At(t)) => (t.ms, Some(format!("--end {}", t.text))),
+        Some(End::After(d)) => (
+            start.saturating_add(d.ms),
+            Some(format!("--duration {}", d.text)),
+        ),
+    };
+    if asked_end <= start {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "{} leaves nothing of {name}, which is {length} long",
+                range.words()
+            ),
+        ));
+    }
+    let end = asked_end.min(src);
+    if let (true, Some(words)) = (asked_end > src, end_words) {
+        notes.push(format!(
+            "Source is {length} long, so the cut stops at its end rather than at {words}."
+        ));
+    }
+    let requested = Requested {
+        start: range.start.as_ref().map(|t| t.text.clone()),
+        end: match &range.end {
+            Some(End::At(t)) => Some(t.text.clone()),
+            _ => None,
+        },
+        duration: match &range.end {
+            Some(End::After(t)) => Some(t.text.clone()),
+            _ => None,
+        },
+    };
+    let report = RangeReport {
+        start_ms: start,
+        end_ms: end,
+        requested,
+    };
+    if start == 0 && end == src {
+        return Ok(Clip {
+            cut: None,
+            probe: probe.clone(),
+            notes: vec![format!(
+                "The range covers all of the {length} source, so nothing was cut."
+            )],
+            report,
+        });
+    }
+    let cut = Cut {
+        start_ms: start,
+        end_ms: end,
+        source_ms: src,
+    };
+    // One frame's length, rounded down: a cut of 33 ms at 30 fps still
+    // holds the frame it lands on.
+    if let (true, true, Some((n, d))) = (keeps_video, probe.video_streams > 0, probe.frame_rate) {
+        let frame_ms = 1000 * u64::from(d) / u64::from(n);
+        if cut.len_ms() < frame_ms {
+            return Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "the cut {}-{} is shorter than one frame of {name} ({frame_ms} ms at {} fps)",
+                    format_time(start),
+                    format_time(end),
+                    crate::video::show_rate((n, d)),
+                ),
+            ));
+        }
+    }
+    let mut narrowed = probe.clone();
+    narrowed.duration_ms = Some(cut.len_ms());
+    narrowed.size_bytes = probe.size_bytes.map(|b| {
+        u64::try_from(u128::from(b) * u128::from(cut.len_ms()) / u128::from(src))
+            .unwrap_or(u64::MAX)
+    });
+    Ok(Clip {
+        cut: Some(cut),
+        probe: narrowed,
+        notes,
+        report,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +618,173 @@ mod tests {
             assert_eq!(got, want, "{}", r.words());
             assert!(!got.contains(':'), "{got}");
         }
+    }
+
+    fn source(secs: u64) -> MediaProbe {
+        MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            frame_rate: Some((30, 1)),
+            duration_ms: Some(secs * 1000),
+            size_bytes: Some(secs * 100_000),
+            ..MediaProbe::default()
+        }
+    }
+
+    fn resolved(r: &Range, secs: u64) -> crate::Result<Clip> {
+        resolve(r, &source(secs), Path::new("talk.mp4"), true)
+    }
+
+    #[test]
+    fn a_range_inside_the_file_is_cut_where_asked() {
+        let c = resolved(&range(Some("1:02"), Some("1:10"), None), 600).unwrap();
+        assert_eq!(
+            c.cut,
+            Some(Cut {
+                start_ms: 62_000,
+                end_ms: 70_000,
+                source_ms: 600_000
+            })
+        );
+        assert!(c.notes.is_empty(), "{:?}", c.notes);
+        assert_eq!(c.probe.duration_ms, Some(8_000), "planning sees the clip");
+        assert_eq!(c.probe.size_bytes, Some(800_000), "scaled with it");
+        assert_eq!((c.report.start_ms, c.report.end_ms), (62_000, 70_000));
+        assert_eq!(c.report.requested.start.as_deref(), Some("1:02"));
+    }
+
+    #[test]
+    fn times_from_the_end_count_back_from_this_files_own_length() {
+        let c = resolved(&range(Some("-30"), None, None), 100)
+            .unwrap()
+            .cut
+            .unwrap();
+        assert_eq!((c.start_ms, c.end_ms), (70_000, 100_000));
+        let c = resolved(&range(None, Some("-5"), None), 100)
+            .unwrap()
+            .cut
+            .unwrap();
+        assert_eq!((c.start_ms, c.end_ms), (0, 95_000));
+        let c = resolved(&range(Some("1:02"), None, Some("8")), 600)
+            .unwrap()
+            .cut
+            .unwrap();
+        assert_eq!((c.start_ms, c.end_ms), (62_000, 70_000));
+    }
+
+    #[test]
+    fn an_end_past_the_file_stops_at_its_end_with_a_note() {
+        let c = resolved(&range(Some("1:00"), Some("1:10"), None), 65).unwrap();
+        assert_eq!(c.cut.unwrap().end_ms, 65_000);
+        assert_eq!(
+            c.notes,
+            ["Source is 1:05 long, so the cut stops at its end rather than at --end 1:10."]
+        );
+        let c = resolved(&range(Some("1:00"), None, Some("30")), 65).unwrap();
+        assert!(
+            c.notes[0].ends_with("rather than at --duration 30."),
+            "{:?}",
+            c.notes
+        );
+    }
+
+    #[test]
+    fn a_start_from_the_end_before_the_beginning_starts_at_it() {
+        let c = resolved(&range(Some("-30"), Some("15"), None), 20).unwrap();
+        assert_eq!(c.cut.unwrap().start_ms, 0);
+        assert_eq!(
+            c.notes,
+            ["Source is 0:20 long, so the cut starts at its beginning rather than at --start -30."]
+        );
+    }
+
+    #[test]
+    fn a_range_covering_the_whole_file_cuts_nothing_and_says_so() {
+        let c = resolved(&range(None, Some("2:00"), None), 65).unwrap();
+        assert_eq!(c.cut, None);
+        assert_eq!(
+            c.notes,
+            ["The range covers all of the 1:05 source, so nothing was cut."]
+        );
+        assert_eq!(c.probe, source(65), "the probe is left whole");
+        assert_eq!((c.report.start_ms, c.report.end_ms), (0, 65_000));
+    }
+
+    #[test]
+    fn a_start_past_the_end_is_refused_naming_the_length() {
+        let e = resolved(&range(Some("2:00"), None, None), 65).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
+        assert_eq!(
+            e.message,
+            "--start 2:00 is past the end of talk.mp4, which is 1:05 long"
+        );
+    }
+
+    #[test]
+    fn mixed_signs_that_leave_nothing_are_refused() {
+        let e = resolved(&range(Some("1:00"), Some("-30"), None), 80).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
+        assert_eq!(
+            e.message,
+            "--start 1:00 --end -30 leaves nothing of talk.mp4, which is 1:20 long"
+        );
+    }
+
+    #[test]
+    fn a_cut_shorter_than_a_frame_is_refused_only_where_there_are_frames() {
+        let r = range(Some("1"), Some("1.010"), None);
+        let e = resolved(&r, 10).unwrap_err();
+        assert!(
+            e.message.contains("shorter than one frame"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("33 ms at 30 fps"), "{}", e.message);
+        // The same 10 ms of audio is a real, if short, clip.
+        assert!(resolve(&r, &source(10), Path::new("a.mp4"), false).is_ok());
+    }
+
+    #[test]
+    fn an_unreadable_length_is_its_own_error_with_the_fix() {
+        let mut p = source(10);
+        p.duration_ms = None;
+        let e = resolve(
+            &range(Some("1"), None, None),
+            &p,
+            Path::new("live.mkv"),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::ConversionFailed);
+        assert_eq!(
+            e.message,
+            "cannot read the duration of live.mkv; --start needs it to place the cut"
+        );
+    }
+
+    #[test]
+    fn a_cut_becomes_input_options_only_where_it_cuts() {
+        let c = |s, e| {
+            Cut {
+                start_ms: s,
+                end_ms: e,
+                source_ms: 600_000,
+            }
+            .input_args()
+        };
+        assert_eq!(c(62_000, 70_000), ["-ss", "62", "-t", "8"]);
+        assert_eq!(c(62_500, 70_250), ["-ss", "62.5", "-t", "7.75"]);
+        assert_eq!(c(0, 30_000), ["-t", "30"], "from 0: no seek");
+        assert_eq!(c(62_000, 600_000), ["-ss", "62"], "to the end: no length");
+    }
+
+    #[test]
+    fn the_report_serialises_with_only_the_flags_given() {
+        let c = resolved(&range(Some("1:02"), None, Some("8")), 600).unwrap();
+        assert_eq!(
+            serde_json::to_value(&c.report).unwrap(),
+            serde_json::json!({"start_ms": 62000, "end_ms": 70000,
+                               "requested": {"start": "1:02", "duration": "8"}})
+        );
     }
 }

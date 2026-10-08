@@ -109,7 +109,7 @@ fn rate_value(s: &str) -> Option<f64> {
 }
 
 /// Formats a probed rational for a note: `24`, `29.97`.
-fn show_rate((n, d): (u32, u32)) -> String {
+pub(crate) fn show_rate((n, d): (u32, u32)) -> String {
     let v = f64::from(n) / f64::from(d);
     if (v - v.round()).abs() < 1e-6 {
         format!("{}", v.round() as i64)
