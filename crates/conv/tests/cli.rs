@@ -2836,3 +2836,88 @@ fn merge_dry_run_json_puts_a_missing_qpdf_in_plans() {
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["plans"][0]["error"]["code"], "backend_missing");
 }
+
+// --- conv split ---------------------------------------------------------
+
+#[test]
+fn split_rejects_a_malformed_range() {
+    conv()
+        .args(["split", "a.pdf", "3-"])
+        .assert()
+        .code(2)
+        .stderr(contains("`3-` is not a page range"));
+}
+
+#[test]
+fn split_takes_one_pdf() {
+    conv()
+        .args(["split", "a.pdf", "b.pdf"])
+        .assert()
+        .code(2)
+        .stderr(contains("split takes one PDF; got 2"));
+}
+
+#[test]
+fn split_json_reports_a_missing_qpdf() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.pdf"), b"%PDF").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let out = cmd
+        .current_dir(dir.path())
+        .args(["split", "a.pdf", "--json"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["results"][0]["error"]["code"], "backend_missing");
+    assert_eq!(v["results"][0]["input"], "a.pdf");
+}
+
+// --- end to end with a real qpdf ------------------------------------------
+
+fn sample_pdf() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/sample.pdf")
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn merge_end_to_end_prints_the_ok_line_and_json() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.pdf", "b.pdf"] {
+        std::fs::copy(sample_pdf(), dir.path().join(name)).unwrap();
+    }
+    conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.pdf", "b.pdf", "out.pdf"])
+        .assert()
+        .success()
+        .stdout(contains("OK out.pdf - 6 pages - ").and(contains(
+            "note  Bookmarks from b.pdf are not carried over; out.pdf keeps a.pdf's.",
+        )));
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.pdf", "b.pdf", "out.pdf", "-y", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["results"][0]["pages"], 6);
+    assert_eq!(v["results"][0]["inputs"][1], "b.pdf");
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn split_end_to_end_creates_the_outdir_and_warns_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("sample.pdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["split", "sample.pdf", "2", "-o", "pages"])
+        .assert()
+        .success()
+        .stdout(contains("OK sample-2.pdf - 1 page - "))
+        .stderr(contains(
+            "warning  Pages 1 and 3 are not in any range, so they were left out.",
+        ));
+    assert!(dir.path().join("pages/sample-2.pdf").is_file());
+}

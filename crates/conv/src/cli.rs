@@ -224,6 +224,19 @@ pages, so text stays selectable and links keep working. The first file's \
 bookmarks are kept; later files' bookmarks and every file's permission \
 restrictions are not, and conv prints a note when that happens.")]
     Merge(MergeArgs),
+
+    /// Split a PDF into one file per page, or one per page range.
+    #[command(long_about = "\
+Writes one file per page, or one file per RANGE. A RANGE is a page (5), a \
+span (1-3), or uses z for the last page (11-z); 5-1 writes pages 5 to 1 in \
+reverse order. Files are named after the input and their pages -- \
+report-01.pdf ... report-12.pdf, or report-1-3.pdf -- and go next to the \
+input, or into -o DIR.
+
+Pages no range covers are left out with a warning, and a page in more than \
+one range is written to each, with a note. A range past the last page is \
+refused before anything is written.")]
+    Split(SplitArgs),
 }
 
 #[derive(Args, Debug)]
@@ -242,6 +255,34 @@ pub struct MergeArgs {
     pub dry_run: bool,
 
     /// Show the qpdf command as it runs, and qpdf's own output.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct SplitArgs {
+    /// The PDF to split.
+    #[arg(value_name = "PDF")]
+    pub input: PathBuf,
+
+    /// Pages for each file: 5, 1-3, 11-z (z is the last page). Without
+    /// ranges, every page gets its own file.
+    #[arg(value_name = "RANGE")]
+    pub ranges: Vec<String>,
+
+    /// Write the files into this folder (created if missing).
+    #[arg(short = 'o', long, value_name = "DIR")]
+    pub outdir: Option<PathBuf>,
+
+    /// Overwrite files that already exist.
+    #[arg(short = 'y', long)]
+    pub overwrite: bool,
+
+    /// Print the qpdf commands instead of running them.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Show each qpdf command as it runs, and qpdf's own output.
     #[arg(short = 'v', long)]
     pub verbose: bool,
 }
