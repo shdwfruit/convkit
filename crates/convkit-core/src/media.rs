@@ -642,6 +642,32 @@ fn copyable_audio_for(to: Format) -> Option<&'static [&'static str]> {
     }
 }
 
+/// A video or audio file stripped into its own container: every stream
+/// copied as it is, so nothing is re-encoded and no track is lost, except
+/// the data tracks (timecode, Apple's mebx, GoPro's GPS), which can carry
+/// a location of their own. The mov/mp4 muxer rebuilds a timecode track
+/// from the copied video anyway, and `VIDEO_TO_MKV` drops data the same
+/// way. `kept` is the probe's kept tags, written back after the clear.
+pub(crate) fn same_format_copy(
+    to: Format,
+    kept: &[(String, String)],
+    input: &Path,
+    output: &Path,
+) -> MediaInvocation {
+    let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
+    push(&mut argv, &["-map", "0", "-map", "-0:d", "-c", "copy"]);
+    argv.extend(crate::metadata::ffmpeg_args(kept));
+    if matches!(to, Format::Mp4 | Format::Mov | Format::M4a) {
+        push(&mut argv, &["-movflags", "+faststart"]);
+    }
+    push(&mut argv, &["-y"]);
+    argv.push(output.to_string_lossy().into_owned());
+    MediaInvocation {
+        argv,
+        warnings: Vec::new(),
+    }
+}
+
 /// Builds a stream-copy audio extraction when the source's first audio
 /// stream is already in a codec the target container holds natively.
 /// `None` falls back to the registry's static transcode recipe — including

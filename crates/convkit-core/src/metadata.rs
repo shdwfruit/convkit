@@ -48,6 +48,50 @@ pub(crate) fn ffmpeg_args(kept: &[(String, String)]) -> Vec<String> {
     argv
 }
 
+/// Whether a file of format `f` can be stripped into a file of its own
+/// format (`photo.jpg` -> `photo-stripped.jpg`), and if not, why, with the
+/// fix. Shared by the planner and the command line, so both say the same.
+pub fn in_place(f: Format) -> Result<(), String> {
+    match f {
+        Format::Jpg
+        | Format::Png
+        | Format::Webp
+        | Format::Avif
+        | Format::Tiff
+        | Format::Bmp
+        | Format::Mp4
+        | Format::Mov
+        | Format::Mkv
+        | Format::Webm
+        | Format::Mp3
+        | Format::M4a
+        | Format::Flac
+        | Format::Wav => Ok(()),
+        Format::Heic | Format::Heif => Err(format!(
+            "conv cannot write {}; add --to jpg to strip it into a jpg",
+            f.ext()
+        )),
+        _ => Err(format!(
+            "--strip-metadata cannot keep a {0} as {0}; add --to <format> to convert it",
+            f.ext()
+        )),
+    }
+}
+
+/// The note on a lossy image stripped into its own format: ImageMagick
+/// decodes and encodes again, so the picture pays a generation.
+pub(crate) fn reencode_note(to: Format, tuning: &Tuning) -> String {
+    let quality = tuning.quality.map_or_else(
+        || crate::registry::IMAGE_QUALITY.to_string(),
+        |q| q.to_string(),
+    );
+    format!(
+        "The {0} is re-encoded at quality {quality} to remove its metadata; ImageMagick \
+         cannot take it out of a {0} without re-encoding.",
+        to.ext()
+    )
+}
+
 /// Whether ImageMagick carries an EXIF GPS from `from` into `to`, as
 /// measured: jpg, webp, avif and pdf keep the EXIF profile (a pdf inside its
 /// embedded JPEG), and png keeps it three times over (an eXIf chunk, a raw

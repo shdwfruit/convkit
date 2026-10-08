@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::recipe::{ScaleStyle, VideoChainSpec};
-use crate::{Arg, Backend, Format, OutputMode, Recipe, Step, Tuning};
+use crate::{Arg, Backend, Format, Kind, OutputMode, Recipe, Step, Tuning};
 
 /// JPEG/WebP/AVIF quality. Visually transparent without bloat; see spec §7.4.
 /// `pub` so `conv capabilities <format>` can state the default it is
@@ -299,22 +299,28 @@ const RASTER_WRITABLE: &[Format] = &[
 
 type Table = BTreeMap<(Format, Format), Recipe>;
 
+/// The recipe every raster source takes to `to`, by `to`'s frame policy:
+/// jpg/png/bmp hold one image, so they take the first frame explicitly (jpg
+/// additionally flattens alpha); webp/avif hold animation and alpha as-is;
+/// tiff holds multi-page sources faithfully. `None` for a format conv does
+/// not write. Also what a raster stripped into its own format runs.
+pub(crate) fn image_recipe_for(to: Format) -> Option<Recipe> {
+    Some(match to {
+        Format::Jpg => IMG_TO_JPG,
+        Format::Png | Format::Bmp => IMG_LOSSLESS_SINGLE_FRAME,
+        _ if !RASTER_WRITABLE.contains(&to) => return None,
+        _ if is_lossy(to) => IMG_LOSSY,
+        _ => IMG_LOSSLESS,
+    })
+}
+
 fn insert_image_family(t: &mut Table) {
     for &from in RASTER {
         for &to in RASTER_WRITABLE {
             if from == to {
                 continue;
             }
-            // Frame policy per target: jpg/png/bmp hold one image, so they
-            // take the first frame explicitly (jpg additionally flattens
-            // alpha); webp/avif hold animation and alpha as-is; tiff holds
-            // multi-page sources faithfully.
-            let recipe = match to {
-                Format::Jpg => IMG_TO_JPG,
-                Format::Png | Format::Bmp => IMG_LOSSLESS_SINGLE_FRAME,
-                _ if is_lossy(to) => IMG_LOSSY,
-                _ => IMG_LOSSLESS,
-            };
+            let recipe = image_recipe_for(to).expect("every writable raster has a recipe");
             t.insert((from, to), recipe);
         }
         t.insert((from, Format::Pdf), IMG_TO_PDF);
@@ -1292,11 +1298,16 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
     if needs_probe(from, to) {
         return true;
     }
-    // --strip-metadata writes back the content tags the probe reads.
-    if tuning.strip_metadata
-        && lookup(from, to).is_some_and(|r| r.steps.iter().any(|s| s.backend == Backend::Ffmpeg))
-    {
-        return true;
+    // --strip-metadata writes back the content tags the probe reads, on
+    // every ffmpeg pair and on a video or audio file stripped into its own
+    // format.
+    if tuning.strip_metadata {
+        let ffmpeg =
+            lookup(from, to).is_some_and(|r| r.steps.iter().any(|s| s.backend == Backend::Ffmpeg));
+        let in_place = from == to && matches!(from.kind(), Kind::Video | Kind::Audio);
+        if ffmpeg || in_place {
+            return true;
+        }
     }
     if tuning.fps.is_none() && tuning.resize.is_none() {
         return false;
@@ -1341,7 +1352,14 @@ pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::pr
 /// the frame and alpha notes, and the location note wherever the target
 /// keeps an EXIF GPS and the flag is not taking it out.
 pub fn notes_need_image(from: Format, to: Format, tuning: &Tuning) -> bool {
-    let frame_notes = lookup(from, to).is_some_and(|r| {
+    // A file stripped into its own format runs the recipe any raster takes
+    // to that format, and carries its notes.
+    let recipe = lookup(from, to).or_else(|| {
+        (from == to && tuning.strip_metadata)
+            .then(|| image_recipe_for(to))
+            .flatten()
+    });
+    let frame_notes = recipe.is_some_and(|r| {
         r.warnings
             .iter()
             .any(|&w| matches!(w, FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE))
@@ -1564,6 +1582,12 @@ mod tests {
         }
         assert!(!notes_need_image(Format::Svg, Format::Jpg, &off));
         assert!(!notes_need_image(Format::Mp4, Format::Gif, &off));
+        // Stripped into its own format, a jpg/png/bmp is read like any
+        // other source to one; without the flag there is no such pair.
+        assert!(notes_need_image(Format::Jpg, Format::Jpg, &on));
+        assert!(notes_need_image(Format::Png, Format::Png, &on));
+        assert!(!notes_need_image(Format::Webp, Format::Webp, &on));
+        assert!(!notes_need_image(Format::Jpg, Format::Jpg, &off));
         let opaque = read_image(Some(false), false);
         assert_eq!(
             notes(Format::Svg, Format::Jpg, Some(&opaque)),
