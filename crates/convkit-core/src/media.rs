@@ -354,6 +354,11 @@ fn mapped_invocation(
 
     if strip {
         argv.extend(crate::metadata::ffmpeg_args(&probe.kept_tags));
+        // Only mkv maps attachments (`-map 0` above); the others leave them
+        // out and say so.
+        if to == Format::Mkv && probe.attachment_streams > 0 {
+            push(&mut argv, &crate::metadata::KEEP_ATTACHMENT_TAGS);
+        }
     }
     if matches!(to, Format::Mp4 | Format::Mov) {
         push(&mut argv, &["-movflags", "+faststart"]);
@@ -650,22 +655,30 @@ fn copyable_audio_for(to: Format) -> Option<&'static [&'static str]> {
 /// way. `kept` is the probe's kept tags, written back after the clear.
 pub(crate) fn same_format_copy(
     to: Format,
-    kept: &[(String, String)],
+    probe: Option<&MediaProbe>,
     input: &Path,
     output: &Path,
 ) -> MediaInvocation {
     let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
-    push(&mut argv, &["-map", "0", "-map", "-0:d", "-c", "copy"]);
-    argv.extend(crate::metadata::ffmpeg_args(kept));
+    let mut warnings = Vec::new();
+    push(&mut argv, &["-map", "0", "-map", "-0:d"]);
+    if to == Format::Mkv && probe.is_none() {
+        push(&mut argv, &["-map", "-0:t"]);
+        warnings.push(crate::metadata::ATTACHMENTS_UNREAD_NOTE.to_string());
+    }
+    push(&mut argv, &["-c", "copy"]);
+    argv.extend(crate::metadata::ffmpeg_args(
+        probe.map_or(&[][..], |p| p.kept_tags.as_slice()),
+    ));
+    if to == Format::Mkv && probe.is_some_and(|p| p.attachment_streams > 0) {
+        push(&mut argv, &crate::metadata::KEEP_ATTACHMENT_TAGS);
+    }
     if matches!(to, Format::Mp4 | Format::Mov | Format::M4a) {
         push(&mut argv, &["-movflags", "+faststart"]);
     }
     push(&mut argv, &["-y"]);
     argv.push(output.to_string_lossy().into_owned());
-    MediaInvocation {
-        argv,
-        warnings: Vec::new(),
-    }
+    MediaInvocation { argv, warnings }
 }
 
 /// Builds a stream-copy audio extraction when the source's first audio
@@ -761,6 +774,32 @@ mod tests {
         assert_eq!(m.argv.last().unwrap(), "out.mp4");
         let plain = stream_mapped_invocation(Format::Mp4, &p, false, &i, &o).unwrap();
         assert!(!plain.argv.iter().any(|a| a == "-map_metadata"));
+    }
+
+    /// Matroska refuses an attachment without its `filename` and
+    /// `mimetype` tags, so a stripped mkv keeps the attachments' own tags;
+    /// the option errors when there is no attachment, so only then. With no
+    /// probe to say, attachments are left out of an in-place copy.
+    #[test]
+    fn a_stripped_mkv_keeps_its_attachments_tags() {
+        let restore = ["-map_metadata:s:t", "0:s:t"];
+        let (i, o) = (PathBuf::from("in.mkv"), PathBuf::from("out.mkv"));
+        let mut fonts = probe(Some("h264"), &["aac"], &["ass"], 0);
+        fonts.attachment_streams = 1;
+        let plain = probe(Some("h264"), &["aac"], &[], 0);
+
+        let m = same_format_copy(Format::Mkv, Some(&fonts), &i, &o);
+        assert!(has(&m.argv, restore), "{:?}", m.argv);
+        let m = same_format_copy(Format::Mkv, Some(&plain), &i, &o);
+        assert!(!has(&m.argv, restore), "{:?}", m.argv);
+        let m = same_format_copy(Format::Mkv, None, &i, &o);
+        assert!(has(&m.argv, ["-map", "-0:t"]), "{:?}", m.argv);
+        assert!(!has(&m.argv, restore), "{:?}", m.argv);
+
+        let m = stream_mapped_invocation(Format::Mkv, &fonts, true, &i, &o).unwrap();
+        assert!(has(&m.argv, restore), "{:?}", m.argv);
+        let m = stream_mapped_invocation(Format::Mkv, &fonts, false, &i, &o).unwrap();
+        assert!(!has(&m.argv, restore), "{:?}", m.argv);
     }
 
     #[test]

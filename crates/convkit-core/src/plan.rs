@@ -180,6 +180,8 @@ pub fn build_tuned(
                 m.warnings.extend(resolved.notes.iter().cloned());
                 m.warnings
                     .extend(crate::metadata::location_note(from, to, probe, tuning));
+                m.warnings
+                    .extend(crate::metadata::labels_note(to, tuning, probe));
                 // Every invocation `media.rs` builds opens with
                 // `-i <input>` and closes with the output path, so the
                 // path positions (for the Windows long-path rewriter) are
@@ -228,6 +230,7 @@ pub fn build_tuned(
     warnings.extend(resolved.notes.iter().cloned());
     warnings.extend(crate::metadata::tags_unread_note(to, tuning, probe));
     warnings.extend(crate::metadata::location_note(from, to, probe, tuning));
+    warnings.extend(crate::metadata::labels_note(to, tuning, probe));
 
     Ok(ConversionPlan {
         from,
@@ -350,7 +353,7 @@ fn in_place(
                     ),
                 ));
             }
-            let m = media::same_format_copy(format, kept, &inputs[0], output);
+            let m = media::same_format_copy(format, probe, &inputs[0], output);
             let path_args = vec![1, m.argv.len() - 1];
             let step = PlannedStep {
                 backend: Backend::Ffmpeg,
@@ -365,6 +368,7 @@ fn in_place(
         }
     };
     warnings.extend(crate::metadata::tags_unread_note(format, tuning, probe));
+    warnings.extend(crate::metadata::labels_note(format, tuning, probe));
     Ok(ConversionPlan {
         from: format,
         to: format,

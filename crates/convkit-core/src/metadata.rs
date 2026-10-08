@@ -48,6 +48,20 @@ pub(crate) fn ffmpeg_args(kept: &[(String, String)]) -> Vec<String> {
     argv
 }
 
+/// Gives an mkv's attachments (fonts) their own tags back after
+/// `ffmpeg_args` has cleared them: Matroska refuses an attachment without
+/// its `filename` and `mimetype` ("Could not write header"), and a font's
+/// file name says nothing about who made the video. Only where the probe
+/// saw an attachment, since ffmpeg errors on a stream specifier that
+/// matches no stream (6.1 and 9.0 alike).
+pub(crate) const KEEP_ATTACHMENT_TAGS: [&str; 2] = ["-map_metadata:s:t", "0:s:t"];
+
+/// Said when an mkv is stripped into its own format with no probe: without
+/// one conv cannot tell whether it has attachments, which cannot be copied
+/// once their tags are cleared, so they are left out.
+pub(crate) const ATTACHMENTS_UNREAD_NOTE: &str = "Any attachments (fonts) are left out, \
+     since ffprobe could not read the file and they cannot be copied without their tags.";
+
 /// Whether a file of format `f` can be stripped into a file of its own
 /// format (`photo.jpg` -> `photo-stripped.jpg`), and if not, why, with the
 /// fix. Shared by the planner and the command line, so both say the same.
@@ -153,6 +167,37 @@ pub(crate) fn location_note(
     })
 }
 
+/// The note on labels the flag clears that the target would otherwise have
+/// kept, as measured with conv: track languages survive into mp4, mov, m4a,
+/// mkv and webm, and chapter names into those and mp3; flac and wav keep
+/// neither. Writing them back would mean matching every output stream to
+/// its input across each mapping, which a wrong guess turns into a
+/// mislabelled track, so the loss is said instead.
+pub(crate) fn labels_note(
+    to: Format,
+    tuning: &Tuning,
+    probe: Option<&MediaProbe>,
+) -> Option<String> {
+    let p = probe.filter(|_| tuning.strip_metadata)?;
+    let languages = p.track_languages
+        && matches!(
+            to,
+            Format::Mp4 | Format::Mov | Format::M4a | Format::Mkv | Format::Webm
+        );
+    let chapters = p.chapter_titles
+        && matches!(
+            to,
+            Format::Mp4 | Format::Mov | Format::M4a | Format::Mkv | Format::Webm | Format::Mp3
+        );
+    let what = match (languages, chapters) {
+        (true, true) => "Track languages and chapter names are",
+        (true, false) => "Track languages are",
+        (false, true) => "Chapter names are",
+        (false, false) => return None,
+    };
+    Some(format!("{what} cleared with the rest of the tags."))
+}
+
 /// Said when the flag cleared a video or audio file's tags with no probe to
 /// read the kept ones from: ffprobe is missing, or could not read the file.
 pub(crate) const TAGS_UNREAD_NOTE: &str = "ffprobe could not read the tags, so all of them \
@@ -218,6 +263,33 @@ mod tests {
             ..Tuning::default()
         };
         assert!(location_note(Format::Heic, Format::Jpg, Some(&photo(true)), &on).is_none());
+    }
+
+    /// Labels the target would have kept are said to go, and only those:
+    /// flac and wav keep neither, mp3 keeps chapters but no languages.
+    #[test]
+    fn the_flag_says_when_it_clears_track_languages_or_chapter_names() {
+        let on = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        let movie = MediaProbe {
+            track_languages: true,
+            chapter_titles: true,
+            ..MediaProbe::default()
+        };
+        assert_eq!(
+            labels_note(Format::Mkv, &on, Some(&movie)).unwrap(),
+            "Track languages and chapter names are cleared with the rest of the tags."
+        );
+        assert_eq!(
+            labels_note(Format::Mp3, &on, Some(&movie)).unwrap(),
+            "Chapter names are cleared with the rest of the tags."
+        );
+        assert!(labels_note(Format::Flac, &on, Some(&movie)).is_none());
+        assert!(labels_note(Format::Mkv, &Tuning::default(), Some(&movie)).is_none());
+        assert!(labels_note(Format::Mkv, &on, Some(&MediaProbe::default())).is_none());
+        assert!(labels_note(Format::Mkv, &on, None).is_none());
     }
 
     /// The mov muxer writes `location` but drops Apple's keys; Matroska,

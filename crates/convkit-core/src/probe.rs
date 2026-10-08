@@ -74,6 +74,11 @@ pub struct MediaProbe {
     pub kept_tags: Vec<(String, String)>,
     /// Which location tags the container carries.
     pub location: LocationTags,
+    /// Whether any stream names its language (anything but `und`), and
+    /// whether any chapter has a title: labels `--strip-metadata` clears,
+    /// which it says when it does.
+    pub track_languages: bool,
+    pub chapter_titles: bool,
 }
 
 /// The two ways a video or audio file records where it was made. Outputs
@@ -187,6 +192,8 @@ pub fn parse(json: &str) -> MediaProbe {
 
     let mut p = MediaProbe::default();
     for s in streams {
+        let language = s.pointer("/tags/language").and_then(|l| l.as_str());
+        p.track_languages |= language.is_some_and(|l| !l.is_empty() && l != "und");
         let kind = s.get("codec_type").and_then(|t| t.as_str()).unwrap_or("");
         // ffprobe omits codec_name entirely for codecs it cannot identify;
         // see `audio_codecs`' docs for why that becomes a placeholder
@@ -269,6 +276,16 @@ pub fn parse(json: &str) -> MediaProbe {
             _ => {}
         }
     }
+    p.chapter_titles = v
+        .get("chapters")
+        .and_then(|c| c.as_array())
+        .is_some_and(|chapters| {
+            chapters.iter().any(|c| {
+                c.pointer("/tags/title")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| !t.is_empty())
+            })
+        });
     if let Some(format) = v.get("format") {
         p.duration_ms = format
             .get("duration")
@@ -327,6 +344,8 @@ pub fn run(ffprobe: &Path, input: &Path) -> Result<MediaProbe> {
     }
     // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
     // inside `backend_command`, not repeated here -- see its docs.
+    // `-show_chapters` only so `--strip-metadata` can say when it clears
+    // chapter names; it costs nothing on a file without chapters.
     let out = backend_command(ffprobe)
         .args([
             "-v",
@@ -335,6 +354,7 @@ pub fn run(ffprobe: &Path, input: &Path) -> Result<MediaProbe> {
             "json",
             "-show_streams",
             "-show_format",
+            "-show_chapters",
         ])
         .arg(input)
         .output()
@@ -594,6 +614,25 @@ mod tests {
         );
         let plain = parse(r#"{"streams":[],"format":{"tags":{"title":"x"}}}"#);
         assert_eq!(plain.location, LocationTags::default());
+    }
+
+    /// A track language other than `und`, and a chapter with a title, are
+    /// labels `--strip-metadata` clears, so the probe notices them.
+    #[test]
+    fn streams_and_chapters_say_whether_they_are_labelled() {
+        let p = parse(
+            r#"{"streams":[
+                {"codec_type":"video","codec_name":"h264","tags":{"language":"und"}},
+                {"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}}],
+               "chapters":[{"id":0,"tags":{"title":"Opening"}}],
+               "format":{}}"#,
+        );
+        assert!(p.track_languages && p.chapter_titles);
+        let plain = parse(
+            r#"{"streams":[{"codec_type":"audio","codec_name":"aac","tags":{"language":"und"}}],
+               "chapters":[{"id":0}],"format":{}}"#,
+        );
+        assert!(!plain.track_languages && !plain.chapter_titles);
     }
 
     #[test]

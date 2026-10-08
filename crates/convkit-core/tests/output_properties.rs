@@ -1276,8 +1276,10 @@ fn image_notes_say_only_what_the_source_holds() {
     let (_, photo) = convert_path(&fixture("photo.heic"), "jpg");
     assert_eq!(
         photo.warnings,
-        ["The source records a GPS location, and the jpg keeps it; add \
-          --strip-metadata to remove it."]
+        [
+            "The source records a GPS location, and the jpg keeps it; add \
+          --strip-metadata to remove it."
+        ]
     );
 
     let dir = tmp();
@@ -2542,6 +2544,39 @@ fn a_video_stripped_in_place_is_copied_not_re_encoded() {
     assert_eq!(after.video_codec, before.video_codec);
     assert_eq!(after.audio_codecs, before.audio_codecs);
     assert_eq!(after.rotation.map(i32::abs), Some(90));
+}
+
+/// An mkv carrying a font attachment, as subtitled anime does: Matroska
+/// refuses an attachment whose tags were cleared, so the strip has to give
+/// them back. The font stays, the location goes.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_mkv_with_a_font_attachment_can_be_stripped() {
+    let dir = tmp();
+    let font = dir.path().join("font.ttf");
+    std::fs::write(&font, b"not really a font").unwrap();
+    let anime = dir.path().join("anime.mkv");
+    run_ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=64x48:rate=10:duration=1",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-attach",
+        &font.to_string_lossy(),
+        "-metadata:s:t",
+        "mimetype=application/x-truetype-font",
+        "-metadata",
+        "location=+51.5007-000.1246/",
+        &anime.to_string_lossy(),
+    ]);
+    let clean = dir.path().join("anime-stripped.mkv");
+    convert_tuned(&anime, &clean, &stripped()).unwrap();
+    assert!(!carries_location(&clean));
+    assert_eq!(probe_media(&clean).attachment_streams, 1);
 }
 
 /// An m4a with a title, an artist and a location, into mp3: the note

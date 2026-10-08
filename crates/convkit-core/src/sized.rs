@@ -149,8 +149,10 @@ struct Prepared<'a> {
     /// `--strip-metadata`: the file is never byte-copied, and the pass that
     /// writes it clears the tags.
     strip: bool,
-    /// The location note, decided once so every attempt's plan carries it.
+    /// The location note, and `--strip-metadata`'s note on the labels it
+    /// clears, decided once so every attempt's plan carries them.
     location_note: Option<String>,
+    labels_note: Option<String>,
 }
 
 /// The plan for a `--max-size` conversion. Pure: the probe is the caller's.
@@ -201,6 +203,7 @@ pub(crate) fn plan(
                     .warnings
                     .into_iter()
                     .chain(p.location_note.clone())
+                    .chain(p.labels_note.clone())
                     .collect(),
                 sizing: Some(sizing),
                 enlarged: None,
@@ -369,6 +372,7 @@ fn prepare<'a>(
         max,
         strip: tuning.strip_metadata,
         location_note: crate::metadata::location_note(from, to, Some(probe), tuning),
+        labels_note: crate::metadata::labels_note(to, tuning, Some(probe)),
     })
 }
 
@@ -437,6 +441,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
     })?;
     let mut warnings = two.pass2.warnings;
     warnings.extend(p.location_note.clone());
+    warnings.extend(p.labels_note.clone());
     // GIF's static recipes carry the one fact the stream mapping cannot
     // know: a looping GIF becomes a single play.
     if p.from == Format::Gif {

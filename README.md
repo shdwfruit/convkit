@@ -337,6 +337,10 @@ OK IMG_0042-stripped.jpg - 2.5 MB - 0.3s
   note  The jpg is re-encoded at quality 92 to remove its metadata; ImageMagick cannot take it out of a jpg without re-encoding.
 ```
 
+Track languages and chapter names go with the other tags, and a note says
+so when the file has them. Cover art is kept as it is, so a cover made from
+a phone photo can still carry that photo's EXIF.
+
 The note goes by the EXIF in an image's header and the tags ffprobe
 reports. A WebP source never gets it, because its header read loads no
 EXIF, and neither does a location kept only in XMP; the flag removes both
