@@ -7,3 +7,4 @@
 pub mod clips;
 pub mod draw;
 pub mod session;
+pub mod term;
