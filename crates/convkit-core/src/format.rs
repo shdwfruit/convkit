@@ -45,6 +45,7 @@ pub enum Format {
     Tiff,
     Bmp,
     Svg,
+    Ico,
     // Documents
     Pdf,
     Docx,
@@ -94,6 +95,7 @@ const TABLE: &[(Format, Kind, &[&str], &[&str])] = &[
     (Format::Tiff, Kind::Image, &["tiff", "tif"], &[]),
     (Format::Bmp, Kind::Image, &["bmp"], &[]),
     (Format::Svg, Kind::Image, &["svg"], &[]),
+    (Format::Ico, Kind::Image, &["ico"], &[]),
     (Format::Pdf, Kind::Document, &["pdf"], &[]),
     (Format::Docx, Kind::Document, &["docx"], &[]),
     (Format::Xlsx, Kind::Document, &["xlsx"], &[]),

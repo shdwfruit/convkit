@@ -474,7 +474,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         enlarged: None,
         cut: p.cut,
         mute: false,
-        ogg_tags: false,
+        ..ResolvedVideo::default()
     };
     let passlog = p.output.with_extension("convkit-pass");
     let two = media::two_pass_invocations(
