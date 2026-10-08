@@ -5,4 +5,5 @@
 #![allow(dead_code)]
 
 pub mod clips;
+pub mod draw;
 pub mod session;

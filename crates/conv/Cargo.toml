@@ -44,6 +44,9 @@ anstyle = "1"
 # `render::ansi_supported`). Already in the tree via clap/anstream, which is
 # why `--help` rendered correctly on conhost while conv's own output did not.
 anstyle-query = "1"
+# conv trim sends its picture to kitty and iTerm2 as base64. Already in the
+# tree through ureq.
+base64 = "0.22"
 
 # APFS resolves names normalization-insensitively (NFC and NFD spellings of
 # one stem land on one physical file), so the batch output-collision key

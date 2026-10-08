@@ -234,6 +234,7 @@ dependencies = [
  "anstyle",
  "anstyle-query",
  "assert_cmd",
+ "base64",
  "clap",
  "convkit-core",
  "glob",
