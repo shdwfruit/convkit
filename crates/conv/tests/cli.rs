@@ -2801,3 +2801,75 @@ fn the_gif_buffering_note_shows_only_for_a_long_source() {
         }
     }
 }
+
+/// One pair's tuning flags, from `conv capabilities FORMAT --json`.
+fn tuning_row(v: &serde_json::Value, to: &str) -> Vec<serde_json::Value> {
+    v["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["to"] == to)
+        .unwrap_or_else(|| panic!("no {to} row"))["tuning"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// Every pair with a timeline lists the range flags, and nothing else does.
+#[test]
+fn capabilities_lists_the_range_flags_where_a_cut_works() {
+    let out = conv()
+        .args(["capabilities", "mp4", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    for target in ["mov", "mkv", "webm", "gif", "mp3", "m4a", "wav", "flac"] {
+        let flags = tuning_row(&v, target);
+        for f in ["--start", "--end", "--duration"] {
+            assert!(flags.iter().any(|x| x == f), "mp4 -> {target} lacks {f}");
+        }
+    }
+    let out = conv()
+        .args(["capabilities", "png", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert!(!tuning_row(&v, "jpg").iter().any(|x| x == "--start"));
+}
+
+#[test]
+fn a_range_on_an_image_is_refused_by_name() {
+    conv()
+        .args(["photo.png", "out.jpg", "--start", "5", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--start does not apply to png -> jpg: jpg is a still image",
+        ));
+}
+
+#[test]
+fn a_start_after_the_end_is_a_usage_error() {
+    conv()
+        .args([
+            "talk.mp4",
+            "clip.mp4",
+            "--start",
+            "1:10",
+            "--end",
+            "1:02",
+            "--dry-run",
+        ])
+        .assert()
+        .code(2)
+        .stderr(contains("--start 1:10 is not before --end 1:02"));
+}
+
+#[test]
+fn a_malformed_time_names_the_forms_that_work() {
+    conv()
+        .args(["talk.mp4", "clip.mp4", "--start", "1:75", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("seconds after a colon run 0-59"));
+}
