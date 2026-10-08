@@ -877,6 +877,7 @@ impl StepRunner<'_> {
         temp_final: &Path,
     ) -> Result<SizedRun> {
         if sizing.strategy == Strategy::Copy {
+            debug_assert!(built.range.is_none(), "a cut is never a whole-file copy");
             copy_fresh(&req.inputs[0], temp_final)?;
             return Ok(SizedRun::new(built, sizing, 0));
         }

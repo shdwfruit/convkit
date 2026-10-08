@@ -142,7 +142,9 @@ struct Prepared<'a> {
     to: Format,
     inputs: &'a [PathBuf],
     output: &'a Path,
-    probe: &'a MediaProbe,
+    /// The probe as the plan sees it: under a range, narrowed to the clip
+    /// (its length, and the file's size scaled to it).
+    probe: MediaProbe,
     src: Source,
     limits: Limits,
     max: &'a MaxSize,
@@ -153,6 +155,10 @@ struct Prepared<'a> {
     /// clears, decided once so every attempt's plan carries them.
     location_note: Option<String>,
     labels_note: Option<String>,
+    /// The range's cut, carried into every pass.
+    cut: Option<crate::trim::Cut>,
+    range: Option<crate::trim::RangeReport>,
+    clip_notes: Vec<String>,
 }
 
 /// The plan for a `--max-size` conversion. Pure: the probe is the caller's.
@@ -175,10 +181,13 @@ pub(crate) fn plan(
         || p.limits.max_fps.is_some_and(|r| {
             u64::from(r.0) * u64::from(src_rate.1) < u64::from(src_rate.0) * u64::from(r.1)
         });
-    if !caps_bind && p.probe.size_bytes.is_some_and(|b| b <= max.bytes) {
+    // A copy can only be exact from the start of the file: a cut starting
+    // later re-encodes (see `plan::build_tuned`), so it is never copied.
+    let copy_ok = p.cut.is_none_or(|c| c.start_ms == 0);
+    if !caps_bind && copy_ok && p.probe.size_bytes.is_some_and(|b| b <= max.bytes) {
         // A byte copy carries every tag along, so a stripped file is
         // remuxed instead, which clears them.
-        if from == to && !p.strip {
+        if from == to && p.cut.is_none() && !p.strip {
             sizing.strategy = Strategy::Copy;
             return Ok(ConversionPlan {
                 from,
@@ -186,31 +195,40 @@ pub(crate) fn plan(
                 inputs: inputs.to_vec(),
                 output: output.to_path_buf(),
                 steps: Vec::new(),
-                warnings: p.location_note.iter().cloned().collect(),
+                warnings: p
+                    .clip_notes
+                    .iter()
+                    .cloned()
+                    .chain(p.location_note.clone())
+                    .collect(),
                 sizing: Some(sizing),
                 enlarged: None,
-                range: None,
+                range: p.range.clone(),
             });
         }
-        if let Some(m) =
-            media::stream_mapped_invocation(to, p.probe, p.strip, None, &inputs[0], output)
-        {
+        if let Some(m) = media::stream_mapped_invocation(
+            to,
+            &p.probe,
+            p.strip,
+            p.cut.as_ref(),
+            &inputs[0],
+            output,
+        ) {
             sizing.strategy = Strategy::Remux;
+            let mut warnings = m.warnings;
+            warnings.extend(p.clip_notes.iter().cloned());
+            warnings.extend(p.location_note.clone());
+            warnings.extend(p.labels_note.clone());
             return Ok(ConversionPlan {
                 from,
                 to,
                 inputs: inputs.to_vec(),
                 output: output.to_path_buf(),
                 steps: vec![ffmpeg_step(m.argv, OutputMode::Path, output.to_path_buf())],
-                warnings: m
-                    .warnings
-                    .into_iter()
-                    .chain(p.location_note.clone())
-                    .chain(p.labels_note.clone())
-                    .collect(),
+                warnings,
                 sizing: Some(sizing),
                 enlarged: None,
-                range: None,
+                range: p.range.clone(),
             });
         }
     }
@@ -284,7 +302,9 @@ fn new_sizing(p: &Prepared<'_>, strategy: Strategy) -> SizingPlan {
         choice: None,
         warning: None,
         suggested: None,
-        source_bytes: p.probe.size_bytes,
+        // A clip's size is only an estimate (the file's size scaled to the
+        // clip's length), and the notes that print this say "Already".
+        source_bytes: p.probe.size_bytes.filter(|_| p.cut.is_none()),
     }
 }
 
@@ -341,7 +361,19 @@ fn prepare<'a>(
             ),
         )
     })?;
-    let src = Source::from_probe(probe).map_err(|gap| gap_error(gap, input))?;
+    // A range is resolved against the whole file; the budget then sizes the
+    // clip, and the already-small check weighs the clip's share of the
+    // file, not all of it.
+    let clip = tuning
+        .range
+        .as_ref()
+        .map(|r| crate::trim::clip(from, to, r, Some(probe), input))
+        .transpose()?;
+    let (probe, cut, range, clip_notes) = match clip {
+        Some(c) => (c.probe, c.cut, Some(c.report), c.notes),
+        None => (probe.clone(), None, None, Vec::new()),
+    };
+    let src = Source::from_probe(&probe).map_err(|gap| gap_error(gap, input))?;
     // A rate that cannot be held exactly is refused: dropping it would leave
     // the conversion with no ceiling the user asked for.
     let max_fps = tuning
@@ -365,6 +397,8 @@ fn prepare<'a>(
             .map(|g| video::fit_within(g, (src.width, src.height))),
         max_fps,
     };
+    let location_note = crate::metadata::location_note(from, to, Some(&probe), tuning);
+    let labels_note = crate::metadata::labels_note(to, tuning, Some(&probe));
     Ok(Prepared {
         from,
         to,
@@ -375,8 +409,11 @@ fn prepare<'a>(
         limits,
         max,
         strip: tuning.strip_metadata,
-        location_note: crate::metadata::location_note(from, to, Some(probe), tuning),
-        labels_note: crate::metadata::labels_note(to, tuning, Some(probe)),
+        location_note,
+        labels_note,
+        cut,
+        range,
+        clip_notes,
     })
 }
 
@@ -421,12 +458,12 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         keep_source_rate: false,
         keep_source_size: false,
         enlarged: None,
-        cut: None,
+        cut: p.cut,
     };
     let passlog = p.output.with_extension("convkit-pass");
     let two = media::two_pass_invocations(
         p.to,
-        p.probe,
+        &p.probe,
         &resolved,
         choice.video_bps,
         choice.audio_kbps,
@@ -454,6 +491,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
             warnings.extend(r.warnings.iter().map(|w| (*w).to_string()));
         }
     }
+    warnings.extend(p.clip_notes.iter().cloned());
     if choice.extreme {
         sizing.warning = Some(extreme_sentence(&p.src, &sizing, &choice));
         // The suggestion was found against this attempt's budget; the user
@@ -478,24 +516,27 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         warnings,
         sizing: Some(sizing),
         enlarged: None,
-        range: None,
+        range: p.range.clone(),
     })
 }
 
 /// An ffmpeg step with its path positions recorded for the Windows
-/// long-path rewriter: the input (always argv[1]), the pass log, and the
-/// output for a step that writes one. Pass 1 ends in `-`, which is not a
-/// path.
+/// long-path rewriter: the input (after any cut's `-ss`/`-t`), the pass
+/// log, and the output for a step that writes one. Pass 1 ends in `-`,
+/// which is not a path.
 fn ffmpeg_step(argv: Vec<String>, mode: OutputMode, output: PathBuf) -> PlannedStep {
-    let mut path_args = vec![1];
-    // Searched from argv[2]: argv[1] is the input, whose name may look like
-    // anything. mkv scopes the flag to the video stream.
+    let input = media::input_position(&argv);
+    let mut path_args = vec![input];
+    // Searched after the input, whose name may look like anything. mkv
+    // scopes the flag to the video stream.
     let log_flag = argv
         .iter()
-        .skip(2)
-        .position(|a| a == "-passlogfile" || a == "-passlogfile:v:0");
+        .enumerate()
+        .skip(input + 1)
+        .find(|(_, a)| *a == "-passlogfile" || *a == "-passlogfile:v:0")
+        .map(|(i, _)| i + 1);
     if let Some(i) = log_flag {
-        path_args.push(i + 3);
+        path_args.push(i);
     }
     if mode == OutputMode::Path {
         path_args.push(argv.len() - 1);
@@ -2205,5 +2246,77 @@ mod tests {
             "Already 6.00 MB, under 10 MB; the video would be stream-copied, \
              and re-encoded only if the copy came out over."
         );
+    }
+
+    // --- A range under --max-size ------------------------------------------
+
+    fn sized_cut(size: &str, start: Option<&str>, end: Option<&str>) -> Tuning {
+        Tuning {
+            max_size: Some(crate::size::parse(size).unwrap()),
+            range: crate::trim::Range::new(
+                start.map(|s| crate::trim::parse_time(s).unwrap()),
+                end.map(|s| crate::trim::parse_time(s).unwrap()),
+                None,
+            )
+            .unwrap(),
+            ..Tuning::default()
+        }
+    }
+
+    #[test]
+    fn a_sized_cut_budgets_for_the_clip_not_the_file() {
+        // Ten minutes into 8 MB is extreme; ten seconds of it is not.
+        let p = probe(600, 600_000_000);
+        let plan = build(
+            Format::Mp4,
+            Format::Mp4,
+            &p,
+            &sized_cut("8mb", Some("1:00"), Some("1:10")),
+        )
+        .unwrap();
+        let sizing = plan.sizing.as_ref().unwrap();
+        assert_eq!(sizing.strategy, Strategy::Encode);
+        assert!(!sizing.choice.as_ref().unwrap().extreme, "{sizing:?}");
+        for step in &plan.steps {
+            assert_eq!(
+                &step.argv[..6],
+                ["-ss", "60", "-t", "10", "-i", "in.mp4"],
+                "{:?}",
+                step.argv
+            );
+            assert_eq!(step.path_args[0], 5, "the input, after the cut");
+        }
+        assert_eq!(
+            plan.range.as_ref().map(|r| (r.start_ms, r.end_ms)),
+            Some((60_000, 70_000))
+        );
+    }
+
+    #[test]
+    fn a_sized_cut_from_zero_that_already_fits_is_a_copied_cut_not_a_file_copy() {
+        let p = probe(600, 60_000_000);
+        let plan = build(
+            Format::Mp4,
+            Format::Mp4,
+            &p,
+            &sized_cut("8mb", None, Some("30")),
+        )
+        .unwrap();
+        assert_eq!(plan.sizing.as_ref().unwrap().strategy, Strategy::Remux);
+        assert_eq!(&plan.steps[0].argv[..3], ["-t", "30", "-i"]);
+        assert_eq!(plan.steps[0].path_args[0], 3);
+    }
+
+    #[test]
+    fn a_sized_cut_after_zero_is_never_copied() {
+        let p = probe(600, 60_000_000);
+        let plan = build(
+            Format::Mp4,
+            Format::Mp4,
+            &p,
+            &sized_cut("8mb", Some("10"), Some("40")),
+        )
+        .unwrap();
+        assert_eq!(plan.sizing.as_ref().unwrap().strategy, Strategy::Encode);
     }
 }
