@@ -2792,6 +2792,47 @@ fn merge_without_qpdf_reports_it_missing() {
         .timeout(Duration::from_secs(10))
         .assert()
         .code(3)
-        .stderr(contains("qpdf not found"));
+        .stderr(contains("FAIL out.pdf").and(contains("qpdf not found")));
     assert!(!dir.path().join("out.pdf").exists());
+}
+
+fn merge_missing_qpdf_json(extra: &[&str]) -> serde_json::Value {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.pdf"), b"%PDF").unwrap();
+    std::fs::write(dir.path().join("b.pdf"), b"%PDF").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let out = cmd
+        .current_dir(dir.path())
+        .args([
+            "merge",
+            "a.pdf",
+            "b.pdf",
+            "out.pdf",
+            "--json",
+            "--no-install",
+        ])
+        .args(extra)
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&out).unwrap()
+}
+
+#[test]
+fn merge_json_puts_a_missing_qpdf_in_results() {
+    let v = merge_missing_qpdf_json(&[]);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["results"][0]["error"]["code"], "backend_missing");
+    assert_eq!(v["results"][0]["output"], "out.pdf");
+}
+
+#[test]
+fn merge_dry_run_json_puts_a_missing_qpdf_in_plans() {
+    let v = merge_missing_qpdf_json(&["--dry-run"]);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["plans"][0]["error"]["code"], "backend_missing");
 }
