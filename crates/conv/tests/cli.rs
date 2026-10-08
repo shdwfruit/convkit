@@ -2921,3 +2921,17 @@ fn split_end_to_end_creates_the_outdir_and_warns_on_stderr() {
         ));
     assert!(dir.path().join("pages/sample-2.pdf").is_file());
 }
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn split_refused_range_does_not_create_the_outdir() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("sample.pdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["split", "sample.pdf", "7", "-o", "pages"])
+        .assert()
+        .code(2)
+        .stderr(contains("goes past the end"));
+    assert!(!dir.path().join("pages").exists());
+}
