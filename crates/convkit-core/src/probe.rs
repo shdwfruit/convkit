@@ -32,6 +32,8 @@ pub struct MediaProbe {
     pub data_streams: usize,
     /// How many real video streams (attached-picture cover art excluded).
     pub video_streams: usize,
+    /// How many attached pictures (cover art), which an Ogg target drops.
+    pub attached_pics: usize,
     /// How many attachment streams (fonts in mkv).
     pub attachment_streams: usize,
     pub color_transfer: Option<String>,
@@ -220,7 +222,9 @@ pub fn parse(json: &str) -> MediaProbe {
                     .and_then(|d| d.get("attached_pic"))
                     .and_then(|a| a.as_i64())
                     == Some(1);
-                if !attached_pic {
+                if attached_pic {
+                    p.attached_pics += 1;
+                } else {
                     p.video_streams += 1;
                     if p.video_codec.is_none() {
                         p.video_codec = Some(name);
@@ -308,6 +312,19 @@ pub fn parse(json: &str) -> MediaProbe {
             .and_then(|s| s.parse().ok());
         if let Some(tags) = format.get("tags").and_then(|t| t.as_object()) {
             read_tags(&mut p, tags);
+        }
+        // An Ogg file keeps its tags in each stream's comment header, and
+        // ffprobe reports them on the stream: the first audio stream's are
+        // the file's.
+        if format.get("format_name").and_then(|n| n.as_str()) == Some("ogg") {
+            let tags = streams
+                .iter()
+                .find(|s| s.get("codec_type").and_then(|t| t.as_str()) == Some("audio"))
+                .and_then(|s| s.get("tags"))
+                .and_then(|t| t.as_object());
+            if let Some(tags) = tags {
+                read_tags(&mut p, tags);
+            }
         }
     }
     p
@@ -633,6 +650,25 @@ mod tests {
         assert_eq!(plain.location, LocationTags::default());
     }
 
+    /// An Ogg file's tags are on its audio stream, and are read as the
+    /// file's own. Another container's stream tags, such as an mkv track's
+    /// title, are not.
+    #[test]
+    fn an_ogg_files_stream_tags_are_its_own() {
+        let ogg = parse(
+            r#"{"streams":[{"codec_type":"audio","codec_name":"opus","tags":{
+                "title":"Song","location":"+51.5007-000.1246/"}}],
+                "format":{"format_name":"ogg"}}"#,
+        );
+        assert_eq!(ogg.kept_tags, [("title".to_string(), "Song".to_string())]);
+        assert!(ogg.location.classic);
+        let mkv = parse(
+            r#"{"streams":[{"codec_type":"audio","codec_name":"opus","tags":{
+                "title":"Commentary"}}],"format":{"format_name":"matroska,webm"}}"#,
+        );
+        assert!(mkv.kept_tags.is_empty());
+    }
+
     /// A track language other than `und`, and a chapter with a title, are
     /// labels `--strip-metadata` clears, so the probe notices them.
     #[test]
@@ -842,6 +878,7 @@ mod tests {
         assert_eq!(p.data_streams, 1);
         assert_eq!(p.attachment_streams, 1);
         assert_eq!(p.video_streams, 1, "cover art is not a video stream");
+        assert_eq!(p.attached_pics, 1, "but it is counted as cover art");
         assert!(p.is_hdr());
     }
 

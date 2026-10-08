@@ -1193,6 +1193,15 @@ mov and m4a outputs, because the mov muxer writes mdta keys only under
 wav keeps title and artist but no location, and gif keeps nothing. The
 re-encode path keeps exactly what the stream copy keeps.
 
+opus and ogg (checked 2026-10-12, ffmpeg 6.1.1 and 9.0.1) keep both kinds
+of location, the chapters and the track language. Ogg keeps its tags in
+the audio stream's comment header, not the file's, so ffprobe reports
+them on the stream and no other muxer reads them: an opus to mp3 lost its
+title and location until the recipes added `-map_metadata 0:s:a:0` for an
+Ogg source. The probe reads the first audio stream's tags for an Ogg file
+for the same reason. A stripped or cut Ogg file leaves out its cover
+picture, which the muxer refuses.
+
 **Images.** `+profile '!icc,*'` deletes every profile whose name is not
 `icc` (`ProfileImage` tests each name with `IsOptionMember`, in
 ImageMagick 6 and 7 alike). Verified from every source to jpg, webp, avif,
@@ -1239,3 +1248,47 @@ and `+profile` still removes it; only the note cannot see it.
 The tests that hold these to account are the `--ignored` ones in
 `output_properties.rs` from `stripped_images_lose_their_location_and_keep_colour_and_orientation`
 on.
+
+## Opus sample rate (`-ar 48000`)
+
+Measured 2026-10-08 on the same machine with Homebrew's ffmpeg 9.0.1, and
+with ffmpeg 6.1.1 (evermeet.cx's macOS build), which is the version Ubuntu
+24.04 ships and CI runs.
+
+libopus takes 48, 24, 16, 12 and 8 kHz only. Without `-ar`, ffmpeg resamples
+any other rate to the nearest of those. The rate the encoder was opened at
+is in ffmpeg's own output line; ffprobe cannot show it, since an Opus stream
+always decodes at 48 kHz.
+
+```
+ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=$r:duration=1" -c:a pcm_s16le "s$r.wav"
+ffmpeg -i "s$r.wav" -c:a libopus "o$r.opus" 2>&1 | grep -A3 '^Output #0'
+```
+
+| Source | Default (6.1.1 and 9.0.1) | With `-ar 48000` |
+|---|---|---|
+| 44.1 kHz | 48 kHz | 48 kHz |
+| 32 kHz | 24 kHz | 48 kHz |
+| 22.05 kHz | 24 kHz | 48 kHz |
+| 16 kHz | 16 kHz | 48 kHz |
+| 8 kHz | 8 kHz | 48 kHz |
+
+A 32 kHz source is the one that loses something: at 24 kHz the encoder
+keeps nothing above 12 kHz. The opus and ogg recipes pass `-ar 48000`, which
+is Opus's internal rate and what every decoder outputs, so no source is
+band-limited by the resample.
+
+The cost falls on 16 and 8 kHz recordings, which are now encoded at 48 kHz
+rather than their own rate. Measured on 20 s of pink noise band-passed to
+200-3400 Hz at 16 kHz, decoded and compared with `asisdr` against the
+source:
+
+| Bitrate | Own rate | `-ar 48000` |
+|---|---|---|
+| 24 kb/s | 57,701 B, SDR 9.8 dB | 58,710 B, SDR 9.8 dB |
+| 128 kb/s | 301,338 B, SDR 37.8 dB | 307,468 B, SDR 25.5 dB |
+
+At a voice bitrate there is no difference. At the 128 kb/s default the 48
+kHz encode measures further from the source, but SDR is not a perceptual
+measure and no listening test was done; losing everything above 12 kHz
+from a 32 kHz source is the audible failure, so 48 kHz stays.

@@ -171,6 +171,7 @@ pub fn build_tuned(
     let mut resolved = crate::video::resolve(tuning, probe, target_for(to));
     resolved.cut = cut;
     resolved.mute = tuning.mute;
+    resolved.ogg_tags = media::is_ogg(from) && !media::is_ogg(to);
 
     // Probe-aware media paths first: a container change whose video codec
     // already fits the target gets a stream-mapped copy (or hybrid
@@ -844,6 +845,52 @@ mod tests {
             "{argv:?}"
         );
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    }
+
+    /// An Ogg source's tags are on its audio stream, so they are mapped to
+    /// the file's own for a target that is not Ogg, and only the kept ones
+    /// are written back when the flag clears them.
+    #[test]
+    fn an_ogg_sources_tags_reach_a_target_that_is_not_ogg() {
+        let probe = MediaProbe {
+            audio_codecs: vec!["opus".into()],
+            kept_tags: vec![("title".into(), "Song".into())],
+            ..MediaProbe::default()
+        };
+        let stream_tags = ["-map_metadata", "0:s:a:0"];
+        let plan_for = |to: Format, strip_metadata: bool| {
+            let t = Tuning {
+                strip_metadata,
+                ..Tuning::default()
+            };
+            let out = format!("a.{}", to.ext());
+            build_tuned(
+                Format::Opus,
+                to,
+                &[p("a.opus")],
+                Path::new(&out),
+                Some(&probe),
+                None,
+                &t,
+            )
+            .unwrap()
+            .steps[0]
+                .argv
+                .clone()
+        };
+        for to in [Format::Mp3, Format::M4a, Format::Flac, Format::Wav] {
+            let argv = plan_for(to, false);
+            assert!(argv.windows(2).any(|w| w == stream_tags), "{argv:?}");
+            let argv = plan_for(to, true);
+            assert!(!argv.windows(2).any(|w| w == stream_tags), "{argv:?}");
+            assert!(
+                argv.windows(2).any(|w| w == ["-metadata", "title=Song"]),
+                "{argv:?}"
+            );
+        }
+        // Into Ogg, the stream's tags are carried as they are.
+        let argv = plan_for(Format::Ogg, false);
+        assert!(!argv.iter().any(|a| a == "-map_metadata"), "{argv:?}");
     }
 
     #[test]

@@ -170,7 +170,11 @@ pub enum Arg {
     /// `--strip-metadata`'s arguments for this step's backend when the flag
     /// was given (`metadata::MAGICK_STRIP` or `metadata::ffmpeg_args`);
     /// renders nothing otherwise, keeping untuned argv byte-identical.
-    /// Authored only on ImageMagick and ffmpeg steps.
+    /// Authored only on ImageMagick and ffmpeg steps. Without the flag, an
+    /// Ogg source (`ResolvedVideo::ogg_tags`) gets `-map_metadata 0:s:a:0`:
+    /// Ogg keeps its tags in the audio stream's comment header, and every
+    /// other muxer writes only the file's own tags, so the title, artist
+    /// and the rest were lost (ffmpeg 6.1 and 9.0 alike).
     StripMetadata,
     /// The cut, as ffmpeg input options (`-ss S -t D`), when a range was
     /// given; renders *nothing* otherwise, keeping untuned argv
@@ -346,6 +350,9 @@ impl Step {
                     Backend::Ffmpeg => argv.extend(crate::metadata::ffmpeg_args(kept)),
                     other => unreachable!("--strip-metadata slot authored on a {other:?} step"),
                 },
+                Arg::StripMetadata if video.ogg_tags && self.backend == Backend::Ffmpeg => {
+                    argv.extend(["-map_metadata".to_string(), "0:s:a:0".to_string()]);
+                }
                 Arg::StripMetadata => {}
                 Arg::Trim => {
                     if let Some(cut) = &video.cut {

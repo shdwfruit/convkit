@@ -102,6 +102,9 @@ pub struct ResolvedVideo {
     /// A silent clip: every audio track dropped. Carried here for the same
     /// reason as `cut`.
     pub mute: bool,
+    /// An Ogg source going to a target that is not Ogg: its tags are on its
+    /// audio stream, and are copied to the file's own (`Arg::StripMetadata`).
+    pub ogg_tags: bool,
 }
 
 /// Parses a user frame rate (`24`, `29.97`, `30000/1001`) into a float for

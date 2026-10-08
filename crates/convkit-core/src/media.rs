@@ -701,6 +701,12 @@ fn audio_codec_args(
     ));
 }
 
+/// Whether `f` is written in Ogg, which keeps its tags on the audio stream
+/// and cannot hold a cover picture.
+pub(crate) fn is_ogg(f: Format) -> bool {
+    matches!(f, Format::Opus | Format::Ogg)
+}
+
 /// Audio codecs each audio target container can hold as-is — the gate for
 /// lossless `-c:a copy` extraction instead of a generation-loss re-encode
 /// of a codec the target already speaks (mp4 → m4a used to re-encode AAC
@@ -711,6 +717,13 @@ fn copyable_audio_for(to: Format) -> Option<&'static [&'static str]> {
         Format::Mp3 => Some(&["mp3"]),
         Format::Flac => Some(&["flac"]),
         Format::Wav => Some(&["pcm_s16le"]),
+        // Checked here, not left to the muxer: ffmpeg's `.opus` muxer
+        // accepts a Vorbis stream copy and writes a file no Opus player
+        // can read.
+        Format::Opus => Some(&["opus"]),
+        // Ogg is Vorbis's own container, so Vorbis is copied into it
+        // rather than re-encoded to the Opus an encode would produce.
+        Format::Ogg => Some(&["opus", "vorbis"]),
         _ => None,
     }
 }
@@ -733,6 +746,15 @@ pub(crate) fn same_format_copy(
     if to == Format::Mkv && probe.is_none() {
         push(&mut argv, &["-map", "-0:t"]);
         warnings.push(crate::metadata::ATTACHMENTS_UNREAD_NOTE.to_string());
+    }
+    // The Ogg muxer refuses a cover picture ("Unsupported codec id"), so
+    // every video stream is unmapped and `V`, which matches no attached
+    // picture, maps back any real one.
+    if is_ogg(to) {
+        push(&mut argv, &["-map", "-0:v", "-map", "0:V?"]);
+        if probe.is_none_or(|p| p.attached_pics > 0) {
+            warnings.push(crate::registry::COVER_ART_DROPPED_NOTE.to_string());
+        }
     }
     push(&mut argv, &["-c", "copy"]);
     argv.extend(crate::metadata::ffmpeg_args(
@@ -779,15 +801,19 @@ pub(crate) fn audio_copy_invocation(
         return None;
     }
 
-    let audio_source = matches!(from, Format::Mp3 | Format::M4a | Format::Wav | Format::Flac);
+    let audio_source = matches!(
+        from,
+        Format::Mp3 | Format::M4a | Format::Wav | Format::Flac | Format::Opus | Format::Ogg
+    );
+    // WAV and Ogg can't carry an attached picture; everything else keeps it.
+    let art_fits = !matches!(to, Format::Wav | Format::Opus | Format::Ogg);
 
     let mut argv = input_args(cut, input);
     // The probe describes stream order, so map the first audio stream
     // explicitly rather than trusting default selection (which picks by
     // channel count and could grab a stream the probe never approved).
     push(&mut argv, &["-map", "0:a:0"]);
-    if audio_source && to != Format::Wav {
-        // WAV can't carry an attached picture; everything else keeps it.
+    if audio_source && art_fits {
         push(&mut argv, &["-map", "0:v?", "-c:v", "copy"]);
     }
     // A copied cut lands on the demuxer's packets, which for PCM are about
@@ -805,6 +831,10 @@ pub(crate) fn audio_copy_invocation(
     }
     if strip {
         argv.extend(crate::metadata::ffmpeg_args(&probe.kept_tags));
+    } else if is_ogg(from) && !is_ogg(to) {
+        // An Ogg FLAC copied into a .flac: its tags are on the stream, as
+        // `Arg::StripMetadata` says.
+        push(&mut argv, &["-map_metadata", "0:s:a:0"]);
     }
     if let Some(cut) = cut {
         argv.extend(cut.output_args());
@@ -818,6 +848,9 @@ pub(crate) fn audio_copy_invocation(
             "Source has {} audio tracks; only the first is extracted.",
             audios.len()
         ));
+    }
+    if audio_source && matches!(to, Format::Opus | Format::Ogg) && probe.attached_pics > 0 {
+        warnings.push(registry::COVER_ART_DROPPED_NOTE.to_string());
     }
 
     Some(MediaInvocation { argv, warnings })
@@ -875,6 +908,30 @@ mod tests {
             stream_mapped_invocation(Format::Mp4, &p, false, &ResolvedVideo::default(), &i, &o)
                 .unwrap();
         assert!(!plain.argv.iter().any(|a| a == "-map_metadata"));
+    }
+
+    /// The Ogg muxer refuses a cover picture, so a file stripped into opus
+    /// or ogg leaves it out, and says so where the probe saw one or could
+    /// not tell. A real video stream is mapped back.
+    #[test]
+    fn a_stripped_ogg_leaves_out_its_cover_picture() {
+        let (i, o) = (PathBuf::from("in.opus"), PathBuf::from("out.opus"));
+        let mut art = probe(None, &["opus"], &[], 0);
+        art.attached_pics = 1;
+        let plain = probe(None, &["opus"], &[], 0);
+        let note = [crate::registry::COVER_ART_DROPPED_NOTE];
+        for to in [Format::Opus, Format::Ogg] {
+            let m = same_format_copy(to, Some(&art), &i, &o);
+            assert!(has(&m.argv, ["-map", "-0:v"]), "{:?}", m.argv);
+            assert!(has(&m.argv, ["-map", "0:V?"]), "{:?}", m.argv);
+            assert_eq!(m.warnings, note);
+            assert!(same_format_copy(to, Some(&plain), &i, &o)
+                .warnings
+                .is_empty());
+            assert_eq!(same_format_copy(to, None, &i, &o).warnings, note);
+        }
+        let flac = same_format_copy(Format::Flac, Some(&art), &i, &o);
+        assert!(!has(&flac.argv, ["-map", "-0:v"]), "{:?}", flac.argv);
     }
 
     /// Matroska refuses an attachment without its `filename` and
@@ -1397,6 +1454,47 @@ mod tests {
         );
     }
 
+    /// Ogg holds Vorbis or Opus, so either is copied into an ogg target;
+    /// an opus target takes only Opus, because ffmpeg's `.opus` muxer
+    /// would accept a Vorbis copy and write a file no Opus player reads.
+    #[test]
+    fn ogg_takes_a_vorbis_or_opus_copy_and_opus_only_opus() {
+        let webm_vorbis = probe(Some("vp8"), &["vorbis"], &[], 0);
+        let m = audio_invoke(Format::Webm, Format::Ogg, &webm_vorbis).unwrap();
+        assert!(has(&m.argv, ["-c:a", "copy"]), "{:?}", m.argv);
+        assert!(audio_invoke(Format::Webm, Format::Opus, &webm_vorbis).is_none());
+        let vorbis = probe(None, &["vorbis"], &[], 0);
+        assert!(audio_invoke(Format::Ogg, Format::Opus, &vorbis).is_none());
+
+        let m = audio_invoke(Format::Ogg, Format::Opus, &probe(None, &["opus"], &[], 0)).unwrap();
+        assert!(has(&m.argv, ["-c:a", "copy"]), "{:?}", m.argv);
+        assert!(
+            !has(&m.argv, ["-map", "0:v?"]),
+            "Ogg cannot carry cover art: {:?}",
+            m.argv
+        );
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
+
+    /// The copy into Ogg drops cover art like the encode does, and says so
+    /// only when there was some.
+    #[test]
+    fn a_copy_into_ogg_notes_dropped_cover_art() {
+        let with_art = MediaProbe {
+            attached_pics: 1,
+            ..probe(None, &["opus"], &[], 0)
+        };
+        let m = audio_invoke(Format::Opus, Format::Ogg, &with_art).unwrap();
+        assert_eq!(m.warnings, vec![registry::COVER_ART_DROPPED_NOTE]);
+        let m = audio_invoke(
+            Format::Webm,
+            Format::Opus,
+            &probe(Some("vp9"), &["opus"], &[], 0),
+        )
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
+
     /// More than one audio track can't all fit a single-track extraction;
     /// the loss is named.
     #[test]
@@ -1652,6 +1750,7 @@ mod tests {
             enlarged: None,
             cut: None,
             mute: false,
+            ..ResolvedVideo::default()
         }
     }
 

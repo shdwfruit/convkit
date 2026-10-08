@@ -80,7 +80,9 @@ pub fn in_place(f: Format) -> Result<(), String> {
         | Format::Mp3
         | Format::M4a
         | Format::Flac
-        | Format::Wav => Ok(()),
+        | Format::Wav
+        | Format::Opus
+        | Format::Ogg => Ok(()),
         Format::Heic | Format::Heif => Err(format!(
             "conv cannot write {}; add --to jpg to strip it into a jpg",
             f.ext()
@@ -155,11 +157,13 @@ pub(crate) fn keeps_exif_location(from: Format, to: Format) -> bool {
 /// Whether `to` keeps the location tags `tags` names, as measured: every
 /// tagged target keeps the classic `location`, and Apple's keys survive only
 /// where the muxer writes keys it does not know (Matroska, WebM, ID3,
-/// Vorbis comments). wav and gif keep neither.
+/// Vorbis comments, which flac, opus and ogg hold). wav and gif keep neither.
 fn keeps_location_tags(to: Format, tags: LocationTags) -> bool {
     match to {
         Format::Mp4 | Format::Mov | Format::M4a => tags.classic,
-        Format::Mkv | Format::Webm | Format::Mp3 | Format::Flac => tags.classic || tags.apple,
+        Format::Mkv | Format::Webm | Format::Mp3 | Format::Flac | Format::Opus | Format::Ogg => {
+            tags.classic || tags.apple
+        }
         _ => false,
     }
 }
@@ -190,8 +194,8 @@ pub(crate) fn location_note(
 
 /// The note on labels the flag clears that the target would otherwise have
 /// kept, as measured with conv: track languages survive into mp4, mov, m4a,
-/// mkv and webm, and chapter names into those and mp3; flac and wav keep
-/// neither. Writing them back would mean matching every output stream to
+/// mkv, webm, opus and ogg, and chapter names into those and mp3; flac and
+/// wav keep neither. Writing them back would mean matching every output stream to
 /// its input across each mapping, which a wrong guess turns into a
 /// mislabelled track, so the loss is said instead.
 pub(crate) fn labels_note(
@@ -203,12 +207,25 @@ pub(crate) fn labels_note(
     let languages = p.track_languages
         && matches!(
             to,
-            Format::Mp4 | Format::Mov | Format::M4a | Format::Mkv | Format::Webm
+            Format::Mp4
+                | Format::Mov
+                | Format::M4a
+                | Format::Mkv
+                | Format::Webm
+                | Format::Opus
+                | Format::Ogg
         );
     let chapters = p.chapter_titles
         && matches!(
             to,
-            Format::Mp4 | Format::Mov | Format::M4a | Format::Mkv | Format::Webm | Format::Mp3
+            Format::Mp4
+                | Format::Mov
+                | Format::M4a
+                | Format::Mkv
+                | Format::Webm
+                | Format::Mp3
+                | Format::Opus
+                | Format::Ogg
         );
     let what = match (languages, chapters) {
         (true, true) => "Track languages and chapter names are",
@@ -345,6 +362,7 @@ mod tests {
                 );
             }
         }
+        assert!(in_place(Format::Opus).is_ok() && in_place(Format::Ogg).is_ok());
         assert_eq!(strip_target_for(Format::Gif), Some(Format::Mp4));
         assert_eq!(strip_target_for(Format::Heic), Some(Format::Jpg));
         assert_eq!(strip_target_for(Format::Svg), Some(Format::Png));

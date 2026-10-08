@@ -13,8 +13,8 @@
 
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
-ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 115
-conversion pairs across 27 formats (`conv capabilities` is the source of
+ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 143
+conversion pairs across 29 formats (`conv capabilities` is the source of
 truth). Files never leave your machine; only `conv install`/`conv update`
 ever touch the network.
 
@@ -286,6 +286,8 @@ mp4 (Video)
     mp4 -> m4a      [--strip-metadata --start --end --duration]
     mp4 -> wav      [--strip-metadata --start --end --duration]
     mp4 -> flac     [--strip-metadata --start --end --duration]
+    mp4 -> opus     [--strip-metadata --start --end --duration]
+    mp4 -> ogg      [--strip-metadata --start --end --duration]
     mp4 -> gif      [--resize --upscale --fps --strip-metadata --start --end --duration]
 
   as target, accepts: mov mkv webm avi gif
@@ -577,7 +579,7 @@ $ conv scan
 README       --
 already.jpg  Image   -> png webp avif tiff bmp pdf
 archive.zip  --
-clip.mp4     Video   -> mov mkv webm mp3 m4a wav flac gif
+clip.mp4     Video   -> mov mkv webm mp3 m4a wav flac opus ogg gif
 notes.md     Doc     -> pdf docx html
 photo.heic   Image   -> jpg png webp avif tiff bmp pdf
 ```
