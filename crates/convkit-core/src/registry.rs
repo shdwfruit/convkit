@@ -40,6 +40,7 @@ const IMG_LOSSY: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Lit("-quality"),
@@ -78,6 +79,7 @@ const IMG_TO_JPG: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::Lit("-background"),
             Arg::Lit("white"),
             Arg::Lit("-alpha"),
@@ -102,6 +104,7 @@ const IMG_LOSSLESS: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Output,
@@ -120,6 +123,7 @@ const IMG_LOSSLESS_SINGLE_FRAME: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Output,
@@ -148,6 +152,7 @@ const SVG_TO_LOSSY: Recipe = Recipe {
             Arg::Lit("-alpha"),
             Arg::Lit("off"),
             Arg::Lit("-flatten"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Lit("-quality"),
@@ -167,6 +172,7 @@ const SVG_TO_LOSSLESS: Recipe = Recipe {
             Arg::Lit("-background"),
             Arg::Lit("none"),
             Arg::Input,
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Output,
@@ -186,6 +192,7 @@ const IMG_TO_PDF: Recipe = Recipe {
         [
             Arg::Inputs,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::Lit("-compress"),
             Arg::Lit("jpeg"),
@@ -196,6 +203,76 @@ const IMG_TO_PDF: Recipe = Recipe {
     )],
     warnings: &[],
 };
+
+/// ImageMagick reads every EXIF field into an image property, and its PNG
+/// writer writes every property as a tEXt chunk, GPS included, after
+/// `+profile` has removed the EXIF itself. No option avoids that: the
+/// writer emits the colour profile (iCCP) only while text chunks are
+/// enabled (png.c, ImageMagick 6 and 7 alike), and `+set` deletes one
+/// exact property name. So under `--strip-metadata` a png target goes
+/// through a TIFF, whose writer takes only `label` and `comment` from
+/// properties: the intermediate holds the pixels and the colour profile,
+/// and the PNG written from it carries no text from the source.
+/// `-compress none` keeps a JPEG source's compression from being carried
+/// into the intermediate, which would make it lossy; 16 bits stay 16.
+const IMG_TO_PNG_STRIPPED: Recipe = Recipe {
+    steps: &[
+        Step {
+            backend: Backend::Magick,
+            args: &[
+                Arg::InputFirstFrame,
+                Arg::Lit("-auto-orient"),
+                Arg::StripMetadata,
+                Arg::TuneResize,
+                Arg::Lit("-compress"),
+                Arg::Lit("none"),
+                Arg::Output,
+            ],
+            output: OutputMode::Path,
+            intermediate_ext: Some("tiff"),
+        },
+        step!(Backend::Magick, [Arg::Input, Arg::TuneColors, Arg::Output]),
+    ],
+    warnings: &[FIRST_FRAME_NOTE],
+};
+
+/// `SVG_TO_LOSSLESS` under `--strip-metadata`, through a TIFF for
+/// `IMG_TO_PNG_STRIPPED`'s reason: the SVG's own `<title>` would otherwise
+/// land in a tEXt chunk.
+const SVG_TO_PNG_STRIPPED: Recipe = Recipe {
+    steps: &[
+        Step {
+            backend: Backend::Magick,
+            args: &[
+                Arg::Lit("-density"),
+                Arg::Lit(SVG_DENSITY),
+                Arg::Lit("-background"),
+                Arg::Lit("none"),
+                Arg::Input,
+                Arg::StripMetadata,
+                Arg::TuneResize,
+                Arg::Lit("-compress"),
+                Arg::Lit("none"),
+                Arg::Output,
+            ],
+            output: OutputMode::Path,
+            intermediate_ext: Some("tiff"),
+        },
+        step!(Backend::Magick, [Arg::Input, Arg::TuneColors, Arg::Output]),
+    ],
+    warnings: &[],
+};
+
+/// The recipe `--strip-metadata` runs in place of `recipe`: a png target's
+/// TIFF detour, and `recipe` itself everywhere else (bmp shares png's
+/// recipe but writes no text).
+pub(crate) fn strip_variant(to: Format, recipe: Recipe) -> Recipe {
+    match to {
+        Format::Png if recipe == IMG_LOSSLESS_SINGLE_FRAME => IMG_TO_PNG_STRIPPED,
+        Format::Png if recipe == SVG_TO_LOSSLESS => SVG_TO_PNG_STRIPPED,
+        _ => recipe,
+    }
+}
 
 /// Raster image formats that participate in the all-directions image family.
 const RASTER: &[Format] = &[
@@ -1503,6 +1580,76 @@ mod tests {
     }
 
     use crate::video::ResolvedVideo;
+
+    /// Every ImageMagick recipe carries the strip slot, so the flag is
+    /// refused only where it truly does not apply, and strips only after
+    /// the picture is oriented: `-auto-orient` reads the EXIF orientation
+    /// the strip removes.
+    #[test]
+    fn the_strip_slot_follows_auto_orient_in_every_image_recipe() {
+        for (from, to) in all_pairs() {
+            let r = lookup(from, to).unwrap();
+            for s in r.steps {
+                let strip = s.args.iter().position(|a| *a == Arg::StripMetadata);
+                if s.backend == Backend::Magick {
+                    assert!(strip.is_some(), "{from:?} -> {to:?}");
+                }
+                if strip.is_some() {
+                    assert!(
+                        matches!(s.backend, Backend::Magick | Backend::Ffmpeg),
+                        "{from:?} -> {to:?}"
+                    );
+                }
+                let orient = s.args.iter().position(|a| *a == Arg::Lit("-auto-orient"));
+                if let (Some(o), Some(st)) = (orient, strip) {
+                    assert!(o < st, "{from:?} -> {to:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stripped_jpg_drops_everything_but_the_colour_profile_after_orienting() {
+        let tuning = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        let argv = lookup(Format::Heic, Format::Jpg).unwrap().steps[0]
+            .render_full(
+                &[Path::new("in.heic")],
+                Path::new("out.jpg"),
+                &tuning,
+                &ResolvedVideo::default(),
+                &[],
+            )
+            .argv;
+        let at = argv.iter().position(|a| a == "-auto-orient").unwrap();
+        assert_eq!(
+            argv[at + 1..at + 7],
+            ["+profile", "!icc,*", "+set", "comment", "+set", "label"],
+            "{argv:?}"
+        );
+    }
+
+    /// png's writer turns every property into text, so a stripped png goes
+    /// through a TIFF; bmp shares png's recipe but writes no text.
+    #[test]
+    fn a_stripped_png_goes_through_an_uncompressed_tiff() {
+        for from in [Format::Jpg, Format::Svg] {
+            let r = strip_variant(Format::Png, lookup(from, Format::Png).unwrap());
+            assert_eq!(r.steps.len(), 2, "{from:?}");
+            assert_eq!(r.steps[0].intermediate_ext, Some("tiff"));
+            assert!(r.steps[0]
+                .args
+                .windows(2)
+                .any(|w| w == [Arg::Lit("-compress"), Arg::Lit("none")]));
+            assert!(r.steps[0].args.contains(&Arg::StripMetadata));
+        }
+        let bmp = lookup(Format::Jpg, Format::Bmp).unwrap();
+        assert_eq!(strip_variant(Format::Bmp, bmp), bmp);
+        let jpg = lookup(Format::Png, Format::Jpg).unwrap();
+        assert_eq!(strip_variant(Format::Jpg, jpg), jpg);
+    }
 
     #[test]
     fn heic_to_jpg_auto_orients_and_sets_quality() {

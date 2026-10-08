@@ -1289,6 +1289,20 @@ fn capabilities_with_a_format_lists_tuning_flags_and_defaults() {
         .code(2);
 }
 
+/// `--strip-metadata` is listed where it applies, image pairs among them,
+/// and not on a document pair, which refuses it.
+#[test]
+fn capabilities_lists_strip_metadata_where_it_applies() {
+    let assert = conv().args(["capabilities", "heic"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let jpg = stdout.lines().find(|l| l.contains("heic -> jpg")).unwrap();
+    assert!(jpg.contains("--strip-metadata"), "{stdout}");
+
+    let assert = conv().args(["capabilities", "docx"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(!stdout.contains("--strip-metadata"), "{stdout}");
+}
+
 /// `conv scan` answers the one question the tool could not: what is in front
 /// of me, and what could it become. `capabilities` answers it globally and
 /// per-format; the only contextual alternative was `conv <dir> --to jpg

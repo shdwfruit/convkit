@@ -42,11 +42,15 @@ pub struct Tuning {
     /// Lets `resize` enlarge a picture smaller than its geometry. Without
     /// it, `resize` only ever fits within, on every target.
     pub upscale: bool,
+    /// Removes the source's metadata except the colour profile, the
+    /// orientation and an audio file's content tags: see `metadata`.
+    pub strip_metadata: bool,
 }
 
 impl Tuning {
     pub fn is_empty(&self) -> bool {
         !self.upscale
+            && !self.strip_metadata
             && self.resize.is_none()
             && self.quality.is_none()
             && self.colors.is_none()
@@ -154,6 +158,11 @@ pub enum Arg {
     TuneResize,
     /// `-colors <n>` when `--colors` was given; renders nothing otherwise.
     TuneColors,
+    /// `--strip-metadata`'s arguments for this step's backend when the flag
+    /// was given (`metadata::MAGICK_STRIP` or `metadata::ffmpeg_args`);
+    /// renders nothing otherwise, keeping untuned argv byte-identical.
+    /// Authored only on ImageMagick and ffmpeg steps.
+    StripMetadata,
     /// The first (usually only) input path.
     Input,
     /// The first input path with ImageMagick's `[0]` frame selector
@@ -252,6 +261,7 @@ impl Step {
             output,
             &Tuning::default(),
             &ResolvedVideo::default(),
+            &[],
         )
         .argv
     }
@@ -263,12 +273,16 @@ impl Step {
     /// line alone, which is why `render` stays the short spelling and
     /// delegates here rather than the two walking `args` separately and
     /// drifting apart.
+    ///
+    /// `kept` is the tags `--strip-metadata` writes back on an ffmpeg step:
+    /// the probe's `kept_tags`, or none without a probe.
     pub fn render_full(
         &self,
         inputs: &[&Path],
         output: &Path,
         tuning: &Tuning,
         video: &ResolvedVideo,
+        kept: &[(String, String)],
     ) -> Rendered {
         let mut argv = Vec::with_capacity(self.args.len());
         let mut path_args = Vec::new();
@@ -302,6 +316,16 @@ impl Step {
                         argv.push(n.to_string());
                     }
                 }
+                Arg::StripMetadata if tuning.strip_metadata => match self.backend {
+                    Backend::Magick => argv.extend(
+                        crate::metadata::MAGICK_STRIP
+                            .iter()
+                            .map(|s| (*s).to_string()),
+                    ),
+                    Backend::Ffmpeg => argv.extend(crate::metadata::ffmpeg_args(kept)),
+                    other => unreachable!("--strip-metadata slot authored on a {other:?} step"),
+                },
+                Arg::StripMetadata => {}
                 Arg::Input => {
                     path_args.push(argv.len());
                     argv.push(inputs[0].to_string_lossy().into_owned());
@@ -399,6 +423,7 @@ mod tests {
             Path::new("out.gif"),
             &Tuning::default(),
             &ResolvedVideo::default(),
+            &[],
         );
         assert_eq!(r.argv, vec!["-i", "in.mp4", "-y", "out.gif"]);
         assert_eq!(
@@ -425,6 +450,7 @@ mod tests {
             Path::new("out.jpg"),
             &Tuning::default(),
             &ResolvedVideo::default(),
+            &[],
         );
         assert_eq!(r.argv[0], "photo.heic[0]");
         assert_eq!(
@@ -447,6 +473,7 @@ mod tests {
             Path::new("b/out.pdf"),
             &Tuning::default(),
             &ResolvedVideo::default(),
+            &[],
         );
         assert_eq!(r.argv, vec!["--outdir", "b", "a/in.docx"]);
         assert_eq!(r.path_args, vec![1, 2], "the out-dir and the input");
@@ -465,6 +492,7 @@ mod tests {
             Path::new("out.pdf"),
             &Tuning::default(),
             &ResolvedVideo::default(),
+            &[],
         );
         assert_eq!(r.argv, vec!["."]);
         assert_eq!(r.path_args, vec![0]);
@@ -548,12 +576,14 @@ mod tests {
             crf: None,
             max_size: None,
             upscale: false,
+            strip_metadata: false,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],
             Path::new("out.jpg"),
             &tuning,
             &ResolvedVideo::default(),
+            &[],
         );
         assert_eq!(
             r.argv,
@@ -585,6 +615,7 @@ mod tests {
                         ..Tuning::default()
                     },
                     &ResolvedVideo::default(),
+                    &[],
                 )
                 .argv
         };
@@ -605,6 +636,7 @@ mod tests {
             Path::new("out.jpg"),
             &tuning,
             &ResolvedVideo::default(),
+            &[],
         );
         for &i in &r.path_args {
             assert!(
@@ -672,6 +704,7 @@ mod tests {
             Path::new("out.mp4"),
             &Tuning::default(),
             &ResolvedVideo::default(),
+            &[],
         );
         assert_eq!(out.argv, vec!["-crf".to_string(), "20".to_string()]);
     }
@@ -692,6 +725,7 @@ mod tests {
                 ..Default::default()
             },
             &ResolvedVideo::default(),
+            &[],
         );
         assert_eq!(out.argv, vec!["-crf".to_string(), "28".to_string()]);
     }

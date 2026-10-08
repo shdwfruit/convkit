@@ -197,6 +197,11 @@ pub fn build_tuned(
 
     let recipe =
         select(from, to, probe, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
+    let recipe = if tuning.strip_metadata {
+        registry::strip_variant(to, recipe)
+    } else {
+        recipe
+    };
     validate_tuning(&recipe, from, to, tuning, &resolved)?;
 
     let last = recipe.steps.len() - 1;
@@ -228,7 +233,7 @@ pub fn build_tuned(
         let crate::recipe::Rendered {
             mut argv,
             mut path_args,
-        } = step.render_full(&inputs_here, &step_outputs[i], tuning, &resolved);
+        } = step.render_full(&inputs_here, &step_outputs[i], tuning, &resolved, &[]);
         if step.backend == Backend::Soffice {
             // See `USER_INSTALLATION_PLACEHOLDER`'s docs: every real
             // Soffice invocation gets this flag from `exec::run`, so the
@@ -474,6 +479,17 @@ fn validate_tuning(
             ),
         ));
     }
+    if tuning.strip_metadata && !has_slot(|a| matches!(a, Arg::StripMetadata)) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--strip-metadata does not apply to {} -> {}: it covers image, video and \
+                 audio conversions",
+                from.ext(),
+                to.ext(),
+            ),
+        ));
+    }
     check_crf_range(to, tuning)
 }
 
@@ -526,6 +542,51 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn strip_metadata_is_refused_on_a_document_pair() {
+        let e = build_tuned(
+            Format::Docx,
+            Format::Pdf,
+            &[p("a.docx")],
+            Path::new("a.pdf"),
+            None,
+            None,
+            &Tuning {
+                strip_metadata: true,
+                ..Tuning::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert_eq!(
+            e.message,
+            "--strip-metadata does not apply to docx -> pdf: it covers image, video and \
+             audio conversions"
+        );
+    }
+
+    /// The flag swaps a png target onto its TIFF detour, and nothing else
+    /// about the plan.
+    #[test]
+    fn a_stripped_png_plan_writes_a_tiff_first() {
+        let plan = build_tuned(
+            Format::Heic,
+            Format::Png,
+            &[p("a.heic")],
+            Path::new("a.png"),
+            None,
+            None,
+            &Tuning {
+                strip_metadata: true,
+                ..Tuning::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].output, Path::new("a.convkit-step0.tiff"));
+        assert_eq!(plan.steps[1].argv, ["a.convkit-step0.tiff", "a.png"]);
     }
 
     #[test]
@@ -1132,6 +1193,7 @@ mod tests {
             crf: None,
             max_size: None,
             upscale: false,
+            strip_metadata: false,
         }
     }
 
