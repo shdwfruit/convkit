@@ -117,7 +117,6 @@ impl PdfPlan {
     /// Where output `i` lands inside `scratch` when the commands write
     /// there. For `SplitPages` this follows qpdf's own `%d` padding: the
     /// width of the page count.
-    #[allow(dead_code)] // used once plans are run
     pub(crate) fn scratch_output(&self, scratch: &Path, i: usize) -> PathBuf {
         match &self.job {
             PdfJob::Merge { .. } => scratch.join(MERGE_SCRATCH),
