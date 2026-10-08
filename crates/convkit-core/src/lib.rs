@@ -4,6 +4,7 @@ pub mod budget;
 pub mod error;
 pub mod exec;
 pub mod format;
+mod icon;
 pub mod install;
 pub mod manifest;
 mod media;

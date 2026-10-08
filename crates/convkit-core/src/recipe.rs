@@ -163,6 +163,22 @@ pub enum Arg {
     /// `stem-1.jpg`, … and the conversion fails with an empty "produced no
     /// output". Harmless on single-frame sources.
     InputFirstFrame,
+    /// The first input with the frame selector for the frame the plan chose
+    /// from the source, `[0]` when it chose none. An .ico lists its sizes
+    /// in whatever order it was written, and a favicon is often written
+    /// smallest first, so `InputFirstFrame` would take its 16px icon.
+    InputChosenFrame,
+    /// A `-density` value: the one resolved from the source when there is
+    /// one, the authored default otherwise. Spelled with its default, as
+    /// `Quality` is.
+    Density(&'static str),
+    /// Makes an icon's square. With the source's size read, `-extent NxN`
+    /// pads it to a transparent square at its own longer side, so every
+    /// icon size is made from the original in one resample, and a source
+    /// already at an icon size keeps that size untouched. Unread, it first
+    /// fits the picture within the authored geometry, which still makes a
+    /// square, at the cost of a second resample.
+    IconCanvas(&'static str),
     /// The directory containing the first input path (`.` for a bare
     /// filename). For backends like `pandoc` that resolve a document's
     /// relative resources (images) against a search path rather than
@@ -326,6 +342,32 @@ impl Step {
                     path_args.push(argv.len());
                     argv.push(format!("{}[0]", inputs[0].to_string_lossy()));
                 }
+                // A path, for the same reason `InputFirstFrame` is.
+                Arg::InputChosenFrame => {
+                    path_args.push(argv.len());
+                    argv.push(format!(
+                        "{}[{}]",
+                        inputs[0].to_string_lossy(),
+                        video.frame.unwrap_or(0)
+                    ));
+                }
+                Arg::Density(default) => argv.push(
+                    video
+                        .density
+                        .clone()
+                        .unwrap_or_else(|| (*default).to_string()),
+                ),
+                Arg::IconCanvas(fallback) => match video.icon_canvas {
+                    Some(side) => {
+                        argv.push("-extent".to_string());
+                        argv.push(format!("{side}x{side}"));
+                    }
+                    None => {
+                        for a in ["-resize", fallback, "-extent", fallback] {
+                            argv.push(a.to_string());
+                        }
+                    }
+                },
                 Arg::InputDir => {
                     let dir = inputs[0].parent().filter(|p| !p.as_os_str().is_empty());
                     path_args.push(argv.len());
@@ -432,6 +474,66 @@ mod tests {
             vec![0, 2],
             "the selector token and the output, not the flag"
         );
+    }
+
+    /// Unresolved, the icon slots render their authored fallbacks, which is
+    /// what the snapshot shows; resolved, what the source called for. The
+    /// chosen frame is a path position either way.
+    #[test]
+    fn icon_slots_render_what_was_resolved_or_their_fallback() {
+        let step = Step {
+            backend: Backend::Magick,
+            args: &[
+                Arg::Lit("-density"),
+                Arg::Density("384"),
+                Arg::InputChosenFrame,
+                Arg::IconCanvas("256x256"),
+                Arg::Output,
+            ],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let render = |video: &ResolvedVideo| {
+            step.render_full(
+                &[Path::new("in.ico")],
+                Path::new("out.ico"),
+                &Tuning::default(),
+                video,
+            )
+        };
+        let plain = render(&ResolvedVideo::default());
+        assert_eq!(
+            plain.argv,
+            vec![
+                "-density",
+                "384",
+                "in.ico[0]",
+                "-resize",
+                "256x256",
+                "-extent",
+                "256x256",
+                "out.ico"
+            ]
+        );
+        assert_eq!(plain.path_args, vec![2, 7]);
+        let read = render(&ResolvedVideo {
+            density: Some("1024".into()),
+            frame: Some(3),
+            icon_canvas: Some(48),
+            ..ResolvedVideo::default()
+        });
+        assert_eq!(
+            read.argv,
+            vec![
+                "-density",
+                "1024",
+                "in.ico[3]",
+                "-extent",
+                "48x48",
+                "out.ico"
+            ]
+        );
+        assert_eq!(read.path_args, vec![2, 5]);
     }
 
     #[test]

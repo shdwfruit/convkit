@@ -42,8 +42,10 @@ heif -> pdf: magick in.heif -auto-orient -compress jpeg -quality 92 out.pdf
 heif -> png: magick in.heif[0] -auto-orient out.png
 heif -> tiff: magick in.heif -auto-orient out.tiff
 heif -> webp: magick in.heif -auto-orient -quality 92 out.webp
+ico -> png: magick in.ico[0] out.png
 jpg -> avif: magick in.jpg -auto-orient -quality 92 out.avif
 jpg -> bmp: magick in.jpg[0] -auto-orient out.bmp
+jpg -> ico: magick in.jpg[0] -auto-orient -background none -gravity center -resize 256x256 -extent 256x256 -define icon:png-compression-size=256 -define icon:auto-resize=256,128,64,48,32,24,16 out.ico
 jpg -> pdf: magick in.jpg -auto-orient -compress jpeg -quality 92 out.pdf
 jpg -> png: magick in.jpg[0] -auto-orient out.png
 jpg -> tiff: magick in.jpg -auto-orient out.tiff
@@ -87,11 +89,13 @@ odt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --no
 pdf -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=writer_pdf_import --convert-to docx:MS Word 2007 XML --outdir . in.pdf
 png -> avif: magick in.png -auto-orient -quality 92 out.avif
 png -> bmp: magick in.png[0] -auto-orient out.bmp
+png -> ico: magick in.png[0] -auto-orient -background none -gravity center -resize 256x256 -extent 256x256 -define icon:png-compression-size=256 -define icon:auto-resize=256,128,64,48,32,24,16 out.ico
 png -> jpg: magick in.png[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
 png -> pdf: magick in.png -auto-orient -compress jpeg -quality 92 out.pdf
 png -> tiff: magick in.png -auto-orient out.tiff
 png -> webp: magick in.png -auto-orient -quality 92 out.webp
 pptx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.pptx
+svg -> ico: magick -density 384 -background none in.svg -gravity center -resize 256x256 -extent 256x256 -define icon:png-compression-size=256 -define icon:auto-resize=256,128,64,48,32,24,16 out.ico
 svg -> jpg: magick -density 384 -background white in.svg -alpha remove -alpha off -flatten -quality 92 out.jpg
 svg -> png: magick -density 384 -background none in.svg out.png
 tiff -> avif: magick in.tiff -auto-orient -quality 92 out.avif
@@ -113,6 +117,7 @@ webm -> mp4: ffmpeg -i in.webm -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx26
 webm -> wav: ffmpeg -i in.webm -vn -c:a pcm_s16le -y out.wav
 webp -> avif: magick in.webp -auto-orient -quality 92 out.avif
 webp -> bmp: magick in.webp[0] -auto-orient out.bmp
+webp -> ico: magick in.webp[0] -auto-orient -background none -gravity center -resize 256x256 -extent 256x256 -define icon:png-compression-size=256 -define icon:auto-resize=256,128,64,48,32,24,16 out.ico
 webp -> jpg: magick in.webp[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
 webp -> pdf: magick in.webp -auto-orient -compress jpeg -quality 92 out.pdf
 webp -> png: magick in.webp[0] -auto-orient out.png

@@ -337,6 +337,16 @@ fn probed_for(
             probed.get_or_insert_with(MediaProbe::default).image = Some(t);
         }
     }
+    // As `exec::run` does, so the preview reads the same .ico frame.
+    if registry::reads_frames(job.from, job.to) {
+        let frames = resolver
+            .resolve(Backend::Magick)
+            .ok()
+            .and_then(|m| probe::frame_sizes(&m.path, &job.inputs[0]).ok());
+        if let Some(f) = frames {
+            probed.get_or_insert_with(MediaProbe::default).frames = f;
+        }
+    }
     Ok(probed)
 }
 
@@ -362,7 +372,7 @@ fn media_probed_for(
     }
     if let (Some(read), Some(geometry)) = (
         registry::image_read(job.from, job.to, tuning),
-        tuning.resize.as_deref(),
+        registry::image_read_geometry(job.to, tuning),
     ) {
         // As `exec::run` does: an unreadable size leaves `--upscale` its
         // general warning rather than failing the preview. `probe::image`

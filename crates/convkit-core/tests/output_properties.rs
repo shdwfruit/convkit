@@ -1346,6 +1346,203 @@ fn the_gif_buffering_note_is_for_long_sources_only() {
     );
 }
 
+// --- Icons ------------------------------------------------------------------
+
+/// Every size an .ico target holds, largest first, as ImageMagick lists
+/// its frames.
+const ICON_SIZES: [(u32, u32); 7] = [
+    (256, 256),
+    (128, 128),
+    (64, 64),
+    (48, 48),
+    (32, 32),
+    (24, 24),
+    (16, 16),
+];
+
+/// Every frame's size, in file order.
+fn icon_frames(path: &Path) -> Vec<(u32, u32)> {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+    let magick = resolver.resolve(Backend::Magick).unwrap().path;
+    let text = run_identify(&magick, &["-format", "%w %h\n", &path.to_string_lossy()]);
+    text.lines()
+        .map(|l| {
+            let mut it = l.split_whitespace().map(|n| n.parse::<u32>().unwrap());
+            (it.next().unwrap(), it.next().unwrap())
+        })
+        .collect()
+}
+
+/// An image's pixels as 8-bit RGBA, for comparing two of them exactly.
+/// `spec` may carry a frame selector.
+fn rgba(spec: &str) -> Vec<u8> {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+    let magick = resolver.resolve(Backend::Magick).unwrap().path;
+    let out = Command::new(&magick)
+        .args([spec, "-depth", "8", "rgba:-"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ImageMagick: {e}"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+/// The alpha at `(x, y)` of a `side`-pixel-wide RGBA buffer.
+fn alpha_at(pixels: &[u8], side: usize, x: usize, y: usize) -> u8 {
+    pixels[(y * side + x) * 4 + 3]
+}
+
+/// A source at least as big as the largest size: every size, no warning,
+/// no note.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_icon_holds_every_size() {
+    let dir = tmp();
+    let args = [
+        "-size",
+        "512x512",
+        "xc:none",
+        "-fill",
+        "teal",
+        "-draw",
+        "circle 256,256 256,40",
+    ];
+    let logo = synth_image(&dir, &args, "logo.png");
+    let (ico, o) = convert_path(&logo, "ico");
+    assert_eq!(icon_frames(&ico), ICON_SIZES);
+    assert!(o.warnings.is_empty() && o.notes.is_empty(), "{o:?}");
+    assert_eq!(o.enlarged, None);
+}
+
+/// A small source still gets every size, with a warning naming the
+/// enlarged ones, and its own size comes through untouched.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_small_source_fills_every_size_and_says_which_are_enlarged() {
+    let dir = tmp();
+    let args = [
+        "-size",
+        "32x32",
+        "xc:none",
+        "-fill",
+        "red",
+        "-draw",
+        "circle 16,16 16,2",
+    ];
+    let tiny = synth_image(&dir, &args, "tiny.png");
+    let (ico, o) = convert_path(&tiny, "ico");
+    assert_eq!(icon_frames(&ico), ICON_SIZES);
+    assert!(
+        o.notes[0]
+            .starts_with("The 32x32 source is enlarged for the 48, 64, 128 and 256 px icon sizes"),
+        "{:?}",
+        o.notes
+    );
+    assert!(!o.enlarged.unwrap().needs_confirmation);
+    let own_size = format!("{}[4]", ico.display());
+    assert_eq!(rgba(&own_size), rgba(&tiny.to_string_lossy()));
+}
+
+/// A wide picture is centered on a transparent square, not stretched, even
+/// from a JPEG, which has no transparency of its own.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_picture_that_is_not_square_is_padded_not_stretched() {
+    let dir = tmp();
+    let banner = synth_image(
+        &dir,
+        &["-size", "300x150", "gradient:red-blue"],
+        "banner.jpg",
+    );
+    let (ico, o) = convert_path(&banner, "ico");
+    assert!(
+        o.warnings.iter().any(|w| w.contains("transparent square")),
+        "{:?}",
+        o.warnings
+    );
+    let largest = rgba(&format!("{}[0]", ico.display()));
+    // 300x150 centered on 300x300, then shrunk to 256: the picture spans
+    // rows 64 to 192.
+    assert_eq!(alpha_at(&largest, 256, 128, 20), 0, "padding above");
+    assert_eq!(alpha_at(&largest, 256, 128, 236), 0, "padding below");
+    assert_eq!(alpha_at(&largest, 256, 128, 128), 255, "the picture");
+}
+
+/// An SVG is rendered at the largest size rather than enlarged from a
+/// smaller rendering: its 256 px frame is what rendering it at 256 px
+/// gives.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_svg_icon_is_rendered_at_full_size() {
+    let dir = tmp();
+    let svg = write_svg(&dir);
+    let (ico, o) = convert_path(&svg, "ico");
+    assert_eq!(o.enlarged, None);
+    assert!(o.warnings.is_empty(), "a square drawing: {:?}", o.warnings);
+    let direct = synth_image(
+        &dir,
+        &[
+            "-density",
+            "1024",
+            "-background",
+            "none",
+            &svg.to_string_lossy(),
+        ],
+        "direct.png",
+    );
+    assert_eq!(imagemagick_dimensions(&direct), (256, 256));
+    let frame = rgba(&format!("{}[0]", ico.display()));
+    let reference = rgba(&direct.to_string_lossy());
+    let diff: u64 = frame
+        .iter()
+        .zip(&reference)
+        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+        .sum();
+    let mean = diff as f64 / frame.len() as f64;
+    assert!(mean < 1.0, "mean difference {mean} per channel");
+}
+
+fn write_svg(dir: &tempfile::TempDir) -> PathBuf {
+    let path = dir.path().join("mark.svg");
+    std::fs::write(
+        &path,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><circle cx="12" cy="12" r="10" fill="teal"/></svg>"#,
+    )
+    .unwrap();
+    path
+}
+
+/// A favicon written smallest first reads back as its largest size, with a
+/// note; an icon of one size, without.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_icon_reads_back_as_its_largest_size() {
+    let dir = tmp();
+    let tiny = synth_image(&dir, &["-size", "48x48", "xc:teal"], "tiny.png");
+    let tiny = tiny.to_string_lossy();
+    let favicon = synth_image(
+        &dir,
+        &[&tiny, "-define", "icon:auto-resize=16,32,48"],
+        "favicon.ico",
+    );
+    assert_eq!(icon_frames(&favicon), vec![(16, 16), (32, 32), (48, 48)]);
+    let (png, o) = convert_path(&favicon, "png");
+    assert_eq!(imagemagick_dimensions(&png), (48, 48));
+    assert!(
+        o.warnings.iter().any(|w| w.contains("largest")),
+        "{:?}",
+        o.warnings
+    );
+    let single = synth_image(&dir, &[&tiny], "single.ico");
+    let (_, o) = convert_path(&single, "png");
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+}
+
 // --- --max-size -----------------------------------------------------------
 
 /// A clip noisy enough that the encoder has to spend the bits it is given:
@@ -2021,6 +2218,7 @@ fn a_heic_size_is_read_without_decoding_it() {
         density: None,
         every_input: false,
         every_page: false,
+        largest_frame: false,
     };
     let p =
         convkit_core::probe::image(&magick, &[fixture("photo.heic")], first_frame, "1x").unwrap();

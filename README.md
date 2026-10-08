@@ -13,8 +13,8 @@
 
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
-ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 115
-conversion pairs across 27 formats (`conv capabilities` is the source of
+ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 120
+conversion pairs across 28 formats (`conv capabilities` is the source of
 truth). Files never leave your machine; only `conv install`/`conv update`
 ever touch the network.
 
@@ -249,6 +249,17 @@ warning names and the question is decided on. If a size cannot be
 read, conv warns without the numbers and does not ask, unless the
 geometry is a percentage, whose ratio is known regardless.
 
+An `.ico` is the one place conv enlarges without being asked. An icon
+holds every size from 16 to 256 px, so a smaller source is enlarged for
+the sizes above it, and a warning names them:
+
+```console
+$ conv tiny.png .ico
+OK tiny.ico - 109 KB - 0.1s
+  /home/user/Pictures/tiny.ico
+warning  The 32x32 source is enlarged for the 48, 64, 128 and 256 px icon sizes: enlarging adds no detail, so they look soft. A source 256 px or more on its longer side fills every size.
+```
+
 An out-of-range `--crf` is refused rather than passed through to the
 encoder:
 
@@ -434,7 +445,7 @@ each could be converted into.
 ```console
 $ conv scan
 README       --
-already.jpg  Image   -> png webp avif tiff bmp pdf
+already.jpg  Image   -> png webp avif tiff bmp ico pdf
 archive.zip  --
 clip.mp4     Video   -> mov mkv webm mp3 m4a wav flac gif
 notes.md     Doc     -> pdf docx html

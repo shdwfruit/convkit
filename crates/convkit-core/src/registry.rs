@@ -12,7 +12,7 @@ use crate::{Arg, Backend, Format, OutputMode, Recipe, Step, Tuning};
 pub const IMAGE_QUALITY: &str = "92";
 /// DPI used when rasterising vectors. 384 gives a crisp result at 4x a 96dpi
 /// nominal size without producing an absurd bitmap.
-const SVG_DENSITY: &str = "384";
+pub(crate) const SVG_DENSITY: &str = "384";
 
 /// Lossy raster targets take a quality flag; lossless ones must not.
 fn is_lossy(f: Format) -> bool {
@@ -197,6 +197,94 @@ const IMG_TO_PDF: Recipe = Recipe {
     warnings: &[],
 };
 
+/// The note on an icon from a picture that is not square. `notes_for`
+/// drops it once the source's size shows it is.
+const ICON_SQUARE_NOTE: &str =
+    "Icons are square, so a picture that is not is centered on a transparent square.";
+
+/// The note on `ICO_TO_PNG`, dropped for an icon holding one size.
+const ICO_LARGEST_NOTE: &str =
+    "Only the largest of the icon's sizes is kept; a PNG holds one image.";
+
+/// The two defines every icon recipe ends with. `auto-resize` writes one
+/// frame per size in `icon::SIZES`, each resized from the square picture
+/// it is given. `png-compression-size=256` stores the 256 px frame as PNG,
+/// which Windows and every browser read, instead of a 270 KB bitmap.
+/// ImageMagick 7 gained it in April 2026; an older build, or ImageMagick
+/// 6, ignores the define and writes the bitmap.
+const ICON_DEFINES: [Arg; 4] = [
+    Arg::Lit("-define"),
+    Arg::Lit("icon:png-compression-size=256"),
+    Arg::Lit("-define"),
+    Arg::Lit("icon:auto-resize=256,128,64,48,32,24,16"),
+];
+
+/// png/jpg/webp -> ico, for favicons and app icons. The picture is padded
+/// to a transparent square, centered, rather than stretched: a logo
+/// squashed into a square is the one result nobody wants. Every size is
+/// embedded even when the source is smaller than some of them, and
+/// `icon::resolve` warns about those. An animated or multi-page source
+/// gives its first frame.
+const RASTER_TO_ICO: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::InputFirstFrame,
+            Arg::Lit("-auto-orient"),
+            Arg::Lit("-background"),
+            Arg::Lit("none"),
+            Arg::Lit("-gravity"),
+            Arg::Lit("center"),
+            Arg::IconCanvas("256x256"),
+            ICON_DEFINES[0],
+            ICON_DEFINES[1],
+            ICON_DEFINES[2],
+            ICON_DEFINES[3],
+            Arg::Output,
+        ]
+    )],
+    warnings: &[ICON_SQUARE_NOTE, FIRST_FRAME_NOTE],
+};
+
+/// svg -> ico. Rendered on a transparent background at the density that
+/// makes its longer side the largest icon (`icon::resolve`), so no size is
+/// enlarged from a smaller rendering.
+const SVG_TO_ICO: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::Lit("-density"),
+            Arg::Density(SVG_DENSITY),
+            Arg::Lit("-background"),
+            Arg::Lit("none"),
+            Arg::Input,
+            Arg::Lit("-gravity"),
+            Arg::Lit("center"),
+            Arg::IconCanvas("256x256"),
+            ICON_DEFINES[0],
+            ICON_DEFINES[1],
+            ICON_DEFINES[2],
+            ICON_DEFINES[3],
+            Arg::Output,
+        ]
+    )],
+    warnings: &[ICON_SQUARE_NOTE],
+};
+
+/// ico -> png, the largest of the icon's sizes (`icon::resolve`).
+const ICO_TO_PNG: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::InputChosenFrame,
+            Arg::TuneResize,
+            Arg::TuneColors,
+            Arg::Output,
+        ]
+    )],
+    warnings: &[ICO_LARGEST_NOTE],
+};
+
 /// Raster image formats that participate in the all-directions image family.
 const RASTER: &[Format] = &[
     Format::Heic,
@@ -253,6 +341,12 @@ fn insert_image_family(t: &mut Table) {
             },
         );
     }
+
+    for from in [Format::Png, Format::Jpg, Format::Webp] {
+        t.insert((from, Format::Ico), RASTER_TO_ICO);
+    }
+    t.insert((Format::Svg, Format::Ico), SVG_TO_ICO);
+    t.insert((Format::Ico, Format::Png), ICO_TO_PNG);
 }
 
 // --- Media family ------------------------------------------------------------
@@ -1219,29 +1313,50 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
     })
 }
 
-/// How to read an image's size before converting it, when to at all: only
-/// for `--resize --upscale` on a pair whose recipe resizes with
-/// ImageMagick, where the size decides whether it enlarges, what the
-/// warning says, and whether to ask first. Read off the resizing step's
-/// own args, so the size is taken the way the recipe takes its input: every
-/// input or the first, every page or the first frame, and at the density it
-/// renders a vector source at.
+/// How to read an image's size before converting it, when to at all: for
+/// `--resize --upscale` on a pair whose recipe resizes with ImageMagick,
+/// where the size decides whether it enlarges, what the warning says, and
+/// whether to ask first; and for an icon target, which centers the picture
+/// on a square of its own size and warns about the sizes it enlarges. Read
+/// off the step's own args, so the size is taken the way the recipe takes
+/// its input: every input or the first, every page, the first frame or the
+/// largest, and at the density it renders a vector source at.
 pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::probe::ImageRead> {
-    if !tuning.upscale || tuning.resize.is_none() {
+    let upscale = tuning.upscale && tuning.resize.is_some();
+    if !upscale && to != Format::Ico {
         return None;
     }
-    let step = lookup(from, to)?
-        .steps
-        .iter()
-        .find(|s| s.args.iter().any(|a| matches!(a, Arg::TuneResize)))?;
+    let step = lookup(from, to)?.steps.iter().find(|s| {
+        s.args
+            .iter()
+            .any(|a| matches!(a, Arg::TuneResize | Arg::IconCanvas(_)))
+    })?;
+    let has = |wanted: fn(&Arg) -> bool| step.args.iter().any(wanted);
     Some(crate::probe::ImageRead {
         density: step.args.windows(2).find_map(|w| match w {
-            [Arg::Lit("-density"), Arg::Lit(d)] => Some(*d),
+            [Arg::Lit("-density"), Arg::Lit(d) | Arg::Density(d)] => Some(*d),
             _ => None,
         }),
-        every_input: step.args.iter().any(|a| matches!(a, Arg::Inputs)),
-        every_page: !step.args.iter().any(|a| matches!(a, Arg::InputFirstFrame)),
+        every_input: has(|a| matches!(a, Arg::Inputs)),
+        every_page: !has(|a| matches!(a, Arg::InputFirstFrame | Arg::InputChosenFrame)),
+        largest_frame: has(|a| matches!(a, Arg::InputChosenFrame)),
     })
+}
+
+/// The geometry `probe::image` decides "enlarged most" against: the
+/// `--resize` given, or for an icon target, which takes none, its largest
+/// size.
+pub fn image_read_geometry(to: Format, tuning: &Tuning) -> Option<&str> {
+    match tuning.resize.as_deref() {
+        Some(g) => Some(g),
+        None => (to == Format::Ico).then_some("256x256"),
+    }
+}
+
+/// Whether to list an .ico's frames before planning, so the recipe reads
+/// the largest (`icon::resolve`).
+pub fn reads_frames(from: Format, to: Format) -> bool {
+    from == Format::Ico && lookup(from, to).is_some()
 }
 
 /// Whether a note on this pair depends on what the source image holds, so
@@ -1266,6 +1381,10 @@ pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> V
     let long = probe
         .and_then(|p| p.duration_ms)
         .is_none_or(|ms| ms > GIF_BUFFER_NOTE_AFTER_MS);
+    let square = probe
+        .and_then(|p| Some((p.width?, p.height?)))
+        .is_some_and(|(w, h)| w == h);
+    let one_size = probe.is_some_and(|p| p.frames.len() == 1);
     recipe
         .warnings
         .iter()
@@ -1278,6 +1397,8 @@ pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> V
             },
             FIRST_FRAME_NOTE => frames.then_some(note),
             GIF_BUFFER_NOTE => long.then_some(note),
+            ICON_SQUARE_NOTE => (!square).then_some(note),
+            ICO_LARGEST_NOTE => (!one_size).then_some(note),
             _ => Some(note),
         })
         .map(str::to_string)
@@ -1533,6 +1654,96 @@ mod tests {
         let argv = r.steps[0].render(&[Path::new("in.jpg")], Path::new("out.png"));
         assert!(!argv.contains(&"-quality".to_string()), "{argv:?}");
         assert!(argv.contains(&"-auto-orient".to_string()));
+    }
+
+    /// The sizes ImageMagick is told to write are the ones `icon` warns
+    /// about.
+    #[test]
+    fn the_icon_sizes_written_are_the_ones_warned_about() {
+        let Arg::Lit(define) = ICON_DEFINES[3] else {
+            panic!("{:?}", ICON_DEFINES[3]);
+        };
+        let written: Vec<u32> = define
+            .strip_prefix("icon:auto-resize=")
+            .unwrap()
+            .split(',')
+            .map(|s| s.parse().unwrap())
+            .collect();
+        assert_eq!(written, crate::icon::SIZES);
+    }
+
+    #[test]
+    fn icons_are_made_from_png_jpg_webp_and_svg_and_read_back_to_png() {
+        for from in [Format::Png, Format::Jpg, Format::Webp] {
+            assert_eq!(lookup(from, Format::Ico), Some(RASTER_TO_ICO), "{from:?}");
+        }
+        assert_eq!(lookup(Format::Svg, Format::Ico), Some(SVG_TO_ICO));
+        let from_ico: Vec<Format> = all_pairs()
+            .into_iter()
+            .filter(|&(f, _)| f == Format::Ico)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(from_ico, vec![Format::Png]);
+    }
+
+    fn sized(w: u32, h: u32) -> crate::MediaProbe {
+        crate::MediaProbe {
+            width: Some(w),
+            height: Some(h),
+            ..crate::MediaProbe::default()
+        }
+    }
+
+    #[test]
+    fn an_icon_says_it_was_squared_only_for_a_source_that_was_not_square() {
+        let says = |p: Option<&crate::MediaProbe>| {
+            notes(Format::Png, Format::Ico, p).contains(&ICON_SQUARE_NOTE.to_string())
+        };
+        assert!(!says(Some(&sized(64, 64))));
+        assert!(says(Some(&sized(64, 32))));
+        assert!(says(None), "unread keeps it");
+        let svg = notes(Format::Svg, Format::Ico, Some(&sized(96, 48)));
+        assert_eq!(svg, vec![ICON_SQUARE_NOTE]);
+    }
+
+    #[test]
+    fn reading_an_icon_back_notes_the_dropped_sizes_only_when_there_were_some() {
+        let frames = |n: usize| crate::MediaProbe {
+            frames: vec![(16, 16, 32); n],
+            ..crate::MediaProbe::default()
+        };
+        assert!(notes(Format::Ico, Format::Png, Some(&frames(1))).is_empty());
+        assert_eq!(
+            notes(Format::Ico, Format::Png, Some(&frames(3))),
+            vec![ICO_LARGEST_NOTE]
+        );
+        assert_eq!(
+            notes(Format::Ico, Format::Png, None),
+            vec![ICO_LARGEST_NOTE]
+        );
+    }
+
+    /// An icon target reads its source's size with no flag at all, the
+    /// way the recipe reads it; ico -> png reads the largest frame.
+    #[test]
+    fn an_icon_pair_reads_the_source_the_way_its_recipe_does() {
+        let none = Tuning::default();
+        let png = image_read(Format::Png, Format::Ico, &none).unwrap();
+        assert!(!png.every_page && !png.largest_frame && png.density.is_none());
+        let svg = image_read(Format::Svg, Format::Ico, &none).unwrap();
+        assert_eq!(svg.density, Some(SVG_DENSITY));
+        assert_eq!(image_read_geometry(Format::Ico, &none), Some("256x256"));
+        assert_eq!(image_read_geometry(Format::Png, &none), None);
+        assert_eq!(image_read(Format::Ico, Format::Png, &none), None);
+        let up = Tuning {
+            resize: Some("64x".into()),
+            upscale: true,
+            ..Tuning::default()
+        };
+        let ico = image_read(Format::Ico, Format::Png, &up).unwrap();
+        assert!(ico.largest_frame && !ico.every_page, "{ico:?}");
+        assert!(reads_frames(Format::Ico, Format::Png));
+        assert!(!reads_frames(Format::Png, Format::Ico));
     }
 
     #[test]

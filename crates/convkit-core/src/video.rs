@@ -93,8 +93,20 @@ pub struct ResolvedVideo {
     /// Capitalised sentences with a terminal period, per that register.
     pub notes: Vec<String>,
     /// Set when `--upscale` enlarges the picture, or might because the
-    /// source size is unknown.
+    /// source size is unknown. Also set for an icon target whose largest
+    /// sizes are bigger than its source (see `icon::resolve`).
     pub enlarged: Option<Enlargement>,
+    /// The side of the transparent square an icon target centers its
+    /// source on: the source's own longer side, read from it. `None`
+    /// renders `Arg::IconCanvas`'s fallback.
+    pub icon_canvas: Option<u32>,
+    /// The density to render an SVG at, when the recipe's own would not
+    /// suit the source: an icon renders its SVG at the size of its largest
+    /// icon.
+    pub density: Option<String>,
+    /// The frame `Arg::InputChosenFrame` reads, chosen from the source: an
+    /// .ico's largest. `None` reads the first.
+    pub frame: Option<usize>,
 }
 
 /// Parses a user frame rate (`24`, `29.97`, `30000/1001`) into a float for
