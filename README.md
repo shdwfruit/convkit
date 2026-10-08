@@ -13,8 +13,8 @@
 
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
-ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 143
-conversion pairs across 29 formats (`conv capabilities` is the source of
+ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 149
+conversion pairs across 32 formats (`conv capabilities` is the source of
 truth). Files never leave your machine; only `conv install`/`conv update`
 ever touch the network.
 

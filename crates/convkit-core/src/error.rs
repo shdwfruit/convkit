@@ -32,13 +32,18 @@ pub enum ErrorCode {
     /// no, or nobody could be asked (no terminal, `--json`, `--quiet`) and
     /// `--yes` was not given. A usage-family error: the fix is a flag.
     ConfirmationRequired,
+    /// The source is encrypted with a password LibreOffice was not given.
+    /// Its own code, rather than `ConversionFailed`, so a script can tell
+    /// it from a damaged file: LibreOffice's own words for the two are the
+    /// same.
+    PasswordProtected,
 }
 
 impl ErrorCode {
     /// Process exit code. Values are fixed by the spec; do not renumber.
     pub fn exit_code(&self) -> i32 {
         match self {
-            ErrorCode::ConversionFailed => 1,
+            ErrorCode::ConversionFailed | ErrorCode::PasswordProtected => 1,
             ErrorCode::UnsupportedPair
             | ErrorCode::UnknownFormat
             | ErrorCode::InputNotFound
@@ -107,6 +112,29 @@ impl ConvError {
             remediation: Some(Remediation {
                 managed: None,
                 manual: Some(format!("use a .{canonical} output path")),
+            }),
+        }
+    }
+
+    /// An Office source encrypted with a password. conv has no way to pass
+    /// one to LibreOffice, so the fix is a copy without it.
+    pub fn password_protected(input: &Path, from: Format) -> Self {
+        let name = input.file_name().map_or_else(
+            || input.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        ConvError {
+            code: ErrorCode::PasswordProtected,
+            message: format!(
+                "{name} is password-protected, and LibreOffice cannot open it without the password"
+            ),
+            backend: None,
+            remediation: Some(Remediation {
+                managed: None,
+                manual: Some(format!(
+                    "open it in {} with the password, save a copy without one, and convert that",
+                    crate::office::app_for(from)
+                )),
             }),
         }
     }
@@ -338,6 +366,23 @@ mod tests {
         assert_eq!(ErrorCode::BatchPartialFailure.exit_code(), 4);
         assert_eq!(ErrorCode::InvalidInvocation.exit_code(), 2);
         assert_eq!(ErrorCode::ConfirmationRequired.exit_code(), 2);
+        assert_eq!(ErrorCode::PasswordProtected.exit_code(), 1);
+    }
+
+    #[test]
+    fn password_protected_names_the_file_and_the_way_out() {
+        let e = ConvError::password_protected(Path::new("q3/budget.xls"), Format::Xls);
+        assert_eq!(
+            serde_json::to_string(&e.code).unwrap(),
+            "\"password_protected\""
+        );
+        assert!(
+            e.message.starts_with("budget.xls is password-protected"),
+            "{}",
+            e.message
+        );
+        let fix = e.remediation.and_then(|r| r.manual).unwrap();
+        assert!(fix.contains("Excel"), "{fix}");
     }
 
     #[test]
