@@ -71,6 +71,11 @@ pub struct WorkbookShape {
 /// is not what its extension says, so the notes stay whole and the import
 /// falls back to the plain default.
 pub fn read(path: &Path, from: Format) -> Option<TableShape> {
+    // Only a regular file, as `probe::run` insists: a FIFO named `x.csv`
+    // would block a --dry-run forever.
+    if !path.is_file() {
+        return None;
+    }
     match from {
         Format::Csv => sniff_csv(&std::fs::read(path).ok()?).map(TableShape::Csv),
         Format::Xlsx => xlsx(path).map(TableShape::Workbook),
