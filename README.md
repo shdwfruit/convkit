@@ -101,6 +101,7 @@ conv scan                        # list the files here and what each can become
 conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
+conv trim talk.mp4               # find clips in the terminal and cut them
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -508,6 +509,29 @@ start fails on its own. A batch writes into a folder named after the range
 `--max-size` sizes the clip rather than the whole file, and `--fps`,
 `--resize` and `--crf` work as usual. On an image or a document the flags
 are refused, with the reason.
+
+To find the times without opening a player, `conv trim talk.mp4` shows the
+file in the terminal: the frame under a slider, a bar of the video's
+colors and a bar of its loudness. ←/→ move the slider 10 ms a press and
+2 s a second while held, PgUp/PgDn jump, and `+`/`-` zoom the bars. `c`
+marks a clip's start, then its end. A clip keeps the picture and the
+sound; select a bar with ↑/↓ and Enter to keep that alone, a silent video
+or the sound as m4a. `w` writes every clip the way the flags would, and
+`q` quits:
+
+```console
+$ conv trim talk.mp4
+OK talk-1m00s-3m00s.mp4 - 36.6 MB - 11.0s
+  /home/user/Videos/talk-1m00s-3m00s.mp4
+  note  Re-encoded rather than stream-copied, because a copied cut can only start on a keyframe; this one starts exactly at 1:00.
+OK talk-3m00s-4m00s.m4a - 951 KB - 0.2s - stream copy, no re-encode
+  /home/user/Videos/talk-3m00s-4m00s.m4a
+```
+
+The picture is drawn in half blocks, which any terminal shows, or sharper
+through kitty's or iTerm2's graphics in kitty, Ghostty, WezTerm and iTerm2;
+`--graphics` picks one. Without a terminal, piped or under `--json`, it
+refuses and points at `--start` and `--end`.
 
 ## Discovering formats and capabilities
 
