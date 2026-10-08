@@ -2926,3 +2926,174 @@ fn a_batch_cut_fails_only_the_file_too_short_for_it() {
     assert!(clips.join("long.mkv").is_file());
     assert!(!clips.join("short.mkv").exists());
 }
+
+// --- conv trim -----------------------------------------------------------
+
+/// Without a terminal to draw on there is nothing to show, so conv trim
+/// refuses and points at the flags, which need none. assert_cmd runs it
+/// with pipes, not a terminal.
+#[test]
+fn conv_trim_without_a_terminal_points_at_the_flags() {
+    conv()
+        .args(["trim", "talk.mp4"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "conv trim needs a terminal; use conv FILE --start T --end T to cut without one",
+        ));
+    conv()
+        .args(["trim", "talk.mp4", "--json"])
+        .assert()
+        .code(2)
+        .stderr(contains("conv trim needs a terminal"));
+}
+
+#[test]
+fn conv_trim_refuses_what_it_cannot_cut_before_anything_else() {
+    conv()
+        .args(["trim", "photo.png"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "conv trim cuts video and audio; photo.png is a still image",
+        ));
+    conv()
+        .args(["trim", "anim.gif"])
+        .assert()
+        .code(2)
+        .stderr(contains("add --to mp4"));
+    conv()
+        .args(["trim", "talk.mp4", "--to", "png"])
+        .assert()
+        .code(2)
+        .stderr(contains("--to png is a still image"));
+    conv()
+        .args(["trim", "talk.mp4", "--graphics", "sixel"])
+        .assert()
+        .code(2);
+}
+
+/// Drives `conv trim` in a pseudo-terminal 100 columns by 30 rows, then
+/// prints its exit code and `stty -a` from the same terminal, so the test
+/// can see the tty was given back. `mode` is `write` (two clips: one whole,
+/// one of the sound alone, then w) or `quit` (a clip, then q and y).
+#[cfg(unix)]
+const TRIM_EXPECT: &str = r#"
+set timeout 60
+lassign $argv conv src out mode
+log_user 0
+spawn -noecho sh -c "stty rows 30 cols 100; TERM=xterm-256color COLORTERM= TERM_PROGRAM= TMUX= '$conv' trim '$src' -o '$out'; echo EXIT=\$?; stty -a"
+expect {
+    "w write" {}
+    timeout { puts "no screen"; exit 1 }
+}
+expect -timeout 1 "zz-never-zz"
+set pgdn "\033\[6~"
+if {$mode == "write"} {
+    send $pgdn; send "c"; send $pgdn; send $pgdn; send "c"
+    send "\033\[B"; send "\r"
+    send "c"; send $pgdn; send "c"
+    send "w"
+} else {
+    send "c"; send $pgdn; send "c"; send "q"; send "y"
+}
+expect {
+    -re {EXIT=(\d+)} { set code $expect_out(1,string) }
+    timeout { puts "no exit"; exit 1 }
+}
+expect {
+    -re {lflags:[^\n]*} { set lflags $expect_out(0,string) }
+    -re {(-?icanon[^\n]*)} { set lflags $expect_out(0,string) }
+    timeout { puts "no stty"; exit 1 }
+}
+expect eof
+puts "code=$code"
+puts "tty=$lflags"
+"#;
+
+/// Line editing and echo are on again: `stty -a` lists `icanon` and `echo`
+/// without a `-` (the format differs between macOS and GNU, the words do
+/// not).
+#[cfg(unix)]
+fn tty_given_back(stdout: &str) -> bool {
+    let tty = stdout.lines().find(|l| l.starts_with("tty=")).unwrap_or("");
+    tty.contains("icanon")
+        && !tty.contains("-icanon")
+        && tty.split_whitespace().any(|w| w == "echo")
+}
+
+#[cfg(unix)]
+fn run_trim_session(mode: &str) -> (String, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let ffmpeg = std::env::var_os("CONVKIT_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+    let src = dir.path().join("src.mp4");
+    let ok = std::process::Command::new(&ffmpeg)
+        .args(["-v", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=30:duration=20",
+        ])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=20"])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args(["-c:a", "aac"])
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let script = dir.path().join("trim.exp");
+    std::fs::write(&script, TRIM_EXPECT).unwrap();
+    let out = dir.path().join("clips");
+    let run = std::process::Command::new("expect")
+        .arg(&script)
+        .arg(assert_cmd::cargo::cargo_bin("conv"))
+        .arg(&src)
+        .arg(&out)
+        .arg(mode)
+        .output()
+        .expect("expect is needed for this test: apt-get install expect, or brew install expect");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert!(
+        run.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    (stdout, dir)
+}
+
+/// The whole of conv trim in a real terminal: marking a clip whole and a
+/// clip of the sound alone, writing both as they would be by the flags,
+/// and handing the terminal back with echo and line editing on.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_writes_the_clips_marked_in_a_real_terminal() {
+    let (stdout, dir) = run_trim_session("write");
+    assert!(stdout.contains("code=0"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
+    let clips = dir.path().join("clips");
+    let mut names: Vec<String> = std::fs::read_dir(&clips)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["src-2s-6s.mp4", "src-6s-8s.m4a"]);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_quits_without_writing_when_asked() {
+    let (stdout, dir) = run_trim_session("quit");
+    assert!(stdout.contains("code=0"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
+    assert!(!dir.path().join("clips").exists());
+}

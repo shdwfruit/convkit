@@ -135,7 +135,8 @@ jobs:
           mkdir -p ~/apt-archives
           find ~/apt-archives -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives/ {} +
           sudo apt-get update
-          sudo apt-get install -y -o Acquire::Retries=3 ffmpeg imagemagick libheif-plugin-libde265 libreoffice pandoc
+          # expect drives conv trim in a pseudo-terminal for its end-to-end test.
+          sudo apt-get install -y -o Acquire::Retries=3 ffmpeg imagemagick libheif-plugin-libde265 libreoffice pandoc expect
           # Drop versions an update has replaced, so the cache does not grow
           # by a week's worth of stale packages each week.
           sudo apt-get autoclean

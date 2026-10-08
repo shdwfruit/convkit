@@ -228,12 +228,21 @@ pub fn loudness_columns(buckets: &[f32], view: (u64, u64), width: usize) -> Vec<
         .collect()
 }
 
-/// The time each of `width` columns over the view starts at.
+/// The time each of `width` columns over the view starts at, snapped to a
+/// grid one column wide, so moving the view along reuses the colours
+/// already grabbed for the video bar instead of asking for every column
+/// again.
 pub fn column_times(view: (u64, u64), width: usize) -> Vec<u64> {
     let (start, len) = view;
+    let step = len.div_ceil(width.max(1) as u64).max(1);
     (0..width as u64)
-        .map(|i| start + len * i / width as u64)
+        .map(|i| (start + len * i / width as u64) / step * step)
         .collect()
+}
+
+/// How many columns the bars take in a terminal `cols` wide.
+pub fn bar_width(cols: u16) -> usize {
+    usize::from(cols).saturating_sub(LABEL).max(1)
 }
 
 /// Cuts a line of plain text to `width` characters.

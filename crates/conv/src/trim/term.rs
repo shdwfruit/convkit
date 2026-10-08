@@ -3,6 +3,8 @@
 //! are drawn chosen from what the terminal says it is.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use console::{Key, Term};
@@ -68,20 +70,25 @@ pub fn input_for(key: &Key) -> Input {
     }
 }
 
-/// Reads keys on its own thread for the rest of the session, handing each
-/// to `send` with the moment it arrived, until `send` returns false or the
-/// terminal stops answering.
-pub fn keys(send: impl Fn(Input, Instant) -> bool + Send + 'static) {
-    std::thread::spawn(move || {
-        let term = Term::stdout();
-        // `read_key_raw` hands back Ctrl-C as a key instead of letting it
-        // stop the process, so it reaches the quit question.
-        while let Ok(key) = term.read_key_raw() {
-            if !send(input_for(&key), Instant::now()) {
-                break;
-            }
-        }
-    });
+/// Whether a key is waiting to be read. On unix the key thread waits here,
+/// a tenth of a second at a time, rather than inside `console`'s read: that
+/// read holds the tty in raw mode and puts back the mode it found when a
+/// key arrives, so a thread left waiting in it after the session would
+/// undo the session's restore on the next keypress.
+#[cfg(unix)]
+fn key_waiting() -> bool {
+    let mut fd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one pollfd, valid for the call.
+    unsafe { libc::poll(&mut fd, 1, 100) > 0 }
+}
+
+#[cfg(not(unix))]
+fn key_waiting() -> bool {
+    true
 }
 
 /// The terminal's size, columns then rows.
@@ -108,6 +115,8 @@ pub fn put(s: &str) {
 /// guard, or a panic, gives all of it back.
 pub struct Screen {
     graphics: Graphics,
+    stop: Arc<AtomicBool>,
+    keys: Option<std::thread::JoinHandle<()>>,
 }
 
 /// The tty mode before the session, for `Drop` and the panic hook.
@@ -131,12 +140,47 @@ impl Screen {
         }));
         ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
         put(ENTER);
-        Screen { graphics }
+        Screen {
+            graphics,
+            stop: Arc::new(AtomicBool::new(false)),
+            keys: None,
+        }
+    }
+
+    /// Reads keys on their own thread for the rest of the session, handing
+    /// each to `send` with the moment it arrived, until `send` returns
+    /// false or the session ends.
+    pub fn read_keys(&mut self, send: impl Fn(Input, Instant) -> bool + Send + 'static) {
+        let stop = Arc::clone(&self.stop);
+        self.keys = Some(std::thread::spawn(move || {
+            let term = Term::stdout();
+            while !stop.load(Ordering::SeqCst) {
+                if !key_waiting() {
+                    continue;
+                }
+                // `read_key_raw` hands back Ctrl-C as a key instead of
+                // letting it stop the process, so it reaches the quit
+                // question.
+                match term.read_key_raw() {
+                    Ok(key) if send(input_for(&key), Instant::now()) => {}
+                    _ => break,
+                }
+            }
+        }));
     }
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // On unix the thread sees the flag within one wait. Elsewhere it may
+        // be inside a read, which holds nothing to undo, and ends with the
+        // process.
+        if cfg!(unix) {
+            if let Some(keys) = self.keys.take() {
+                let _ = keys.join();
+            }
+        }
         restore(Some(self.graphics));
     }
 }
