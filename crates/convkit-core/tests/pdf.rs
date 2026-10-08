@@ -286,6 +286,23 @@ fn split_writes_one_file_per_page_padded_to_the_page_count() {
 
 #[test]
 #[ignore = "requires qpdf; run with --ignored"]
+fn split_into_a_folder_with_a_percent_in_its_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = copy_sample(dir.path(), "sample.pdf");
+    let out = dir.path().join("50%done");
+    std::fs::create_dir(&out).unwrap();
+
+    let o = split(&input, &[], Some(&out));
+
+    assert_eq!(
+        names(&o),
+        vec!["sample-1.pdf", "sample-2.pdf", "sample-3.pdf"]
+    );
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 3);
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
 fn split_pads_to_three_digits_past_ninety_nine_pages() {
     let dir = tempfile::tempdir().unwrap();
     let doc = many_pages(dir.path(), 34); // 102 pages
