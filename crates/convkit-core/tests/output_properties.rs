@@ -2821,6 +2821,54 @@ fn a_cut_with_copied_audio_starts_the_sound_at_the_cut() {
     assert!(held < 3.1, "m4a holds {held} s of audio, edit list aside");
 }
 
+/// A webm written live, as a browser's MediaRecorder writes one, carries no
+/// duration. A range from the start needs none, so it is cut all the same.
+#[test]
+#[ignore]
+fn a_recording_without_a_duration_is_still_cut() {
+    let dir = tmp();
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let src = dir.path().join("live.webm");
+    let r = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x90:rate=30:duration=6",
+        ])
+        .args([
+            "-c:v",
+            "libvpx-vp9",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+        ])
+        .args(["-live", "1"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(
+        probe_media(&src).duration_ms,
+        None,
+        "the fixture must lack one"
+    );
+    let out = dir.path().join("cut.mkv");
+    let o = convert_tuned(&src, &out, &ranged(Some("1"), Some("3"))).unwrap();
+    assert_eq!(decoded_frames(&out), 60, "2 s at 30 fps");
+    assert!(
+        o.warnings
+            .iter()
+            .any(|w| w.contains("Source length could not be determined")),
+        "{:?}",
+        o.warnings
+    );
+}
+
 /// A range covering the whole file cuts nothing, so a file already under
 /// `--max-size` is copied as it is, as it would be with no range at all.
 #[test]

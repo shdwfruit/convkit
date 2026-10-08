@@ -2635,7 +2635,7 @@ mod tests {
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
         assert_eq!(plan.steps[0].path_args, [3, argv.len() - 1]);
         let r = plan.range.expect("a cut plan reports its range");
-        assert_eq!((r.start_ms, r.end_ms), (0, 30_000));
+        assert_eq!((r.start_ms, r.end_ms), (0, Some(30_000)));
     }
 
     #[test]

@@ -902,8 +902,7 @@ mod tests {
     fn a_stream_copy_cut_puts_the_cut_ahead_of_the_input() {
         let cut = crate::trim::Cut {
             start_ms: 0,
-            end_ms: 30_000,
-            source_ms: 600_000,
+            end_ms: Some(30_000),
         };
         let m = stream_mapped_invocation(
             Format::Mp4,
@@ -929,8 +928,7 @@ mod tests {
     fn copied_audio_drops_what_comes_before_a_cut() {
         let cut = crate::trim::Cut {
             start_ms: 62_000,
-            end_ms: 70_000,
-            source_ms: 600_000,
+            end_ms: Some(70_000),
         };
         let resolved = ResolvedVideo {
             cut: Some(cut),

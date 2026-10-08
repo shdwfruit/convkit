@@ -2288,7 +2288,7 @@ mod tests {
         }
         assert_eq!(
             plan.range.as_ref().map(|r| (r.start_ms, r.end_ms)),
-            Some((60_000, 70_000))
+            Some((60_000, Some(70_000)))
         );
     }
 

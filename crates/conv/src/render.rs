@@ -688,7 +688,7 @@ mod tests {
         assert!(outcome_json(&o).get("range").is_none());
         o.range = Some(convkit_core::trim::RangeReport {
             start_ms: 62_000,
-            end_ms: 70_000,
+            end_ms: Some(70_000),
             requested: convkit_core::trim::Requested {
                 start: Some("1:02".into()),
                 end: Some("1:10".into()),

@@ -730,8 +730,7 @@ mod tests {
         let video = ResolvedVideo {
             cut: Some(crate::trim::Cut {
                 start_ms: 62_000,
-                end_ms: 70_000,
-                source_ms: 600_000,
+                end_ms: Some(70_000),
             }),
             ..ResolvedVideo::default()
         };
