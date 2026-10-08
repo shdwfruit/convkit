@@ -5,6 +5,7 @@ mod input;
 mod install_prompt;
 mod prompt;
 mod render;
+mod trim;
 
 use clap::Parser;
 
