@@ -45,12 +45,17 @@ pub struct Tuning {
     /// Removes the source's metadata except the colour profile, the
     /// orientation and an audio file's content tags: see `metadata`.
     pub strip_metadata: bool,
+    /// The part of the source to keep (`--start`/`--end`/`--duration`), as
+    /// typed. Resolved against the probe by `trim::resolve`; the cut reaches
+    /// argv through `ResolvedVideo::cut`.
+    pub range: Option<crate::trim::Range>,
 }
 
 impl Tuning {
     pub fn is_empty(&self) -> bool {
         !self.upscale
             && !self.strip_metadata
+            && self.range.is_none()
             && self.resize.is_none()
             && self.quality.is_none()
             && self.colors.is_none()
@@ -163,6 +168,12 @@ pub enum Arg {
     /// renders nothing otherwise, keeping untuned argv byte-identical.
     /// Authored only on ImageMagick and ffmpeg steps.
     StripMetadata,
+    /// The cut, as ffmpeg input options (`-ss S -t D`), when a range was
+    /// given; renders *nothing* otherwise, keeping untuned argv
+    /// byte-identical to the static table. Authored first in every ffmpeg
+    /// recipe, ahead of `-i`, because these are input options: see
+    /// `trim::Cut::input_args`.
+    Trim,
     /// The first (usually only) input path.
     Input,
     /// The first input path with ImageMagick's `[0]` frame selector
@@ -326,6 +337,11 @@ impl Step {
                     other => unreachable!("--strip-metadata slot authored on a {other:?} step"),
                 },
                 Arg::StripMetadata => {}
+                Arg::Trim => {
+                    if let Some(cut) = &video.cut {
+                        argv.extend(cut.input_args());
+                    }
+                }
                 Arg::Input => {
                     path_args.push(argv.len());
                     argv.push(inputs[0].to_string_lossy().into_owned());
@@ -577,6 +593,7 @@ mod tests {
             max_size: None,
             upscale: false,
             strip_metadata: false,
+            range: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],
@@ -678,6 +695,15 @@ mod tests {
                 crf: Some(28),
                 ..Default::default()
             },
+            Tuning {
+                range: crate::trim::Range::new(
+                    Some(crate::trim::parse_time("5").unwrap()),
+                    None,
+                    None,
+                )
+                .unwrap(),
+                ..Default::default()
+            },
         ];
         assert!(Tuning::default().is_empty());
         for t in &each {
@@ -686,9 +712,38 @@ mod tests {
         // If a field is added without extending this list, this catches it.
         assert_eq!(
             each.len(),
-            5,
+            6,
             "Tuning gained a field; add it to `each` and to is_empty()"
         );
+    }
+
+    #[test]
+    fn a_trim_slot_renders_the_cut_before_the_input_and_nothing_without_one() {
+        let step = Step {
+            backend: Backend::Ffmpeg,
+            args: &[Arg::Trim, Arg::Lit("-i"), Arg::Input, Arg::Output],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let untuned = step.render(&[Path::new("in.mp4")], Path::new("out.mp4"));
+        assert_eq!(untuned, ["-i", "in.mp4", "out.mp4"]);
+        let video = ResolvedVideo {
+            cut: Some(crate::trim::Cut {
+                start_ms: 62_000,
+                end_ms: 70_000,
+                source_ms: 600_000,
+            }),
+            ..ResolvedVideo::default()
+        };
+        let r = step.render_full(
+            &[Path::new("in.mp4")],
+            Path::new("out.mp4"),
+            &Tuning::default(),
+            &video,
+            &[],
+        );
+        assert_eq!(r.argv, ["-ss", "62", "-t", "8", "-i", "in.mp4", "out.mp4"]);
+        assert_eq!(r.path_args, [5, 6], "the input and output, not the times");
     }
 
     #[test]

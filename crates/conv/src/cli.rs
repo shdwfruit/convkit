@@ -322,6 +322,7 @@ impl Cli {
             max_size: self.max_size.clone(),
             upscale: self.upscale,
             strip_metadata: self.strip_metadata,
+            range: None,
         }
     }
 

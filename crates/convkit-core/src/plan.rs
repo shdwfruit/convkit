@@ -1605,6 +1605,7 @@ mod tests {
             max_size: None,
             upscale: false,
             strip_metadata: false,
+            range: None,
         }
     }
 
