@@ -32,6 +32,8 @@ pub struct MediaProbe {
     pub data_streams: usize,
     /// How many real video streams (attached-picture cover art excluded).
     pub video_streams: usize,
+    /// How many attached pictures (cover art), which an Ogg target drops.
+    pub attached_pics: usize,
     /// How many attachment streams (fonts in mkv).
     pub attachment_streams: usize,
     pub color_transfer: Option<String>,
@@ -182,7 +184,9 @@ pub fn parse(json: &str) -> MediaProbe {
                     .and_then(|d| d.get("attached_pic"))
                     .and_then(|a| a.as_i64())
                     == Some(1);
-                if !attached_pic {
+                if attached_pic {
+                    p.attached_pics += 1;
+                } else {
                     p.video_streams += 1;
                     if p.video_codec.is_none() {
                         p.video_codec = Some(name);
@@ -656,6 +660,7 @@ mod tests {
         assert_eq!(p.data_streams, 1);
         assert_eq!(p.attachment_streams, 1);
         assert_eq!(p.video_streams, 1, "cover art is not a video stream");
+        assert_eq!(p.attached_pics, 1, "but it is counted as cover art");
         assert!(p.is_hdr());
     }
 

@@ -756,6 +756,11 @@ const TO_M4A: Recipe = audio_recipe!(
 );
 const TO_FLAC: Recipe = audio_recipe!(drop_video, [Arg::Lit("-c:a"), Arg::Lit("flac")]);
 
+/// `TO_WAV`'s note. Dropped by `notes_for` for an Opus or Vorbis source,
+/// which decodes to floating point from a lossy stream and so has no 24-bit
+/// original to lose.
+const WAV_DEPTH_NOTE: &str = "A 24-bit source is downconverted to 16-bit PCM by pcm_s16le.";
+
 /// WAV cannot carry an attached-picture stream at all, so unlike the other
 /// audio targets this always strips it with `-vn` — leaving the stream in
 /// fails rather than degrading gracefully, in either direction. `pcm_s16le`
@@ -774,7 +779,61 @@ const TO_WAV: Recipe = Recipe {
             Arg::Output,
         ]
     )],
-    warnings: &["A 24-bit source is downconverted to 16-bit PCM by pcm_s16le."],
+    warnings: &[WAV_DEPTH_NOTE],
+};
+
+/// The note for an audio source going to opus or ogg. `notes_for` keeps it
+/// only when the probe saw a picture, or could not tell. Shared with the
+/// stream-copy path in `media.rs`.
+pub(crate) const COVER_ART_DROPPED_NOTE: &str =
+    "Cover art is dropped; ffmpeg cannot write a picture into an Ogg file.";
+
+/// The note on an ogg target that is encoded rather than copied.
+const OGG_IS_OPUS_NOTE: &str = "The audio is encoded as Opus. Players that only know Ogg \
+     Vorbis, such as some car stereos and game engines, cannot play it.";
+
+/// Opus, for both `.opus` and `.ogg`; the extension picks ffmpeg's muxer,
+/// and both are Ogg. An `.ogg` gets Opus rather than Vorbis because it
+/// sounds better than Vorbis at the same size, it is what WhatsApp and
+/// Telegram voice notes already are, and libopus is in every ffmpeg convkit
+/// runs on: Homebrew's has no libvorbis, only ffmpeg's own experimental
+/// Vorbis encoder. A source that already holds Vorbis or Opus is copied
+/// instead (see `media::audio_copy_invocation`).
+///
+/// - `-b:a`: the Opus rate webm audio uses.
+/// - `-ar 48000`: libopus only takes 48, 24, 16, 12 and 8 kHz, and ffmpeg
+///   otherwise resamples to whichever is nearest. 44.1 kHz goes up to 48,
+///   but 32 kHz goes *down* to 24, which cuts everything above 12 kHz
+///   (checked on ffmpeg 6.1.1 and 9.0.1). 48 kHz is Opus's internal rate
+///   and the rate every Opus decoder outputs anyway.
+/// - `-af`: libopus rejects ffmpeg's default 5.1(side) layout, as on webm.
+/// - `-vn`, from `drop_video`: the Ogg muxer refuses a cover art stream
+///   ("Unsupported codec id in stream 1"), so it is dropped rather than
+///   failing the conversion, and `COVER_ART_DROPPED_NOTE` says so.
+const TO_OPUS: Recipe = audio_recipe!(
+    drop_video,
+    [
+        Arg::Lit("-c:a"),
+        Arg::Lit("libopus"),
+        Arg::Lit("-b:a"),
+        Arg::Lit(WEBM_AUDIO_BITRATE),
+        Arg::Lit("-ar"),
+        Arg::Lit("48000"),
+        Arg::Lit("-af"),
+        Arg::Lit(OPUS_CHANNEL_LAYOUTS),
+    ]
+);
+const TO_OPUS_ART: Recipe = Recipe {
+    warnings: &[COVER_ART_DROPPED_NOTE],
+    ..TO_OPUS
+};
+const TO_OGG: Recipe = Recipe {
+    warnings: &[OGG_IS_OPUS_NOTE],
+    ..TO_OPUS
+};
+const TO_OGG_ART: Recipe = Recipe {
+    warnings: &[OGG_IS_OPUS_NOTE, COVER_ART_DROPPED_NOTE],
+    ..TO_OPUS
 };
 
 const TO_MP3_KEEP_ART: Recipe = audio_recipe!(
@@ -878,16 +937,30 @@ const AUDIO_TARGETS: &[(Format, Recipe)] = &[
     (Format::M4a, TO_M4A),
     (Format::Wav, TO_WAV),
     (Format::Flac, TO_FLAC),
+    (Format::Opus, TO_OPUS),
+    (Format::Ogg, TO_OGG),
 ];
 
 /// Same target formats, but for an *audio* source: mp3/m4a/flac preserve an
 /// attached-picture cover art stream instead of stripping it with `-vn`. WAV
 /// still can't carry one, so it reuses `TO_WAV` unchanged in both tables.
+/// Neither can Ogg, so opus/ogg drop it and say so.
 const AUDIO_TARGETS_KEEP_ART: &[(Format, Recipe)] = &[
     (Format::Mp3, TO_MP3_KEEP_ART),
     (Format::M4a, TO_M4A_KEEP_ART),
     (Format::Wav, TO_WAV),
     (Format::Flac, TO_FLAC_KEEP_ART),
+    (Format::Opus, TO_OPUS_ART),
+    (Format::Ogg, TO_OGG_ART),
+];
+
+const AUDIO: &[Format] = &[
+    Format::Mp3,
+    Format::M4a,
+    Format::Wav,
+    Format::Flac,
+    Format::Opus,
+    Format::Ogg,
 ];
 
 /// `avi` is deliberately never inserted as a *target* below, only ever as a
@@ -924,11 +997,19 @@ fn insert_media_family(t: &mut Table) {
 
     // Audio sources transcode between audio targets, preserving an
     // attached-picture cover art stream where the target can carry one.
-    for &from in &[Format::Mp3, Format::M4a, Format::Wav, Format::Flac] {
+    for &from in AUDIO {
         for &(to, recipe) in AUDIO_TARGETS_KEEP_ART {
-            if from != to {
-                t.insert((from, to), recipe);
+            if from == to {
+                continue;
             }
+            // A WAV source holds no cover art, so it gets the opus/ogg
+            // recipes without the note about dropping it.
+            let recipe = match (from, to) {
+                (Format::Wav, Format::Opus) => TO_OPUS,
+                (Format::Wav, Format::Ogg) => TO_OGG,
+                _ => recipe,
+            };
+            t.insert((from, to), recipe);
         }
     }
 
@@ -1182,13 +1263,31 @@ pub fn needs_probe(from: Format, to: Format) -> bool {
     );
     let container_change =
         matches!(to, Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm) && video_source;
-    // Audio→audio probing is restricted to m4a sources: mp3/flac/wav are
-    // single-codec containers, so the probe's answer there is fully
-    // determined by the extension and could never enable the copy path —
-    // it would be one wasted ffprobe spawn per file in a library batch.
-    // m4a (the mp4 container) genuinely varies: aac, alac, even mp3.
-    let audio_extract = matches!(to, Format::M4a | Format::Mp3 | Format::Flac | Format::Wav)
-        && (video_source || from == Format::M4a);
+    // Audio→audio probing is restricted to the sources where the answer
+    // can change something: mp3/flac/wav are single-codec containers, so
+    // the probe's answer there is fully determined by the extension and
+    // could never enable the copy path — it would be one wasted ffprobe
+    // spawn per file in a library batch. m4a (the mp4 container) genuinely
+    // varies: aac, alac, even mp3.
+    let audio_target = matches!(
+        to,
+        Format::M4a | Format::Mp3 | Format::Flac | Format::Wav | Format::Opus | Format::Ogg
+    );
+    // Ogg varies too (vorbis, opus, rarely flac), and an opus file is
+    // always opus, so each can be copied into the other, and flac out of
+    // an Ogg FLAC. Either one also tells a wav target that its 24-bit note
+    // does not apply.
+    let ogg_source = match from {
+        Format::Ogg => matches!(to, Format::Opus | Format::Flac | Format::Wav),
+        Format::Opus => matches!(to, Format::Ogg | Format::Wav),
+        _ => false,
+    };
+    // An opus/ogg target drops cover art, and says so only for a source
+    // the probe saw a picture in.
+    let art_dropped = matches!(to, Format::Opus | Format::Ogg)
+        && matches!(from, Format::Mp3 | Format::M4a | Format::Flac);
+    let audio_extract =
+        audio_target && (video_source || from == Format::M4a || ogg_source || art_dropped);
     // A gif target probes for the HDR transfer question, not for a stream
     // copy — see `gif_recipe_for`.
     let gif_target = to == Format::Gif && video_source;
@@ -1266,6 +1365,12 @@ pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> V
     let long = probe
         .and_then(|p| p.duration_ms)
         .is_none_or(|ms| ms > GIF_BUFFER_NOTE_AFTER_MS);
+    // A probe that found no audio at all could not read the file, so it
+    // says nothing about pictures either.
+    let art = probe.is_none_or(|p| p.audio_codecs.is_empty() || p.attached_pics > 0);
+    let float_source = probe
+        .and_then(|p| p.audio_codec())
+        .is_some_and(|c| matches!(c, "opus" | "vorbis"));
     recipe
         .warnings
         .iter()
@@ -1278,6 +1383,8 @@ pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> V
             },
             FIRST_FRAME_NOTE => frames.then_some(note),
             GIF_BUFFER_NOTE => long.then_some(note),
+            COVER_ART_DROPPED_NOTE => art.then_some(note),
+            WAV_DEPTH_NOTE => (!float_source).then_some(note),
             _ => Some(note),
         })
         .map(str::to_string)
@@ -1494,7 +1601,11 @@ mod tests {
             for &w in r.warnings {
                 if !matches!(
                     w,
-                    FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE | GIF_BUFFER_NOTE
+                    FLATTEN_FIRST_FRAME_NOTE
+                        | FIRST_FRAME_NOTE
+                        | GIF_BUFFER_NOTE
+                        | COVER_ART_DROPPED_NOTE
+                        | WAV_DEPTH_NOTE
                 ) {
                     assert!(kept.iter().any(|k| k == w), "{from:?} -> {to:?}: {w}");
                 }
@@ -1828,6 +1939,108 @@ mod tests {
         assert!(argv.contains(&"-vn".to_string()), "{argv:?}");
         assert_eq!(r.warnings.len(), 1);
         assert!(r.warnings[0].contains("16-bit"), "{:?}", r.warnings);
+    }
+
+    /// Every encode into opus or ogg is libopus at 48 kHz with the layout
+    /// coercion, and never maps a picture the Ogg muxer would refuse.
+    #[test]
+    fn opus_and_ogg_targets_encode_opus_at_48_khz() {
+        for (from, to) in all_pairs() {
+            if !matches!(to, Format::Opus | Format::Ogg) {
+                continue;
+            }
+            let r = lookup(from, to).unwrap();
+            let argv = r.steps[0].render(&[Path::new("in")], Path::new("out"));
+            for pair in [
+                ["-c:a", "libopus"],
+                ["-ar", "48000"],
+                ["-af", OPUS_CHANNEL_LAYOUTS],
+            ] {
+                assert!(
+                    argv.windows(2).any(|w| w == pair),
+                    "{from:?} -> {to:?}: {argv:?}"
+                );
+            }
+            assert!(argv.contains(&"-vn".to_string()), "{from:?} -> {to:?}");
+            assert_eq!(
+                r.warnings.contains(&OGG_IS_OPUS_NOTE),
+                to == Format::Ogg,
+                "{from:?} -> {to:?}"
+            );
+        }
+    }
+
+    fn audio_probe(codec: &str, attached_pics: usize) -> crate::MediaProbe {
+        crate::MediaProbe {
+            audio_codecs: vec![codec.into()],
+            attached_pics,
+            ..crate::MediaProbe::default()
+        }
+    }
+
+    /// The cover art note is for a source that has a picture, or one
+    /// nobody could read; a WAV source, which cannot hold one, never gets it.
+    #[test]
+    fn the_cover_art_note_shows_only_for_a_source_with_art() {
+        let art = COVER_ART_DROPPED_NOTE.to_string();
+        for to in [Format::Opus, Format::Ogg] {
+            let says = |p: Option<&crate::MediaProbe>| notes(Format::Mp3, to, p).contains(&art);
+            assert!(says(Some(&audio_probe("mp3", 1))), "{to:?}");
+            assert!(!says(Some(&audio_probe("mp3", 0))), "{to:?}");
+            assert!(says(None), "unread keeps it: {to:?}");
+            assert!(
+                says(Some(&crate::MediaProbe::default())),
+                "a probe that saw no audio read nothing: {to:?}"
+            );
+            assert!(!notes(Format::Wav, to, None).contains(&art), "{to:?}");
+            assert!(!notes(Format::Mp4, to, None).contains(&art), "{to:?}");
+        }
+    }
+
+    /// Opus and Vorbis decode to floating point from a lossy stream, so a
+    /// wav target has no 24-bit original to warn about.
+    #[test]
+    fn the_wav_depth_note_is_dropped_for_an_opus_or_vorbis_source() {
+        for codec in ["opus", "vorbis"] {
+            assert!(
+                notes(Format::Ogg, Format::Wav, Some(&audio_probe(codec, 0))).is_empty(),
+                "{codec}"
+            );
+        }
+        let flac = audio_probe("flac", 0);
+        assert_eq!(
+            notes(Format::Ogg, Format::Wav, Some(&flac)),
+            vec![WAV_DEPTH_NOTE]
+        );
+        assert_eq!(notes(Format::Opus, Format::Wav, None), vec![WAV_DEPTH_NOTE]);
+    }
+
+    /// The probe runs where its answer changes the command or a note: a
+    /// copy between ogg and opus, an Ogg source's codec, or cover art an
+    /// ogg target drops. A wav source has no art, and an opus source into
+    /// mp3 can only be encoded.
+    #[test]
+    fn opus_and_ogg_pairs_probe_only_where_it_decides_something() {
+        for (from, to) in [
+            (Format::Opus, Format::Ogg),
+            (Format::Ogg, Format::Opus),
+            (Format::Ogg, Format::Wav),
+            (Format::Opus, Format::Wav),
+            (Format::Ogg, Format::Flac),
+            (Format::Mp3, Format::Opus),
+            (Format::Flac, Format::Ogg),
+            (Format::Webm, Format::Opus),
+        ] {
+            assert!(needs_probe(from, to), "{from:?} -> {to:?}");
+        }
+        for (from, to) in [
+            (Format::Wav, Format::Opus),
+            (Format::Opus, Format::Mp3),
+            (Format::Ogg, Format::M4a),
+            (Format::Flac, Format::Mp3),
+        ] {
+            assert!(!needs_probe(from, to), "{from:?} -> {to:?}");
+        }
     }
 
     #[test]
