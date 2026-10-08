@@ -67,7 +67,17 @@ pub enum Input {
 pub enum Outcome {
     Continue,
     Write,
+    /// Write, replacing the files already there: the answer to
+    /// `ask_to_replace`.
+    Replace,
     Quit,
+}
+
+/// A question on the message line, which the next key answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Quit,
+    Replace,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +93,8 @@ pub struct Session {
     open: Option<(u64, Keeps)>,
     clips: Vec<Clip>,
     message: Option<String>,
-    asking_quit: bool,
+    asking: Option<Ask>,
+    picture_alone: bool,
     last_arrow: Option<(i8, Instant)>,
     generation: u64,
 }
@@ -113,21 +124,47 @@ impl Session {
             open: None,
             clips: Vec::new(),
             message: None,
-            asking_quit: false,
+            asking: None,
+            picture_alone: false,
             last_arrow: None,
             generation: 0,
         }
     }
 
+    /// For a video target with no sound in it, a GIF: a clip with the
+    /// picture keeps the picture alone, whether or not the video bar is
+    /// selected, so one clip can't be marked twice as two.
+    pub fn picture_alone(mut self) -> Session {
+        self.picture_alone = true;
+        self
+    }
+
+    /// Drops the clip just marked, which can't be written, saying why.
+    pub fn refuse_last(&mut self, why: &str) {
+        self.clips.pop();
+        self.message = Some(why.to_string());
+    }
+
+    /// Asks before writing over files already there; `y` gives
+    /// `Outcome::Replace`, any other key keeps the session.
+    pub fn ask_to_replace(&mut self, question: String) {
+        self.asking = Some(Ask::Replace);
+        self.message = Some(question);
+    }
+
+    /// Shows a message until the next key.
+    pub fn tell(&mut self, message: String) {
+        self.message = Some(message);
+    }
+
     pub fn input(&mut self, input: Input, now: Instant) -> Outcome {
-        // The quit question takes the next key, whatever it is.
-        if self.asking_quit {
-            self.asking_quit = false;
+        // A question takes the next key, whatever it is.
+        if let Some(ask) = self.asking.take() {
             self.message = None;
-            return if input == Input::Yes {
-                Outcome::Quit
-            } else {
-                Outcome::Continue
+            return match (ask, input) {
+                (Ask::Quit, Input::Yes) => Outcome::Quit,
+                (Ask::Replace, Input::Yes) => Outcome::Replace,
+                _ => Outcome::Continue,
             };
         }
         self.message = None;
@@ -225,6 +262,7 @@ impl Session {
 
     fn keeps(&self) -> Keeps {
         match self.selected {
+            None if self.picture_alone && self.bars.contains(&Bar::Video) => Keeps::Video,
             None => Keeps::Both,
             Some(Bar::Video) => Keeps::Video,
             Some(Bar::Audio) => Keeps::Audio,
@@ -282,7 +320,7 @@ impl Session {
             (1, _) => "Quit without writing 1 clip? [y/N]".to_string(),
             (n, _) => format!("Quit without writing {n} clips? [y/N]"),
         };
-        self.asking_quit = true;
+        self.asking = Some(Ask::Quit);
         self.message = Some(question);
         Outcome::Continue
     }
@@ -640,5 +678,73 @@ mod tests {
         let g = s.generation();
         s.input(Input::Cut, t);
         assert_eq!(s.generation(), g);
+    }
+
+    /// Marks a clip from 0 to the next tenth of the view.
+    fn mark(s: &mut Session, t: Instant) {
+        s.input(Input::Home, t);
+        s.input(Input::Cut, t);
+        s.input(Input::PageDown, t);
+        s.input(Input::Cut, t);
+    }
+
+    #[test]
+    fn a_clip_that_cannot_be_written_is_dropped_with_the_reason() {
+        let mut s = session(60);
+        let t = Instant::now();
+        mark(&mut s, t);
+        s.refuse_last("Not marked: too short.");
+        assert!(s.clips().is_empty());
+        assert_eq!(s.message(), Some("Not marked: too short."));
+        assert_eq!(s.open_mark(), None);
+    }
+
+    #[test]
+    fn the_replace_question_takes_the_next_key() {
+        let mut s = session(60);
+        let t = Instant::now();
+        mark(&mut s, t);
+        assert_eq!(s.input(Input::Write, t), Outcome::Write);
+        s.ask_to_replace("Replace it? [y/N]".to_string());
+        assert_eq!(s.message(), Some("Replace it? [y/N]"));
+        assert_eq!(s.input(Input::Quit, t), Outcome::Continue);
+        assert_eq!(s.message(), None, "anything but y keeps the session");
+        assert_eq!(s.clips().len(), 1);
+        s.input(Input::Write, t);
+        s.ask_to_replace("Replace it? [y/N]".to_string());
+        assert_eq!(s.input(Input::Yes, t), Outcome::Replace);
+    }
+
+    #[test]
+    fn a_message_from_outside_shows_until_the_next_key() {
+        let mut s = session(60);
+        let t = Instant::now();
+        s.tell("Two clips would both write a.gif.".to_string());
+        assert_eq!(s.message(), Some("Two clips would both write a.gif."));
+        s.input(Input::Right, t);
+        assert_eq!(s.message(), None);
+    }
+
+    /// A GIF holds no sound, so the whole clip and the video bar's clip of
+    /// one range are the same file, and marking both is marking it twice.
+    #[test]
+    fn with_the_picture_alone_a_clip_with_the_picture_keeps_only_that() {
+        let mut s = session(60).picture_alone();
+        let t = Instant::now();
+        mark(&mut s, t);
+        assert_eq!(s.clips()[0].keeps, Keeps::Video);
+        s.input(Input::Up, t);
+        s.input(Input::Enter, t); // the video bar
+        mark(&mut s, t);
+        assert_eq!(s.clips().len(), 1);
+        assert_eq!(s.message(), Some("That clip is already marked."));
+        s.input(Input::Down, t);
+        s.input(Input::Enter, t); // the audio bar: sound alone still
+        mark(&mut s, t);
+        assert_eq!(s.clips()[1].keeps, Keeps::Audio);
+
+        let mut sound = Session::new(60_000, None, false, true).picture_alone();
+        mark(&mut sound, t);
+        assert_eq!(sound.clips()[0].keeps, Keeps::Both, "no picture to keep");
     }
 }

@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use convkit_core::frames::{self, Pixels, Want};
-use convkit_core::{plan, probe, Backend, ConvError, ErrorCode, Format, MediaProbe};
+use convkit_core::{
+    plan, probe, Backend, ConvError, ConversionPlan, ErrorCode, Format, MediaProbe,
+};
 use rayon::prelude::*;
 
 use crate::cli::{Cli, Command};
@@ -127,7 +129,13 @@ fn trim(cli: &Cli, args: &Args) -> Result<i32, ConvError> {
         .frame_rate
         .filter(|&(n, _)| n > 0)
         .map(|(n, d)| 1000 * u64::from(d) / u64::from(n));
-    let mut session = Session::new(duration, frame_ms, has_video, has_audio);
+    let session = Session::new(duration, frame_ms, has_video, has_audio);
+    // A GIF has no sound to keep or drop: its clips keep the picture alone.
+    let mut session = if target.video == Some(Format::Gif) {
+        session.picture_alone()
+    } else {
+        session
+    };
     let size = probe.display_dimensions().filter(|_| has_video);
     let info = Info {
         name: file
@@ -144,10 +152,20 @@ fn trim(cli: &Cli, args: &Args) -> Result<i32, ConvError> {
         frame_ms: frame_ms.unwrap_or(40),
         has_audio,
     };
-    if interact(&mut session, &info, &source, graphics) == Outcome::Quit {
-        return Ok(0);
-    }
-    write(cli, args, &target, &probe, session.clips())
+    let writing = Writing {
+        file,
+        outdir: args.outdir,
+        target: &target,
+        probe: &probe,
+        overwrite: args.overwrite,
+        dry_run: args.dry_run,
+    };
+    let overwrite = match interact(&mut session, &info, &source, graphics, &writing) {
+        Outcome::Write => args.overwrite,
+        Outcome::Replace => true,
+        Outcome::Quit | Outcome::Continue => return Ok(0),
+    };
+    write(cli, &writing, overwrite, session.clips())
 }
 
 fn fps_words((n, d): (u32, u32)) -> String {
@@ -183,7 +201,13 @@ struct Shown {
 
 /// Runs the session until it is written or quit. The screen is held only
 /// for the length of this call.
-fn interact(session: &mut Session, info: &Info, source: &Source, graphics: Graphics) -> Outcome {
+fn interact(
+    session: &mut Session,
+    info: &Info,
+    source: &Source,
+    graphics: Graphics,
+    writing: &Writing,
+) -> Outcome {
     let (tx, rx) = mpsc::channel::<Event>();
     let mut screen = term::Screen::enter(graphics);
     let keys = tx.clone();
@@ -253,13 +277,31 @@ fn interact(session: &mut Session, info: &Info, source: &Source, graphics: Graph
         let mut finished = None;
         for event in take_batch(first, &rx, BATCH) {
             match event {
-                Event::Key(input, at) => match session.input(input, at) {
-                    Outcome::Continue => {}
-                    end => {
-                        finished = Some(end);
-                        break;
+                Event::Key(input, at) => {
+                    let marked = session.clips().len();
+                    match session.input(input, at) {
+                        Outcome::Continue => {
+                            if session.clips().len() > marked {
+                                let clip = *session.clips().last().expect("a clip just marked");
+                                if let Err(e) = writing.check(&clip) {
+                                    session.refuse_last(&format!("Not marked: {}.", e.message));
+                                }
+                            }
+                        }
+                        Outcome::Write => match writing.ready(session.clips()) {
+                            Ready::Go => {
+                                finished = Some(Outcome::Write);
+                                break;
+                            }
+                            Ready::Refuse(why) => session.tell(why),
+                            Ready::Ask(question) => session.ask_to_replace(question),
+                        },
+                        end => {
+                            finished = Some(end);
+                            break;
+                        }
                     }
-                },
+                }
                 // A frame for an older slider position is drawn only until
                 // the newer one arrives, and never over it.
                 Event::Frame { generation, pixels } => {
@@ -484,32 +526,100 @@ fn loudness_worker(source: &Source, events: Sender<Event>, done: Arc<AtomicBool>
     });
 }
 
+/// Where and how the clips are written, so that each one is checked while
+/// the screen is still up: a clip found unwritable once the session is
+/// over would take every mark with it.
+struct Writing<'a> {
+    file: &'a Path,
+    outdir: Option<&'a Path>,
+    target: &'a clips::Target,
+    probe: &'a MediaProbe,
+    overwrite: bool,
+    dry_run: bool,
+}
+
+/// Whether the clips can be written as they are.
+#[derive(Debug, PartialEq, Eq)]
+enum Ready {
+    Go,
+    /// Not as they are: why, and what to do.
+    Refuse(String),
+    /// Only over files already there: the question to ask first.
+    Ask(String),
+}
+
+impl Writing<'_> {
+    /// Plans the clip as `conv FILE --start --end` would, so it is
+    /// refused for what the flags would refuse. Planning runs nothing.
+    fn plan(&self, clip: &session::Clip) -> Result<ConversionPlan, ConvError> {
+        let (job, tuning) = clips::job(self.file, self.outdir, clip, self.target);
+        plan::build_tuned(
+            job.from,
+            job.to,
+            &job.inputs,
+            &job.output,
+            Some(self.probe),
+            None,
+            &tuning,
+        )
+    }
+
+    fn check(&self, clip: &session::Clip) -> Result<(), ConvError> {
+        self.plan(clip).map(|_| ())
+    }
+
+    /// Checks the clips' names before `w` leaves the screen: two clips
+    /// writing one file would race in the batch, and a file already there
+    /// is replaced only when asked.
+    fn ready(&self, marked: &[session::Clip]) -> Ready {
+        let outputs: Vec<PathBuf> = marked
+            .iter()
+            .map(|c| clips::job(self.file, self.outdir, c, self.target).0.output)
+            .collect();
+        let name = |p: &Path| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let mut seen = std::collections::HashSet::new();
+        for output in &outputs {
+            if !seen.insert(crate::input::collision_key(output)) {
+                return Ready::Refuse(format!(
+                    "Two clips would both write {}; press u to drop the last.",
+                    name(output)
+                ));
+            }
+        }
+        if self.overwrite || self.dry_run {
+            return Ready::Go;
+        }
+        let there: Vec<&PathBuf> = outputs.iter().filter(|o| o.exists()).collect();
+        match there.as_slice() {
+            [] => Ready::Go,
+            [one] => Ready::Ask(format!("{} is already there. Replace it? [y/N]", name(one))),
+            many => Ready::Ask(format!(
+                "{} clips would replace files already there. Replace them? [y/N]",
+                many.len()
+            )),
+        }
+    }
+}
+
 /// Writes every clip, after the screen has been given back, as `conv FILE
 /// --start --end` would: through the same planning and the same batch,
-/// with the subcommand's `-o` and `-y`.
+/// with the subcommand's `-o`. `overwrite` is `-y`, or the answer to the
+/// question `w` asked.
 fn write(
     cli: &Cli,
-    args: &Args,
-    target: &clips::Target,
-    probe: &MediaProbe,
+    writing: &Writing,
+    overwrite: bool,
     marked: &[session::Clip],
 ) -> Result<i32, ConvError> {
-    let pairs: Vec<_> = marked
-        .iter()
-        .map(|c| clips::job(args.file, args.outdir, c, target))
-        .collect();
-    if args.dry_run {
+    if writing.dry_run {
         let mut code = 0;
-        for (job, tuning) in &pairs {
-            match plan::build_tuned(
-                job.from,
-                job.to,
-                &job.inputs,
-                &job.output,
-                Some(probe),
-                None,
-                tuning,
-            ) {
+        for clip in marked {
+            match writing.plan(clip) {
                 Ok(p) => print!("{}", render::plan_human(&p)),
                 Err(e) => {
                     eprint!("{}", render::error_human(&e));
@@ -519,7 +629,7 @@ fn write(
         }
         return Ok(code);
     }
-    if let Some(dir) = args.outdir {
+    if let Some(dir) = writing.outdir {
         std::fs::create_dir_all(dir).map_err(|e| {
             ConvError::new(
                 ErrorCode::InvalidInvocation,
@@ -527,9 +637,13 @@ fn write(
             )
         })?;
     }
+    let pairs: Vec<_> = marked
+        .iter()
+        .map(|c| clips::job(writing.file, writing.outdir, c, writing.target))
+        .collect();
     let mut runner = cli.clone();
-    runner.overwrite = args.overwrite;
-    runner.outdir = args.outdir.map(PathBuf::from);
+    runner.overwrite = overwrite;
+    runner.outdir = writing.outdir.map(PathBuf::from);
     runner.command = None;
     let (results, code, _) = batch::run_each(pairs, &runner, false);
     let (styled_out, styled_err) = (render::stdout_styled(), render::stderr_styled());
@@ -577,5 +691,112 @@ mod tests {
         assert!(took < Duration::from_millis(100), "{took:?}");
         // What it left is still there.
         assert!(rx.try_recv().is_ok());
+    }
+
+    fn probe() -> MediaProbe {
+        MediaProbe {
+            video_codec: Some("h264".into()),
+            audio_codecs: vec!["aac".into()],
+            video_streams: 1,
+            width: Some(320),
+            height: Some(180),
+            frame_rate: Some((30, 1)),
+            duration_ms: Some(20_000),
+            ..MediaProbe::default()
+        }
+    }
+
+    fn clip(start_ms: u64, end_ms: u64, keeps: session::Keeps) -> session::Clip {
+        session::Clip {
+            start_ms,
+            end_ms,
+            keeps,
+        }
+    }
+
+    const MP4: clips::Target = clips::Target {
+        video: Some(Format::Mp4),
+        audio: Format::M4a,
+    };
+
+    fn writing<'a>(
+        file: &'a Path,
+        target: &'a clips::Target,
+        probe: &'a MediaProbe,
+    ) -> Writing<'a> {
+        Writing {
+            file,
+            outdir: None,
+            target,
+            probe,
+            overwrite: false,
+            dry_run: false,
+        }
+    }
+
+    /// Whatever `conv FILE --start --end` would refuse is refused as the
+    /// clip is marked, while the marks are still on screen.
+    #[test]
+    fn a_clip_is_checked_as_the_flags_would_check_it() {
+        let probe = probe();
+        let w = writing(Path::new("src.mp4"), &MP4, &probe);
+        let e = w
+            .check(&clip(2_000, 2_010, session::Keeps::Both))
+            .unwrap_err();
+        assert!(e.message.contains("shorter than one frame"), "{e}");
+        // The sound alone has no frames to be shorter than.
+        assert!(w.check(&clip(2_000, 2_010, session::Keeps::Audio)).is_ok());
+        assert!(w.check(&clip(2_000, 4_000, session::Keeps::Both)).is_ok());
+    }
+
+    #[test]
+    fn w_asks_before_replacing_files_already_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("src.mp4");
+        let probe = probe();
+        let mut w = writing(&file, &MP4, &probe);
+        let both = [
+            clip(2_000, 4_000, session::Keeps::Both),
+            clip(2_000, 4_000, session::Keeps::Audio),
+        ];
+        assert_eq!(w.ready(&both), Ready::Go);
+        std::fs::write(dir.path().join("src-2s-4s.mp4"), b"").unwrap();
+        assert_eq!(
+            w.ready(&both),
+            Ready::Ask("src-2s-4s.mp4 is already there. Replace it? [y/N]".to_string())
+        );
+        std::fs::write(dir.path().join("src-2s-4s.m4a"), b"").unwrap();
+        assert_eq!(
+            w.ready(&both),
+            Ready::Ask(
+                "2 clips would replace files already there. Replace them? [y/N]".to_string()
+            )
+        );
+        w.overwrite = true;
+        assert_eq!(w.ready(&both), Ready::Go, "-y has said yes");
+        w.overwrite = false;
+        w.dry_run = true;
+        assert_eq!(w.ready(&both), Ready::Go, "a dry run writes nothing");
+    }
+
+    /// The batch runs clips in parallel, and two writing one file would race.
+    #[test]
+    fn w_refuses_two_clips_that_would_write_one_file() {
+        let gif = clips::Target {
+            video: Some(Format::Gif),
+            audio: Format::M4a,
+        };
+        let probe = probe();
+        let w = writing(Path::new("src.mp4"), &gif, &probe);
+        let twice = [
+            clip(2_000, 4_000, session::Keeps::Both),
+            clip(2_000, 4_000, session::Keeps::Video),
+        ];
+        assert_eq!(
+            w.ready(&twice),
+            Ready::Refuse(
+                "Two clips would both write src-2s-4s.gif; press u to drop the last.".to_string()
+            )
+        );
     }
 }

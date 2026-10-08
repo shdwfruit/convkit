@@ -2975,27 +2975,67 @@ fn conv_trim_refuses_what_it_cannot_cut_before_anything_else() {
 
 /// Drives `conv trim` in a pseudo-terminal 100 columns by 30 rows, then
 /// prints its exit code and `stty -a` from the same terminal, so the test
-/// can see the tty was given back. `mode` is `write` (two clips: one whole,
-/// one of the sound alone, then w) or `quit` (a clip, then q and y).
+/// can see the tty was given back. `mode` is:
+/// - `write`: two clips, one whole and one of the sound alone, then w;
+/// - `replace`: the same, into a folder that has the first clip already,
+///   answering y to the question;
+/// - `quit`: a clip, then q and y;
+/// - `ctrlc`: a burst of arrows, as a held key sends them, which must not
+///   be echoed; a clip one tap long, which is shorter than a frame and
+///   refused; then a clip, Ctrl-C and y;
+/// - `nolength`: no keys, for a file that is refused.
 #[cfg(unix)]
 const TRIM_EXPECT: &str = r#"
 set timeout 60
 lassign $argv conv src out mode
 log_user 0
 spawn -noecho sh -c "stty rows 30 cols 100; TERM=xterm-256color COLORTERM= TERM_PROGRAM= TMUX= '$conv' trim '$src' -o '$out'; echo EXIT=\$?; stty -a"
-expect {
-    "w write" {}
-    timeout { puts "no screen"; exit 1 }
+if {$mode == "nolength"} {
+    expect {
+        "cannot read the length" {}
+        timeout { puts "no refusal"; exit 1 }
+    }
+} else {
+    expect {
+        "w write" {}
+        timeout { puts "no screen"; exit 1 }
+    }
+    expect -timeout 1 "zz-never-zz"
 }
-expect -timeout 1 "zz-never-zz"
 set pgdn "\033\[6~"
-if {$mode == "write"} {
+if {$mode == "write" || $mode == "replace"} {
     send $pgdn; send "c"; send $pgdn; send $pgdn; send "c"
     send "\033\[B"; send "\r"
     send "c"; send $pgdn; send "c"
     send "w"
-} else {
+    if {$mode == "replace"} {
+        expect {
+            "src-2s-6s.mp4 is already there. Replace it?" {}
+            timeout { puts "no question"; exit 1 }
+        }
+        send "y"
+    }
+} elseif {$mode == "quit"} {
     send "c"; send $pgdn; send "c"; send "q"; send "y"
+} elseif {$mode == "ctrlc"} {
+    for {set i 0} {$i < 40} {incr i} { send "\033\[C" }
+    set timeout 2
+    expect {
+        -ex "^\[\[C" { puts "echoed"; exit 1 }
+        timeout {}
+    }
+    set timeout 60
+    send "c"; send "\033\[C"; send "c"
+    expect {
+        "Not marked: the cut" {}
+        timeout { puts "a clip of one tap was kept"; exit 1 }
+    }
+    send "c"; send $pgdn; send "c"; send "\003"
+    expect {
+        "Quit without writing 1 clip?" {}
+        timeout { puts "no question"; exit 1 }
+    }
+    send "y"
 }
 expect {
     -re {EXIT=(\d+)} { set code $expect_out(1,string) }
@@ -3026,10 +3066,28 @@ fn tty_given_back(stdout: &str) -> bool {
 fn run_trim_session(mode: &str) -> (String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let ffmpeg = std::env::var_os("CONVKIT_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
-    let src = dir.path().join("src.mp4");
-    let ok = std::process::Command::new(&ffmpeg)
-        .args(["-v", "error", "-y"])
+    let mut make = std::process::Command::new(&ffmpeg);
+    make.args(["-v", "error", "-y"]);
+    let src = if mode == "nolength" {
+        // Written live, as a browser records one: no length in it.
+        make.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x90:rate=30:duration=2",
+        ])
         .args([
+            "-c:v",
+            "libvpx-vp9",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+        ])
+        .args(["-live", "1"]);
+        dir.path().join("src.webm")
+    } else {
+        make.args([
             "-f",
             "lavfi",
             "-i",
@@ -3044,14 +3102,17 @@ fn run_trim_session(mode: &str) -> (String, tempfile::TempDir) {
             "-pix_fmt",
             "yuv420p",
         ])
-        .args(["-c:a", "aac"])
-        .arg(&src)
-        .status()
-        .unwrap();
-    assert!(ok.success());
+        .args(["-c:a", "aac"]);
+        dir.path().join("src.mp4")
+    };
+    assert!(make.arg(&src).status().unwrap().success());
     let script = dir.path().join("trim.exp");
     std::fs::write(&script, TRIM_EXPECT).unwrap();
     let out = dir.path().join("clips");
+    if mode == "replace" {
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("src-2s-6s.mp4"), b"").unwrap();
+    }
     let run = std::process::Command::new("expect")
         .arg(&script)
         .arg(assert_cmd::cargo::cargo_bin("conv"))
@@ -3096,4 +3157,41 @@ fn conv_trim_quits_without_writing_when_asked() {
     assert!(stdout.contains("code=0"), "{stdout}");
     assert!(tty_given_back(&stdout), "{stdout}");
     assert!(!dir.path().join("clips").exists());
+}
+
+/// A clip already on disk is found while the marks are still on screen,
+/// and replaced only once w's question is answered y.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_asks_before_replacing_a_clip_already_there() {
+    let (stdout, dir) = run_trim_session("replace");
+    assert!(stdout.contains("code=0"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
+    let clips = dir.path().join("clips");
+    let replaced = std::fs::metadata(clips.join("src-2s-6s.mp4")).unwrap();
+    assert!(replaced.len() > 0, "the empty file was written over");
+    assert!(clips.join("src-6s-8s.m4a").exists());
+}
+
+/// Held keys reach conv rather than the screen, and Ctrl-C is a key that
+/// asks before throwing marked clips away, rather than a signal that
+/// stops conv with the terminal still held.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_takes_ctrl_c_and_held_arrows_as_keys() {
+    let (stdout, dir) = run_trim_session("ctrlc");
+    assert!(stdout.contains("code=0"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
+    assert!(!dir.path().join("clips").exists());
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_refuses_a_file_without_a_length() {
+    let (stdout, _dir) = run_trim_session("nolength");
+    assert!(stdout.contains("code=2"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
 }

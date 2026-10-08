@@ -202,7 +202,8 @@ keeps that bar alone (a silent video, or the sound as m4a). u undoes, \
 Esc drops an open mark, w writes every clip, q quits.
 
 Each clip is written as conv FILE --start T --end T would write it, \
-named for its range: talk-1m02s-1m10s.mp4.")]
+named for its range: talk-1m02s-1m10s.mp4, and w asks before it \
+replaces a file already there.")]
     Trim {
         /// The video or audio file to cut.
         file: PathBuf,
@@ -213,7 +214,7 @@ named for its range: talk-1m02s-1m10s.mp4.")]
         /// Write the clips into this directory.
         #[arg(short = 'o', long)]
         outdir: Option<PathBuf>,
-        /// Overwrite clips that already exist.
+        /// Overwrite clips that already exist, without asking.
         #[arg(short = 'y', long)]
         overwrite: bool,
         /// Print each clip's command instead of running it.
