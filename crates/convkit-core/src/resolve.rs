@@ -703,11 +703,22 @@ impl Resolver {
         extract_version_token(&first_line).map(str::to_string)
     }
 
-    /// `backend`'s version as its own `--version` reports it, or `None` when
-    /// the program at `path` does not run. `install` uses this to check a
-    /// freshly unpacked folder backend before swapping it into place.
-    pub(crate) fn probe_version(backend: Backend, path: &Path) -> Option<String> {
-        Self::version_of(backend, path, VERSION_PROBE_TIMEOUT)
+    /// A strict `--version` check for `install`, used on a freshly unpacked
+    /// folder backend before it is swapped into place. Unlike `version_of`,
+    /// it requires the program to exit successfully and reads the version
+    /// only from stdout, so a loader failure (which prints to stderr and
+    /// exits non-zero) is never mistaken for a version banner. It shares
+    /// `run_with_timeout`, so a hung program is still killed.
+    pub(crate) fn probe_version_strict(path: &Path) -> Option<String> {
+        let mut cmd = crate::procutil::backend_command(path);
+        cmd.arg("--version");
+        let out = Self::run_with_timeout(cmd, VERSION_PROBE_TIMEOUT)?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let line = stdout.lines().next()?;
+        extract_version_token(line).map(str::to_string)
     }
 
     /// Runs `path` with `flag` and returns the first line of its version

@@ -370,12 +370,12 @@ fn keep_in_folder(rel: &str, exe_rel: &str) -> bool {
     if rel == exe_rel {
         return true;
     }
-    let lower = rel.to_ascii_lowercase();
-    if let Some(name) = lower.strip_prefix("bin/") {
-        return plain_file_name(name) && name.ends_with(".dll");
+    if let Some(name) = rel.strip_prefix("bin/") {
+        return plain_file_name(name) && name.to_ascii_lowercase().ends_with(".dll");
     }
-    if let Some(name) = lower.strip_prefix("lib/") {
-        return plain_file_name(name)
+    if let Some(name) = rel.strip_prefix("lib/") {
+        let name = name.to_ascii_lowercase();
+        return plain_file_name(&name)
             && (name.ends_with(".dylib") || name.ends_with(".so") || name.contains(".so."));
     }
     false
@@ -405,7 +405,15 @@ fn link_stays_inside(link: &Path, target: &str) -> bool {
             Component::RootDir | Component::Prefix(_) => return false,
         }
     }
-    !parts.is_empty()
+    // Only a sibling file directly in `bin/` or `lib/` is a valid target.
+    // Anything else (the folder itself, a subdirectory, another link's
+    // directory alias) could let a chain of links climb out.
+    matches!(
+        parts.as_slice(),
+        [dir, name]
+            if (*dir == OsStr::new("bin") || *dir == OsStr::new("lib"))
+                && name.to_str().is_some_and(plain_file_name)
+    )
 }
 
 /// Reads a folder backend's runtime files out of a verified zip: every
@@ -516,7 +524,13 @@ fn write_folder(dir: &Path, exe_rel: &str, entries: &[FolderEntry]) -> Result<()
         }
         match entry {
             FolderEntry::File { bytes, .. } => {
-                std::fs::write(&path, bytes).map_err(|e| io_err(&path, e))?;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .map_err(|e| io_err(&path, e))?;
+                std::io::Write::write_all(&mut f, bytes).map_err(|e| io_err(&path, e))?;
+                drop(f);
                 let is_dylib = rel.extension().is_some_and(|e| e == "dylib");
                 if rel == Path::new(exe_rel) || is_dylib {
                     finalize(&path)?;
@@ -599,7 +613,7 @@ fn install_folder(
 /// must answer. On Linux the usual reason it does not is a glibc older than
 /// the one upstream built against; qpdf 12.4.2's Linux builds need 2.34.
 fn check_runs(backend: Backend, exe: &Path) -> Result<()> {
-    if crate::resolve::Resolver::probe_version(backend, exe).is_some() {
+    if crate::resolve::Resolver::probe_version_strict(exe).is_some() {
         return Ok(());
     }
     let mut message = format!(
@@ -1183,6 +1197,8 @@ mod tests {
             ("include/qpdf/QPDF.hh", false),
             ("share/doc/qpdf/README.md", false),
             ("bin/..\\..\\evil.dll", false),
+            ("BIN/qpdf30.dll", false),
+            ("LIB/libx.so", false),
         ] {
             assert_eq!(keep_in_folder(rel, "bin/qpdf"), kept, "{rel}");
         }
@@ -1197,6 +1213,9 @@ mod tests {
             ("lib/a.so.1", "../../outside", false),
             ("lib/a.so.1", "/etc/passwd", false),
             ("lib/a.so.1", "..", false),
+            ("lib/y.so", ".", false),
+            ("lib/x.so", "y.so/y.so/../../../outside.txt", false),
+            ("lib/x.so", "../bin/qpdf30.dll", true),
         ] {
             assert_eq!(
                 link_stays_inside(Path::new(link), target),
@@ -1379,5 +1398,80 @@ mod tests {
         );
         assert!(!folder.join("stale.txt").exists());
         assert_eq!(entries_in(managed.path()), vec!["qpdf"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_cannot_be_written_through_an_earlier_link_of_the_same_name() {
+        // The zip writer refuses duplicate names, so this drives
+        // `install_folder` with the entries a crafted archive would yield.
+        let entries = vec![
+            FolderEntry::File {
+                rel: "bin/qpdf".into(),
+                bytes: b"program".to_vec(),
+            },
+            FolderEntry::File {
+                rel: "lib/libx.so.1.0".into(),
+                bytes: b"library".to_vec(),
+            },
+            FolderEntry::Symlink {
+                rel: "lib/libx.so.1".into(),
+                target: "libx.so.1.0".into(),
+            },
+            FolderEntry::File {
+                rel: "lib/libx.so.1".into(),
+                bytes: b"clobber".to_vec(),
+            },
+        ];
+        let managed = tempfile::tempdir().unwrap();
+        let dest = program_dest(managed.path());
+
+        let result = install_folder(&dest, "bin/qpdf", &entries, &|_| Ok(()));
+
+        assert!(result.is_err());
+        assert!(
+            entries_in(managed.path()).is_empty(),
+            "nothing may be left behind"
+        );
+    }
+
+    #[cfg(unix)]
+    fn stub(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("qpdf");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_runs_rejects_a_loader_failure_on_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = stub(
+            dir.path(),
+            "echo \"$0: /lib/libc.so.6: version 'GLIBC_2.34' not found\" >&2; exit 1",
+        );
+        let err = check_runs(crate::Backend::Qpdf, &exe).unwrap_err();
+        assert!(err.message.contains("did not run"), "{}", err.message);
+        if cfg!(target_os = "linux") {
+            assert!(err.message.contains("glibc 2.34"), "{}", err.message);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_runs_accepts_a_clean_version_banner() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = stub(dir.path(), "echo 'qpdf version 12.4.2'");
+        check_runs(crate::Backend::Qpdf, &exe).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_runs_rejects_a_version_banner_with_a_failing_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = stub(dir.path(), "echo 'qpdf version 12.4.2'; exit 1");
+        assert!(check_runs(crate::Backend::Qpdf, &exe).is_err());
     }
 }
