@@ -442,7 +442,7 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
         .map(|job| {
             let probed = probed_for(&resolver, job, &tuning)?;
             let available = available_for(&resolver, job);
-            plan::build_tuned(
+            let mut plan = plan::build_tuned(
                 job.from,
                 job.to,
                 &job.inputs,
@@ -450,7 +450,10 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
                 probed.as_ref(),
                 available.as_ref(),
                 &tuning,
-            )
+            )?;
+            // As `exec::run` does, so the preview names the same fix.
+            convkit_core::metadata::explain_missing_ffprobe(&mut plan, &resolver);
+            Ok(plan)
         })
         .collect();
 

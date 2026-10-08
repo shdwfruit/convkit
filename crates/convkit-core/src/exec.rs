@@ -494,7 +494,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     })?;
     let temp_final = scratch.join(final_name);
 
-    let built = plan::build_tuned(
+    let mut built = plan::build_tuned(
         req.from,
         req.to,
         &req.inputs,
@@ -503,6 +503,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         available.as_ref(),
         &req.tuning,
     )?;
+    crate::metadata::explain_missing_ffprobe(&mut built, resolver);
     let mut runner = StepRunner {
         resolver,
         guard: &mut guard,
@@ -2617,6 +2618,45 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         .map(|s| s.to_string())
         .collect();
         assert!(is_remux(&argv), "{argv:?}");
+    }
+
+    /// With ffprobe missing, `--strip-metadata` still strips, removing every
+    /// tag since none could be read to keep, and the note says why and how to
+    /// fix it: the same install command a missing backend's error gives.
+    #[test]
+    fn a_strip_without_ffprobe_says_to_install_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("song.flac");
+        std::fs::write(&input, b"not really audio").unwrap();
+        let mut r = Resolver::new();
+        r.overrides_only();
+        r.with_override(Backend::Ffmpeg, stub_that_creates_its_output(dir.path()));
+        let req = Request {
+            from: Format::Flac,
+            to: Format::Mp3,
+            inputs: vec![input],
+            output: dir.path().join("song.mp3"),
+            overwrite: false,
+            tuning: crate::Tuning {
+                strip_metadata: true,
+                ..Default::default()
+            },
+            allow_extreme: false,
+        };
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        let missing = crate::ConvError::backend_missing(Backend::Ffprobe);
+        let fix = missing
+            .remediation
+            .as_ref()
+            .and_then(|r| r.managed.clone().or_else(|| r.manual.clone()));
+        assert_eq!(
+            o.warnings,
+            [format!(
+                "ffprobe not found, so every tag was removed, title and artist included. \
+                 To keep them: {}",
+                fix.unwrap()
+            )]
+        );
     }
 
     /// A webm video knob can only be applied by the probe-aware path, so an

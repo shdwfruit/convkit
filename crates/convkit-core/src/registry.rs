@@ -1300,10 +1300,11 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
     }
     // --strip-metadata writes back the content tags the probe reads, on
     // every ffmpeg pair and on a video or audio file stripped into its own
-    // format.
+    // format. A gif holds no tags, so there is nothing to read.
     if tuning.strip_metadata {
-        let ffmpeg =
-            lookup(from, to).is_some_and(|r| r.steps.iter().any(|s| s.backend == Backend::Ffmpeg));
+        let ffmpeg = from != Format::Gif
+            && lookup(from, to)
+                .is_some_and(|r| r.steps.iter().any(|s| s.backend == Backend::Ffmpeg));
         let in_place = from == to && matches!(from.kind(), Kind::Video | Kind::Audio);
         if ffmpeg || in_place {
             return true;
@@ -1660,6 +1661,24 @@ mod tests {
     }
 
     use crate::video::ResolvedVideo;
+
+    /// Stripping probes for the tags it keeps, so only where there can be
+    /// some: not a gif, which holds none.
+    #[test]
+    fn stripping_probes_only_a_source_with_tags_to_keep() {
+        let on = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        assert!(needs_probe_tuned(Format::Flac, Format::Mp3, &on));
+        assert!(needs_probe_tuned(Format::Mp3, Format::Mp3, &on));
+        assert!(!needs_probe_tuned(Format::Gif, Format::Mp4, &on));
+        assert!(!needs_probe_tuned(
+            Format::Flac,
+            Format::Mp3,
+            &Tuning::default()
+        ));
+    }
 
     /// Every ImageMagick and ffmpeg recipe carries the strip slot, so the
     /// flag is refused only where it truly does not apply (documents), and

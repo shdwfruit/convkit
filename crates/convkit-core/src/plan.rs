@@ -228,7 +228,7 @@ pub fn build_tuned(
     // -- a static recipe carrying an `Arg::VideoChain` slot gets the same
     // honesty about a cap that did not bind or a probe that never ran.
     warnings.extend(resolved.notes.iter().cloned());
-    warnings.extend(crate::metadata::tags_unread_note(to, tuning, probe));
+    warnings.extend(crate::metadata::tags_unread_note(from, to, tuning, probe));
     warnings.extend(crate::metadata::location_note(from, to, probe, tuning));
     warnings.extend(crate::metadata::labels_note(to, tuning, probe));
 
@@ -367,7 +367,9 @@ fn in_place(
             (vec![step], m.warnings, None)
         }
     };
-    warnings.extend(crate::metadata::tags_unread_note(format, tuning, probe));
+    warnings.extend(crate::metadata::tags_unread_note(
+        format, format, tuning, probe,
+    ));
     warnings.extend(crate::metadata::labels_note(format, tuning, probe));
     Ok(ConversionPlan {
         from: format,

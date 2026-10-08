@@ -325,13 +325,21 @@ impl OwnFormat<'_> {
     }
 
     /// The format a batch of `f` files should name with `--to`: their own
-    /// where this run keeps it, else the nearest one it can write.
-    fn fix_ext(&self, f: Option<Format>) -> &'static str {
+    /// where this run keeps it, else one conv converts them to with the
+    /// flag. `Err` is why there is none (the flag does not cover the
+    /// format), which the caller says instead.
+    fn fix_ext(&self, f: Option<Format>) -> Result<&'static str, String> {
         match f {
-            Some(f) if self.keeps(f) => f.ext(),
-            _ if self.sized => "mp4",
-            Some(f) if f.kind() == Kind::Image => "jpg",
-            _ => "<format>",
+            Some(f) if self.keeps(f) => Ok(f.ext()),
+            _ if self.sized => Ok("mp4"),
+            Some(f) => convkit_core::metadata::strip_target_for(f)
+                .map(|to| to.ext())
+                .ok_or_else(|| {
+                    convkit_core::metadata::in_place(f)
+                        .err()
+                        .unwrap_or_default()
+                }),
+            None => Ok("<format>"),
         }
     }
 }
@@ -585,16 +593,20 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
     // `IN OUT` pair form, where the second match would be an output.
     if let (true, Some(own)) = (lone_sized_input && positionals.len() > 1, &own) {
         let pattern = &cli.paths[0];
-        let ext = own.fix_ext(Format::from_path(pattern));
-        return Err(ConvError::new(
-            ErrorCode::InvalidInvocation,
-            format!(
+        let message = match own.fix_ext(Format::from_path(pattern)) {
+            Ok(ext) => format!(
                 "{} matched {} files; add --to {ext} to {} each one",
                 pattern.display(),
                 positionals.len(),
                 own.verb
             ),
-        ));
+            Err(why) => format!(
+                "{} matched {} files, and {why}",
+                pattern.display(),
+                positionals.len()
+            ),
+        };
+        return Err(ConvError::new(ErrorCode::InvalidInvocation, message));
     }
 
     // Without `--to`, positional grammar gives the last path an *output*
@@ -777,15 +789,15 @@ fn refuse_a_batch_without_to(
             ))
         }
         [first, _, _, ..] if !is_image_merge(paths) => {
-            let ext = own.fix_ext(Format::from_path(first));
-            Err(ConvError::new(
-                ErrorCode::InvalidInvocation,
-                format!(
+            let message = match own.fix_ext(Format::from_path(first)) {
+                Ok(ext) => format!(
                     "{} without --to takes one input, or an input and an output; \
                      add --to {ext} to {} each file",
                     own.flag, own.verb
                 ),
-            ))
+                Err(why) => why,
+            };
+            Err(ConvError::new(ErrorCode::InvalidInvocation, message))
         }
         _ => Ok(()),
     }
@@ -1710,8 +1722,45 @@ mod tests {
             e.message,
             "conv cannot write heic; add --to jpg to strip it into a jpg"
         );
+        let e = plan_jobs(&stripped(vec![dir.path().join("anim.gif")], None, None)).unwrap_err();
+        assert_eq!(
+            e.message,
+            "conv cannot keep gif files as gif; add --to mp4 to strip them"
+        );
         let e = plan_jobs(&stripped(vec![dir.path().join("a.docx")], None, None)).unwrap_err();
-        assert!(e.message.contains("add --to <format>"), "{}", e.message);
+        assert!(
+            e.message
+                .starts_with("--strip-metadata does not apply to docx files"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// A glob of files conv cannot strip into their own format is told the
+    /// format it can strip them into, which must be a real pair (gif -> jpg
+    /// is not one), or that the flag does not apply.
+    #[test]
+    fn a_glob_conv_cannot_keep_is_told_a_format_it_can_strip_into() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a.gif", "b.gif", "a.docx", "b.docx"] {
+            std::fs::write(dir.path().join(n), b"x").unwrap();
+        }
+        let e = plan_jobs(&stripped(vec![dir.path().join("*.gif")], None, None)).unwrap_err();
+        assert!(
+            e.message
+                .ends_with("matched 2 files; add --to mp4 to strip each one"),
+            "{}",
+            e.message
+        );
+        let e = plan_jobs(&stripped(vec![dir.path().join("*.docx")], None, None)).unwrap_err();
+        assert!(
+            e.message.ends_with(
+                "matched 2 files, and --strip-metadata does not apply to docx files: it \
+                 covers image, video and audio conversions"
+            ),
+            "{}",
+            e.message
+        );
     }
 
     #[test]

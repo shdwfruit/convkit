@@ -85,10 +85,31 @@ pub fn in_place(f: Format) -> Result<(), String> {
             "conv cannot write {}; add --to jpg to strip it into a jpg",
             f.ext()
         )),
-        _ => Err(format!(
-            "--strip-metadata cannot keep a {0} as {0}; add --to <format> to convert it",
-            f.ext()
-        )),
+        _ => Err(match strip_target_for(f) {
+            Some(to) => format!(
+                "conv cannot keep {0} files as {0}; add --to {1} to strip them",
+                f.ext(),
+                to.ext()
+            ),
+            None => format!(
+                "--strip-metadata does not apply to {} files: it covers image, video and \
+                 audio conversions",
+                f.ext()
+            ),
+        }),
+    }
+}
+
+/// For a file conv cannot strip into its own format, the format to name in
+/// the fix: one it converts that file to with the flag. `None` for a
+/// document, which the flag does not cover.
+pub fn strip_target_for(f: Format) -> Option<Format> {
+    match f {
+        Format::Heic | Format::Heif => Some(Format::Jpg),
+        Format::Svg => Some(Format::Png),
+        // gif -> mp4 is the only conversion conv has for a gif.
+        Format::Gif | Format::Avi => Some(Format::Mp4),
+        _ => None,
     }
 }
 
@@ -203,15 +224,52 @@ pub(crate) fn labels_note(
 pub(crate) const TAGS_UNREAD_NOTE: &str = "ffprobe could not read the tags, so all of them \
      were removed, title and artist included.";
 
-/// `TAGS_UNREAD_NOTE` when it applies: the flag is on, the target holds
-/// tags (a gif holds none), and there is no probe.
+/// `TAGS_UNREAD_NOTE` when it applies: the flag is on, both ends hold tags
+/// (a gif holds none, so it is not probed for any), and there is no probe.
 pub(crate) fn tags_unread_note(
+    from: Format,
     to: Format,
     tuning: &Tuning,
     probe: Option<&MediaProbe>,
 ) -> Option<String> {
-    let holds_tags = matches!(to.kind(), Kind::Video | Kind::Audio);
+    let holds_tags = matches!(to.kind(), Kind::Video | Kind::Audio) && from != Format::Gif;
     (tuning.strip_metadata && holds_tags && probe.is_none()).then(|| TAGS_UNREAD_NOTE.to_string())
+}
+
+/// Where the flag cleared every tag, or left out an mkv's attachments, for
+/// want of a probe because ffprobe itself is missing, says so as a missing
+/// backend is said everywhere else, with the same fix (`conv install
+/// ffprobe`, or the package manager's command). A probe that ran and could
+/// not read the file keeps the plain note. Called by whoever planned with a
+/// resolver in hand, since planning itself never resolves a backend.
+pub fn explain_missing_ffprobe(plan: &mut crate::ConversionPlan, resolver: &crate::Resolver) {
+    let unread = |w: &String| w == TAGS_UNREAD_NOTE || w == ATTACHMENTS_UNREAD_NOTE;
+    if !plan.warnings.iter().any(unread) {
+        return;
+    }
+    let Err(missing) = resolver.resolve(crate::Backend::Ffprobe) else {
+        return;
+    };
+    let fix = missing
+        .remediation
+        .as_ref()
+        .and_then(|r| r.managed.clone().or_else(|| r.manual.clone()));
+    for note in &mut plan.warnings {
+        if note == TAGS_UNREAD_NOTE {
+            *note = format!(
+                "{}, so every tag was removed, title and artist included.",
+                missing.message
+            );
+            if let Some(fix) = &fix {
+                note.push_str(&format!(" To keep them: {fix}"));
+            }
+        } else if note == ATTACHMENTS_UNREAD_NOTE {
+            *note = format!(
+                "{}, so any attachments (fonts) are left out.",
+                missing.message
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +321,54 @@ mod tests {
             ..Tuning::default()
         };
         assert!(location_note(Format::Heic, Format::Jpg, Some(&photo(true)), &on).is_none());
+    }
+
+    /// A format conv cannot strip into itself is pointed at one it can
+    /// convert to with the flag: a real pair that carries the strip, never
+    /// a guess. A document has none.
+    #[test]
+    fn the_fix_for_a_format_kept_as_itself_is_a_real_pair() {
+        for &f in Format::all() {
+            if in_place(f).is_ok() {
+                continue;
+            }
+            if let Some(to) = strip_target_for(f) {
+                let recipe = crate::registry::lookup(f, to)
+                    .unwrap_or_else(|| panic!("{f:?} -> {to:?} is not a pair"));
+                assert!(
+                    recipe
+                        .steps
+                        .iter()
+                        .any(|s| s.args.contains(&crate::Arg::StripMetadata)),
+                    "{f:?} -> {to:?}"
+                );
+            }
+        }
+        assert_eq!(strip_target_for(Format::Gif), Some(Format::Mp4));
+        assert_eq!(strip_target_for(Format::Heic), Some(Format::Jpg));
+        assert_eq!(strip_target_for(Format::Svg), Some(Format::Png));
+        assert_eq!(strip_target_for(Format::Docx), None);
+        assert_eq!(
+            in_place(Format::Gif).unwrap_err(),
+            "conv cannot keep gif files as gif; add --to mp4 to strip them"
+        );
+        assert_eq!(
+            in_place(Format::Docx).unwrap_err(),
+            "--strip-metadata does not apply to docx files: it covers image, video and \
+             audio conversions"
+        );
+    }
+
+    /// A gif holds no tags to keep, so stripping one into an mp4 needs no
+    /// probe, and says nothing about one.
+    #[test]
+    fn a_gif_source_has_no_tags_to_be_unread() {
+        let on = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        assert!(tags_unread_note(Format::Gif, Format::Mp4, &on, None).is_none());
+        assert!(tags_unread_note(Format::Mov, Format::Mp4, &on, None).is_some());
     }
 
     /// Labels the target would have kept are said to go, and only those:
