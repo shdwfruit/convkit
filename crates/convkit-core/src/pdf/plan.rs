@@ -54,6 +54,10 @@ pub struct PdfPlan {
 /// Where a merge writes inside the scratch folder.
 const MERGE_SCRATCH: &str = "merged.pdf";
 
+/// The `--split-pages` template of a real run, relative to the scratch
+/// folder.
+pub(crate) const SPLIT_SCRATCH_TEMPLATE: &str = "p-%d.pdf";
+
 impl PdfPlan {
     pub fn is_merge(&self) -> bool {
         matches!(self.job, PdfJob::Merge { .. })
@@ -81,14 +85,21 @@ impl PdfPlan {
                 vec![argv]
             }
             PdfJob::SplitPages { input, dir, stem } => {
-                let template = match scratch {
-                    Some(s) => s.join("p-%d.pdf"),
-                    None => dir.join(format!("{stem}-%d.pdf")),
+                // qpdf substitutes the first `%d` anywhere in the template,
+                // so a real run uses the bare template from inside the
+                // scratch folder (see `runs_in_scratch`), where no `%` in
+                // the person's own paths can reach it.
+                let (input, template) = match scratch {
+                    Some(_) => (
+                        std::path::absolute(input).unwrap_or_else(|_| input.clone()),
+                        PathBuf::from(SPLIT_SCRATCH_TEMPLATE),
+                    ),
+                    None => (input.clone(), dir.join(format!("{stem}-%d.pdf"))),
                 };
                 vec![vec![
                     "--decrypt".to_string(),
                     "--split-pages".to_string(),
-                    path_arg(input),
+                    path_arg(&input),
                     path_arg(&template),
                 ]]
             }
@@ -111,6 +122,21 @@ impl PdfPlan {
                     ]
                 })
                 .collect(),
+        }
+    }
+
+    /// Whether a real run must start qpdf with the scratch folder as its
+    /// working directory, because its output names are relative to it.
+    pub(crate) fn runs_in_scratch(&self) -> bool {
+        matches!(self.job, PdfJob::SplitPages { .. })
+    }
+
+    /// The name the template's output files get once placed, e.g.
+    /// `report-%d.pdf`, for `SplitPages` plans.
+    pub(crate) fn final_template_name(&self) -> Option<String> {
+        match &self.job {
+            PdfJob::SplitPages { stem, .. } => Some(format!("{stem}-%d.pdf")),
+            _ => None,
         }
     }
 
@@ -764,10 +790,9 @@ mod tests {
         assert_eq!(merge.scratch_output(s, 0), s.join("merged.pdf"));
 
         let pages = split_plan(&info("report.pdf", 12), &[], Path::new("")).unwrap();
-        assert_eq!(
-            pages.commands_into(Some(s))[0][3],
-            s.join("p-%d.pdf").to_string_lossy()
-        );
+        assert_eq!(pages.commands_into(Some(s))[0][3], "p-%d.pdf");
+        assert!(pages.runs_in_scratch());
+        assert!(!merge.runs_in_scratch());
         assert_eq!(pages.scratch_output(s, 0), s.join("p-01.pdf"));
         assert_eq!(pages.scratch_output(s, 11), s.join("p-12.pdf"));
 

@@ -31,6 +31,13 @@ pub fn read_args(input: &Path) -> Vec<String> {
     ]
 }
 
+fn qpdf_error(message: String) -> ConvError {
+    ConvError {
+        backend: Some(crate::Backend::Qpdf),
+        ..ConvError::new(ErrorCode::ConversionFailed, message)
+    }
+}
+
 /// Reads `input` with the qpdf at `qpdf`.
 pub fn read(qpdf: &Path, input: &Path) -> Result<PdfInfo> {
     let out = backend_command(qpdf)
@@ -55,19 +62,14 @@ pub fn read(qpdf: &Path, input: &Path) -> Result<PdfInfo> {
 /// could not open it at all.
 pub fn parse_read(input: &Path, code: Option<i32>, stdout: &[u8], stderr: &str) -> Result<PdfInfo> {
     let name = display_name(input);
-    let unreadable = |reason: &str| {
-        ConvError::new(
-            ErrorCode::ConversionFailed,
-            format!("{name} could not be read as a PDF: {reason}"),
-        )
-    };
+    let unreadable =
+        |reason: &str| qpdf_error(format!("{name} could not be read as a PDF: {reason}"));
     match code {
         Some(0) | Some(3) => {}
         Some(2) if stderr.contains("invalid password") => {
-            return Err(ConvError::new(
-                ErrorCode::ConversionFailed,
-                format!("{name} is password-protected, and conv can't open it yet"),
-            ));
+            return Err(qpdf_error(format!(
+                "{name} is password-protected, and conv can't open it yet"
+            )));
         }
         _ => {
             let reason = qpdf_reason(stderr);

@@ -324,10 +324,9 @@ fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
                         || line.contains("rejected"))
             }
             Backend::Typst => line.contains("warning:") || line.contains("error:"),
-            // qpdf's own reports: `qpdf: <file>: <reason>` on failure and
-            // `WARNING: <file>: ...` when it repairs a damaged file. Only
-            // used for failure detail; `pdf` writes its own sentences.
-            Backend::Qpdf => line.starts_with("qpdf: ") || line.starts_with("WARNING: "),
+            // qpdf's reports never become distilled notes: `pdf` writes its
+            // own sentences (spec section 4.3).
+            Backend::Qpdf => false,
         }
     };
 

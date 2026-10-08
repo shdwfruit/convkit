@@ -83,6 +83,9 @@ pub fn run(
         });
         let mut cmd = backend_command(&qpdf.path);
         cmd.args(argv);
+        if plan.runs_in_scratch() {
+            cmd.current_dir(&scratch);
+        }
         on_event(Event::StepSpawned {
             index,
             program: qpdf.path.clone(),
@@ -111,10 +114,8 @@ pub fn run(
             Some(0) => {}
             Some(3) => qpdf_warned = true,
             _ => {
-                return Err(ConvError::new(
-                    ErrorCode::ConversionFailed,
-                    format!("qpdf failed: {}", super::qpdf_reason(&report)),
-                ));
+                let reason = hide_scratch_paths(plan, &scratch, &super::qpdf_reason(&report));
+                return Err(qpdf_error(format!("qpdf failed: {reason}")));
             }
         }
         on_event(Event::StepFinished { index });
@@ -125,13 +126,10 @@ pub fn run(
         let path = plan.scratch_output(&scratch, i);
         let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         if bytes == 0 {
-            return Err(ConvError::new(
-                ErrorCode::ConversionFailed,
-                format!(
-                    "qpdf produced no output for {}",
-                    display_name(&planned.path)
-                ),
-            ));
+            return Err(qpdf_error(format!(
+                "qpdf produced no output for {}",
+                display_name(&planned.path)
+            )));
         }
         produced.push((path, bytes));
     }
@@ -172,6 +170,44 @@ pub fn run(
     })
 }
 
+/// A conversion failure attributed to qpdf.
+fn qpdf_error(message: String) -> ConvError {
+    ConvError {
+        backend: Some(Backend::Qpdf),
+        ..ConvError::new(ErrorCode::ConversionFailed, message)
+    }
+}
+
+/// Replaces the scratch paths qpdf may name in `reason` with the names the
+/// files would get, since the person never chose the scratch ones and they
+/// are gone after cleanup. Longest strings first, so a path is never half
+/// replaced.
+fn hide_scratch_paths(plan: &PdfPlan, scratch: &Path, reason: &str) -> String {
+    let mut pairs: Vec<(String, String)> = (0..plan.outputs.len())
+        .map(|i| {
+            (
+                plan.scratch_output(scratch, i).display().to_string(),
+                display_name(&plan.outputs[i].path),
+            )
+        })
+        .collect();
+    if let Some(name) = plan.final_template_name() {
+        pairs.push((
+            scratch
+                .join(super::plan::SPLIT_SCRATCH_TEMPLATE)
+                .display()
+                .to_string(),
+            name,
+        ));
+    }
+    pairs.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    let mut out = reason.to_string();
+    for (from, to) in pairs {
+        out = out.replace(&from, &to);
+    }
+    out
+}
+
 /// Moves each `(produced, target)` pair into place. On the first failure it
 /// removes the targets this call created, so a failed move leaves no mixed
 /// set. Files replaced under `-y` are not restored.
@@ -195,13 +231,10 @@ fn place_outputs(
             } else {
                 format!("{} had already been replaced", join_and(&replaced))
             };
-            return Err(ConvError::new(
-                ErrorCode::ConversionFailed,
-                format!(
-                    "could not move {} into place: {e}; {tail}",
-                    display_name(to)
-                ),
-            ));
+            return Err(qpdf_error(format!(
+                "could not move {} into place: {e}; {tail}",
+                display_name(to)
+            )));
         }
     }
     Ok(())
@@ -349,7 +382,9 @@ mod tests {
 
         assert_eq!(e.code, ErrorCode::ConversionFailed);
         assert!(e.message.starts_with("qpdf failed: "), "{}", e.message);
-        assert!(e.message.ends_with("r-2.pdf: boom"), "{}", e.message);
+        assert!(e.message.ends_with("report-4.pdf: boom"), "{}", e.message);
+        assert!(!e.message.contains(".convkit-"), "{}", e.message);
+        assert_eq!(e.backend, Some(Backend::Qpdf));
         assert_eq!(entries(dir.path()), vec!["report.pdf"]);
     }
 
