@@ -9,10 +9,12 @@
 pub mod plan;
 pub mod range;
 pub mod read;
+pub mod run;
 
 pub use plan::{plan_merge, plan_split, PdfJob, PdfPlan, PlannedOutput};
 pub use range::{parse_range, PageRange};
 pub use read::PdfInfo;
+pub use run::{run, PdfOutcome, WrittenOutput};
 
 use std::path::Path;
 
