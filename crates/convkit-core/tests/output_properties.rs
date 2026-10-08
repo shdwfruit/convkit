@@ -1346,6 +1346,217 @@ fn the_gif_buffering_note_is_for_long_sources_only() {
     );
 }
 
+// --- Opus and Ogg -----------------------------------------------------------
+
+/// Writes `out` in `dir` with ffmpeg, from `args`.
+fn synth_media(dir: &tempfile::TempDir, args: &[&str], out: &str) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let path = dir.path().join(out);
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(args)
+        .arg(&path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "building {out} failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    path
+}
+
+/// A two-second stereo tone at `rate` Hz, as `out`, plus `extra` output
+/// arguments.
+fn synth_tone(dir: &tempfile::TempDir, rate: u32, extra: &[&str], out: &str) -> PathBuf {
+    let source = format!("sine=frequency=440:sample_rate={rate}:duration=2");
+    let mut args = vec!["-f", "lavfi", "-i", &source, "-ac", "2"];
+    args.extend_from_slice(extra);
+    synth_media(dir, &args, out)
+}
+
+fn audio_codec(path: &Path) -> String {
+    probe_media(path)
+        .audio_codec()
+        .unwrap_or_else(|| panic!("no audio stream in {}", path.display()))
+        .to_string()
+}
+
+/// The sample rate the Opus encoder was given, from the `OpusHead` header.
+/// ffprobe cannot answer this: an Opus stream always decodes at 48 kHz, so
+/// it reports 48000 whatever the encoder ran at.
+fn opus_input_rate(path: &Path) -> u32 {
+    let bytes = std::fs::read(path).unwrap();
+    let at = bytes
+        .windows(8)
+        .position(|w| w == b"OpusHead")
+        .unwrap_or_else(|| panic!("no OpusHead in {}", path.display()));
+    // Magic (8), version (1), channels (1), pre-skip (2), then the rate.
+    let rate = &bytes[at + 12..at + 16];
+    u32::from_le_bytes(rate.try_into().unwrap())
+}
+
+/// Both Ogg targets are Opus at 48 kHz. ffmpeg on its own would encode a
+/// 32 kHz source at 24 kHz, the nearest rate libopus takes, and lose
+/// everything above 12 kHz.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn opus_and_ogg_targets_are_opus_at_48_khz() {
+    let dir = tmp();
+    let wav = synth_tone(&dir, 32_000, &["-c:a", "pcm_s16le"], "tone32k.wav");
+    for to in ["opus", "ogg"] {
+        let (out, o) = convert_path(&wav, to);
+        assert_eq!(audio_codec(&out), "opus", "{to}");
+        assert_eq!(opus_input_rate(&out), 48_000, "{to}");
+        assert!(!o.remuxed, "{to}");
+        let says_opus = o.warnings.iter().any(|w| w.contains("encoded as Opus"));
+        assert_eq!(says_opus, to == "ogg", "{to}: {:?}", o.warnings);
+        assert!(
+            !o.warnings.iter().any(|w| w.contains("Cover art")),
+            "a wav has no art: {:?}",
+            o.warnings
+        );
+    }
+}
+
+/// A Telegram-style voice note (Opus in .ogg) converts out to the common
+/// formats, and into .opus by stream copy with no note.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_voice_note_converts_out_and_copies_between_ogg_and_opus() {
+    let dir = tmp();
+    let voice = synth_media(
+        &dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=300:sample_rate=16000:duration=2",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "24k",
+        ],
+        "voice.ogg",
+    );
+    for (to, codec) in [
+        ("mp3", "mp3"),
+        ("m4a", "aac"),
+        ("wav", "pcm_s16le"),
+        ("flac", "flac"),
+    ] {
+        let (out, o) = convert_path(&voice, to);
+        assert_eq!(audio_codec(&out), codec, "{to}");
+        assert!(o.warnings.is_empty(), "{to}: {:?}", o.warnings);
+    }
+    let (opus, o) = convert_path(&voice, "opus");
+    assert_eq!(audio_codec(&opus), "opus");
+    assert!(o.remuxed, "ogg(opus) -> opus must be a stream copy");
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+    let (back, o) = convert_path(&opus, "ogg");
+    assert_eq!(audio_codec(&back), "opus");
+    assert!(o.remuxed, "opus -> ogg must be a stream copy");
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+}
+
+/// Vorbis is copied into .ogg, its own container, but re-encoded for .opus.
+/// The source is built with ffmpeg's built-in Vorbis encoder, the one every
+/// build has (Homebrew's has no libvorbis).
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn vorbis_is_copied_into_ogg_and_encoded_for_opus() {
+    let dir = tmp();
+    let clip = synth_media(
+        &dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=10:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=2",
+            "-ac",
+            "2",
+            "-c:v",
+            "libvpx",
+            "-c:a",
+            "vorbis",
+            "-strict",
+            "experimental",
+        ],
+        "vorbis.webm",
+    );
+    let (ogg, o) = convert_path(&clip, "ogg");
+    assert_eq!(audio_codec(&ogg), "vorbis");
+    assert!(o.remuxed, "webm(vorbis) -> ogg must be a stream copy");
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+    let (opus, o) = convert_path(&ogg, "opus");
+    assert_eq!(audio_codec(&opus), "opus");
+    assert!(!o.remuxed, "vorbis cannot be copied into .opus");
+    let (_, o) = convert_path(&ogg, "wav");
+    assert!(o.warnings.is_empty(), "no 24-bit note: {:?}", o.warnings);
+}
+
+/// Ogg cannot hold cover art, so it is dropped with a note, and only when
+/// the source had some. Surround audio in ffmpeg's default 5.1(side)
+/// layout, which libopus rejects as it is, converts too.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn ogg_targets_note_dropped_art_and_take_surround_audio() {
+    let dir = tmp();
+    let art = synth_image(&dir, &["-size", "64x64", "xc:red"], "art.png");
+    let tagged = synth_media(
+        &dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=2",
+            "-i",
+            art.to_str().unwrap(),
+            "-map",
+            "0",
+            "-map",
+            "1",
+            "-c:a",
+            "libmp3lame",
+            "-c:v",
+            "copy",
+            "-disposition:v",
+            "attached_pic",
+        ],
+        "tagged.mp3",
+    );
+    let plain = synth_tone(&dir, 44_100, &["-c:a", "libmp3lame"], "plain.mp3");
+    let art_note = |o: &exec::Outcome| o.warnings.iter().any(|w| w.contains("Cover art"));
+    let (out, o) = convert_path(&tagged, "opus");
+    assert_eq!(audio_codec(&out), "opus");
+    assert!(art_note(&o), "{:?}", o.warnings);
+    let (_, o) = convert_path(&plain, "opus");
+    assert!(!art_note(&o), "{:?}", o.warnings);
+
+    let surround = synth_media(
+        &dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=2",
+            "-af",
+            "pan=5.1(side)|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0",
+            "-c:a",
+            "ac3",
+        ],
+        "surround.mkv",
+    );
+    let (out, _) = convert_path(&surround, "ogg");
+    assert_eq!(audio_codec(&out), "opus");
+}
+
 // --- --max-size -----------------------------------------------------------
 
 /// A clip noisy enough that the encoder has to spend the bits it is given:

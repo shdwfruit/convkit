@@ -621,6 +621,13 @@ fn copyable_audio_for(to: Format) -> Option<&'static [&'static str]> {
         Format::Mp3 => Some(&["mp3"]),
         Format::Flac => Some(&["flac"]),
         Format::Wav => Some(&["pcm_s16le"]),
+        // Checked here, not left to the muxer: ffmpeg's `.opus` muxer
+        // accepts a Vorbis stream copy and writes a file no Opus player
+        // can read.
+        Format::Opus => Some(&["opus"]),
+        // Ogg is Vorbis's own container, so Vorbis is copied into it
+        // rather than re-encoded to the Opus an encode would produce.
+        Format::Ogg => Some(&["opus", "vorbis"]),
         _ => None,
     }
 }
@@ -646,15 +653,19 @@ pub(crate) fn audio_copy_invocation(
         return None;
     }
 
-    let audio_source = matches!(from, Format::Mp3 | Format::M4a | Format::Wav | Format::Flac);
+    let audio_source = matches!(
+        from,
+        Format::Mp3 | Format::M4a | Format::Wav | Format::Flac | Format::Opus | Format::Ogg
+    );
+    // WAV and Ogg can't carry an attached picture; everything else keeps it.
+    let art_fits = !matches!(to, Format::Wav | Format::Opus | Format::Ogg);
 
     let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
     // The probe describes stream order, so map the first audio stream
     // explicitly rather than trusting default selection (which picks by
     // channel count and could grab a stream the probe never approved).
     push(&mut argv, &["-map", "0:a:0"]);
-    if audio_source && to != Format::Wav {
-        // WAV can't carry an attached picture; everything else keeps it.
+    if audio_source && art_fits {
         push(&mut argv, &["-map", "0:v?", "-c:v", "copy"]);
     }
     push(&mut argv, &["-c:a", "copy", "-y"]);
@@ -666,6 +677,9 @@ pub(crate) fn audio_copy_invocation(
             "Source has {} audio tracks; only the first is extracted.",
             audios.len()
         ));
+    }
+    if audio_source && matches!(to, Format::Opus | Format::Ogg) && probe.attached_pics > 0 {
+        warnings.push(registry::COVER_ART_DROPPED_NOTE.to_string());
     }
 
     Some(MediaInvocation { argv, warnings })
@@ -994,6 +1008,47 @@ mod tests {
             "video sources drop video: {:?}",
             m.argv
         );
+    }
+
+    /// Ogg holds Vorbis or Opus, so either is copied into an ogg target;
+    /// an opus target takes only Opus, because ffmpeg's `.opus` muxer
+    /// would accept a Vorbis copy and write a file no Opus player reads.
+    #[test]
+    fn ogg_takes_a_vorbis_or_opus_copy_and_opus_only_opus() {
+        let webm_vorbis = probe(Some("vp8"), &["vorbis"], &[], 0);
+        let m = audio_invoke(Format::Webm, Format::Ogg, &webm_vorbis).unwrap();
+        assert!(has(&m.argv, ["-c:a", "copy"]), "{:?}", m.argv);
+        assert!(audio_invoke(Format::Webm, Format::Opus, &webm_vorbis).is_none());
+        let vorbis = probe(None, &["vorbis"], &[], 0);
+        assert!(audio_invoke(Format::Ogg, Format::Opus, &vorbis).is_none());
+
+        let m = audio_invoke(Format::Ogg, Format::Opus, &probe(None, &["opus"], &[], 0)).unwrap();
+        assert!(has(&m.argv, ["-c:a", "copy"]), "{:?}", m.argv);
+        assert!(
+            !has(&m.argv, ["-map", "0:v?"]),
+            "Ogg cannot carry cover art: {:?}",
+            m.argv
+        );
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
+
+    /// The copy into Ogg drops cover art like the encode does, and says so
+    /// only when there was some.
+    #[test]
+    fn a_copy_into_ogg_notes_dropped_cover_art() {
+        let with_art = MediaProbe {
+            attached_pics: 1,
+            ..probe(None, &["opus"], &[], 0)
+        };
+        let m = audio_invoke(Format::Opus, Format::Ogg, &with_art).unwrap();
+        assert_eq!(m.warnings, vec![registry::COVER_ART_DROPPED_NOTE]);
+        let m = audio_invoke(
+            Format::Webm,
+            Format::Opus,
+            &probe(Some("vp9"), &["opus"], &[], 0),
+        )
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
     }
 
     /// More than one audio track can't all fit a single-track extraction;
