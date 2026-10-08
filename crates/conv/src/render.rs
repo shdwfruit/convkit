@@ -523,13 +523,10 @@ pub fn conversion_success_human(o: &Outcome, styled: bool) -> String {
 /// arrow line is a short header, not the detail) pairs with `to_ext`, the
 /// target format alone, mirroring how a person would describe the
 /// conversion they asked for out loud.
-pub fn conversion_failure_human(input: &Path, to_ext: &str, e: &ConvError, styled: bool) -> String {
-    let name = input
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| input.display().to_string());
-    let arrow = if styled { "\u{2192}" } else { "->" };
-
+/// A failure block with any header: `FAIL <header>`, the message, and at
+/// most one `try` line (see `conversion_failure_human` for why only one).
+#[allow(dead_code)] // used by conv merge/split
+pub fn failure_human(header: &str, e: &ConvError, styled: bool) -> String {
     let mut s = String::new();
     let glyph = if styled {
         paint("\u{2717}", red_bold(), true)
@@ -537,9 +534,8 @@ pub fn conversion_failure_human(input: &Path, to_ext: &str, e: &ConvError, style
         "FAIL".to_string()
     };
     s.push_str(&glyph);
-    s.push_str(&format!(" {name} {arrow} {to_ext}\n"));
+    s.push_str(&format!(" {header}\n"));
     s.push_str(&format!("  {}\n", e.message));
-
     if let Some(r) = &e.remediation {
         let hint = r.managed.as_deref().or(r.manual.as_deref());
         if let Some(hint) = hint {
@@ -550,6 +546,172 @@ pub fn conversion_failure_human(input: &Path, to_ext: &str, e: &ConvError, style
         }
     }
     s
+}
+
+pub fn conversion_failure_human(input: &Path, to_ext: &str, e: &ConvError, styled: bool) -> String {
+    let name = input
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| input.display().to_string());
+    let arrow = if styled { "\u{2192}" } else { "->" };
+    failure_human(&format!("{name} {arrow} {to_ext}"), e, styled)
+}
+
+fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
+fn pages_text(n: usize) -> String {
+    if n == 1 {
+        "1 page".to_string()
+    } else {
+        format!("{n} pages")
+    }
+}
+
+/// `--dry-run` for merge and split: each qpdf call as a pasteable command
+/// line, then the warnings and notes a real run would print, in
+/// `plan_human`'s `warning:`/`note:` style.
+#[allow(dead_code)] // used by conv merge/split
+pub fn pdf_plan_human(plan: &convkit_core::pdf::PdfPlan) -> String {
+    let mut s = String::new();
+    for argv in plan.commands() {
+        s.push_str(&command_line_human("qpdf", &argv));
+        s.push('\n');
+    }
+    for w in &plan.warnings {
+        s.push_str(&format!("warning: {w}\n"));
+    }
+    for n in &plan.notes {
+        s.push_str(&format!("note: {n}\n"));
+    }
+    s
+}
+
+/// One `plans` element for `--dry-run --json`. Notes go in `warnings` and
+/// warnings in `notes`, the same swap a conversion's JSON has.
+#[allow(dead_code)] // used by conv merge/split
+pub fn pdf_plan_json(plan: &convkit_core::pdf::PdfPlan) -> serde_json::Value {
+    let commands: Vec<Vec<String>> = plan
+        .commands()
+        .into_iter()
+        .map(|argv| std::iter::once("qpdf".to_string()).chain(argv).collect())
+        .collect();
+    let mut v = json!({
+        "ok": true,
+        "commands": commands,
+        "warnings": plan.notes,
+        "notes": plan.warnings,
+    });
+    if plan.is_merge() {
+        v["output"] = json!(plan.outputs[0].path);
+        v["pages"] = json!(plan.outputs[0].pages.len());
+    } else {
+        v["outputs"] = plan
+            .outputs
+            .iter()
+            .map(|o| json!({ "path": o.path, "pages": o.pages }))
+            .collect();
+    }
+    v
+}
+
+/// A finished merge or split, for stdout:
+///
+/// ```text
+/// OK out.pdf - 13 pages - 1.2 MB - 0.1s
+///   /home/user/Docs/out.pdf
+///   note  Bookmarks from b.pdf are not carried over.
+///
+/// OK report-01.pdf ... report-12.pdf - 12 files - 1.1 MB - 0.2s
+///   /home/user/Docs
+/// ```
+///
+/// One output reads like a conversion (its pages, its path). Several are
+/// listed by name up to three, else first ... last, with their folder.
+#[allow(dead_code)] // used by conv merge/split
+pub fn pdf_success_human(
+    o: &convkit_core::pdf::PdfOutcome,
+    elapsed: Duration,
+    styled: bool,
+) -> String {
+    let sep = if styled { " \u{b7} " } else { " - " };
+    let total: u64 = o.outputs.iter().map(|w| w.bytes).sum();
+    let (mut fields, location) = match o.outputs.as_slice() {
+        [one] => (
+            vec![file_name_of(&one.path), pages_text(one.pages.len())],
+            absolute_display(&one.path),
+        ),
+        many => {
+            let names: Vec<String> = many.iter().map(|w| file_name_of(&w.path)).collect();
+            let listed = if names.len() <= 3 {
+                names.join(", ")
+            } else {
+                format!("{} ... {}", names[0], names[names.len() - 1])
+            };
+            let folder = many
+                .first()
+                .and_then(|w| std::path::absolute(&w.path).ok())
+                .and_then(|p| p.parent().map(|d| d.display().to_string()))
+                .unwrap_or_default();
+            (vec![listed, format!("{} files", many.len())], folder)
+        }
+    };
+    fields.push(human_size(total));
+    fields.push(human_elapsed(elapsed));
+
+    let glyph = if styled {
+        paint("\u{2713}", green_bold(), true)
+    } else {
+        "OK".to_string()
+    };
+    let mut s = format!("{glyph} {}\n  {location}\n", fields.join(sep));
+    for n in &o.notes {
+        s.push_str("  ");
+        s.push_str(&paint(&format!("note  {n}"), dim(), styled));
+        s.push('\n');
+    }
+    s
+}
+
+/// A finished run's warnings, for stderr: `warning  ...` per line.
+#[allow(dead_code)] // used by conv merge/split
+pub fn pdf_warnings_human(o: &convkit_core::pdf::PdfOutcome, styled: bool) -> String {
+    let mut s = String::new();
+    for w in &o.warnings {
+        s.push_str(&paint(&format!("warning  {w}"), yellow_bold(), styled));
+        s.push('\n');
+    }
+    s
+}
+
+/// One `results` element for a finished merge (`output`, `pages` as a
+/// count) or split (`outputs`, each with its source pages). The caller adds
+/// `inputs` or `input`.
+#[allow(dead_code)] // used by conv merge/split
+pub fn pdf_outcome_json(o: &convkit_core::pdf::PdfOutcome, elapsed: Duration) -> serde_json::Value {
+    let mut v = json!({
+        "ok": true,
+        "bytes": o.outputs.iter().map(|w| w.bytes).sum::<u64>(),
+        "elapsed_ms": elapsed.as_millis() as u64,
+        "backends": [{ "backend": convkit_core::Backend::Qpdf, "version": o.version }],
+        "warnings": o.notes,
+        "notes": o.warnings,
+        "backend_output": o.backend_output,
+    });
+    if o.merge {
+        v["output"] = json!(o.outputs[0].path);
+        v["pages"] = json!(o.outputs[0].pages.len());
+    } else {
+        v["outputs"] = o
+            .outputs
+            .iter()
+            .map(|w| json!({ "path": w.path, "pages": w.pages, "bytes": w.bytes }))
+            .collect();
+    }
+    v
 }
 
 /// Renders a whole batch's outcome as one summary line plus one location
@@ -1158,5 +1320,162 @@ mod tests {
         assert!(!hint.contains("conv "), "{hint}");
         assert!(has_ansi(&sizing_hint_human("a.mp4", &o, &args, true)));
         assert!(!has_ansi(&hint));
+    }
+
+    // --- merge and split ---
+
+    use convkit_core::pdf::{PdfJob, PdfOutcome, PdfPlan, PlannedOutput, WrittenOutput};
+
+    fn written(path: &str, pages: Vec<u32>, bytes: u64) -> WrittenOutput {
+        WrittenOutput {
+            path: std::path::PathBuf::from(path),
+            pages,
+            bytes,
+        }
+    }
+
+    fn outcome(merge: bool, outputs: Vec<WrittenOutput>) -> PdfOutcome {
+        PdfOutcome {
+            merge,
+            outputs,
+            notes: vec!["A note.".into()],
+            warnings: vec!["A warning.".into()],
+            backend_output: vec![],
+            version: "12.4.2".into(),
+        }
+    }
+
+    #[test]
+    fn a_merge_reads_like_a_conversion_with_a_page_count() {
+        let o = outcome(
+            true,
+            vec![written("out.pdf", (1..=13).collect(), 1_258_291)],
+        );
+        let s = pdf_success_human(&o, Duration::from_millis(100), false);
+        let mut lines = s.lines();
+        assert_eq!(lines.next(), Some("OK out.pdf - 13 pages - 1.2 MB - 0.1s"));
+        assert!(lines.next().unwrap().trim_start().ends_with("out.pdf"));
+        assert_eq!(lines.next(), Some("  note  A note."));
+        assert_eq!(lines.next(), None);
+        let one = outcome(true, vec![written("out.pdf", vec![1], 10)]);
+        assert!(
+            pdf_success_human(&one, Duration::ZERO, false).starts_with("OK out.pdf - 1 page - ")
+        );
+    }
+
+    #[test]
+    fn a_split_names_up_to_three_files_then_the_first_and_last() {
+        let few = outcome(
+            false,
+            vec![
+                written("docs/report-1-3.pdf", vec![1, 2, 3], 500 * 1024),
+                written("docs/report-4-10.pdf", (4..=10).collect(), 400 * 1024),
+            ],
+        );
+        let s = pdf_success_human(&few, Duration::from_millis(100), false);
+        assert!(
+            s.starts_with("OK report-1-3.pdf, report-4-10.pdf - 2 files - 900 KB - 0.1s\n"),
+            "{s}"
+        );
+        assert!(
+            s.lines().nth(1).unwrap().trim_start().ends_with("docs"),
+            "{s}"
+        );
+
+        let many = outcome(
+            false,
+            (1..=12)
+                .map(|p| written(&format!("report-{p:02}.pdf"), vec![p], 1024))
+                .collect(),
+        );
+        let s = pdf_success_human(&many, Duration::from_millis(200), false);
+        assert!(
+            s.starts_with("OK report-01.pdf ... report-12.pdf - 12 files - 12 KB - 0.2s\n"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn pdf_warnings_go_to_their_own_lines() {
+        let o = outcome(true, vec![written("out.pdf", vec![1], 1)]);
+        assert_eq!(pdf_warnings_human(&o, false), "warning  A warning.\n");
+    }
+
+    #[test]
+    fn a_failure_block_takes_any_header() {
+        let mut e = ConvError::new(
+            ErrorCode::OutputExists,
+            "out.pdf exists; pass -y to overwrite",
+        );
+        e.remediation = Some(convkit_core::Remediation {
+            managed: None,
+            manual: Some("conv merge a.pdf out.pdf merged.pdf".into()),
+        });
+        assert_eq!(
+            failure_human("out.pdf", &e, false),
+            "FAIL out.pdf\n  out.pdf exists; pass -y to overwrite\n  try  conv merge a.pdf out.pdf merged.pdf\n"
+        );
+    }
+
+    #[test]
+    fn json_shapes_for_merge_and_split() {
+        let m = pdf_outcome_json(
+            &outcome(true, vec![written("out.pdf", (1..=6).collect(), 99)]),
+            Duration::from_millis(7),
+        );
+        assert_eq!(m["ok"], true);
+        assert_eq!(m["output"], "out.pdf");
+        assert_eq!(m["pages"], 6);
+        assert_eq!(m["bytes"], 99);
+        assert_eq!(m["elapsed_ms"], 7);
+        assert_eq!(m["backends"][0]["backend"], "qpdf");
+        assert_eq!(m["backends"][0]["version"], "12.4.2");
+        assert_eq!(
+            m["warnings"][0], "A note.",
+            "notes print as `note`, live in `warnings`"
+        );
+        assert_eq!(m["notes"][0], "A warning.");
+
+        let s = pdf_outcome_json(
+            &outcome(false, vec![written("r-5-1.pdf", vec![5, 4, 3, 2, 1], 50)]),
+            Duration::ZERO,
+        );
+        assert_eq!(s["outputs"][0]["path"], "r-5-1.pdf");
+        assert_eq!(s["outputs"][0]["pages"], serde_json::json!([5, 4, 3, 2, 1]));
+        assert_eq!(s["outputs"][0]["bytes"], 50);
+        assert!(s.get("output").is_none());
+    }
+
+    #[test]
+    fn a_pdf_dry_run_prints_pasteable_qpdf_lines_then_warnings_and_notes() {
+        let plan = PdfPlan {
+            job: PdfJob::Merge {
+                inputs: vec!["a b.pdf".into(), "c.pdf".into()],
+                output: "out.pdf".into(),
+            },
+            outputs: vec![PlannedOutput {
+                path: "out.pdf".into(),
+                pages: vec![1, 2],
+            }],
+            notes: vec!["N.".into()],
+            warnings: vec!["W.".into()],
+            repaired: false,
+        };
+        // `shell_quote` uses single quotes on POSIX and double quotes on Windows.
+        let quoted = if cfg!(windows) {
+            "\"a b.pdf\""
+        } else {
+            "'a b.pdf'"
+        };
+        assert_eq!(
+            pdf_plan_human(&plan),
+            format!("qpdf --decrypt {quoted} --pages . c.pdf -- out.pdf\nwarning: W.\nnote: N.\n")
+        );
+        let j = pdf_plan_json(&plan);
+        assert_eq!(j["commands"][0][0], "qpdf");
+        assert_eq!(j["output"], "out.pdf");
+        assert_eq!(j["pages"], 2);
+        assert_eq!(j["warnings"][0], "N.");
+        assert_eq!(j["notes"][0], "W.");
     }
 }
