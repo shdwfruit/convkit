@@ -6,9 +6,11 @@
 //! should see, and runs them through a scratch folder so a failure leaves
 //! nothing behind. Like the rest of convkit-core, it never prints.
 
+pub mod plan;
 pub mod range;
 pub mod read;
 
+pub use plan::{plan_merge, plan_split, PdfJob, PdfPlan, PlannedOutput};
 pub use range::{parse_range, PageRange};
 pub use read::PdfInfo;
 
