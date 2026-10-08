@@ -1329,11 +1329,22 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
 /// own args, so the size is taken the way the recipe takes its input: every
 /// input or the first, every page or the first frame, and at the density it
 /// renders a vector source at.
+/// The recipe whose reads (a size, the notes' traits) a conversion makes:
+/// the pair's own, or for a file stripped into its own format, which has no
+/// pair, the recipe any raster takes to that format.
+fn recipe_read_for(from: Format, to: Format, tuning: &Tuning) -> Option<Recipe> {
+    lookup(from, to).or_else(|| {
+        (from == to && tuning.strip_metadata)
+            .then(|| image_recipe_for(to))
+            .flatten()
+    })
+}
+
 pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::probe::ImageRead> {
     if !tuning.upscale || tuning.resize.is_none() {
         return None;
     }
-    let step = lookup(from, to)?
+    let step = recipe_read_for(from, to, tuning)?
         .steps
         .iter()
         .find(|s| s.args.iter().any(|a| matches!(a, Arg::TuneResize)))?;
@@ -1352,14 +1363,7 @@ pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::pr
 /// the frame and alpha notes, and the location note wherever the target
 /// keeps an EXIF GPS and the flag is not taking it out.
 pub fn notes_need_image(from: Format, to: Format, tuning: &Tuning) -> bool {
-    // A file stripped into its own format runs the recipe any raster takes
-    // to that format, and carries its notes.
-    let recipe = lookup(from, to).or_else(|| {
-        (from == to && tuning.strip_metadata)
-            .then(|| image_recipe_for(to))
-            .flatten()
-    });
-    let frame_notes = recipe.is_some_and(|r| {
+    let frame_notes = recipe_read_for(from, to, tuning).is_some_and(|r| {
         r.warnings
             .iter()
             .any(|&w| matches!(w, FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE))
@@ -1472,6 +1476,15 @@ mod tests {
             None,
             "video is probed"
         );
+        // A photo stripped into its own format is sized like any other, so
+        // a large upscale still asks first.
+        let stripped_up = Tuning {
+            strip_metadata: true,
+            ..up.clone()
+        };
+        let jpg = image_read(Format::Jpg, Format::Jpg, &stripped_up).unwrap();
+        assert!(!jpg.every_page && !jpg.every_input, "{jpg:?}");
+        assert_eq!(image_read(Format::Jpg, Format::Jpg, &up), None, "no pair");
     }
 
     fn read_image(alpha: Option<bool>, multi_frame: bool) -> crate::MediaProbe {
