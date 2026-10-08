@@ -276,9 +276,10 @@ over the ~200 KB budget every other fixture in this repo respects (see
 oversight: as the next paragraph confirms directly, ImageMagick's HEIC
 support is read-only and no available ffmpeg build has a HEIC muxer, so
 there is no encoder anywhere in this project's toolchain that could shrink
-this file or re-save it with EXIF stripped. Its EXIF (IFD0, parsed
-directly) carries device strings (`Apple`, `iPhone`) and a capture date
-(`2025:12:27`), but **no GPS** -- there is no GPS IFD pointer in the file.
+this file or re-save it with EXIF stripped. Its EXIF carries device strings
+(`Apple`, `iPhone`), a capture date (`2025:12:27`), and a GPS IFD with the
+place it was taken: IFD0's tag 0x8825 points at it. This section first said
+there was none; `a_real_iphone_photo_loses_its_gps` now depends on it.
 
 **Command:**
 
@@ -676,9 +677,8 @@ size, after the size and EXIF tradeoffs were raised with and confirmed
 twice by the repo owner. That is roughly 40x the size of `clip.mp4` and
 well over the ~200 KB budget every other fixture above respects -- a
 deliberate exception, not an oversight, since no encoder could shrink it.
-Its EXIF (IFD0, parsed directly) carries device strings (`Apple`,
-`iPhone`) and a capture date (`2025:12:27`), but no GPS IFD pointer -- no
-location data.
+Its EXIF carries device strings (`Apple`, `iPhone`), a capture date
+(`2025:12:27`) and a GPS IFD (see §3).
 
 `heic_to_jpg_preserves_orientation_and_stays_reasonably_sized` is written
 and in place, `#[ignore]`-gated like the others, and now passes for real
@@ -1158,3 +1158,79 @@ machine's memory. The line is drawn on length because that is what a person
 knows about their clip; at 60 s, a portrait source would already pass 2.7
 GiB with no note. It is set at the defaults: `--fps 30` doubles the buffer
 and `--resize` scales it with the frame's area.
+
+## Metadata and location (`--strip-metadata`)
+
+Measured on 2026-10-08 with ImageMagick 7.1.2-30, ffmpeg 9.0.1, and a
+static ffmpeg 6.1 build for every ffmpeg case (identical results).
+ImageMagick 6.9.13 was checked by hand on the image cases. The fixtures are
+synthetic. The photo is a JPEG carrying an EXIF GPS IFD, Make, Model,
+BodySerialNumber, Artist, DateTimeOriginal, Orientation 6, a Display P3
+profile, XMP with GPS, and IPTC. png, webp, avif, tiff and heic copies were
+made from it. The clips carry Apple's
+`com.apple.quicktime.location.ISO6709` (mdta keys, as iPhones write them)
+or the classic `location` tag (`©xyz` in mov, `loci` in mp4), plus chapters.
+Each output was checked with identify and ffprobe and by a raw byte search.
+
+What an untuned conversion keeps:
+
+| target | EXIF GPS |
+|---|---|
+| jpg, webp, avif | kept |
+| png | kept three times: an eXIf chunk, a zTXt raw profile, and a tEXt chunk per field |
+| pdf, single or merged | kept, as APP1 inside the embedded JPEG |
+| tiff | dropped (the writer never writes EXIF or GPS IFDs); XMP and IPTC kept |
+| bmp | dropped |
+
+A TIFF source holds its EXIF in IFDs rather than a profile, and only a png
+target carries that over, as text. Every output stayed upright and kept its
+ICC profile.
+
+Video and audio: the classic `location` survives every conversion between
+mov, mp4, mkv, webm, m4a, mp3 and flac. Apple's keys are dropped by mp4,
+mov and m4a outputs, because the mov muxer writes mdta keys only under
+`-movflags use_metadata_tags`, and kept by mkv, webm, mp3 (TXXX) and flac.
+wav keeps title and artist but no location, and gif keeps nothing. The
+re-encode path keeps exactly what the stream copy keeps.
+
+**Images.** `+profile '!icc,*'` deletes every profile whose name is not
+`icc` (`ProfileImage` tests each name with `IsOptionMember`, in
+ImageMagick 6 and 7 alike). Verified from every source to jpg, webp, avif,
+tiff, bmp and pdf, and on the real `photo.heic`. `-strip` drops the ICC
+profile too. Removing EXIF without `-auto-orient` leaves a rotated photo
+sideways; on 7.1.2 the order of the two does not matter, because
+orientation is read at load, but the recipes orient first anyway.
+
+png needs more. ImageMagick reads every EXIF field into an image property,
+and its PNG writer writes every property as a tEXt chunk. It writes the ICC
+profile (iCCP) only while text chunks are enabled (png.c, both versions).
+So `-define png:exclude-chunk=tEXt,zTXt` loses the profile, and `+set`
+deletes only one exact name; a phone photo has about 60, one of them an
+unprefixed `unknown=iPhone 14 Pro`. Under the flag a png therefore goes
+through an uncompressed TIFF:
+
+    magick in.heic[0] -auto-orient +profile '!icc,*' +set comment +set label -compress none out.convkit-step0.tiff
+    magick out.convkit-step0.tiff out.png
+
+The TIFF writer takes only `label` and `comment` from properties (the
+artist, make and model tags come from artifacts), so the PNG written from
+it has iCCP and only technical text (`tiff:endian`, the profile's own
+copyright line). `-compress none` is explicit so a JPEG source's
+compression is never carried over; 16-bit sources stay 16-bit and the
+pixels match exactly.
+
+**ffmpeg.** `-map_metadata -1` clears global tags, stream tags and chapter
+titles at once, removes every location form above, and leaves a stream
+copy working. A display-matrix rotation is side data and survives it. The
+data tracks that can carry GPS (GoPro GPMF, Apple mebx) are already left
+out by conv's stream maps.
+
+**The note's read.** `magick -ping file[0-1] -format '%m %A %n
+[%[EXIF:GPSLatitude]]\n' info:` returns the latitude for heic, jpg, png,
+avif and tiff sources, in about 25 ms on the 1.6 MB HEIC. For an image
+without one it prints a warning and exits 0. A WebP's `-ping` loads no EXIF
+at all, and XMP GPS is not exposed as a property.
+
+The tests that hold these to account are the `--ignored` ones in
+`output_properties.rs` from `stripped_images_lose_their_location_and_keep_colour_and_orientation`
+on.

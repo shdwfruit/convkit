@@ -99,6 +99,7 @@ conv ./photos --to jpg -o ./out  # folder input, non-recursive, outputs redirect
 conv a.png b.png out.pdf         # merge two or more images into one PDF
 conv scan                        # list the files here and what each can become
 conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
+conv photo.jpg --strip-metadata  # remove the location and other metadata
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -113,7 +114,8 @@ OK clip.gif - 492 KB - 0.2s
 A note follows when there is something to know about converting this
 particular source: a transparent PNG flattened into a JPEG, say, or a GIF
 made from a long video, which takes a lot of memory. A phone photo converted
-to JPEG gets none.
+to JPEG gets one only if it records where it was taken; see
+[Location and metadata](#location-and-metadata).
 
 ```console
 $ conv logo.png logo.jpg
@@ -275,17 +277,17 @@ $ conv capabilities mp4
 mp4 (Video)
 
   as source, converts to:
-    mp4 -> mov      [--resize --upscale --fps --crf --max-size]
-    mp4 -> mkv      [--resize --upscale --fps --crf --max-size]
-    mp4 -> webm     [--crf --resize --upscale --fps --max-size]
-    mp4 -> mp3   
-    mp4 -> m4a   
-    mp4 -> wav   
-    mp4 -> flac  
-    mp4 -> gif      [--resize --upscale --fps]
+    mp4 -> mov      [--resize --upscale --fps --crf --strip-metadata --max-size]
+    mp4 -> mkv      [--resize --upscale --fps --crf --strip-metadata --max-size]
+    mp4 -> webm     [--crf --resize --upscale --fps --strip-metadata --max-size]
+    mp4 -> mp3      [--strip-metadata]
+    mp4 -> m4a      [--strip-metadata]
+    mp4 -> wav      [--strip-metadata]
+    mp4 -> flac     [--strip-metadata]
+    mp4 -> gif      [--resize --upscale --fps --strip-metadata]
 
   as target, accepts: mov mkv webm avi gif
-  tuning flags when writing mp4: --resize --upscale --fps --crf --max-size
+  tuning flags when writing mp4: --resize --upscale --fps --crf --strip-metadata --max-size
 
   defaults: crf 20 (override with --crf)
   note: Subtitle tracks and any audio tracks beyond the first are dropped (--max-size keeps every audio track and every text subtitle).
@@ -293,6 +295,52 @@ mp4 (Video)
 
   full pair list: conv capabilities; exact command preview: conv <in> <out> --dry-run
 ```
+
+## Location and metadata
+
+Phone photos and videos record where they were taken, and a converted copy
+keeps that in most formats. conv says so when it applies:
+
+```console
+$ conv IMG_0042.heic IMG_0042.jpg
+OK IMG_0042.jpg - 2.5 MB - 0.4s
+  /home/user/Pictures/IMG_0042.jpg
+  note  The source records a GPS location, and the jpg keeps it; add --strip-metadata to remove it.
+```
+
+`--strip-metadata` removes it, and the rest of the metadata with it: the
+camera, its serial number, the owner's name, the capture time. An image
+keeps only its colour profile, and is turned upright first, so it comes out
+neither sideways nor with shifted colours. Video and audio keep their title,
+artist, album, album artist, composer, genre and track and disc numbers, as
+well as cover art and rotation, and a stream copy stays a stream copy:
+
+```console
+$ conv IMG_0042.heic IMG_0042.jpg --strip-metadata
+OK IMG_0042.jpg - 2.5 MB - 0.3s
+  /home/user/Pictures/IMG_0042.jpg
+$ conv IMG_0043.MOV IMG_0043.mp4 --strip-metadata
+OK IMG_0043.mp4 - 24 KB - 0.1s - stream copy, no re-encode
+  /home/user/Pictures/IMG_0043.mp4
+```
+
+With one file and no output, conv keeps the format and adds `-stripped` to
+the name, by the same rules as `--max-size`. A jpg, webp or avif is
+re-encoded to do it, since ImageMagick cannot take metadata out any other
+way, and the note says so; video and audio are copied. conv cannot write
+HEIC, so a HEIC file needs `--to jpg`.
+
+```console
+$ conv IMG_0042.jpg --strip-metadata
+OK IMG_0042-stripped.jpg - 2.5 MB - 0.3s
+  /home/user/Pictures/IMG_0042-stripped.jpg
+  note  The jpg is re-encoded at quality 92 to remove its metadata; ImageMagick cannot take it out of a jpg without re-encoding.
+```
+
+The note goes by the EXIF in an image's header and the tags ffprobe
+reports. A WebP source never gets it, because its header read loads no
+EXIF, and neither does a location kept only in XMP; the flag removes both
+anyway. Documents are not covered yet, and the flag is refused on them.
 
 ## Size targets
 
@@ -418,11 +466,11 @@ $ conv capabilities jpg
 jpg (Image)
 
   as source, converts to:
-    jpg -> png      [--resize --upscale --colors]
-    jpg -> webp     [--resize --upscale --quality --colors]
+    jpg -> png      [--resize --upscale --colors --strip-metadata]
+    jpg -> webp     [--resize --upscale --quality --colors --strip-metadata]
     ...
   as target, accepts: heic heif png webp avif tiff bmp svg
-  tuning flags when writing jpg: --resize --upscale --quality --colors
+  tuning flags when writing jpg: --resize --upscale --quality --colors --strip-metadata
 
   defaults: quality 92 (override with --quality)
 ```
