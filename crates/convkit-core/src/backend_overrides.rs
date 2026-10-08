@@ -138,7 +138,7 @@ mod tests {
         }
     }
 
-    /// Each of the five directly-overridable backends maps to its own
+    /// Each of the six directly-overridable backends maps to its own
     /// `Backend` variant, and only that one -- e.g. `magick` must never
     /// accidentally land on `Backend::Pandoc`.
     #[test]

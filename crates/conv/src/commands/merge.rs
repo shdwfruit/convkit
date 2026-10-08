@@ -24,6 +24,14 @@ pub fn run(cli: &Cli, args: &MergeArgs) -> i32 {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| output.display().to_string());
+    // Check the inputs before offering to install qpdf.
+    if let Some(missing) = inputs.iter().find(|p| !p.is_file()) {
+        let e = ConvError::new(
+            ErrorCode::InputNotFound,
+            format!("input not found: {}", missing.display()),
+        );
+        return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run);
+    }
     let qpdf = match pdf_support::resolve_qpdf(cli, !args.dry_run) {
         Ok(q) => q,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
@@ -47,9 +55,9 @@ pub fn run(cli: &Cli, args: &MergeArgs) -> i32 {
         }
         Err(mut e) => {
             if e.code == ErrorCode::OutputExists {
-                e.remediation = Some(Remediation {
+                e.remediation = existing_output_fix(&args.paths).map(|manual| Remediation {
                     managed: None,
-                    manual: Some(existing_output_fix(&args.paths)),
+                    manual: Some(manual),
                 });
             }
             pdf_support::print_failure(cli, subject, &header, &e, false)
@@ -128,8 +136,12 @@ fn split_paths(typed: &[PathBuf]) -> Result<(Vec<PathBuf>, PathBuf), ConvError> 
 /// The `try` line when the output already exists. The usual cause is a
 /// glob that ended in an existing PDF (`conv merge *.pdf`), so it suggests
 /// the same command with `merged.pdf` as the output. `-y` is already named
-/// in the message itself.
-fn existing_output_fix(typed: &[PathBuf]) -> String {
+/// in the message itself. A typed folder may have supplied the existing
+/// file as an input, so then there is no suggestion.
+fn existing_output_fix(typed: &[PathBuf]) -> Option<String> {
+    if typed.iter().any(|p| p.is_dir()) {
+        return None;
+    }
     let shown: Vec<String> = typed.iter().map(|p| p.display().to_string()).collect();
     let last = shown.last().cloned().unwrap_or_default();
     let listed = if shown.len() > 4 {
@@ -137,7 +149,9 @@ fn existing_output_fix(typed: &[PathBuf]) -> String {
     } else {
         shown.join(" ")
     };
-    format!("conv merge {listed} merged.pdf (if {last} was meant as an input)")
+    Some(format!(
+        "conv merge {listed} merged.pdf (if {last} was meant as an input)"
+    ))
 }
 
 #[cfg(test)]
@@ -195,12 +209,23 @@ mod tests {
     #[test]
     fn the_existing_output_fix_suggests_a_new_name() {
         assert_eq!(
-            existing_output_fix(&p(&["a.pdf", "b.pdf", "report.pdf"])),
-            "conv merge a.pdf b.pdf report.pdf merged.pdf (if report.pdf was meant as an input)"
+            existing_output_fix(&p(&["a.pdf", "b.pdf", "report.pdf"])).as_deref(),
+            Some("conv merge a.pdf b.pdf report.pdf merged.pdf (if report.pdf was meant as an input)")
         );
         assert_eq!(
-            existing_output_fix(&p(&["a.pdf", "b.pdf", "c.pdf", "d.pdf", "report.pdf"])),
-            "conv merge a.pdf ... report.pdf merged.pdf (if report.pdf was meant as an input)"
+            existing_output_fix(&p(&["a.pdf", "b.pdf", "c.pdf", "d.pdf", "report.pdf"])).as_deref(),
+            Some(
+                "conv merge a.pdf ... report.pdf merged.pdf (if report.pdf was meant as an input)"
+            )
         );
+    }
+
+    #[test]
+    fn a_typed_folder_gets_no_suggestion() {
+        let dir = tempfile::tempdir().unwrap();
+        let scans = dir.path().join("scans");
+        std::fs::create_dir(&scans).unwrap();
+        let typed = [scans.clone(), scans.join("all.pdf")];
+        assert_eq!(existing_output_fix(&typed), None);
     }
 }
