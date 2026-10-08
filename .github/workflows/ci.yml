@@ -173,6 +173,11 @@ jobs:
       - name: cargo build --workspace
         run: cargo build --workspace
 
+      # qpdf comes from convkit's own installer, not apt, so this job also
+      # exercises the folder install (bin/ and lib/ with library symlinks).
+      - name: Install qpdf via conv itself
+        run: ./target/debug/conv install qpdf --yes
+
       - name: cargo test --workspace -- --ignored (real backends)
         run: cargo test --workspace -- --ignored
 
@@ -209,7 +214,7 @@ jobs:
       - name: cargo build --workspace
         run: cargo build --workspace
 
-      # ffmpeg, ffprobe, pandoc and typst come from convkit's own managed
+      # ffmpeg, ffprobe, pandoc, typst and qpdf come from convkit's own managed
       # installer rather than a package manager. That is the same pinned
       # URL-plus-SHA-256 path a Windows user gets from `conv install`, so
       # this exercises the installer on Windows as a side effect -- the
@@ -219,7 +224,7 @@ jobs:
           $conv = ".\target\debug\conv.exe"
           # `install ffmpeg` brings ffprobe with it -- they come from one
           # archive -- so asking for both would download it twice.
-          foreach ($b in @("ffmpeg", "pandoc", "typst")) {
+          foreach ($b in @("ffmpeg", "pandoc", "typst", "qpdf")) {
             & $conv install $b --yes
             if ($LASTEXITCODE -ne 0) { throw "conv install $b failed ($LASTEXITCODE)" }
           }

@@ -13,7 +13,7 @@
 
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
-ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 115
+ImageMagick, LibreOffice, pandoc, Typst, or qpdf — and runs it locally: 115
 conversion pairs across 27 formats (`conv capabilities` is the source of
 truth). Files never leave your machine; only `conv install`/`conv update`
 ever touch the network.
@@ -97,6 +97,8 @@ conv in.mp4 .gif                 # same basename, new extension
 conv *.heic --to jpg             # batch; globs expanded by conv itself, so this works on Windows too
 conv ./photos --to jpg -o ./out  # folder input, non-recursive, outputs redirected
 conv a.png b.png out.pdf         # merge two or more images into one PDF
+conv merge a.pdf b.pdf out.pdf   # join PDFs into one
+conv split report.pdf 1-3 4-z    # one PDF per page range
 conv scan                        # list the files here and what each can become
 conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 ```
@@ -393,6 +395,33 @@ converts none of them.
 `--json` adds a `sizing` object to each result: the choice it made, the
 number of attempts, and `over_target`.
 
+## Merge and split PDFs
+
+`conv merge` joins PDFs into one, in the order given; the last argument is
+the output. `conv split` writes one file per page, or one per range. Both
+run on qpdf, which rewrites the PDF's structure rather than re-rendering
+pages, so text stays selectable and links keep working.
+
+```console
+$ conv merge cover.pdf report.pdf out.pdf
+OK out.pdf - 13 pages - 1.2 MB - 0.1s
+  /home/user/Docs/out.pdf
+
+$ conv split report.pdf 1-3 4-10
+OK report-1-3.pdf, report-4-10.pdf - 2 files - 900 KB - 0.1s
+  /home/user/Docs
+warning  Pages 11-12 are not in any range, so they were left out.
+```
+
+A range is a page (`5`), a span (`1-3`), or uses `z` for the last page
+(`11-z`); `5-1` reverses. Without ranges, `report.pdf` becomes
+`report-01.pdf` to `report-12.pdf`. `-o DIR` writes the files elsewhere, and
+a folder given to `conv merge` adds every PDF in it, in natural order.
+
+The merged file keeps the first file's bookmarks only, and neither command
+keeps permission restrictions; conv says so when either applies.
+Password-protected PDFs aren't supported yet.
+
 ## Discovering formats and capabilities
 
 `conv capabilities` lists every registered pair and the backend(s) behind it:
@@ -484,7 +513,7 @@ success output but never a failure or a backend warning.
 
 ## Backends
 
-convkit dispatches to six binaries, each invoked as a subprocess:
+convkit dispatches to seven binaries, each invoked as a subprocess:
 
 | Backend | Used for | `conv install` | Pinned version |
 |---|---|---|---|
@@ -493,12 +522,16 @@ convkit dispatches to six binaries, each invoked as a subprocess:
 | `pandoc` | Markdown → HTML/DOCX; parses docx/odt for the PDF fallback | Yes | 3.11 |
 | `typst` | PDF engine for the docx/odt → pdf fallback | Yes | 0.15.1 |
 | `soffice` (LibreOffice) | Office documents ⇄ PDF | No — manual install, always | — |
+| `qpdf` | PDF merge and split | Yes | 12.4.2 |
 
 Managed versions are pinned per convkit build
 (`crates/convkit-core/src/manifest.rs`), checksum-verified, and cover all
 five prebuilt targets. On Windows x64, ffmpeg and ffprobe ship in one
 upstream zip, so `conv install ffmpeg` provisions both; elsewhere they are
-two separate downloads that land at the same pinned version.
+two separate downloads that land at the same pinned version. qpdf installs
+as a folder (`convkit/bin/qpdf/`), since it ships shared libraries; its Linux
+build needs glibc 2.34 or newer, so on older systems install your
+distribution's `qpdf` instead.
 
 When LibreOffice is missing, `docx → pdf` and `odt → pdf` fall back to
 pandoc + Typst — lower fidelity, and the result says so in a warning. That
@@ -535,6 +568,7 @@ ffmpeg    9.0.1      /opt/homebrew/bin/ffmpeg     (PATH)
 ffprobe   9.0.1      /opt/homebrew/bin/ffprobe    (PATH)
 magick    7.1.2-30   /opt/homebrew/bin/magick     (PATH)
 pandoc    3.10.2     /opt/homebrew/bin/pandoc     (PATH)
+qpdf      12.4.2     /opt/homebrew/bin/qpdf       (PATH)
 soffice   missing    manual install only  |  brew install --cask libreoffice
 typst     0.15.1     /opt/homebrew/bin/typst      (PATH)
 ```
@@ -645,7 +679,7 @@ are a good place to start, and questions go in
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), your
-choice. convkit invokes ffmpeg, ImageMagick, LibreOffice, pandoc, and Typst
+choice. convkit invokes ffmpeg, ImageMagick, LibreOffice, pandoc, Typst, and qpdf
 as subprocesses; it does not link against, embed, or redistribute any of
 them, and each keeps its own license. `conv install` downloads official
 upstream builds straight from their publishers.

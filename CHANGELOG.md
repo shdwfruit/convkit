@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **`conv merge` and `conv split` for PDFs.** `conv merge a.pdf b.pdf out.pdf`
+  joins PDFs in order; a folder adds every PDF in it. `conv split report.pdf`
+  writes one file per page, and `conv split report.pdf 1-3 4-z` one per range
+  (`z` is the last page, `5-1` reverses). Pages no range covers are left out
+  with a warning. Both run on qpdf, so text and links come through untouched.
+  The merged file keeps the first file's bookmarks only, and permission
+  restrictions are dropped; conv notes both when they apply.
+- **qpdf is a managed backend.** `conv install qpdf` downloads qpdf 12.4.2 for
+  all five platforms, checks its SHA-256, and installs it as a folder. The
+  Linux build needs glibc 2.34 or newer. `--qpdf-path` and `CONVKIT_QPDF`
+  point conv at another copy.
+
 ## 0.3.1 - 2026-10-02
 
 ### Changed
