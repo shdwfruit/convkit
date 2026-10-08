@@ -11,6 +11,7 @@ pub mod manifest;
 mod media;
 pub mod metadata;
 pub mod office;
+pub mod pdf;
 pub mod plan;
 pub mod probe;
 mod procutil;
