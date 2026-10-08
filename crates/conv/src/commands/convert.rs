@@ -355,6 +355,13 @@ fn probed_for(
             probed.get_or_insert_with(MediaProbe::default).frames = f;
         }
     }
+    // As `exec::run` does, so the preview shows the import options a real
+    // run uses, and the same notes.
+    if registry::reads_table(job.from, job.to) {
+        if let Some(t) = convkit_core::table::read(&job.inputs[0], job.from) {
+            probed.get_or_insert_with(MediaProbe::default).table = Some(t);
+        }
+    }
     Ok(probed)
 }
 

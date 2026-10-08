@@ -57,6 +57,7 @@ pub enum Format {
     Doc,
     Xls,
     Ppt,
+    Csv,
     Html,
     Md,
 }
@@ -105,6 +106,7 @@ const TABLE: &[(Format, Kind, &[&str], &[&str])] = &[
     (Format::Doc, Kind::Document, &["doc"], &[]),
     (Format::Xls, Kind::Document, &["xls"], &[]),
     (Format::Ppt, Kind::Document, &["ppt"], &[]),
+    (Format::Csv, Kind::Document, &["csv"], &[]),
     (Format::Html, Kind::Document, &["html", "htm"], &[]),
     (Format::Md, Kind::Document, &["md", "markdown"], &[]),
 ];

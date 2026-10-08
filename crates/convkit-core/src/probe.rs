@@ -91,6 +91,9 @@ pub struct MediaProbe {
     /// Every frame of an .ico, in file order, as `(width, height, depth)`,
     /// read by `frame_sizes`. Empty when the source was not read.
     pub frames: Vec<(u32, u32, u32)>,
+    /// What a CSV or a workbook holds, read by `table::read`. `None` when
+    /// the source was not read.
+    pub table: Option<crate::table::TableShape>,
 }
 
 /// The two ways a video or audio file records where it was made. Outputs
