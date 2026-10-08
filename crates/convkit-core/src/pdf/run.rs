@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::display_name;
 use super::plan::{PdfJob, PdfPlan};
+use super::range::join_and;
 use crate::error::{ConvError, ErrorCode, Result};
 use crate::exec::{self, BackendOutput, Event};
 use crate::procutil::backend_command;
@@ -48,6 +49,12 @@ pub fn run(
 ) -> Result<PdfOutcome> {
     for o in &plan.outputs {
         winpath::check_output_name(&o.path)?;
+        if o.path.is_dir() {
+            return Err(ConvError::new(
+                ErrorCode::OutputExists,
+                format!("{} is a folder", o.path.display()),
+            ));
+        }
         if o.path.exists() && !overwrite {
             return Err(ConvError::new(
                 ErrorCode::OutputExists,
@@ -129,20 +136,21 @@ pub fn run(
         produced.push((path, bytes));
     }
 
-    let mut outputs = Vec::with_capacity(produced.len());
-    for ((path, bytes), planned) in produced.into_iter().zip(&plan.outputs) {
-        std::fs::rename(&path, &planned.path).map_err(|e| {
-            ConvError::new(
-                ErrorCode::ConversionFailed,
-                format!("{}: {e}", planned.path.display()),
-            )
-        })?;
-        outputs.push(WrittenOutput {
+    let moves: Vec<(PathBuf, PathBuf)> = produced
+        .iter()
+        .zip(&plan.outputs)
+        .map(|((from, _), planned)| (from.clone(), planned.path.clone()))
+        .collect();
+    place_outputs(&moves, &mut |from, to| std::fs::rename(from, to))?;
+    let outputs: Vec<WrittenOutput> = produced
+        .into_iter()
+        .zip(&plan.outputs)
+        .map(|((_, bytes), planned)| WrittenOutput {
             path: planned.path.clone(),
             pages: planned.pages.clone(),
             bytes,
-        });
-    }
+        })
+        .collect();
 
     let mut warnings = plan.warnings.clone();
     if qpdf_warned && !plan.repaired {
@@ -162,6 +170,41 @@ pub fn run(
         backend_output,
         version: qpdf.version.clone(),
     })
+}
+
+/// Moves each `(produced, target)` pair into place. On the first failure it
+/// removes the targets this call created, so a failed move leaves no mixed
+/// set. Files replaced under `-y` are not restored.
+fn place_outputs(
+    moves: &[(PathBuf, PathBuf)],
+    rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let existed: Vec<bool> = moves.iter().map(|(_, to)| to.exists()).collect();
+    for (i, (from, to)) in moves.iter().enumerate() {
+        if let Err(e) = rename(from, to) {
+            let mut replaced = Vec::new();
+            for (j, (_, placed)) in moves[..i].iter().enumerate() {
+                if existed[j] {
+                    replaced.push(display_name(placed));
+                } else {
+                    let _ = std::fs::remove_file(placed);
+                }
+            }
+            let tail = if replaced.is_empty() {
+                "nothing was written".to_string()
+            } else {
+                format!("{} had already been replaced", join_and(&replaced))
+            };
+            return Err(ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!(
+                    "could not move {} into place: {e}; {tail}",
+                    display_name(to)
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -346,5 +389,93 @@ mod tests {
         );
         assert_eq!(o.backend_output.len(), 1);
         assert!(o.backend_output[0].stderr.contains("something odd"));
+    }
+
+    #[test]
+    fn a_folder_output_is_refused_even_with_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.pdf");
+        std::fs::create_dir(&out).unwrap();
+        let plan = merge_plan(&[info(&dir.path().join("a.pdf"), 1)], &out).unwrap();
+
+        let e = run(&plan, &missing_qpdf(), true, &mut |_| {}).unwrap_err();
+
+        assert_eq!(e.code, ErrorCode::OutputExists);
+        assert_eq!(e.message, format!("{} is a folder", out.display()));
+        assert!(out.is_dir());
+        assert_eq!(entries(dir.path()), vec!["out.pdf"]);
+    }
+
+    fn failing_second(calls: &mut u32) -> impl FnMut(&Path, &Path) -> std::io::Result<()> + '_ {
+        move |from, to| {
+            *calls += 1;
+            if *calls == 2 {
+                Err(std::io::Error::other("locked"))
+            } else {
+                std::fs::rename(from, to)
+            }
+        }
+    }
+
+    fn staged(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+        (1..=2)
+            .map(|n| {
+                let from = dir.join(format!("new{n}.tmp"));
+                std::fs::write(&from, format!("new{n}")).unwrap();
+                (from, dir.join(format!("out{n}.pdf")))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_move_removes_what_it_placed() {
+        let dir = tempfile::tempdir().unwrap();
+        let moves = staged(dir.path());
+        let mut calls = 0;
+
+        let e = place_outputs(&moves, &mut failing_second(&mut calls)).unwrap_err();
+
+        assert_eq!(e.code, ErrorCode::ConversionFailed);
+        assert!(
+            e.message
+                .starts_with("could not move out2.pdf into place: "),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.ends_with("; nothing was written"),
+            "{}",
+            e.message
+        );
+        assert!(!moves[0].1.exists());
+        assert!(!moves[1].1.exists());
+    }
+
+    #[test]
+    fn a_failed_move_keeps_and_names_a_file_it_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let moves = staged(dir.path());
+        std::fs::write(&moves[0].1, b"old").unwrap();
+        let mut calls = 0;
+
+        let e = place_outputs(&moves, &mut failing_second(&mut calls)).unwrap_err();
+
+        assert!(
+            e.message.ends_with("; out1.pdf had already been replaced"),
+            "{}",
+            e.message
+        );
+        assert_eq!(std::fs::read(&moves[0].1).unwrap(), b"new1");
+    }
+
+    #[test]
+    fn place_outputs_moves_everything_when_all_renames_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let moves = staged(dir.path());
+
+        place_outputs(&moves, &mut |from, to| std::fs::rename(from, to)).unwrap();
+
+        assert_eq!(std::fs::read(&moves[0].1).unwrap(), b"new1");
+        assert_eq!(std::fs::read(&moves[1].1).unwrap(), b"new2");
     }
 }
