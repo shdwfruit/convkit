@@ -12,7 +12,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::probe::MediaProbe;
-use crate::{ConvError, ErrorCode};
+use crate::{registry, ConvError, ErrorCode, Format, Kind};
 
 /// A time as typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,6 +332,51 @@ pub struct Clip {
     /// covers everything.
     pub notes: Vec<String>,
     pub report: RangeReport,
+}
+
+/// Refuses a range on a pair with no timeline, then resolves it. The one
+/// entry point both `plan::build_tuned` and `sized::prepare` use, so a cut
+/// conversion and a cut-and-sized one agree on every refusal and note.
+pub fn clip(
+    from: Format,
+    to: Format,
+    range: &Range,
+    probe: Option<&MediaProbe>,
+    input: &Path,
+) -> crate::Result<Clip> {
+    let flag = range.flag();
+    if !registry::takes_range(from, to) {
+        let still = |f: Format| f.kind() == Kind::Image && f != Format::Gif;
+        let why = if still(to) {
+            format!("{} is a still image", to.ext())
+        } else if still(from) {
+            format!("{} is a still image", from.ext())
+        } else {
+            format!("{} -> {} has no timeline to cut", from.ext(), to.ext())
+        };
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "{flag} does not apply to {} -> {}: {why}; {flag} cuts video and audio",
+                from.ext(),
+                to.ext()
+            ),
+        ));
+    }
+    let probe = probe.ok_or_else(|| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!(
+                "{flag} needs ffprobe to read {}; install ffprobe or check that it runs",
+                input.display()
+            ),
+        )
+    })?;
+    let keeps_video = matches!(
+        to,
+        Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm | Format::Gif
+    );
+    resolve(range, probe, input, keeps_video)
 }
 
 /// Resolves `range` against the probed source. `keeps_video` is whether

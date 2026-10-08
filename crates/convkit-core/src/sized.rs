@@ -189,9 +189,12 @@ pub(crate) fn plan(
                 warnings: p.location_note.iter().cloned().collect(),
                 sizing: Some(sizing),
                 enlarged: None,
+                range: None,
             });
         }
-        if let Some(m) = media::stream_mapped_invocation(to, p.probe, p.strip, &inputs[0], output) {
+        if let Some(m) =
+            media::stream_mapped_invocation(to, p.probe, p.strip, None, &inputs[0], output)
+        {
             sizing.strategy = Strategy::Remux;
             return Ok(ConversionPlan {
                 from,
@@ -207,6 +210,7 @@ pub(crate) fn plan(
                     .collect(),
                 sizing: Some(sizing),
                 enlarged: None,
+                range: None,
             });
         }
     }
@@ -474,6 +478,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         warnings,
         sizing: Some(sizing),
         enlarged: None,
+        range: None,
     })
 }
 

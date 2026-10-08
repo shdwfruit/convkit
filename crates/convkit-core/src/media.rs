@@ -20,8 +20,24 @@
 use std::path::Path;
 
 use crate::probe::MediaProbe;
+use crate::trim::Cut;
 use crate::video::ResolvedVideo;
 use crate::{registry, Format};
+
+/// `-i <input>`, after a cut's input options when there is one: they only
+/// apply to the input that follows them. See `Cut::input_args`.
+fn input_args(cut: Option<&Cut>, input: &Path) -> Vec<String> {
+    let mut argv = cut.map_or_else(Vec::new, Cut::input_args);
+    argv.extend(["-i".to_string(), input.to_string_lossy().into_owned()]);
+    argv
+}
+
+/// Where the input path sits in an invocation built here: right after
+/// `-i`, which a cut's `-ss`/`-t` push back from argv[1]. For the Windows
+/// long-path rewriter, which must rewrite paths and only paths.
+pub(crate) fn input_position(argv: &[String]) -> usize {
+    argv.iter().position(|a| a == "-i").map_or(1, |i| i + 1)
+}
 
 /// A fully rendered single-step ffmpeg invocation plus the honesty that
 /// goes with it.
@@ -214,12 +230,14 @@ fn reencode_audio_args(argv: &mut Vec<String>, to: Format, kbps: u32, tracks: us
 /// `transcoded_invocation` so the mapping -- which audio tracks survive,
 /// which subtitles the muxer can hold, which attachments ride along -- is
 /// decided exactly once.
+#[allow(clippy::too_many_arguments)] // each is a distinct input to one argv
 fn mapped_invocation(
     to: Format,
     probe: &MediaProbe,
     video: VideoDisposition<'_>,
     audio: AudioDisposition,
     strip: bool,
+    cut: Option<&Cut>,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
@@ -228,7 +246,7 @@ fn mapped_invocation(
     let audios = probe.all_audio();
     let subtitles = probe.all_subtitles();
 
-    let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
+    let mut argv = input_args(cut, input);
     let mut warnings: Vec<String> = Vec::new();
 
     if to == Format::Mkv {
@@ -375,10 +393,14 @@ fn mapped_invocation(
 /// don't fit, and `None` when the video itself has to be re-encoded (or
 /// was never seen) — the caller then falls back to the registry's static
 /// transcode recipe.
+///
+/// A copied cut can only start on a keyframe, so the caller passes a `cut`
+/// here only when it starts at 0 (see `plan::build_tuned`).
 pub(crate) fn stream_mapped_invocation(
     to: Format,
     probe: &MediaProbe,
     strip: bool,
+    cut: Option<&Cut>,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
@@ -393,6 +415,7 @@ pub(crate) fn stream_mapped_invocation(
         VideoDisposition::Copy,
         AudioDisposition::Fit,
         strip,
+        cut,
         input,
         output,
     )
@@ -405,7 +428,9 @@ pub(crate) fn stream_mapped_invocation(
 /// ("Filtering and streamcopy cannot be used together"), so honouring the
 /// knob means giving up the copy -- and giving it up here, rather than
 /// falling through to the static table, is what keeps the second audio
-/// track and the subtitles the static recipe would drop.
+/// track and the subtitles the static recipe would drop. Also reached for a
+/// cut that starts after 0, which a copy could only start on a keyframe.
+/// The caller says which, in the note it adds.
 pub(crate) fn transcoded_invocation(
     to: Format,
     probe: &MediaProbe,
@@ -429,7 +454,7 @@ pub(crate) fn transcoded_invocation(
         _ => return None,
     };
     let chain = registry::TRANSCODE_CHAIN.compose(resolved);
-    let mut m = mapped_invocation(
+    mapped_invocation(
         to,
         probe,
         VideoDisposition::Transcode {
@@ -442,15 +467,10 @@ pub(crate) fn transcoded_invocation(
         },
         AudioDisposition::Fit,
         strip,
+        resolved.cut.as_ref(),
         input,
         output,
-    )?;
-    m.warnings.push(
-        "Re-encoded rather than stream-copied, because a video knob changes \
-         the picture; the copy path cannot filter."
-            .to_string(),
-    );
-    Some(m)
+    )
 }
 
 /// Both passes of a bitrate-targeted encode, for `--max-size`.
@@ -503,6 +523,9 @@ pub(crate) fn two_pass_invocations(
         companions,
     };
 
+    // Both passes read the same range: pass 1's statistics describe only
+    // what pass 2 encodes.
+    let cut = resolved.cut.as_ref();
     let pass1 = if to == Format::Mkv {
         let mut argv = mapped_invocation(
             to,
@@ -510,6 +533,7 @@ pub(crate) fn two_pass_invocations(
             video(1),
             AudioDisposition::Copy,
             false,
+            cut,
             input,
             output,
         )?
@@ -519,7 +543,7 @@ pub(crate) fn two_pass_invocations(
         push(&mut argv, &["-f", "null", "-"]);
         argv
     } else {
-        let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
+        let mut argv = input_args(cut, input);
         push(
             &mut argv,
             &["-map", "0:v:0", "-vf", &chain, "-c:v", encoder],
@@ -538,7 +562,7 @@ pub(crate) fn two_pass_invocations(
         Some(kbps) => AudioDisposition::Reencode { kbps },
         None => AudioDisposition::Fit,
     };
-    let pass2 = mapped_invocation(to, probe, video(2), audio, strip, input, output)?;
+    let pass2 = mapped_invocation(to, probe, video(2), audio, strip, cut, input, output)?;
     Some(TwoPass { pass1, pass2 })
 }
 
@@ -688,11 +712,16 @@ pub(crate) fn same_format_copy(
 /// here and in no allowlist. An audio source keeps its attached cover art
 /// where the target can carry it, matching the static keep-art recipes; a
 /// video source drops the video stream.
+///
+/// A cut keeps the copy here whatever its start: every audio packet decodes
+/// on its own, so a copied audio cut lands within one frame, about 21-26 ms
+/// for AAC and MP3.
 pub(crate) fn audio_copy_invocation(
     from: Format,
     to: Format,
     probe: &MediaProbe,
     strip: bool,
+    cut: Option<&Cut>,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
@@ -705,7 +734,7 @@ pub(crate) fn audio_copy_invocation(
 
     let audio_source = matches!(from, Format::Mp3 | Format::M4a | Format::Wav | Format::Flac);
 
-    let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
+    let mut argv = input_args(cut, input);
     // The probe describes stream order, so map the first audio stream
     // explicitly rather than trusting default selection (which picks by
     // channel count and could grab a stream the probe never approved).
@@ -754,7 +783,14 @@ mod tests {
     }
 
     fn invoke(to: Format, p: &MediaProbe) -> Option<MediaInvocation> {
-        stream_mapped_invocation(to, p, false, &PathBuf::from("in"), &PathBuf::from("out"))
+        stream_mapped_invocation(
+            to,
+            p,
+            false,
+            None,
+            &PathBuf::from("in"),
+            &PathBuf::from("out"),
+        )
     }
 
     fn has(argv: &[String], pair: [&str; 2]) -> bool {
@@ -767,12 +803,12 @@ mod tests {
         let mut p = probe(Some("h264"), &["aac"], &[], 0);
         p.kept_tags = vec![("title".into(), "Clip".into())];
         let (i, o) = (PathBuf::from("in.mov"), PathBuf::from("out.mp4"));
-        let m = stream_mapped_invocation(Format::Mp4, &p, true, &i, &o).unwrap();
+        let m = stream_mapped_invocation(Format::Mp4, &p, true, None, &i, &o).unwrap();
         assert!(has(&m.argv, ["-map_metadata", "-1"]), "{:?}", m.argv);
         assert!(has(&m.argv, ["-metadata", "title=Clip"]), "{:?}", m.argv);
         assert!(has(&m.argv, ["-c:v", "copy"]), "{:?}", m.argv);
         assert_eq!(m.argv.last().unwrap(), "out.mp4");
-        let plain = stream_mapped_invocation(Format::Mp4, &p, false, &i, &o).unwrap();
+        let plain = stream_mapped_invocation(Format::Mp4, &p, false, None, &i, &o).unwrap();
         assert!(!plain.argv.iter().any(|a| a == "-map_metadata"));
     }
 
@@ -796,9 +832,9 @@ mod tests {
         assert!(has(&m.argv, ["-map", "-0:t"]), "{:?}", m.argv);
         assert!(!has(&m.argv, restore), "{:?}", m.argv);
 
-        let m = stream_mapped_invocation(Format::Mkv, &fonts, true, &i, &o).unwrap();
+        let m = stream_mapped_invocation(Format::Mkv, &fonts, true, None, &i, &o).unwrap();
         assert!(has(&m.argv, restore), "{:?}", m.argv);
-        let m = stream_mapped_invocation(Format::Mkv, &fonts, false, &i, &o).unwrap();
+        let m = stream_mapped_invocation(Format::Mkv, &fonts, false, None, &i, &o).unwrap();
         assert!(!has(&m.argv, restore), "{:?}", m.argv);
     }
 
@@ -811,6 +847,7 @@ mod tests {
             Format::Mp3,
             &p,
             true,
+            None,
             &PathBuf::from("in.mp3"),
             &PathBuf::from("out.mp3"),
         )
@@ -828,6 +865,35 @@ mod tests {
             ]
         );
         assert!(has(&m.argv, ["-c:a", "copy"]), "{:?}", m.argv);
+    }
+
+    #[test]
+    fn the_input_is_found_after_a_cut() {
+        let argv: Vec<String> = ["-ss", "62", "-t", "8", "-i", "in.mp4", "out.mp4"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(input_position(&argv), 5);
+        let plain: Vec<String> = ["-i", "in.mp4", "out.mp4"].map(String::from).to_vec();
+        assert_eq!(input_position(&plain), 1);
+    }
+
+    #[test]
+    fn a_stream_copy_cut_puts_the_cut_ahead_of_the_input() {
+        let cut = crate::trim::Cut {
+            start_ms: 0,
+            end_ms: 30_000,
+            source_ms: 600_000,
+        };
+        let m = stream_mapped_invocation(
+            Format::Mp4,
+            &probe(Some("h264"), &["aac"], &[], 0),
+            false,
+            Some(&cut),
+            &PathBuf::from("in"),
+            &PathBuf::from("out"),
+        )
+        .unwrap();
+        assert_eq!(&m.argv[..4], ["-t", "30", "-i", "in"], "{:?}", m.argv);
     }
 
     /// The flagship bug: a two-audio-track source must map *both* tracks
@@ -1069,6 +1135,7 @@ mod tests {
             to,
             p,
             false,
+            None,
             &PathBuf::from("in"),
             &PathBuf::from("out"),
         )
