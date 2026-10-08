@@ -463,6 +463,16 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             probed.get_or_insert_with(MediaProbe::default).image = Some(t);
         }
     }
+    // Whether an Office source is encrypted or carries macros. A plain
+    // file read, no backend.
+    let office = if registry::reads_office(req.from, req.to) {
+        crate::office::traits(&req.inputs[0])
+    } else {
+        None
+    };
+    if let Some(t) = office {
+        probed.get_or_insert_with(MediaProbe::default).office = Some(t);
+    }
 
     // Likewise: only check backend availability when this pair actually has
     // more than one recipe to choose between (today: docx/odt -> pdf). An
@@ -533,7 +543,22 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                     "recipe has no steps",
                 ));
             }
-            runner.run_all(&built)?;
+            runner.run_all(&built).map_err(|e| {
+                // LibreOffice says a password-protected .doc, .xls or .ppt
+                // "could not be loaded", as it does a damaged one. It does
+                // open one encrypted with Office's default password, so the
+                // password is only blamed once the conversion has failed.
+                // A missing LibreOffice is still reported as that.
+                let locked = office.is_some_and(|o| o.encrypted);
+                if locked
+                    && e.code == ErrorCode::ConversionFailed
+                    && e.backend == Some(Backend::Soffice)
+                {
+                    ConvError::password_protected(&req.inputs[0], req.from)
+                } else {
+                    e
+                }
+            })?;
             (built, None)
         }
         Some(sz) => {
@@ -1931,6 +1956,73 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             leftovers.is_empty(),
             "left scratch directories behind: {leftovers:?}"
         );
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    fn office_request(input: PathBuf, to: Format, dir: &Path) -> Request {
+        Request {
+            from: Format::from_path(&input).unwrap(),
+            to,
+            output: dir.join(format!("out.{}", to.ext())),
+            inputs: vec![input],
+            overwrite: false,
+            tuning: Default::default(),
+            allow_extreme: false,
+        }
+    }
+
+    /// LibreOffice writes nothing for a password-protected .doc and says
+    /// only that it "could not be loaded"; the error says why.
+    #[test]
+    fn a_password_protected_doc_that_fails_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.with_override(Backend::Soffice, stub_that_writes_nothing(dir.path()));
+        let req = office_request(fixture("encrypted.doc"), Format::Docx, dir.path());
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::PasswordProtected, "{e:?}");
+        assert!(
+            e.message.starts_with("encrypted.doc is password-protected"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// The same failure on a file that is not encrypted stays the ordinary
+    /// one: the password is only blamed when the file has one.
+    #[test]
+    fn an_unencrypted_doc_that_fails_keeps_the_ordinary_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.with_override(Backend::Soffice, stub_that_writes_nothing(dir.path()));
+        let input = dir.path().join("memo.doc");
+        std::fs::write(&input, b"{\\rtf1\\ansi memo}").unwrap();
+        let e = run(
+            &office_request(input, Format::Pdf, dir.path()),
+            &r,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::ConversionFailed, "{e:?}");
+    }
+
+    /// A password-protected .docx never reaches LibreOffice, which can read
+    /// one as plain text and print the encrypted bytes. The stub here would
+    /// have succeeded.
+    #[test]
+    fn a_password_protected_docx_is_refused_before_libreoffice_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.with_override(Backend::Soffice, outdir_stub_that_writes_pdf(dir.path()));
+        let req = office_request(fixture("encrypted.docx"), Format::Pdf, dir.path());
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::PasswordProtected, "{e:?}");
+        assert!(!req.output.exists());
     }
 
     /// IMPORTANT 1: the `ScratchGuard` `Drop` impl, not two explicit

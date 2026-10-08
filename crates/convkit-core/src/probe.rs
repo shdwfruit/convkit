@@ -68,6 +68,9 @@ pub struct MediaProbe {
     /// What an image source holds that a single-image target drops, read
     /// by `image_traits`. `None` when the source was not read.
     pub image: Option<ImageTraits>,
+    /// Whether an Office source is encrypted or carries macros, read by
+    /// `office::traits`. `None` when the source was not read.
+    pub office: Option<crate::office::OfficeTraits>,
 }
 
 /// What a jpg/png/bmp target cannot keep from its source, for the notes

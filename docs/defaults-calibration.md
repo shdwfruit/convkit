@@ -648,6 +648,32 @@ any more.
 | `tests/fixtures/clip.mp4` | the `ffmpeg -f lavfi` command at the top of this doc | 56,325 B |
 | `tests/fixtures/sample.md` | hand-written | 726 B |
 | `tests/fixtures/sample.docx` | `pandoc tests/fixtures/sample.md --standalone -o tests/fixtures/sample.docx` | 11,357 B |
+| `tests/fixtures/encrypted.doc` | LibreOffice 26.8, see below | 9,216 B |
+| `tests/fixtures/encrypted.xls` | LibreOffice 26.8, see below | 6,144 B |
+| `tests/fixtures/encrypted.docx` | LibreOffice 26.8, see below | 8,192 B |
+| `tests/fixtures/default-password.xls` | LibreOffice 26.8, see below | 5,632 B |
+
+**Password fixtures.** The three `encrypted.*` files are saved with the
+password `secret`, and `default-password.xls` with `VelvetSweatshop`, the
+password Excel uses when a workbook is encrypted without asking for one. `soffice --convert-to` has no way to set a password, so
+they were written by a LibreOffice Basic macro run headless: a two-page
+Writer document and a two-sheet Calc document, each stored with
+`storeToURL` and the properties `FilterName` (`MS Word 97`, `MS Excel 97`,
+`MS Word 2007 XML`) and `Password`. LibreOffice cannot write an encrypted
+`.ppt`, so PowerPoint's encryption check is covered by unit tests that
+build the file in memory. The detection was also checked against Apache
+POI's test files saved by Office itself (`PasswordProtected.doc`,
+`password.xls`, `xor-encryption-abc.xls`, `Password_Protected-hello.ppt`,
+`cryptoapi-proc2356.ppt`, `protected_passtika.xlsx` and others), and
+against its edit-protected files, which are not encrypted and convert.
+LibreOffice 26.8 refused every encrypted one headless with "source file
+could not be loaded" and exit status 0, except
+`bug53475-password-is-pass.docx`: it imported that as plain text and wrote
+a 106-page PDF of the encrypted bytes. That is why an encrypted
+`.docx`/`.xlsx`/`.pptx` is refused before LibreOffice runs, while an
+encrypted `.doc`/`.xls`/`.ppt` is only blamed once LibreOffice has failed
+on it: LibreOffice opens `default-password.xls` without asking, and so
+converts it, though it carries the same encryption record as the others.
 | `tests/fixtures/photo.heic` | supplied directly by the repo owner: a real iPhone photo, committed as-is (see below for why) | 1,623,213 B |
 
 **HEIC fixture: could not be produced on any available machine, so a real
