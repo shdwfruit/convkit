@@ -3019,6 +3019,87 @@ fn a_cut_mp3_keeps_its_cover_art() {
     );
 }
 
+/// conv trim's picture: a frame read over a pipe, as raw RGB or a PNG.
+#[test]
+#[ignore]
+fn a_trim_frame_is_grabbed_over_a_pipe() {
+    use convkit_core::frames::{grab, Pixels, Want};
+    let dir = tmp();
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let src = dir.path().join("red.mp4");
+    let r = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:size=320x180:rate=30:duration=3",
+        ])
+        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let Pixels::Rgb { data, .. } = grab(
+        &ffmpeg,
+        &src,
+        1_500,
+        Want::Rgb {
+            width: 8,
+            height: 6,
+        },
+    )
+    .unwrap() else {
+        panic!("asked for rgb")
+    };
+    assert_eq!(data.len(), 8 * 6 * 3);
+    for px in data.chunks(3) {
+        assert!(px[0] > 200 && px[1] < 40 && px[2] < 40, "{px:?}");
+    }
+    let Pixels::Png(png) = grab(&ffmpeg, &src, 0, Want::Png { width: 64 }).unwrap() else {
+        panic!("asked for png")
+    };
+    assert!(png.starts_with(b"\x89PNG"));
+    assert!(
+        grab(&ffmpeg, &src, 60_000, Want::Png { width: 64 }).is_err(),
+        "past the end there is no frame"
+    );
+}
+
+/// conv trim's loudness bar: 1 s of tone, then 1 s of silence.
+#[test]
+#[ignore]
+fn a_trim_loudness_tells_sound_from_silence() {
+    use convkit_core::frames::{dbfs, loudness};
+    let dir = tmp();
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let src = dir.path().join("tone.m4a");
+    let r = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+        .args(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono:d=1"])
+        .args(["-filter_complex", "[0][1]concat=n=2:v=0:a=1", "-c:a", "aac"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let mut levels = Vec::new();
+    loudness(&ffmpeg, &src, &mut |batch| levels.extend_from_slice(batch)).unwrap();
+    assert!(
+        (195..=210).contains(&levels.len()),
+        "{} buckets",
+        levels.len()
+    );
+    // lavfi's sine is an eighth of full scale: about -21 dBFS.
+    let loud = levels[10..90].iter().all(|&l| dbfs(l) > -25.0);
+    let quiet = levels[110..190].iter().all(|&l| dbfs(l) < -60.0);
+    assert!(loud && quiet, "{levels:?}");
+}
+
 /// conv trim's video-only clips: no audio track in any video container,
 /// whichever path builds the command (the webm one is the static recipe,
 /// whose audio filter must not trip over the missing audio).
