@@ -48,6 +48,7 @@ fn main() {
         Some(cli::Command::Update { check }) => commands::update::run(&cli, *check),
         Some(cli::Command::Qr { .. }) => commands::qr::run(&cli),
         Some(cli::Command::Ascii { .. }) => commands::ascii::run(&cli),
+        Some(cli::Command::Merge(args)) => commands::merge::run(&cli, args),
     };
     std::process::exit(code);
 }
