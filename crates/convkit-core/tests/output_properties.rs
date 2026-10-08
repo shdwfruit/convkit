@@ -1597,7 +1597,9 @@ fn a_workbook_writes_its_first_sheet_as_values() {
     }
 }
 
-/// csv -> xlsx -> csv gives back the same file: no digit lost on the way.
+/// csv -> xlsx -> csv gives back the same lines: no digit lost on the way.
+/// Lines, not bytes: LibreOffice ends them with CRLF on Windows, as RFC
+/// 4180 has it, and LF elsewhere, and its CSV filter has no option for it.
 #[test]
 #[ignore = "requires backends; run with --ignored"]
 fn a_csv_survives_a_round_trip_through_xlsx() {
@@ -1606,7 +1608,11 @@ fn a_csv_survives_a_round_trip_through_xlsx() {
     let csv = write_bytes(&dir, "orders.csv", original.as_bytes());
     let (xlsx, _) = convert_path(&csv, "xlsx");
     let (back, o) = convert_path(&xlsx, "csv");
-    assert_eq!(std::fs::read_to_string(&back).unwrap(), original);
+    let written = std::fs::read_to_string(&back).unwrap();
+    assert_eq!(
+        written.lines().collect::<Vec<_>>(),
+        original.lines().collect::<Vec<_>>()
+    );
     assert!(
         o.warnings.is_empty(),
         "one sheet, no formulas: {:?}",
