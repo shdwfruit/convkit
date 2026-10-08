@@ -682,16 +682,20 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
                 if Some(fmt) == target_format {
                     // Under `--max-size` or `--strip-metadata` a file already
                     // in the target format is what gets sized or stripped, so
-                    // it is kept; only a previous run's own result
-                    // (`clip-10mb.mp4`, `photo-stripped.jpg`) is left behind.
-                    let own_result = own.as_ref().is_some_and(|own| {
-                        p.file_stem().is_some_and(|stem| {
-                            stem.to_string_lossy()
-                                .to_lowercase()
-                                .ends_with(&format!("-{}", own.suffix))
-                        })
+                    // it is kept, where the flag can keep that format; a
+                    // previous run's own result (`clip-10mb.mp4`,
+                    // `photo-stripped.jpg`) is left behind, and so is a file
+                    // the flag cannot keep (a pdf among scans), as it is
+                    // without the flag.
+                    let kept_here = own.as_ref().is_some_and(|own| {
+                        own.keeps(fmt)
+                            && !p.file_stem().is_some_and(|stem| {
+                                stem.to_string_lossy()
+                                    .to_lowercase()
+                                    .ends_with(&format!("-{}", own.suffix))
+                            })
                     });
-                    if own.is_none() || own_result {
+                    if !kept_here {
                         continue;
                     }
                 }
@@ -1773,6 +1777,29 @@ mod tests {
             .map(|j| j.output.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(outs, ["a-stripped.jpg", "b.jpg"]);
+    }
+
+    /// A file already in the target format is kept for stripping only where
+    /// the flag can keep it; a pdf among scans merged with `--to pdf` is
+    /// skipped, as it is without the flag, rather than failed.
+    #[test]
+    fn a_stripped_folder_skips_target_files_it_cannot_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a.jpg", "b.png", "old.pdf"] {
+            std::fs::write(dir.path().join(n), b"x").unwrap();
+        }
+        let jobs = plan_jobs(&stripped(vec![dir.path().to_path_buf()], Some("pdf"), None)).unwrap();
+        let inputs: Vec<String> = jobs
+            .iter()
+            .map(|j| {
+                j.inputs[0]
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(inputs, ["a.jpg", "b.png"]);
     }
 
     /// Both flags keep the format; the size names the file, as its rules
