@@ -1229,7 +1229,12 @@ out by conv's stream maps.
 [%[EXIF:GPSLatitude]]\n' info:` returns the latitude for heic, jpg, png,
 avif and tiff sources, in about 25 ms on the 1.6 MB HEIC. For an image
 without one it prints a warning and exits 0. A WebP's `-ping` loads no EXIF
-at all, and XMP GPS is not exposed as a property.
+at all, and XMP GPS is not exposed as a property. ImageMagick 6 reads no
+HEIC EXIF, ping or not: an iPhone's Exif item starts with a 4-byte offset
+(6) to the TIFF header, its HEIC reader skips past the `Exif\0\0` marker
+there, and its EXIF parser (`GetEXIFProperty`) finds nothing without it.
+The profile is still attached and written out (a jpg gets it raw in APP1),
+and `+profile` still removes it; only the note cannot see it.
 
 The tests that hold these to account are the `--ignored` ones in
 `output_properties.rs` from `stripped_images_lose_their_location_and_keep_colour_and_orientation`

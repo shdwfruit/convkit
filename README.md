@@ -343,8 +343,11 @@ a phone photo can still carry that photo's EXIF.
 
 The note goes by the EXIF in an image's header and the tags ffprobe
 reports. A WebP source never gets it, because its header read loads no
-EXIF, and neither does a location kept only in XMP; the flag removes both
-anyway. Documents are not covered yet, and the flag is refused on them.
+EXIF, and neither does a location kept only in XMP. With ImageMagick 6
+(what Debian and Ubuntu install) a HEIC photo gets no note either, since
+ImageMagick 6 cannot read a HEIC's EXIF itself. The flag removes all of
+these anyway. Documents are not covered yet, and the flag is refused on
+them.
 
 ## Size targets
 

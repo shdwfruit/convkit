@@ -24,14 +24,16 @@ fn dry_run_prints_the_expert_ffmpeg_command() {
 fn dry_run_strips_a_lone_photo_into_a_stripped_copy() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("photo.jpg"), b"not really a jpeg").unwrap();
+    // The pattern is quoted for the shell the preview is for: '...' on
+    // Unix, "..." on Windows.
     conv()
         .current_dir(dir.path())
         .args(["photo.jpg", "--strip-metadata", "--dry-run"])
         .assert()
         .success()
-        .stdout(contains(
-            "-auto-orient +profile '!icc,*' +set comment +set label",
-        ))
+        .stdout(contains("-auto-orient +profile "))
+        .stdout(contains("!icc,*"))
+        .stdout(contains(" +set comment +set label "))
         .stdout(contains("photo-stripped.jpg"));
 }
 
