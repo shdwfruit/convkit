@@ -22,6 +22,14 @@ pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
     };
     let subject = json!({ "input": input });
     let header = name_of(&input);
+    // Check the input before offering to install qpdf.
+    if !input.is_file() {
+        let e = ConvError::new(
+            ErrorCode::InputNotFound,
+            format!("input not found: {}", input.display()),
+        );
+        return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run);
+    }
     // A missing qpdf (or a failed install) is a failure of this run, so it
     // goes in the result envelope like any other, as in `conv merge`.
     let qpdf = match pdf_support::resolve_qpdf(cli, !args.dry_run) {
@@ -37,7 +45,7 @@ pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
         return 0;
     }
 
-    if let Some(dir) = args.outdir.as_ref().filter(|_| !args.dry_run) {
+    if let Some(dir) = args.outdir.as_ref() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             let e = ConvError {
                 code: ErrorCode::InvalidInvocation,
@@ -51,8 +59,7 @@ pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
                     )),
                 }),
             };
-            render::print_error(cli.json, &e);
-            return e.code.exit_code();
+            return pdf_support::print_failure(cli, subject, &header, &e, false);
         }
     }
 
