@@ -7,6 +7,7 @@ pub mod format;
 pub mod install;
 pub mod manifest;
 mod media;
+pub mod pdf;
 pub mod plan;
 pub mod probe;
 mod procutil;
@@ -18,7 +19,7 @@ pub mod sized;
 mod video;
 pub mod winpath;
 
-pub use backend::{Backend, PackageManager};
+pub use backend::{Backend, ManagedLayout, PackageManager};
 pub use backend_overrides::BackendOverrides;
 pub use error::{manual_hint_for, ConvError, ErrorCode, Remediation, Result};
 pub use exec::{BackendOutput, Event, Outcome, Request};

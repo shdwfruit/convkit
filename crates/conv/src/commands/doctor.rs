@@ -3,13 +3,14 @@ use serde_json::json;
 
 use crate::cli::Cli;
 
-const BACKENDS: [Backend; 6] = [
+const BACKENDS: [Backend; 7] = [
     Backend::Ffmpeg,
     Backend::Ffprobe,
     Backend::Magick,
     Backend::Pandoc,
     Backend::Soffice,
     Backend::Typst,
+    Backend::Qpdf,
 ];
 
 /// `ResolvedBackend`/`Source` don't derive `Serialize` (the core crate never

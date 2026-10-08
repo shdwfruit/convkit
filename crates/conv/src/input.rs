@@ -455,6 +455,33 @@ pub(crate) fn expand_globs(paths: &[PathBuf], globbable: usize) -> Vec<PathBuf> 
     out
 }
 
+/// Every PDF directly inside `dir`, in natural order (`p2` before `p10`),
+/// leaving out `exclude`: the merge's own output, so a rerun of `conv merge
+/// scans/ scans/all.pdf -y` does not fold the previous result into the new
+/// one.
+pub(crate) fn pdfs_in(dir: &Path, exclude: &Path) -> Result<Vec<PathBuf>, ConvError> {
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!("cannot read directory {}: {e}", dir.display()),
+        )
+    })?;
+    let skip = collision_key(exclude);
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && Format::from_path(p) == Some(Format::Pdf))
+        .filter(|p| collision_key(p) != skip)
+        .collect();
+    found.sort_by(|a, b| {
+        natural_cmp(
+            &a.file_name().unwrap_or_default().to_string_lossy(),
+            &b.file_name().unwrap_or_default().to_string_lossy(),
+        )
+    });
+    Ok(found)
+}
+
 /// Expands any directory positional into the files directly inside it
 /// (non-recursive; subdirectories and files with an unrecognised extension
 /// are skipped), then delegates to `jobs_from`. Globs the shell already expanded arrive
@@ -758,6 +785,19 @@ mod tests {
                     .into_owned()
             })
             .collect()
+    }
+
+    #[test]
+    fn pdfs_in_lists_pdfs_in_natural_order_and_leaves_out_the_merge_output() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["p10.pdf", "p2.pdf", "p1.PDF", "all.pdf", "notes.txt"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(dir.path().join("sub.pdf")).unwrap();
+
+        let found = pdfs_in(dir.path(), &dir.path().join("all.pdf")).unwrap();
+
+        assert_eq!(names(&found), vec!["p1.PDF", "p2.pdf", "p10.pdf"]);
     }
 
     /// The README's headline Windows batch example, which failed with
@@ -1184,6 +1224,7 @@ mod tests {
             pandoc_path: None,
             soffice_path: None,
             typst_path: None,
+            qpdf_path: None,
             command: None,
         }
     }

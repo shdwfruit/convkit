@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use convkit_core::{Resolver, Tuning};
 
 #[derive(Parser, Debug)]
@@ -137,6 +137,9 @@ pub struct Cli {
     /// Use this typst binary instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     pub typst_path: Option<PathBuf>,
+    /// Use this qpdf binary instead of the resolved one.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub qpdf_path: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -172,7 +175,7 @@ Files convkit does not recognise are listed with `--` rather than hidden, so an 
     },
     /// Update managed backends to the versions this convkit pins.
     #[command(long_about = "\
-Brings managed backends (ffmpeg, ffprobe, pandoc, typst) in line with the \
+Brings managed backends (ffmpeg, ffprobe, pandoc, typst, qpdf) in line with the \
 exact versions THIS BUILD of convkit has pinned and verified -- not the \
 latest versions available upstream. Every managed backend is installed \
 from a pinned URL with a verified SHA-256 checksum; chasing latest \
@@ -209,6 +212,79 @@ changes nothing, and exits non-zero if anything is.")]
         #[arg(long)]
         check: bool,
     },
+    /// Join PDFs into one, in the order given: `conv merge a.pdf b.pdf out.pdf`.
+    #[command(long_about = "\
+Joins PDFs into one, in the order given. The last argument is the output; it \
+must end in .pdf, and conv refuses to replace an existing file unless -y is \
+given. A folder adds every PDF directly inside it, in natural order (p2 \
+before p10).
+
+qpdf does the work, rewriting the files' structure rather than re-rendering \
+pages, so text stays selectable and links keep working. The first file's \
+bookmarks are kept; later files' bookmarks and every file's permission \
+restrictions are not, and conv prints a note when that happens.")]
+    Merge(MergeArgs),
+
+    /// Split a PDF into one file per page, or one per page range.
+    #[command(long_about = "\
+Writes one file per page, or one file per RANGE. A RANGE is a page (5), a \
+span (1-3), or uses z for the last page (11-z); 5-1 writes pages 5 to 1 in \
+reverse order. Files are named after the input and their pages -- \
+report-01.pdf ... report-12.pdf, or report-1-3.pdf -- and go next to the \
+input, or into -o DIR.
+
+Pages no range covers are left out with a warning, and a page in more than \
+one range is written to each, with a note. A range past the last page is \
+refused before anything is written.")]
+    Split(SplitArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct MergeArgs {
+    /// PDFs to join, then the output file: `a.pdf b.pdf out.pdf`. A folder
+    /// adds every PDF in it.
+    #[arg(required = true, value_name = "PDF")]
+    pub paths: Vec<PathBuf>,
+
+    /// Overwrite the output if it exists.
+    #[arg(short = 'y', long)]
+    pub overwrite: bool,
+
+    /// Print the qpdf command instead of running it.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Show the qpdf command as it runs, and qpdf's own output.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct SplitArgs {
+    /// The PDF to split.
+    #[arg(value_name = "PDF")]
+    pub input: PathBuf,
+
+    /// Pages for each file: 5, 1-3, 11-z (z is the last page). Without
+    /// ranges, every page gets its own file.
+    #[arg(value_name = "RANGE")]
+    pub ranges: Vec<String>,
+
+    /// Write the files into this folder (created if missing).
+    #[arg(short = 'o', long, value_name = "DIR")]
+    pub outdir: Option<PathBuf>,
+
+    /// Overwrite files that already exist.
+    #[arg(short = 'y', long)]
+    pub overwrite: bool,
+
+    /// Print the qpdf commands instead of running them.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Show each qpdf command as it runs, and qpdf's own output.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 }
 
 /// A dimension past this is not a size any real raster or frame reaches --
@@ -316,7 +392,7 @@ impl Cli {
     /// through, from whichever `--<backend>-path` flags were passed. The
     /// actual override-application and ffprobe-sibling-inference logic
     /// lives in `convkit_core::BackendOverrides` -- this just maps this
-    /// struct's own six flag fields onto its six fields, so `conv`'s CLI
+    /// struct's own seven flag fields onto its seven fields, so `conv`'s CLI
     /// surface (flag names, `#[arg(...)]` attributes, doc comments shown in
     /// `--help`) stays exactly where it already was, on `Cli` itself.
     pub fn resolver(&self) -> Resolver {
@@ -327,6 +403,7 @@ impl Cli {
             pandoc: self.pandoc_path.clone(),
             soffice: self.soffice_path.clone(),
             typst: self.typst_path.clone(),
+            qpdf: self.qpdf_path.clone(),
         }
         .resolver()
     }
@@ -367,6 +444,7 @@ mod tests {
             pandoc_path: None,
             soffice_path: None,
             typst_path: None,
+            qpdf_path: None,
             command: None,
         }
     }
@@ -376,7 +454,7 @@ mod tests {
     /// own responsibility, tested thoroughly (including the cross-platform
     /// path reasoning) in `convkit-core`. What's left to prove here is
     /// narrower but still real: that `Cli::resolver()` maps every one of
-    /// its six flag fields onto the matching `BackendOverrides` field,
+    /// its seven flag fields onto the matching `BackendOverrides` field,
     /// rather than, say, `magick_path` ending up on `Backend::Pandoc`.
     #[test]
     fn resolver_maps_every_flag_to_its_own_backend_override() {
@@ -388,6 +466,7 @@ mod tests {
         c.pandoc_path = Some(PathBuf::from("/o/pandoc"));
         c.soffice_path = Some(PathBuf::from("/o/soffice"));
         c.typst_path = Some(PathBuf::from("/o/typst"));
+        c.qpdf_path = Some(PathBuf::from("/o/qpdf"));
 
         let r = c.resolver();
         for (backend, expected) in [
@@ -397,6 +476,7 @@ mod tests {
             (Backend::Pandoc, "/o/pandoc"),
             (Backend::Soffice, "/o/soffice"),
             (Backend::Typst, "/o/typst"),
+            (Backend::Qpdf, "/o/qpdf"),
         ] {
             assert_eq!(
                 r.candidates(backend).first().map(|(p, _)| p.as_path()),

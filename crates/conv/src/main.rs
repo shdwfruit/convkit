@@ -28,6 +28,8 @@ fn main() {
         Some(cli::Command::Install { backend }) => commands::install::run(&cli, backend),
         Some(cli::Command::Scan { paths }) => commands::scan::run(&cli, paths),
         Some(cli::Command::Update { check }) => commands::update::run(&cli, *check),
+        Some(cli::Command::Merge(args)) => commands::merge::run(&cli, args),
+        Some(cli::Command::Split(args)) => commands::split::run(&cli, args),
     };
     std::process::exit(code);
 }

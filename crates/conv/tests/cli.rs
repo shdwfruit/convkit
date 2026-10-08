@@ -832,7 +832,7 @@ fn update_check_reports_every_managed_backend_as_not_installed_in_an_isolated_en
         .assert()
         .code(0);
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
-    for name in ["ffmpeg", "ffprobe", "pandoc", "typst"] {
+    for name in ["ffmpeg", "ffprobe", "pandoc", "typst", "qpdf"] {
         assert!(stdout.contains(name), "{stdout}");
     }
     assert!(stdout.contains("not installed"), "{stdout}");
@@ -876,7 +876,7 @@ fn update_check_json_reports_a_never_installed_backend_as_not_installed_and_ok()
         serde_json::from_slice(&output.stdout).expect("stdout must be valid JSON");
     assert_eq!(v["ok"], true);
     let backends = v["backends"].as_array().expect("backends must be an array");
-    assert_eq!(backends.len(), 6, "{v}");
+    assert_eq!(backends.len(), 7, "{v}");
     let ffmpeg = backends
         .iter()
         .find(|b| b["backend"] == "ffmpeg")
@@ -943,7 +943,7 @@ fn update_check_json_envelope_lands_on_stderr_when_a_managed_backend_is_outdated
         serde_json::from_slice(&output.stderr).expect("stderr must be valid JSON");
     assert_eq!(v["ok"], false);
     let backends = v["backends"].as_array().expect("backends must be an array");
-    assert_eq!(backends.len(), 6, "{v}");
+    assert_eq!(backends.len(), 7, "{v}");
     let typst = backends
         .iter()
         .find(|b| b["backend"] == "typst")
@@ -2750,4 +2750,213 @@ fn the_gif_buffering_note_shows_only_for_a_long_source() {
             assert_eq!(warnings.len(), usize::from(noted), "{secs} s: {warnings:?}");
         }
     }
+}
+
+// --- conv merge ---------------------------------------------------------
+
+#[test]
+fn merge_needs_an_output() {
+    conv()
+        .args(["merge", "a.pdf"])
+        .assert()
+        .code(2)
+        .stderr(contains("expected PDFs and then an output"));
+}
+
+#[test]
+fn merge_points_images_at_the_image_merge() {
+    conv()
+        .args(["merge", "a.png", "b.pdf", "out.pdf"])
+        .assert()
+        .code(2)
+        .stderr(contains("a.png is not one").and(contains("conv a.png b.png out.pdf")));
+}
+
+#[test]
+fn merge_rejects_conversion_flags() {
+    conv()
+        .args(["merge", "a.pdf", "b.pdf", "out.pdf", "--quality", "80"])
+        .assert()
+        .code(2)
+        .stderr(contains("--quality"));
+}
+
+#[test]
+fn merge_without_qpdf_reports_it_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.pdf"), b"%PDF").unwrap();
+    std::fs::write(dir.path().join("b.pdf"), b"%PDF").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["merge", "a.pdf", "b.pdf", "out.pdf", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3)
+        .stderr(contains("FAIL out.pdf").and(contains("qpdf not found")));
+    assert!(!dir.path().join("out.pdf").exists());
+}
+
+#[test]
+fn merge_checks_inputs_before_looking_for_qpdf() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("b.pdf"), b"%PDF").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["merge", "missing.pdf", "b.pdf", "out.pdf", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(2)
+        .stderr(contains("input not found").and(contains("qpdf").not()));
+}
+
+#[test]
+fn split_checks_the_input_before_looking_for_qpdf() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["split", "missing.pdf", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(2)
+        .stderr(contains("input not found").and(contains("qpdf").not()));
+}
+
+fn merge_missing_qpdf_json(extra: &[&str]) -> serde_json::Value {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.pdf"), b"%PDF").unwrap();
+    std::fs::write(dir.path().join("b.pdf"), b"%PDF").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let out = cmd
+        .current_dir(dir.path())
+        .args([
+            "merge",
+            "a.pdf",
+            "b.pdf",
+            "out.pdf",
+            "--json",
+            "--no-install",
+        ])
+        .args(extra)
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&out).unwrap()
+}
+
+#[test]
+fn merge_json_puts_a_missing_qpdf_in_results() {
+    let v = merge_missing_qpdf_json(&[]);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["results"][0]["error"]["code"], "backend_missing");
+    assert_eq!(v["results"][0]["output"], "out.pdf");
+}
+
+#[test]
+fn merge_dry_run_json_puts_a_missing_qpdf_in_plans() {
+    let v = merge_missing_qpdf_json(&["--dry-run"]);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["plans"][0]["error"]["code"], "backend_missing");
+}
+
+// --- conv split ---------------------------------------------------------
+
+#[test]
+fn split_rejects_a_malformed_range() {
+    conv()
+        .args(["split", "a.pdf", "3-"])
+        .assert()
+        .code(2)
+        .stderr(contains("`3-` is not a page range"));
+}
+
+#[test]
+fn split_takes_one_pdf() {
+    conv()
+        .args(["split", "a.pdf", "b.pdf"])
+        .assert()
+        .code(2)
+        .stderr(contains("split takes one PDF; got 2"));
+}
+
+#[test]
+fn split_json_reports_a_missing_qpdf() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.pdf"), b"%PDF").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let out = cmd
+        .current_dir(dir.path())
+        .args(["split", "a.pdf", "--json"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["results"][0]["error"]["code"], "backend_missing");
+    assert_eq!(v["results"][0]["input"], "a.pdf");
+}
+
+// --- end to end with a real qpdf ------------------------------------------
+
+fn sample_pdf() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/sample.pdf")
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn merge_end_to_end_prints_the_ok_line_and_json() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.pdf", "b.pdf"] {
+        std::fs::copy(sample_pdf(), dir.path().join(name)).unwrap();
+    }
+    conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.pdf", "b.pdf", "out.pdf"])
+        .assert()
+        .success()
+        .stdout(contains("OK out.pdf - 6 pages - ").and(contains(
+            "note  Bookmarks from b.pdf are not carried over; out.pdf keeps a.pdf's.",
+        )));
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.pdf", "b.pdf", "out.pdf", "-y", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["results"][0]["pages"], 6);
+    assert_eq!(v["results"][0]["inputs"][1], "b.pdf");
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn split_end_to_end_creates_the_outdir_and_warns_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("sample.pdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["split", "sample.pdf", "2", "-o", "pages"])
+        .assert()
+        .success()
+        .stdout(contains("OK sample-2.pdf - 1 page - "))
+        .stderr(contains(
+            "warning  Pages 1 and 3 are not in any range, so they were left out.",
+        ));
+    assert!(dir.path().join("pages/sample-2.pdf").is_file());
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn split_refused_range_does_not_create_the_outdir() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("sample.pdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["split", "sample.pdf", "7", "-o", "pages"])
+        .assert()
+        .code(2)
+        .stderr(contains("goes past the end"));
+    assert!(!dir.path().join("pages").exists());
 }

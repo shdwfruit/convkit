@@ -149,7 +149,7 @@ static SCRATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 ///
 /// The LibreOffice profile does *not* live here — see `make_lo_profile_dir`
 /// for why it deliberately lives outside both `scratch` and `dest_dir`.
-fn make_scratch_dir(dest_dir: &Path) -> Result<PathBuf> {
+pub(crate) fn make_scratch_dir(dest_dir: &Path) -> Result<PathBuf> {
     if !dest_dir.is_dir() {
         return Err(ConvError::new(
             ErrorCode::ConversionFailed,
@@ -195,13 +195,13 @@ fn make_scratch_dir(dest_dir: &Path) -> Result<PathBuf> {
 /// This is what makes cleanup cover every return path — backend resolution
 /// failure, spawn failure, a rename failure, even a panic — without needing
 /// an explicit `cleanup()` call at each one.
-struct ScratchGuard {
+pub(crate) struct ScratchGuard {
     scratch: PathBuf,
     profiles: Vec<PathBuf>,
 }
 
 impl ScratchGuard {
-    fn new(scratch: PathBuf) -> Self {
+    pub(crate) fn new(scratch: PathBuf) -> Self {
         ScratchGuard {
             scratch,
             profiles: Vec::new(),
@@ -324,6 +324,9 @@ fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
                         || line.contains("rejected"))
             }
             Backend::Typst => line.contains("warning:") || line.contains("error:"),
+            // qpdf's reports never become distilled notes: `pdf` writes its
+            // own sentences (spec section 4.3).
+            Backend::Qpdf => false,
         }
     };
 
@@ -353,7 +356,7 @@ fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
 /// kept for `--json` consumers, but a backend that logs megabytes must not
 /// balloon the envelope. The tail is what matters: backends summarise at
 /// the end.
-fn tail_str(s: &str, max: usize) -> &str {
+pub(crate) fn tail_str(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
     }
@@ -1020,6 +1023,7 @@ const KNOWN_BACKENDS: &[Backend] = &[
     Backend::Soffice,
     Backend::Pandoc,
     Backend::Typst,
+    Backend::Qpdf,
 ];
 
 /// Substitutes the real, resolved absolute path for every
