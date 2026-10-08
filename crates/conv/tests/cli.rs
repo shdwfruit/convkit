@@ -832,7 +832,7 @@ fn update_check_reports_every_managed_backend_as_not_installed_in_an_isolated_en
         .assert()
         .code(0);
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
-    for name in ["ffmpeg", "ffprobe", "pandoc", "typst"] {
+    for name in ["ffmpeg", "ffprobe", "pandoc", "typst", "qpdf"] {
         assert!(stdout.contains(name), "{stdout}");
     }
     assert!(stdout.contains("not installed"), "{stdout}");
