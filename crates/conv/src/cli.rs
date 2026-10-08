@@ -362,6 +362,8 @@ impl Cli {
             // `check` has already refused a range that does not hold
             // together; see main.
             range: self.range().ok().flatten(),
+            // No flag asks for a silent clip; conv trim sets it per clip.
+            mute: false,
         }
     }
 

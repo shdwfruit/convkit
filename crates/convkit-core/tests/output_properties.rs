@@ -3019,6 +3019,30 @@ fn a_cut_mp3_keeps_its_cover_art() {
     );
 }
 
+/// conv trim's video-only clips: no audio track in any video container,
+/// whichever path builds the command (the webm one is the static recipe,
+/// whose audio filter must not trip over the missing audio).
+#[test]
+#[ignore]
+fn a_silent_cut_has_no_audio_track() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 20, &[]);
+    let resolver = Resolver::new();
+    let ffprobe = resolver.resolve(Backend::Ffprobe).unwrap().path;
+    for ext in ["mp4", "mkv", "mov", "webm"] {
+        let out = dir.path().join(format!("silent.{ext}"));
+        let mut t = ranged(Some("7"), Some("10"));
+        t.mute = true;
+        convert_tuned(&src, &out, &t).unwrap_or_else(|e| panic!("{ext}: {e}"));
+        let streams = probe_streams_json(&ffprobe, &out);
+        assert!(
+            streams.iter().all(|s| s["codec_type"] != "audio"),
+            "{ext}: {streams:?}"
+        );
+        assert_eq!(decoded_frames(&out), 90, "{ext}");
+    }
+}
+
 #[test]
 #[ignore]
 fn a_wav_cut_into_itself_keeps_its_bit_depth() {
