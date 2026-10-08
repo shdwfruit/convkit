@@ -2821,6 +2821,25 @@ fn a_cut_with_copied_audio_starts_the_sound_at_the_cut() {
     assert!(held < 3.1, "m4a holds {held} s of audio, edit list aside");
 }
 
+/// A range covering the whole file cuts nothing, so a file already under
+/// `--max-size` is copied as it is, as it would be with no range at all.
+#[test]
+#[ignore]
+fn a_whole_file_range_under_max_size_copies_a_file_that_already_fits() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 20, &[]);
+    let out = dir.path().join("src-0s-30s.mp4");
+    let mut t = ranged(None, Some("30"));
+    t.max_size = Some(convkit_core::size::parse("100mb").unwrap());
+    let o = convert_tuned(&src, &out, &t).unwrap();
+    assert_eq!(o.bytes, std::fs::metadata(&src).unwrap().len());
+    assert!(
+        o.warnings.iter().any(|w| w.contains("nothing was cut")),
+        "{:?}",
+        o.warnings
+    );
+}
+
 #[test]
 #[ignore]
 fn a_cut_from_zero_is_a_stream_copy() {
