@@ -4,4 +4,5 @@
 // the pieces are built and tested on their own.
 #![allow(dead_code)]
 
+pub mod clips;
 pub mod session;
