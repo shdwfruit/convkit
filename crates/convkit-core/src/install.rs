@@ -5,12 +5,15 @@
 //! backend it isn't handed a verified [`manifest::Asset`] for; deciding
 //! *which* asset to use (or refusing when none exists) is the caller's job.
 
+use std::ffi::OsStr;
 use std::io::{Cursor, Read};
+use std::path::Component;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::error::{ConvError, ErrorCode, Result};
+use crate::backend::ManagedLayout;
+use crate::error::{ConvError, ErrorCode, Remediation, Result};
 use crate::manifest::{ArchiveMember, Asset, Packaging};
 use crate::Backend;
 
@@ -337,6 +340,289 @@ fn install_bytes(dest: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// One file a folder install writes, relative to the backend's folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FolderEntry {
+    File { rel: PathBuf, bytes: Vec<u8> },
+    Symlink { rel: PathBuf, target: String },
+}
+
+/// The program's path inside its folder, `bin/<file name>`, taken from the
+/// member's `archive_member` (`qpdf-12.4.2-msvc64/bin/qpdf.exe` gives
+/// `bin/qpdf.exe`).
+fn folder_exe_rel(member: &ArchiveMember) -> String {
+    let file = member.archive_member.rsplit('/').next().unwrap_or("");
+    format!("bin/{file}")
+}
+
+/// A single path component with nothing that could climb out of a
+/// directory: no separators of either kind, and not `.` or `..`.
+fn plain_file_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != ".."
+}
+
+/// Whether `rel`, a `/`-separated path inside the folder, is something the
+/// program needs at run time: the program itself, the DLLs beside it on
+/// Windows, or a shared library directly in `lib/` elsewhere. Headers,
+/// docs, static and import libraries, CMake and pkg-config files, and
+/// upstream's other tools are left out.
+fn keep_in_folder(rel: &str, exe_rel: &str) -> bool {
+    if rel == exe_rel {
+        return true;
+    }
+    let lower = rel.to_ascii_lowercase();
+    if let Some(name) = lower.strip_prefix("bin/") {
+        return plain_file_name(name) && name.ends_with(".dll");
+    }
+    if let Some(name) = lower.strip_prefix("lib/") {
+        return plain_file_name(name)
+            && (name.ends_with(".dylib") || name.ends_with(".so") || name.contains(".so."));
+    }
+    false
+}
+
+/// Whether a symlink at `link` (relative to the folder) pointing at
+/// `target` resolves to something inside the folder. Only relative targets
+/// qualify.
+fn link_stays_inside(link: &Path, target: &str) -> bool {
+    let target = Path::new(target);
+    if target.is_absolute() || target.has_root() {
+        return false;
+    }
+    let mut parts: Vec<&OsStr> = link
+        .parent()
+        .map(|p| p.iter().collect())
+        .unwrap_or_default();
+    for c in target.components() {
+        match c {
+            Component::Normal(n) => parts.push(n),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return false;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    !parts.is_empty()
+}
+
+/// Reads a folder backend's runtime files out of a verified zip: every
+/// entry under the member's root (`qpdf-12.4.2-msvc64/` on Windows, the
+/// archive root elsewhere) that `keep_in_folder` keeps, with paths made
+/// relative to that root. Everything is read before anything is written,
+/// so a bad archive fails without touching the disk.
+fn extract_folder(asset: &Asset, member: &ArchiveMember, bytes: &[u8]) -> Result<Vec<FolderEntry>> {
+    if asset.packaging != Packaging::Zip {
+        return Err(extract_err(
+            asset,
+            member,
+            "a folder install needs a zip archive",
+        ));
+    }
+    let exe_rel = folder_exe_rel(member);
+    let root = member
+        .archive_member
+        .strip_suffix(exe_rel.as_str())
+        .ok_or_else(|| {
+            extract_err(
+                asset,
+                member,
+                format!("{} does not end in {exe_rel}", member.archive_member),
+            )
+        })?;
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| extract_err(asset, member, e))?;
+    let mut entries = Vec::new();
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| extract_err(asset, member, e))?;
+        if file.is_dir() {
+            continue;
+        }
+        let name = file.name().to_string();
+        let Some(rel) = name.strip_prefix(root) else {
+            continue;
+        };
+        if !keep_in_folder(rel, &exe_rel) {
+            continue;
+        }
+        let rel_path = PathBuf::from(rel);
+        let data = read_capped(&mut file).map_err(|e| extract_err(asset, member, e))?;
+        if file.is_symlink() {
+            let target = String::from_utf8(data).map_err(|e| extract_err(asset, member, e))?;
+            if !link_stays_inside(&rel_path, &target) {
+                return Err(extract_err(
+                    asset,
+                    member,
+                    format!("{rel} links outside its folder, to {target}"),
+                ));
+            }
+            entries.push(FolderEntry::Symlink {
+                rel: rel_path,
+                target,
+            });
+        } else {
+            entries.push(FolderEntry::File {
+                rel: rel_path,
+                bytes: data,
+            });
+        }
+    }
+    let has_program = entries
+        .iter()
+        .any(|e| matches!(e, FolderEntry::File { rel, .. } if rel == Path::new(&exe_rel)));
+    if !has_program {
+        return Err(extract_err(
+            asset,
+            member,
+            format!("{} not found in archive", member.archive_member),
+        ));
+    }
+    Ok(entries)
+}
+
+#[cfg(unix)]
+fn make_symlink(target: &str, link: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(target, link).map_err(|e| io_err(link, e))
+}
+
+#[cfg(not(unix))]
+fn make_symlink(_target: &str, link: &Path) -> Result<()> {
+    Err(ConvError::new(
+        ErrorCode::ConversionFailed,
+        format!(
+            "{}: the archive has a symlink, which installs on this platform do not support",
+            link.display()
+        ),
+    ))
+}
+
+/// Writes `entries` under `dir`. The program and any `.dylib` go through
+/// `finalize` (mode 0755, and an ad-hoc signature on macOS arm64, where an
+/// unsigned library is refused at load time just as an unsigned program is
+/// killed at launch).
+fn write_folder(dir: &Path, exe_rel: &str, entries: &[FolderEntry]) -> Result<()> {
+    for entry in entries {
+        let (rel, path) = match entry {
+            FolderEntry::File { rel, .. } | FolderEntry::Symlink { rel, .. } => {
+                (rel, dir.join(rel))
+            }
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+        }
+        match entry {
+            FolderEntry::File { bytes, .. } => {
+                std::fs::write(&path, bytes).map_err(|e| io_err(&path, e))?;
+                let is_dylib = rel.extension().is_some_and(|e| e == "dylib");
+                if rel == Path::new(exe_rel) || is_dylib {
+                    finalize(&path)?;
+                }
+            }
+            FolderEntry::Symlink { target, .. } => make_symlink(target, &path)?,
+        }
+    }
+    Ok(())
+}
+
+fn remove_any(path: &Path) {
+    if path.is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Moves the finished temp folder to `folder`. An existing folder is moved
+/// aside first and put back if the second move fails, so a failed swap
+/// leaves the previous install working.
+fn swap_into_place(tmp: &Path, folder: &Path) -> Result<()> {
+    if folder.symlink_metadata().is_err() {
+        return std::fs::rename(tmp, folder).map_err(|e| {
+            remove_any(tmp);
+            io_err(folder, e)
+        });
+    }
+    let name = folder.file_name().unwrap_or_default().to_string_lossy();
+    let old = folder.with_file_name(format!(".{name}.old-{}", std::process::id()));
+    remove_any(&old);
+    if let Err(e) = std::fs::rename(folder, &old) {
+        remove_any(tmp);
+        return Err(io_err(folder, e));
+    }
+    if let Err(e) = std::fs::rename(tmp, folder) {
+        let _ = std::fs::rename(&old, folder);
+        remove_any(tmp);
+        return Err(io_err(folder, e));
+    }
+    remove_any(&old);
+    Ok(())
+}
+
+/// Installs a folder backend. `dest_exe` is `Resolver::managed_path`
+/// (`<managed dir>/<exe>/bin/<exe>`), so the folder is two levels up.
+/// Writes into `.<exe>.part-<pid>` beside the folder, runs `check` on the
+/// program there, and only then swaps it in. Any failure removes the temp
+/// folder and leaves an existing install untouched.
+fn install_folder(
+    dest_exe: &Path,
+    exe_rel: &str,
+    entries: &[FolderEntry],
+    check: &dyn Fn(&Path) -> Result<()>,
+) -> Result<()> {
+    let folder = dest_exe.parent().and_then(Path::parent).ok_or_else(|| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!("no folder above {}", dest_exe.display()),
+        )
+    })?;
+    let parent = folder
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+    let name = folder.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = parent.join(format!(".{name}.part-{}", std::process::id()));
+    remove_any(&tmp);
+    let prepared = write_folder(&tmp, exe_rel, entries).and_then(|()| check(&tmp.join(exe_rel)));
+    if let Err(e) = prepared {
+        remove_any(&tmp);
+        return Err(e);
+    }
+    swap_into_place(&tmp, folder)
+}
+
+/// The run check for a freshly unpacked folder backend: its `--version`
+/// must answer. On Linux the usual reason it does not is a glibc older than
+/// the one upstream built against; qpdf 12.4.2's Linux builds need 2.34.
+fn check_runs(backend: Backend, exe: &Path) -> Result<()> {
+    if crate::resolve::Resolver::probe_version(backend, exe).is_some() {
+        return Ok(());
+    }
+    let mut message = format!(
+        "the downloaded {} did not run on this system",
+        backend.exe_name()
+    );
+    if cfg!(target_os = "linux") && backend == Backend::Qpdf {
+        message.push_str(
+            "; the prebuilt qpdf needs glibc 2.34 or newer \
+             (Ubuntu 22.04, Debian 12, Fedora 35, RHEL 9)",
+        );
+    }
+    Err(ConvError {
+        code: ErrorCode::ConversionFailed,
+        message,
+        backend: Some(backend),
+        remediation: Some(Remediation {
+            managed: None,
+            manual: Some(crate::error::manual_hint_for(backend)),
+        }),
+    })
+}
+
 /// Downloads `asset`, verifies its checksum exactly once, then extracts and
 /// installs *every* member `asset.members` names — not just the one whose
 /// backend the caller originally asked to install. `dest_for` maps each
@@ -358,6 +644,8 @@ fn install_bytes(dest: &Path, bytes: &[u8]) -> Result<()> {
 /// `install_bytes`'s atomic temp-name/finalize/rename sequence individually
 /// — see its docs for the cleanup guarantee that provides per file.
 ///
+/// A `ManagedLayout::Folder` member installs as a folder; see `install_folder`.
+///
 /// Returns `(backend, path)` for every member actually installed, on
 /// success.
 pub fn fetch_and_install(
@@ -366,20 +654,48 @@ pub fn fetch_and_install(
 ) -> Result<Vec<(Backend, PathBuf)>> {
     let bytes = download(asset.url)?;
     verify(&bytes, asset.sha256)?;
+    install_verified(asset, &bytes, dest_for, &check_runs)
+}
 
+/// Everything `fetch_and_install` does once the download is verified,
+/// split out so tests can drive it with in-memory archives and a stand-in
+/// for the run check. Every member is extracted before any is written.
+fn install_verified(
+    asset: &Asset,
+    bytes: &[u8],
+    dest_for: impl Fn(Backend) -> PathBuf,
+    check: &dyn Fn(Backend, &Path) -> Result<()>,
+) -> Result<Vec<(Backend, PathBuf)>> {
+    enum Extracted {
+        File(Vec<u8>),
+        Folder(Vec<FolderEntry>),
+    }
     let mut extracted = Vec::with_capacity(asset.members.len());
     for member in asset.members {
-        let exe_bytes = extract(asset, member, &bytes)?;
-        extracted.push((member.backend, exe_bytes));
+        let e = match member.backend.managed_layout() {
+            ManagedLayout::File => Extracted::File(extract(asset, member, bytes)?),
+            ManagedLayout::Folder => Extracted::Folder(extract_folder(asset, member, bytes)?),
+        };
+        extracted.push((member, e));
     }
 
     let mut installed = Vec::with_capacity(extracted.len());
-    for (backend, exe_bytes) in extracted {
-        let dest = dest_for(backend);
-        let dest_dir = dest.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(dest_dir).map_err(|e| io_err(dest_dir, e))?;
-        install_bytes(&dest, &exe_bytes)?;
-        installed.push((backend, dest));
+    for (member, e) in extracted {
+        let dest = dest_for(member.backend);
+        match e {
+            Extracted::File(exe_bytes) => {
+                let dest_dir = dest.parent().unwrap_or_else(|| Path::new("."));
+                std::fs::create_dir_all(dest_dir).map_err(|e| io_err(dest_dir, e))?;
+                install_bytes(&dest, &exe_bytes)?;
+            }
+            Extracted::Folder(entries) => {
+                let backend = member.backend;
+                install_folder(&dest, &folder_exe_rel(member), &entries, &|exe| {
+                    check(backend, exe)
+                })?;
+            }
+        }
+        installed.push((member.backend, dest));
     }
     Ok(installed)
 }
@@ -787,5 +1103,281 @@ mod tests {
             !dest.exists(),
             "dest must never be created when the write fails"
         );
+    }
+
+    // --- Folder installs ---------------------------------------------------
+
+    enum Item {
+        File(&'static [u8]),
+        Link(&'static str),
+        Dir,
+    }
+
+    fn make_folder_zip(items: &[(&str, Item)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let options = zip::write::SimpleFileOptions::default();
+            for (name, item) in items {
+                match item {
+                    Item::File(bytes) => {
+                        w.start_file(*name, options).unwrap();
+                        std::io::Write::write_all(&mut w, bytes).unwrap();
+                    }
+                    Item::Link(target) => w.add_symlink(*name, *target, options).unwrap(),
+                    Item::Dir => w.add_directory(*name, options).unwrap(),
+                }
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    fn folder_asset(archive_member: &'static str) -> Asset {
+        Asset {
+            os: "linux",
+            arch: "x64",
+            url: "https://example.invalid/qpdf.zip",
+            sha256: "0",
+            packaging: Packaging::Zip,
+            members: leaked(vec![one_member(crate::Backend::Qpdf, archive_member)]),
+            version: "0",
+        }
+    }
+
+    fn program_dest(managed: &Path) -> PathBuf {
+        let exe = if cfg!(windows) { "qpdf.exe" } else { "qpdf" };
+        managed.join("qpdf").join("bin").join(exe)
+    }
+
+    fn no_check(_: crate::Backend, _: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn entries_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn keep_in_folder_takes_only_runtime_files() {
+        for (rel, kept) in [
+            ("bin/qpdf", true),
+            ("bin/qpdf30.dll", true),
+            ("bin/VCRUNTIME140.DLL", true),
+            ("lib/libqpdf.30.4.2.dylib", true),
+            ("lib/libqpdf.so.30", true),
+            ("lib/libffi.so.8", true),
+            ("lib/libx.so", true),
+            ("bin/fix-qdf", false),
+            ("bin/zlib-flate.exe", false),
+            ("lib/libqpdf.a", false),
+            ("lib/qpdf.lib", false),
+            ("lib/pkgconfig/libqpdf.pc", false),
+            ("lib/cmake/qpdf/qpdfConfig.cmake", false),
+            ("include/qpdf/QPDF.hh", false),
+            ("share/doc/qpdf/README.md", false),
+            ("bin/..\\..\\evil.dll", false),
+        ] {
+            assert_eq!(keep_in_folder(rel, "bin/qpdf"), kept, "{rel}");
+        }
+    }
+
+    #[test]
+    fn link_targets_must_stay_inside_the_folder() {
+        for (link, target, ok) in [
+            ("lib/libqpdf.so.30", "libqpdf.so.30.4.2", true),
+            ("lib/a.so.1", "./a.so.1.0", true),
+            ("lib/a.so.1", "../lib/a.so.1.0", true),
+            ("lib/a.so.1", "../../outside", false),
+            ("lib/a.so.1", "/etc/passwd", false),
+            ("lib/a.so.1", "..", false),
+        ] {
+            assert_eq!(
+                link_stays_inside(Path::new(link), target),
+                ok,
+                "{link} -> {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_install_keeps_the_program_and_its_libraries_and_nothing_else() {
+        let zip = make_folder_zip(&[
+            ("bin/", Item::Dir),
+            ("bin/qpdf", Item::File(b"program")),
+            ("bin/fix-qdf", Item::File(b"other tool")),
+            ("lib/libqpdf.so.30.4.2", Item::File(b"library")),
+            ("lib/libqpdf.a", Item::File(b"static")),
+            ("lib/pkgconfig/libqpdf.pc", Item::File(b"pc")),
+            ("include/qpdf/QPDF.hh", Item::File(b"header")),
+        ]);
+        let managed = tempfile::tempdir().unwrap();
+        let dest = program_dest(managed.path());
+
+        let installed =
+            install_verified(&folder_asset("bin/qpdf"), &zip, |_| dest.clone(), &no_check).unwrap();
+
+        assert_eq!(installed, vec![(crate::Backend::Qpdf, dest.clone())]);
+        let folder = managed.path().join("qpdf");
+        assert_eq!(std::fs::read(folder.join("bin/qpdf")).unwrap(), b"program");
+        assert_eq!(
+            std::fs::read(folder.join("lib/libqpdf.so.30.4.2")).unwrap(),
+            b"library"
+        );
+        for skipped in ["bin/fix-qdf", "lib/libqpdf.a", "lib/pkgconfig", "include"] {
+            assert!(
+                !folder.join(skipped).exists(),
+                "{skipped} must not be installed"
+            );
+        }
+        assert_eq!(
+            entries_in(managed.path()),
+            vec!["qpdf"],
+            "no temp folder may remain"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_install_recreates_library_symlinks() {
+        let zip = make_folder_zip(&[
+            ("bin/qpdf", Item::File(b"program")),
+            ("lib/libqpdf.so.30.4.2", Item::File(b"library")),
+            ("lib/libqpdf.so.30", Item::Link("libqpdf.so.30.4.2")),
+        ]);
+        let managed = tempfile::tempdir().unwrap();
+        let dest = program_dest(managed.path());
+
+        install_verified(&folder_asset("bin/qpdf"), &zip, |_| dest.clone(), &no_check).unwrap();
+
+        let link = managed.path().join("qpdf/lib/libqpdf.so.30");
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("libqpdf.so.30.4.2")
+        );
+        assert_eq!(std::fs::read(&link).unwrap(), b"library");
+    }
+
+    #[test]
+    fn a_symlink_pointing_outside_the_folder_is_refused() {
+        let zip = make_folder_zip(&[
+            ("bin/qpdf", Item::File(b"program")),
+            ("lib/libevil.so.1", Item::Link("../../../outside")),
+        ]);
+        let managed = tempfile::tempdir().unwrap();
+        let dest = program_dest(managed.path());
+
+        let err = install_verified(&folder_asset("bin/qpdf"), &zip, |_| dest.clone(), &no_check)
+            .unwrap_err();
+
+        assert!(
+            err.message.contains("outside its folder"),
+            "{}",
+            err.message
+        );
+        assert!(
+            entries_in(managed.path()).is_empty(),
+            "nothing may be written"
+        );
+    }
+
+    #[test]
+    fn a_folder_install_strips_the_archive_root_and_keeps_dlls_beside_the_program() {
+        let zip = make_folder_zip(&[
+            ("qpdf-12.4.2-msvc64/bin/qpdf.exe", Item::File(b"program")),
+            ("qpdf-12.4.2-msvc64/bin/qpdf30.dll", Item::File(b"library")),
+            (
+                "qpdf-12.4.2-msvc64/bin/zlib-flate.exe",
+                Item::File(b"other tool"),
+            ),
+            (
+                "qpdf-12.4.2-msvc64/lib/qpdf_static.lib",
+                Item::File(b"static"),
+            ),
+        ]);
+        let managed = tempfile::tempdir().unwrap();
+        let dest = program_dest(managed.path());
+
+        install_verified(
+            &folder_asset("qpdf-12.4.2-msvc64/bin/qpdf.exe"),
+            &zip,
+            |_| dest.clone(),
+            &no_check,
+        )
+        .unwrap();
+
+        let folder = managed.path().join("qpdf");
+        assert_eq!(
+            std::fs::read(folder.join("bin/qpdf.exe")).unwrap(),
+            b"program"
+        );
+        assert_eq!(
+            std::fs::read(folder.join("bin/qpdf30.dll")).unwrap(),
+            b"library"
+        );
+        assert!(!folder.join("bin/zlib-flate.exe").exists());
+        assert!(!folder.join("lib").exists());
+    }
+
+    #[test]
+    fn a_folder_archive_without_the_program_installs_nothing() {
+        let zip = make_folder_zip(&[("lib/libqpdf.so.30.4.2", Item::File(b"library"))]);
+        let managed = tempfile::tempdir().unwrap();
+        let dest = program_dest(managed.path());
+
+        let err = install_verified(&folder_asset("bin/qpdf"), &zip, |_| dest.clone(), &no_check)
+            .unwrap_err();
+
+        assert!(err.message.contains("bin/qpdf"), "{}", err.message);
+        assert!(entries_in(managed.path()).is_empty());
+    }
+
+    #[test]
+    fn a_failing_run_check_leaves_the_installed_folder_as_it_was() {
+        let zip = make_folder_zip(&[("bin/qpdf", Item::File(b"new program"))]);
+        let managed = tempfile::tempdir().unwrap();
+        let folder = managed.path().join("qpdf");
+        std::fs::create_dir_all(folder.join("bin")).unwrap();
+        std::fs::write(folder.join("bin/qpdf"), b"old program").unwrap();
+        let dest = program_dest(managed.path());
+        let failing = |_: crate::Backend, _: &Path| -> Result<()> {
+            Err(ConvError::new(ErrorCode::ConversionFailed, "did not run"))
+        };
+
+        let err = install_verified(&folder_asset("bin/qpdf"), &zip, |_| dest.clone(), &failing)
+            .unwrap_err();
+
+        assert_eq!(err.message, "did not run");
+        assert_eq!(
+            std::fs::read(folder.join("bin/qpdf")).unwrap(),
+            b"old program"
+        );
+        assert_eq!(entries_in(managed.path()), vec!["qpdf"]);
+    }
+
+    #[test]
+    fn a_folder_install_replaces_the_previous_folder_entirely() {
+        let zip = make_folder_zip(&[("bin/qpdf", Item::File(b"new program"))]);
+        let managed = tempfile::tempdir().unwrap();
+        let folder = managed.path().join("qpdf");
+        std::fs::create_dir_all(folder.join("bin")).unwrap();
+        std::fs::write(folder.join("bin/qpdf"), b"old program").unwrap();
+        std::fs::write(folder.join("stale.txt"), b"from an older version").unwrap();
+        let dest = program_dest(managed.path());
+
+        install_verified(&folder_asset("bin/qpdf"), &zip, |_| dest.clone(), &no_check).unwrap();
+
+        assert_eq!(
+            std::fs::read(folder.join("bin/qpdf")).unwrap(),
+            b"new program"
+        );
+        assert!(!folder.join("stale.txt").exists());
+        assert_eq!(entries_in(managed.path()), vec!["qpdf"]);
     }
 }
