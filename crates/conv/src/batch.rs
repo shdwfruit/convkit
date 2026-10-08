@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use convkit_core::{exec, ConvError, ErrorCode, Format, Outcome};
+use convkit_core::{exec, ConvError, ErrorCode, Format, Outcome, Tuning};
 
 use crate::cli::Cli;
 use crate::input::Job;
@@ -121,6 +121,18 @@ pub fn exit_code(results: &[JobResult]) -> i32 {
 /// only production source of a multi-job batch). A new multi-job source
 /// must run the same check.
 pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i32, Duration) {
+    let tuning = cli.tuning();
+    let jobs = jobs.into_iter().map(|job| (job, tuning.clone())).collect();
+    run_each(jobs, cli, allow_extreme)
+}
+
+/// `run`, with a tuning per job instead of the command line's: `conv trim`
+/// cuts every clip with its own range.
+pub fn run_each(
+    jobs: Vec<(Job, Tuning)>,
+    cli: &Cli,
+    allow_extreme: bool,
+) -> (Vec<JobResult>, i32, Duration) {
     let batch_start = Instant::now();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(cli.jobs.unwrap_or_else(num_cpus_or_one))
@@ -137,7 +149,7 @@ pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i
 
     let results: Vec<JobResult> = pool.install(|| {
         jobs.into_par_iter()
-            .map(|job| {
+            .map(|(job, tuning)| {
                 let job_start = Instant::now();
                 // I5: `exec::run` now enforces this same refusal itself
                 // (`Request::overwrite`), so this is a fast path — skipping
@@ -155,7 +167,7 @@ pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i
                         inputs: job.inputs.clone(),
                         output: job.output.clone(),
                         overwrite: cli.overwrite,
-                        tuning: cli.tuning(),
+                        tuning,
                         allow_extreme,
                     };
                     // I8: the `Event` channel used to be threaded all the
@@ -424,6 +436,39 @@ mod tests {
             retry_label(3, 10_150_000, 10_000_000),
             "attempt 3 of 3, over by 1.5%"
         );
+    }
+
+    /// conv trim runs every clip with its own range: each job's tuning is
+    /// its own. A tuning one job's pair refuses fails that job only.
+    #[test]
+    fn run_each_hands_every_job_its_own_tuning() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = test_cli(magick_stub(dir.path()));
+        let input = dir.path().join("a.png");
+        std::fs::write(&input, b"x").unwrap();
+        let job = |to: Format, name: &str| Job {
+            inputs: vec![input.clone()],
+            output: dir.path().join(name),
+            from: Format::Png,
+            to,
+        };
+        let quality = Tuning {
+            quality: Some(70),
+            ..Tuning::default()
+        };
+        let (results, _, _) = run_each(
+            vec![
+                (job(Format::Jpg, "a.jpg"), quality.clone()),
+                (job(Format::Webp, "a.webp"), Tuning::default()),
+                (job(Format::Tiff, "a.tiff"), quality),
+            ],
+            &cli,
+            false,
+        );
+        assert!(results[0].result.is_ok(), "{:?}", results[0].result);
+        assert!(results[1].result.is_ok(), "{:?}", results[1].result);
+        let e = results[2].result.as_ref().unwrap_err();
+        assert!(e.message.contains("lossless"), "{}", e.message);
     }
 
     /// Part 2's own wiring: a real (stubbed-backend) successful job must
