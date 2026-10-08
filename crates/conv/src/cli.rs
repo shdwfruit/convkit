@@ -454,7 +454,7 @@ mod tests {
     /// own responsibility, tested thoroughly (including the cross-platform
     /// path reasoning) in `convkit-core`. What's left to prove here is
     /// narrower but still real: that `Cli::resolver()` maps every one of
-    /// its six flag fields onto the matching `BackendOverrides` field,
+    /// its seven flag fields onto the matching `BackendOverrides` field,
     /// rather than, say, `magick_path` ending up on `Backend::Pandoc`.
     #[test]
     fn resolver_maps_every_flag_to_its_own_backend_override() {

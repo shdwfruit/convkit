@@ -2796,6 +2796,31 @@ fn merge_without_qpdf_reports_it_missing() {
     assert!(!dir.path().join("out.pdf").exists());
 }
 
+#[test]
+fn merge_checks_inputs_before_looking_for_qpdf() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("b.pdf"), b"%PDF").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["merge", "missing.pdf", "b.pdf", "out.pdf", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(2)
+        .stderr(contains("input not found").and(contains("qpdf").not()));
+}
+
+#[test]
+fn split_checks_the_input_before_looking_for_qpdf() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["split", "missing.pdf", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(2)
+        .stderr(contains("input not found").and(contains("qpdf").not()));
+}
+
 fn merge_missing_qpdf_json(extra: &[&str]) -> serde_json::Value {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.pdf"), b"%PDF").unwrap();
