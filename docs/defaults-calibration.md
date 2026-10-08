@@ -1158,3 +1158,38 @@ machine's memory. The line is drawn on length because that is what a person
 knows about their clip; at 60 s, a portrait source would already pass 2.7
 GiB with no note. It is set at the defaults: `--fps 30` doubles the buffer
 and `--resize` scales it with the frame's area.
+
+## CSV import and export (`table.rs`, `CSV_EXPORT`)
+
+Measured 2026-10-08 with LibreOffice 26.8.1, importing this CSV with
+`soffice --infilter=... --convert-to xlsx` and reading the cells back out
+of the workbook's XML:
+
+```
+zip,id,when,ratio,note,formula,card,sci
+02134,007,2024-01-15,1/2,Café,=1+1,4111111111111111,1E5
+```
+
+| Cell | Plain import (`44,34,76,1`) | conv's options |
+|---|---|---|
+| `02134`, `007` | numbers 2134, 7 | text, as written |
+| `2024-01-15` | a date | a date |
+| `1/2` | a date, 2 January | text |
+| `=1+1` | run, giving 2 | text |
+| `4111111111111111` | a number | text, every digit |
+| `1E5` | the number 100000 | text |
+
+The plain import's losses come from four defaults: special numbers are
+detected (`1/2` as a date), scientific notation is detected (`1E5`), a
+cell starting with `=` is imported as a formula when token 13 is left out,
+and every column is Standard. conv's options turn the first three off and
+set Text on the columns the CSV itself shows need it: a leading zero, more
+than 15 digits, or a leading `+`, anywhere in the column. An ISO 8601 date
+is still read as a date with special numbers off. Token 3 is 76 for UTF-8:
+the help page's 75 is UTF-7, which garbled the same file.
+
+Export writes values, not the text cells display: `1234.5` formatted
+`#,##0.00` comes out `1234.5`, where "as shown" gives `"1,234.50"`.
+Dates and percentages keep their format either way. Token 12 `0` writes
+the first sheet in tab order even when the workbook was saved with another
+sheet active, as `<name>.csv`.

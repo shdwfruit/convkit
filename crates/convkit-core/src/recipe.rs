@@ -163,6 +163,10 @@ pub enum Arg {
     /// `stem-1.jpg`, … and the conversion fails with an empty "produced no
     /// output". Harmless on single-frame sources.
     InputFirstFrame,
+    /// `--infilter=` with the CSV import options built from what was read
+    /// of the CSV, or for the default shape (comma, UTF-8, no text
+    /// columns) when it was not read. See `table::import_filter`.
+    CsvImport,
     /// The directory containing the first input path (`.` for a bare
     /// filename). For backends like `pandoc` that resolve a document's
     /// relative resources (images) against a search path rather than
@@ -326,6 +330,12 @@ impl Step {
                     path_args.push(argv.len());
                     argv.push(format!("{}[0]", inputs[0].to_string_lossy()));
                 }
+                Arg::CsvImport => argv.push(format!(
+                    "--infilter={}",
+                    video.csv_import.clone().unwrap_or_else(|| {
+                        crate::table::import_filter(&crate::table::CsvShape::default())
+                    })
+                )),
                 Arg::InputDir => {
                     let dir = inputs[0].parent().filter(|p| !p.as_os_str().is_empty());
                     path_args.push(argv.len());

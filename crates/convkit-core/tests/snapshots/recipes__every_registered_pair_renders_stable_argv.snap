@@ -23,6 +23,8 @@ bmp -> pdf: magick in.bmp -auto-orient -compress jpeg -quality 92 out.pdf
 bmp -> png: magick in.bmp[0] -auto-orient out.png
 bmp -> tiff: magick in.bmp -auto-orient out.tiff
 bmp -> webp: magick in.bmp -auto-orient -quality 92 out.webp
+csv -> ods: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=Text - txt - csv (StarCalc):44,34,76,1,,1033,false,false,false,false,false,,false,,false --convert-to ods:calc8 --outdir . in.csv
+csv -> xlsx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=Text - txt - csv (StarCalc):44,34,76,1,,1033,false,false,false,false,false,,false,,false --convert-to xlsx:Calc MS Excel 2007 XML --outdir . in.csv
 docx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.docx
 flac -> m4a: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
 flac -> mp3: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
@@ -82,6 +84,7 @@ mp4 -> mov: ffmpeg -i in.mp4 -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 
 mp4 -> mp3: ffmpeg -i in.mp4 -vn -c:a libmp3lame -q:a 2 -y out.mp3
 mp4 -> wav: ffmpeg -i in.mp4 -vn -c:a pcm_s16le -y out.wav
 mp4 -> webm: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+ods -> csv: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to csv:Text - txt - csv (StarCalc):44,34,76,1,,1033,false,true,false,false,false,0 --outdir . in.ods
 ods -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.ods
 odt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.odt
 pdf -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=writer_pdf_import --convert-to docx:MS Word 2007 XML --outdir . in.pdf
@@ -117,4 +120,5 @@ webp -> jpg: magick in.webp[0] -auto-orient -background white -alpha remove -alp
 webp -> pdf: magick in.webp -auto-orient -compress jpeg -quality 92 out.pdf
 webp -> png: magick in.webp[0] -auto-orient out.png
 webp -> tiff: magick in.webp -auto-orient out.tiff
+xlsx -> csv: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to csv:Text - txt - csv (StarCalc):44,34,76,1,,1033,false,true,false,false,false,0 --outdir . in.xlsx
 xlsx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.xlsx

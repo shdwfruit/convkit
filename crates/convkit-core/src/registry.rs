@@ -957,6 +957,23 @@ macro_rules! soffice_step {
             intermediate_ext: None,
         }
     };
+    ($filter:expr, csv_import) => {
+        Step {
+            backend: Backend::Soffice,
+            args: &[
+                Arg::Lit("--headless"),
+                Arg::Lit("--norestore"),
+                Arg::CsvImport,
+                Arg::Lit("--convert-to"),
+                Arg::Lit($filter),
+                Arg::Lit("--outdir"),
+                Arg::OutDir,
+                Arg::Input,
+            ],
+            output: OutputMode::OutDir,
+            intermediate_ext: None,
+        }
+    };
     ($filter:expr, infilter: $infilter:expr) => {
         Step {
             backend: Backend::Soffice,
@@ -997,6 +1014,76 @@ const PDF_TO_DOCX: Recipe = Recipe {
         "PDF stores positioned glyphs, not paragraphs, so the result is a set of \
          text boxes rather than a flowing document. Expect to reflow it by hand.",
     ],
+};
+
+/// The notes on a CSV going into a workbook. Each says what conv did after
+/// reading the CSV, so `notes_for` keeps it only when the read says it
+/// happened; a CSV that was not read is imported with the default shape,
+/// and none of them is true of it. The formula note is the exception: an
+/// `=` cell is kept as text either way.
+const CSV_TEXT_NOTE: &str =
+    "Columns with leading zeros or long digit strings, such as zip codes and IDs, are kept as text.";
+const CSV_ENCODING_NOTE: &str =
+    "A CSV that is not UTF-8 is read as Windows-1252, the Western European encoding Excel writes.";
+const CSV_DECIMAL_NOTE: &str =
+    "In a semicolon-separated CSV, decimal commas are read as decimals: 1,5 is one and a half.";
+const CSV_FORMULA_NOTE: &str =
+    "Cells starting with = are kept as text; formulas in a CSV are not run.";
+
+/// csv -> xlsx and csv -> ods, imported with the options `table` builds
+/// from the CSV itself (`Arg::CsvImport`). The export filters are named as
+/// LibreOffice's own Save As names them.
+const CSV_TO_XLSX: Recipe = Recipe {
+    steps: &[soffice_step!("xlsx:Calc MS Excel 2007 XML", csv_import)],
+    warnings: &[
+        CSV_TEXT_NOTE,
+        CSV_ENCODING_NOTE,
+        CSV_DECIMAL_NOTE,
+        CSV_FORMULA_NOTE,
+    ],
+};
+
+const CSV_TO_ODS: Recipe = Recipe {
+    steps: &[soffice_step!("ods:calc8", csv_import)],
+    warnings: CSV_TO_XLSX.warnings,
+};
+
+/// The notes on a workbook going to CSV, kept by `notes_for` only when the
+/// workbook has more than one sheet, or a formula in the one written.
+const SHEETS_NOTE: &str = "Only the first sheet is written; a CSV holds one sheet.";
+const FORMULAS_NOTE: &str = "Formulas are written as their values; a CSV holds no formulas.";
+
+/// The CSV export options, token by token (the import side is
+/// `table::import_filter`, which lists the same positions):
+///
+/// 1. 44: a comma between fields.
+/// 2. 34: a double quote around a field that needs one.
+/// 3. 76: UTF-8, with no byte-order mark (token 14, left out, is false).
+/// 4. 1: import only, but the tokens are positional.
+/// 5. (empty): column formats, import only.
+/// 6. 1033: English (US), so a decimal is written with a point whatever
+///    the machine's locale.
+/// 7. false: quote only a field that needs it (a comma, a quote or a line
+///    break in it), as Excel does, rather than every text cell.
+/// 8. true: numbers are written as numbers; false would quote them.
+/// 9. false: values as stored, not as shown. As shown writes the text a
+///    cell displays: 1234.5 formatted `#,##0.00` becomes "1,234.50", a
+///    comma inside a number, and any digits a format hides are lost.
+///    Dates and percentages keep their format either way (01/15/2024,
+///    25%).
+/// 10. false: formulas are written as their values.
+/// 11. false: import only.
+/// 12. 0: the first sheet in tab order, even when another was active when
+///     the workbook was saved, written as `<name>.csv`. A sheet number
+///     names the file `<name>-<sheet>.csv` instead, and -1 writes every
+///     sheet to its own file; both need LibreOffice 7.2 or later.
+const CSV_EXPORT: &str =
+    "csv:Text - txt - csv (StarCalc):44,34,76,1,,1033,false,true,false,false,false,0";
+
+/// xlsx -> csv and ods -> csv.
+const WORKBOOK_TO_CSV: Recipe = Recipe {
+    steps: &[soffice_step!(CSV_EXPORT)],
+    warnings: &[SHEETS_NOTE, FORMULAS_NOTE],
 };
 
 /// Mirrors `soffice_step!`: the plain pandoc invocation shared by
@@ -1105,6 +1192,10 @@ fn insert_document_family(t: &mut Table) {
     for &from in OFFICE_SOURCES {
         t.insert((from, Format::Pdf), OFFICE_TO_PDF);
     }
+    t.insert((Format::Csv, Format::Xlsx), CSV_TO_XLSX);
+    t.insert((Format::Csv, Format::Ods), CSV_TO_ODS);
+    t.insert((Format::Xlsx, Format::Csv), WORKBOOK_TO_CSV);
+    t.insert((Format::Ods, Format::Csv), WORKBOOK_TO_CSV);
     t.insert((Format::Pdf, Format::Docx), PDF_TO_DOCX);
     t.insert((Format::Md, Format::Docx), MD_TO_DOCX);
     t.insert((Format::Md, Format::Html), MD_TO_HTML);
@@ -1266,22 +1357,98 @@ pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> V
     let long = probe
         .and_then(|p| p.duration_ms)
         .is_none_or(|ms| ms > GIF_BUFFER_NOTE_AFTER_MS);
+    let table = probe.and_then(|p| p.table.as_ref());
     recipe
         .warnings
         .iter()
-        .filter_map(|&note| match note {
-            FLATTEN_FIRST_FRAME_NOTE => match (alpha, frames) {
-                (true, true) => Some(note),
-                (true, false) => Some(FLATTEN_NOTE),
-                (false, true) => Some(FIRST_FRAME_NOTE),
-                (false, false) => None,
-            },
-            FIRST_FRAME_NOTE => frames.then_some(note),
-            GIF_BUFFER_NOTE => long.then_some(note),
-            _ => Some(note),
+        .filter_map(|&note| {
+            let kept = match note {
+                FLATTEN_FIRST_FRAME_NOTE => match (alpha, frames) {
+                    (true, true) => Some(note),
+                    (true, false) => Some(FLATTEN_NOTE),
+                    (false, true) => Some(FIRST_FRAME_NOTE),
+                    (false, false) => None,
+                },
+                FIRST_FRAME_NOTE => frames.then_some(note),
+                GIF_BUFFER_NOTE => long.then_some(note),
+                CSV_TEXT_NOTE | CSV_ENCODING_NOTE | CSV_DECIMAL_NOTE | CSV_FORMULA_NOTE
+                | SHEETS_NOTE | FORMULAS_NOTE => return table_note(note, table),
+                _ => Some(note),
+            };
+            kept.map(str::to_string)
         })
-        .map(str::to_string)
         .collect()
+}
+
+/// A CSV or workbook note as it applies to what `table::read` found,
+/// naming the columns or the sheet where it can. See `CSV_TEXT_NOTE` for
+/// why the CSV notes are dropped, not kept, when nothing was read.
+fn table_note(note: &'static str, table: Option<&crate::table::TableShape>) -> Option<String> {
+    use crate::table::{Encoding, TableShape};
+    let csv = match table {
+        Some(TableShape::Csv(c)) => Some(c),
+        _ => None,
+    };
+    let book = match table {
+        Some(TableShape::Workbook(w)) => Some(w),
+        _ => None,
+    };
+    match note {
+        CSV_TEXT_NOTE => {
+            let columns = &csv?.text_columns;
+            let names: Vec<String> = columns
+                .iter()
+                .map(|(i, header)| match header.trim() {
+                    "" => format!("column {i}"),
+                    h => h.to_string(),
+                })
+                .collect();
+            let subject = match names.len() {
+                0 => return None,
+                1 => format!("The {} column is", names[0]),
+                2..=4 => {
+                    let (last, rest) = names.split_last()?;
+                    format!("The {} and {last} columns are", rest.join(", "))
+                }
+                n => format!(
+                    "The {} and {} more columns are",
+                    names[..3].join(", "),
+                    n - 3
+                ),
+            };
+            Some(format!(
+                "{subject} kept as text, so leading zeros and long numbers keep every digit."
+            ))
+        }
+        CSV_ENCODING_NOTE => csv
+            .is_some_and(|c| c.encoding == Encoding::Windows1252)
+            .then(|| note.to_string()),
+        CSV_DECIMAL_NOTE => csv
+            .is_some_and(|c| c.decimal_comma)
+            .then(|| note.to_string()),
+        CSV_FORMULA_NOTE => csv.is_none_or(|c| c.formulas).then(|| note.to_string()),
+        SHEETS_NOTE => match book {
+            None => Some(note.to_string()),
+            Some(b) if b.sheets.len() > 1 => Some(format!(
+                "Only the first sheet, {}, is written; the workbook has {} and a CSV holds one.",
+                b.sheets[0],
+                b.sheets.len()
+            )),
+            Some(_) => None,
+        },
+        FORMULAS_NOTE => book.is_none_or(|b| b.formulas).then(|| note.to_string()),
+        _ => Some(note.to_string()),
+    }
+}
+
+/// Whether to read a CSV or a workbook with `table::read` before planning:
+/// a CSV for how to import it, a workbook for the notes about what a CSV
+/// cannot hold.
+pub fn reads_table(from: Format, to: Format) -> bool {
+    matches!(
+        (from, to),
+        (Format::Csv, Format::Xlsx | Format::Ods) | (Format::Xlsx | Format::Ods, Format::Csv)
+    )
 }
 
 /// Whether a knob on this pair can only be honoured with a probe, so a
@@ -1494,7 +1661,15 @@ mod tests {
             for &w in r.warnings {
                 if !matches!(
                     w,
-                    FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE | GIF_BUFFER_NOTE
+                    FLATTEN_FIRST_FRAME_NOTE
+                        | FIRST_FRAME_NOTE
+                        | GIF_BUFFER_NOTE
+                        | CSV_TEXT_NOTE
+                        | CSV_ENCODING_NOTE
+                        | CSV_DECIMAL_NOTE
+                        | CSV_FORMULA_NOTE
+                        | SHEETS_NOTE
+                        | FORMULAS_NOTE
                 ) {
                     assert!(kept.iter().any(|k| k == w), "{from:?} -> {to:?}: {w}");
                 }
@@ -2075,6 +2250,120 @@ mod tests {
             ..Default::default()
         };
         assert!(!needs_probe_tuned(Format::Png, Format::Jpg, &t));
+    }
+
+    #[test]
+    fn csv_goes_to_and_from_xlsx_and_ods_through_libreoffice() {
+        for (from, to) in [
+            (Format::Csv, Format::Xlsx),
+            (Format::Csv, Format::Ods),
+            (Format::Xlsx, Format::Csv),
+            (Format::Ods, Format::Csv),
+        ] {
+            assert_eq!(backends_for(from, to), vec![Backend::Soffice], "{from:?}");
+            assert!(reads_table(from, to), "{from:?} -> {to:?}");
+        }
+        assert!(!reads_table(Format::Xlsx, Format::Pdf));
+        let import = lookup(Format::Csv, Format::Xlsx).unwrap();
+        assert!(import.steps[0].args.contains(&Arg::CsvImport));
+    }
+
+    /// The export options, every token: comma, quote, UTF-8, the import
+    /// placeholders, English decimals, quoting only where needed, numbers
+    /// as numbers, values not display text, values not formulas, the first
+    /// sheet.
+    #[test]
+    fn the_csv_export_spells_every_token() {
+        let (filter, options) = CSV_EXPORT.rsplit_once(':').unwrap();
+        assert_eq!(filter, "csv:Text - txt - csv (StarCalc)");
+        let tokens: Vec<&str> = options.split(',').collect();
+        assert_eq!(
+            tokens,
+            ["44", "34", "76", "1", "", "1033", "false", "true", "false", "false", "false", "0"]
+        );
+    }
+
+    fn table_probe(shape: crate::table::TableShape) -> crate::MediaProbe {
+        crate::MediaProbe {
+            table: Some(shape),
+            ..crate::MediaProbe::default()
+        }
+    }
+
+    /// Each CSV note says what conv did, so it shows only when it did it,
+    /// naming the columns; an unread CSV, imported with the default shape,
+    /// gets only the formula note, which is true either way.
+    #[test]
+    fn a_csv_import_notes_only_what_it_did() {
+        use crate::table::{CsvShape, Encoding, TableShape};
+        let notes_of = |shape: CsvShape| {
+            notes(
+                Format::Csv,
+                Format::Xlsx,
+                Some(&table_probe(TableShape::Csv(shape))),
+            )
+        };
+        assert!(notes_of(CsvShape::default()).is_empty());
+        let columns = |names: &[&str]| CsvShape {
+            text_columns: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (i + 1, n.to_string()))
+                .collect(),
+            ..CsvShape::default()
+        };
+        assert_eq!(
+            notes_of(columns(&["zip"])),
+            vec!["The zip column is kept as text, so leading zeros and long numbers keep every digit."]
+        );
+        assert!(notes_of(columns(&["zip", "id"]))[0].starts_with("The zip and id columns are"));
+        assert!(notes_of(columns(&["a", "", "c", "d"]))[0]
+            .starts_with("The a, column 2, c and d columns are"));
+        assert!(notes_of(columns(&["a", "b", "c", "d", "e"]))[0]
+            .starts_with("The a, b, c and 2 more columns are"));
+        let euro = CsvShape {
+            encoding: Encoding::Windows1252,
+            decimal_comma: true,
+            formulas: true,
+            ..CsvShape::default()
+        };
+        assert_eq!(
+            notes_of(euro),
+            vec![CSV_ENCODING_NOTE, CSV_DECIMAL_NOTE, CSV_FORMULA_NOTE]
+        );
+        assert_eq!(
+            notes(Format::Csv, Format::Ods, None),
+            vec![CSV_FORMULA_NOTE]
+        );
+    }
+
+    #[test]
+    fn a_workbook_to_csv_notes_extra_sheets_and_formulas_only_when_there_are_some() {
+        use crate::table::{TableShape, WorkbookShape};
+        let book = |sheets: &[&str], formulas| {
+            table_probe(TableShape::Workbook(WorkbookShape {
+                sheets: sheets.iter().map(|s| s.to_string()).collect(),
+                formulas,
+            }))
+        };
+        assert!(notes(Format::Xlsx, Format::Csv, Some(&book(&["Only"], false))).is_empty());
+        assert_eq!(
+            notes(
+                Format::Ods,
+                Format::Csv,
+                Some(&book(&["Orders", "Notes", "Old"], true))
+            ),
+            vec![
+                "Only the first sheet, Orders, is written; the workbook has 3 and a CSV holds one."
+                    .to_string(),
+                FORMULAS_NOTE.to_string()
+            ]
+        );
+        assert_eq!(
+            notes(Format::Xlsx, Format::Csv, None),
+            vec![SHEETS_NOTE, FORMULAS_NOTE],
+            "unread keeps both"
+        );
     }
 
     #[test]
