@@ -568,9 +568,9 @@ ffmpeg    9.0.1      /opt/homebrew/bin/ffmpeg     (PATH)
 ffprobe   9.0.1      /opt/homebrew/bin/ffprobe    (PATH)
 magick    7.1.2-30   /opt/homebrew/bin/magick     (PATH)
 pandoc    3.10.2     /opt/homebrew/bin/pandoc     (PATH)
-qpdf      12.4.2     /opt/homebrew/bin/qpdf       (PATH)
 soffice   missing    manual install only  |  brew install --cask libreoffice
 typst     0.15.1     /opt/homebrew/bin/typst      (PATH)
+qpdf      12.4.2     /opt/homebrew/bin/qpdf       (PATH)
 ```
 
 `conv install <backend>` downloads and checksum-verifies one managed
