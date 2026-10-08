@@ -18,6 +18,40 @@ fn dry_run_prints_the_expert_ffmpeg_command() {
         .stdout(contains("palettegen=stats_mode=diff"));
 }
 
+/// A lone photo under `--strip-metadata` keeps its format under a new name,
+/// and the command strips only after orienting.
+#[test]
+fn dry_run_strips_a_lone_photo_into_a_stripped_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("photo.jpg"), b"not really a jpeg").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["photo.jpg", "--strip-metadata", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains(
+            "-auto-orient +profile '!icc,*' +set comment +set label",
+        ))
+        .stdout(contains("photo-stripped.jpg"));
+}
+
+/// Where the flag cannot apply, it is refused with the reason and the fix.
+#[test]
+fn strip_metadata_is_refused_where_it_cannot_apply() {
+    conv()
+        .args(["a.docx", "a.pdf", "--strip-metadata", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--strip-metadata does not apply to docx -> pdf: it covers image, video and audio conversions",
+        ));
+    conv()
+        .args(["IMG_0042.heic", "--strip-metadata", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("conv cannot write heic; add --to jpg"));
+}
+
 #[test]
 fn unknown_extension_exits_two_and_suggests() {
     conv()
