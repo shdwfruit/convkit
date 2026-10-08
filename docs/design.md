@@ -222,6 +222,7 @@ code — and every quality claim stays reviewable in a single file.
 | `ffmpeg` | Managed install offered | Static relocatable builds exist |
 | `magick` | Managed install offered | Portable builds exist |
 | `pandoc` | Managed install offered | ~30MB standalone official releases |
+| `qpdf` | Managed install offered (as a folder) | Official builds for all five targets ship the program plus its shared libraries |
 | `soffice` | **Detect only, never managed** | No relocatable binary exists |
 
 Resolution order per backend:
@@ -361,6 +362,8 @@ conv ./photos --to jpg -o ./out  # folder input
 conv doctor                      # what is installed, what is missing, how to fix
 conv install ffmpeg              # explicit, opt-in, pinned URL + SHA-256
 conv capabilities                # the full conversion table
+conv merge a.pdf b.pdf out.pdf   # join PDFs (qpdf)
+conv split report.pdf 1-3 4-z    # one PDF per page or range (qpdf)
 ```
 
 Globs are expanded **inside the binary** via `wild`, parsing the raw command
