@@ -748,7 +748,9 @@ pub(crate) fn audio_copy_invocation(
     let copyable = copyable_audio_for(to)?;
     let audios = probe.all_audio();
     let first = audios.first()?;
-    if !copyable.contains(first) {
+    // A file cut into its own format already holds its codec in that
+    // container, whatever it is: a 24-bit or float wav take stays as it was.
+    if from != to && !copyable.contains(first) {
         return None;
     }
 
@@ -763,11 +765,18 @@ pub(crate) fn audio_copy_invocation(
         // WAV can't carry an attached picture; everything else keeps it.
         push(&mut argv, &["-map", "0:v?", "-c:v", "copy"]);
     }
-    push(&mut argv, &["-c:a", "copy"]);
+    // A copied cut lands on the demuxer's packets, which for PCM are about
+    // 70 ms each on ffmpeg 9. Written out again in its own codec, PCM is
+    // just as lossless and is cut to the sample.
+    if cut.is_some() && to == Format::Wav && first.starts_with("pcm_") {
+        push(&mut argv, &["-c:a", first]);
+    } else {
+        push(&mut argv, &["-c:a", "copy"]);
+        push_cut_audio(&mut argv, cut);
+    }
     if strip {
         argv.extend(crate::metadata::ffmpeg_args(&probe.kept_tags));
     }
-    push_cut_audio(&mut argv, cut);
     push(&mut argv, &["-y"]);
     argv.push(output.to_string_lossy().into_owned());
 

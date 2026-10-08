@@ -3004,6 +3004,35 @@ fn a_cut_mp3_keeps_its_cover_art() {
 
 #[test]
 #[ignore]
+fn a_wav_cut_into_itself_keeps_its_bit_depth() {
+    let dir = tmp();
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let src = dir.path().join("take.wav");
+    let r = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=96000:duration=10",
+        ])
+        .args(["-c:a", "pcm_s24le"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let out = dir.path().join("take-2s-5s.wav");
+    convert_tuned(&src, &out, &ranged(Some("2"), Some("5"))).unwrap();
+    let streams = probe_streams_json(&resolver.resolve(Backend::Ffprobe).unwrap().path, &out);
+    assert_eq!(streams[0]["codec_name"], "pcm_s24le", "{streams:?}");
+    let d = duration_ms(&out);
+    assert!((2_990..=3_010).contains(&d), "{d}");
+}
+
+#[test]
+#[ignore]
 fn a_sized_cut_is_sized_for_the_clip() {
     let dir = tmp();
     let src = synth_cuttable(&dir, "src.mp4", "30", 20, &[]);

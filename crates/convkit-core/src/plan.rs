@@ -2870,27 +2870,28 @@ mod tests {
             plan.steps[0].argv
         );
 
-        // pcm_s24le does not fit TO_WAV's pcm_s16le copy gate: the target's
-        // own recipe, cut.
-        probe.audio_codecs = vec!["pcm_s24le".into()];
-        let plan = build_tuned(
-            Format::Wav,
-            Format::Wav,
-            &[p("take.wav")],
-            Path::new("o.wav"),
-            Some(&probe),
-            None,
-            &ranged(Some("10"), Some("20")),
-        )
-        .unwrap();
-        assert_eq!(
-            &plan.steps[0].argv[..6],
-            ["-ss", "10", "-t", "10", "-i", "take.wav"]
-        );
-        assert!(plan.steps[0]
-            .argv
-            .windows(2)
-            .any(|w| w == ["-c:a", "pcm_s16le"]));
+        // A file cut into its own format keeps its own codec: a 24-bit or
+        // float take stays what it was, though converting to wav from
+        // anything else writes 16-bit. PCM is written out again in that
+        // codec rather than copied, which is as lossless and cuts to the
+        // sample.
+        for codec in ["pcm_s24le", "pcm_f32le"] {
+            probe.audio_codecs = vec![codec.into()];
+            let plan = build_tuned(
+                Format::Wav,
+                Format::Wav,
+                &[p("take.wav")],
+                Path::new("o.wav"),
+                Some(&probe),
+                None,
+                &ranged(Some("10"), Some("20")),
+            )
+            .unwrap();
+            let argv = &plan.steps[0].argv;
+            assert_eq!(&argv[..6], ["-ss", "10", "-t", "10", "-i", "take.wav"]);
+            assert!(argv.windows(2).any(|w| w == ["-c:a", codec]), "{argv:?}");
+            assert!(plan.warnings.is_empty(), "{codec}: {:?}", plan.warnings);
+        }
     }
 
     #[test]
