@@ -479,7 +479,8 @@ last 30 seconds and `--end -5` drops the last 5. `--duration 8` can stand in
 for `--end`.
 
 With one file and no output name, conv keeps the format and puts the range
-in the name, the way `--max-size` puts the size there. Name an output to
+in the name, the way `--max-size` puts the size there, and it does so with
+`-o` too, so two clips of one file never share a name. Name an output to
 change the format too; GIF and audio targets cut the same way:
 
 ```console

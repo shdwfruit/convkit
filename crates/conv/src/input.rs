@@ -447,23 +447,31 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
 /// the final job set is checked once more, after renaming: no two outputs
 /// may be one file, and no output may be any job's input, since that job
 /// would be read while another overwrites it.
+///
+/// With `cut`, a cut is renamed even where it would not land on its input
+/// (`-o` to another folder): a clip is not the file it came from, and two
+/// clips of one file written to one folder must not share a name. A size or
+/// a strip alone keeps the name there, as it always has, and so does a cut
+/// in a batch's folder, whose name already says the range.
 fn name_own_format_outputs(
     mut jobs: Vec<Job>,
     suffix: &str,
     explicit_output: bool,
+    cut: bool,
 ) -> Result<Vec<Job>, ConvError> {
     for job in &mut jobs {
         let output = collision_key(&job.output);
-        if job.inputs.iter().any(|i| collision_key(i) == output) {
-            if explicit_output {
-                return Err(ConvError::new(
-                    ErrorCode::InvalidInvocation,
-                    format!(
-                        "output is the input: {}; name a different output",
-                        job.output.display()
-                    ),
-                ));
-            }
+        let lands_on_input = job.inputs.iter().any(|i| collision_key(i) == output);
+        if lands_on_input && explicit_output {
+            return Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "output is the input: {}; name a different output",
+                    job.output.display()
+                ),
+            ));
+        }
+        if lands_on_input || (cut && !explicit_output && job.from == job.to) {
             job.output = suffixed_name(&job.output, suffix);
         }
     }
@@ -834,7 +842,8 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
             job.output = in_subfolder(&job.output, &own.suffix);
         }
     }
-    let jobs = name_own_format_outputs(jobs, &own.suffix, explicit_output)?;
+    let cut = own.cut && !into_subfolder;
+    let jobs = name_own_format_outputs(jobs, &own.suffix, explicit_output, cut)?;
     if into_subfolder && !cli.dry_run {
         let mut made: Vec<&Path> = Vec::new();
         for dir in jobs.iter().filter_map(|j| j.output.parent()) {
@@ -1585,6 +1594,29 @@ mod tests {
         assert_eq!((jobs[0].from, jobs[0].to), (Format::Mp4, Format::Mp4));
         let jobs = plan_jobs(&cut(v(&["memo.m4a"]), None, None)).unwrap();
         assert_eq!(jobs[0].output, p("memo-1m02s-1m10s.m4a"));
+    }
+
+    /// A clip is not the file it was cut from, wherever it is written: in
+    /// another folder it still carries its range, so two clips of one talk
+    /// do not collide there. (`--max-size` alone keeps the name, as before.)
+    #[test]
+    fn a_cut_into_another_folder_still_names_its_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("clips");
+        let jobs = plan_jobs(&cut(
+            vec![dir.path().join("talk.mp4")],
+            None,
+            Some(out.clone()),
+        ))
+        .unwrap();
+        assert_eq!(jobs[0].output, out.join("talk-1m02s-1m10s.mp4"));
+        let jobs = plan_jobs(&cut(
+            vec![dir.path().join("a.mp4"), dir.path().join("b.mp4")],
+            Some("mp4"),
+            Some(out.clone()),
+        ))
+        .unwrap();
+        assert_eq!(jobs[1].output, out.join("b-1m02s-1m10s.mp4"));
     }
 
     #[test]
