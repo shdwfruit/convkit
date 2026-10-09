@@ -737,7 +737,7 @@ mod tests {
 
     fn marked() -> Session {
         // 60 s; a clip of 6-12 s kept as audio; the slider at 30 s.
-        let mut s = Session::new(60_000, Some(33), true, true);
+        let mut s = Session::new(60_000, Some((30, 1)), true, true);
         let t = Instant::now();
         for i in [Input::Down, Input::Enter] {
             s.input(i, t);
@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn the_header_names_the_file() {
-        let s = Session::new(761_000, Some(33), true, true);
+        let s = Session::new(761_000, Some((30, 1)), true, true);
         let info = Info {
             name: "talk.mp4".into(),
             size: Some((1920, 1080)),

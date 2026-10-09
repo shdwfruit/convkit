@@ -83,7 +83,8 @@ enum Ask {
 #[derive(Debug, Clone)]
 pub struct Session {
     duration_ms: u64,
-    frame_ms: u64,
+    /// Frames a second, as numerator and denominator.
+    frame_rate: (u64, u64),
     bars: Vec<Bar>,
     slider_ms: u64,
     view_start: u64,
@@ -100,11 +101,11 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session over a file this long. `frame_ms` is one frame's length,
-    /// for `,`/`.`; 33 ms (30 fps) when unknown.
+    /// A session over a file this long. `frame_rate` is the picture's, for
+    /// `,`/`.`; 30 fps when unknown.
     pub fn new(
         duration_ms: u64,
-        frame_ms: Option<u64>,
+        frame_rate: Option<(u32, u32)>,
         has_video: bool,
         has_audio: bool,
     ) -> Session {
@@ -112,9 +113,12 @@ impl Session {
             .into_iter()
             .filter_map(|(has, bar)| has.then_some(bar))
             .collect();
+        let (n, d) = frame_rate
+            .filter(|&(n, d)| n > 0 && d > 0 && n <= 1000 * d)
+            .unwrap_or((30, 1));
         Session {
             duration_ms,
-            frame_ms: frame_ms.filter(|&f| f > 0).unwrap_or(33),
+            frame_rate: (u64::from(n), u64::from(d)),
             bars,
             slider_ms: 0,
             view_start: 0,
@@ -178,8 +182,11 @@ impl Session {
             Input::PageDown => self.move_by(self.view_len as i64 / 10),
             Input::Home => self.move_to(0),
             Input::End => self.move_to(self.duration_ms),
-            Input::FrameBack => self.move_by(-(self.frame_ms as i64)),
-            Input::FrameForward => self.move_by(self.frame_ms as i64),
+            Input::FrameBack => {
+                let drawn = self.drawn_frame();
+                self.move_to(self.frame_start(drawn.saturating_sub(1)));
+            }
+            Input::FrameForward => self.move_to(self.frame_start(self.drawn_frame() + 1)),
             Input::ZoomIn => self.zoom_to(self.view_len / 2),
             Input::ZoomOut => self.zoom_to(self.view_len.saturating_mul(2)),
             Input::Up => self.highlighted = self.highlighted.saturating_sub(1),
@@ -214,6 +221,20 @@ impl Session {
         };
         self.last_arrow = Some((dir, now));
         self.move_by(i64::from(dir) * step as i64);
+    }
+
+    /// The frame drawn at the slider: the first that starts at or after it,
+    /// as the grab reads it, which is also the first a clip from there keeps.
+    fn drawn_frame(&self) -> u64 {
+        let (n, d) = self.frame_rate;
+        (u128::from(self.slider_ms) * u128::from(n)).div_ceil(1000 * u128::from(d)) as u64
+    }
+
+    /// Where frame `k` starts, rounded down to the millisecond, so that the
+    /// frame drawn there is frame `k` and not the one after it.
+    fn frame_start(&self, k: u64) -> u64 {
+        let (n, d) = self.frame_rate;
+        (u128::from(k) * 1000 * u128::from(d) / u128::from(n)) as u64
     }
 
     fn move_by(&mut self, delta: i64) {
@@ -375,7 +396,7 @@ mod tests {
     use super::*;
 
     fn session(secs: u64) -> Session {
-        Session::new(secs * 1000, Some(33), true, true)
+        Session::new(secs * 1000, Some((30, 1)), true, true)
     }
 
     /// Feeds inputs `gap_ms` apart, starting at `t0`; returns the last
@@ -472,6 +493,33 @@ mod tests {
         assert_eq!(unknown_rate.slider_ms(), 33);
     }
 
+    /// Frames at 30 fps start every 33.3 ms. A step lands on a frame's start,
+    /// rounded down to the millisecond, so the frame drawn there is the first
+    /// a clip from there keeps; a 33 ms step drifted a frame behind every
+    /// 100, and from the end it landed after the last frame's start.
+    #[test]
+    fn frame_keys_land_on_the_frames_themselves() {
+        let t = Instant::now();
+        let mut s = Session::new(1_000, Some((30, 1)), true, true);
+        s.input(Input::End, t);
+        s.input(Input::FrameBack, t);
+        assert_eq!(s.slider_ms(), 966, "the last frame starts at 966.7 ms");
+        let mut s = session(100);
+        for _ in 0..150 {
+            s.input(Input::FrameForward, t);
+        }
+        assert_eq!(s.slider_ms(), 5_000);
+        let mut s = Session::new(10_000, Some((30_000, 1_001)), true, true);
+        s.input(Input::FrameForward, t);
+        s.input(Input::FrameForward, t);
+        assert_eq!(s.slider_ms(), 66, "the frame at 66.7 ms");
+        // Between two frames the next one is drawn, and a step back goes to
+        // the one before it.
+        s.input(Input::Right, t);
+        s.input(Input::FrameBack, t);
+        assert_eq!(s.slider_ms(), 66);
+    }
+
     #[test]
     fn zoom_halves_around_the_slider_and_stops_at_two_seconds() {
         let mut s = session(600);
@@ -547,7 +595,7 @@ mod tests {
         assert_eq!(audio.bars(), [Bar::Audio]);
         audio.input(Input::Enter, t);
         assert_eq!(audio.selected(), None);
-        let video = Session::new(60_000, Some(40), true, false);
+        let video = Session::new(60_000, Some((25, 1)), true, false);
         assert_eq!(video.bars(), [Bar::Video]);
     }
 

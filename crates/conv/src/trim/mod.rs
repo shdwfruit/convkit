@@ -129,7 +129,7 @@ fn trim(cli: &Cli, args: &Args) -> Result<i32, ConvError> {
         .frame_rate
         .filter(|&(n, _)| n > 0)
         .map(|(n, d)| 1000 * u64::from(d) / u64::from(n));
-    let session = Session::new(duration, frame_ms, has_video, has_audio);
+    let session = Session::new(duration, probe.frame_rate, has_video, has_audio);
     // A GIF has no sound to keep or drop: its clips keep the picture alone.
     let mut session = if target.video == Some(Format::Gif) {
         session.picture_alone()
