@@ -488,25 +488,26 @@ conv talk.mp4 clip.gif --start 1:02 --duration 4
 conv memo.m4a .mp3 --start 0:10 --end 0:40
 ```
 
-The cut starts on the exact frame you asked for. A stream copy can only
-start on a keyframe, which can be seconds earlier, so a cut that starts
-after 0 re-encodes the video, and the note says so. A cut from the start
-keeps the copy:
+The cut starts and ends on the exact frames you asked for. A stream copy
+can only start on a keyframe, which can be seconds earlier, so a cut that
+starts after 0 re-encodes the video, and the note says so. A cut from the
+start keeps the copy, unless the video has B-frames (frames stored after
+ones shown later), which would carry a copy past the end:
 
 ```console
-$ conv talk.mp4 --end 30
-OK talk-0s-30s.mp4 - 5.7 MB - 0.1s - stream copy, no re-encode
-  /home/user/Videos/talk-0s-30s.mp4
+$ conv screen.mp4 --end 30
+OK screen-0s-30s.mp4 - 5.8 MB - 0.1s - stream copy, no re-encode
+  /home/user/Videos/screen-0s-30s.mp4
 ```
 
-An end past the file stops at its end, and a note says so. In a batch the
-range applies to every file, a negative time counts from each file's own
-end, and a file shorter than the start fails on its own. A batch writes
-into a folder named after the range (`1m02s-1m10s/talk.mp4`), the way a
-sized batch does, unless you give `-o`. `--max-size` sizes
-the clip rather than the whole file, and `--fps`, `--resize` and `--crf`
-work as usual. On an image or a document the flags are refused, with the
-reason.
+A clip leaves out the source's chapters. An end past the file stops at its
+end, and a note says so. In a batch the range applies to every file, a
+negative time counts from each file's own end, and a file shorter than the
+start fails on its own. A batch writes into a folder named after the range
+(`1m02s-1m10s/talk.mp4`), the way a sized batch does, unless you give `-o`.
+`--max-size` sizes the clip rather than the whole file, and `--fps`,
+`--resize` and `--crf` work as usual. On an image or a document the flags
+are refused, with the reason.
 
 ## Discovering formats and capabilities
 
