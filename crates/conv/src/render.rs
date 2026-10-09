@@ -276,6 +276,9 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     if let Some(e) = &o.enlarged {
         v["enlarged"] = json!(e);
     }
+    if let Some(r) = &o.range {
+        v["range"] = json!(r);
+    }
     v
 }
 
@@ -646,6 +649,7 @@ mod tests {
             elapsed_ms: 900,
             sizing: None,
             enlarged: None,
+            range: None,
         }
     }
 
@@ -676,6 +680,26 @@ mod tests {
 
     fn only_ascii(s: &str) -> bool {
         s.is_ascii()
+    }
+
+    #[test]
+    fn a_cut_result_reports_its_range_and_others_do_not() {
+        let mut o = sample_outcome(10, false, vec![]);
+        assert!(outcome_json(&o).get("range").is_none());
+        o.range = Some(convkit_core::trim::RangeReport {
+            start_ms: 62_000,
+            end_ms: Some(70_000),
+            requested: convkit_core::trim::Requested {
+                start: Some("1:02".into()),
+                end: Some("1:10".into()),
+                duration: None,
+            },
+        });
+        assert_eq!(
+            outcome_json(&o)["range"],
+            serde_json::json!({"start_ms": 62000, "end_ms": 70000,
+                               "requested": {"start": "1:02", "end": "1:10"}})
+        );
     }
 
     #[test]

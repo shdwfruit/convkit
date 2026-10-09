@@ -19,6 +19,14 @@ fn main() {
     // `wild` parses the raw command line so globs work on Windows, where
     // neither cmd.exe nor PowerShell expands them for a native executable.
     let cli = cli::Cli::parse_from(wild::args_os());
+    // Contradictions between flags, reported the way clap reports its own
+    // usage errors: on stderr, exit 2.
+    if let Err(msg) = cli.check() {
+        use clap::CommandFactory;
+        cli::Cli::command()
+            .error(clap::error::ErrorKind::ArgumentConflict, msg)
+            .exit();
+    }
     let code = match &cli.command {
         None => commands::convert::run(&cli),
         Some(cli::Command::Doctor) => commands::doctor::run(&cli),

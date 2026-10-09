@@ -95,6 +95,10 @@ pub struct ResolvedVideo {
     /// Set when `--upscale` enlarges the picture, or might because the
     /// source size is unknown.
     pub enlarged: Option<Enlargement>,
+    /// The range resolved against the source, when one was given and it
+    /// cuts anything. Carried here because every ffmpeg invocation is built
+    /// from this value, static recipe and probe-aware alike.
+    pub cut: Option<crate::trim::Cut>,
 }
 
 /// Parses a user frame rate (`24`, `29.97`, `30000/1001`) into a float for
@@ -109,7 +113,7 @@ fn rate_value(s: &str) -> Option<f64> {
 }
 
 /// Formats a probed rational for a note: `24`, `29.97`.
-fn show_rate((n, d): (u32, u32)) -> String {
+pub(crate) fn show_rate((n, d): (u32, u32)) -> String {
     let v = f64::from(n) / f64::from(d);
     if (v - v.round()).abs() < 1e-6 {
         format!("{}", v.round() as i64)

@@ -12,9 +12,10 @@ use convkit_core::{Resolver, Tuning};
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     /// Input paths, then optionally an output path or a bare `.ext`. With
-    /// `--max-size` or `--strip-metadata`, a lone input keeps its format and
-    /// is written as NAME-SIZE.EXT or NAME-stripped.EXT (`clip.mp4` ->
-    /// `clip-10mb.mp4`).
+    /// `--max-size`, `--strip-metadata` or `--start`/`--end`/`--duration`, a
+    /// lone input keeps its format and is written as NAME-SUFFIX.EXT
+    /// (`clip.mp4` -> `clip-10mb.mp4`, `photo-stripped.jpg`,
+    /// `clip-1m02s-1m10s.mp4`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -106,6 +107,33 @@ pub struct Cli {
     // Not `global` -- see `dry_run`'s comment.
     #[arg(long)]
     pub strip_metadata: bool,
+
+    /// Keep the output from TIME: seconds (90, 90.5, 30s), m:ss (1:02.5) or
+    /// h:mm:ss (1:02:03). A leading - counts back from the end (-30 is the
+    /// last 30 s). The cut is exact. Video, GIF and audio targets. A lone
+    /// input keeps its format and is written as NAME-START-END.EXT, e.g.
+    /// talk-1m02s-1m10s.mp4; a --to batch writes into a folder named after
+    /// the range, e.g. 1m02s-1m10s/talk.mp4, unless -o is given.
+    // `allow_hyphen_values` so `--start -30` is a time, not an unknown
+    // flag. A missing value then swallows the next flag, but the time
+    // parser refuses that by name. Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "TIME", value_parser = parse_time, allow_hyphen_values = true)]
+    pub start: Option<convkit_core::trim::Time>,
+
+    /// Stop the output at TIME, in the same forms as --start; -5 stops 5 s
+    /// before the end. An end past the file stops at its end.
+    #[arg(
+        long,
+        value_name = "TIME",
+        value_parser = parse_time,
+        allow_hyphen_values = true,
+        conflicts_with = "duration"
+    )]
+    pub end: Option<convkit_core::trim::Time>,
+
+    /// Keep TIME's worth from --start (or from the beginning).
+    #[arg(long, value_name = "TIME", value_parser = parse_duration)]
+    pub duration: Option<convkit_core::trim::Time>,
 
     /// Assume yes to every prompt: installing a missing backend, or
     /// converting an extreme --max-size target or a large --upscale. For a script that wants
@@ -308,10 +336,19 @@ fn parse_max_size(s: &str) -> Result<convkit_core::size::MaxSize, String> {
     convkit_core::size::parse(s)
 }
 
+/// The grammar lives in `convkit_core::trim`; this only adapts it to clap.
+fn parse_time(s: &str) -> Result<convkit_core::trim::Time, String> {
+    convkit_core::trim::parse_time(s)
+}
+
+fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
+    convkit_core::trim::parse_duration(s)
+}
+
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
     /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
-    /// `--max-size` was passed.
+    /// `--max-size`/`--start`/`--end`/`--duration` was passed.
     pub fn tuning(&self) -> Tuning {
         Tuning {
             resize: self.resize.clone(),
@@ -322,7 +359,23 @@ impl Cli {
             max_size: self.max_size.clone(),
             upscale: self.upscale,
             strip_metadata: self.strip_metadata,
+            // `check` has already refused a range that does not hold
+            // together; see main.
+            range: self.range().ok().flatten(),
         }
+    }
+
+    /// The range the three flags ask for, or why they contradict each
+    /// other.
+    pub fn range(&self) -> Result<Option<convkit_core::trim::Range>, String> {
+        convkit_core::trim::Range::new(self.start.clone(), self.end.clone(), self.duration.clone())
+    }
+
+    /// Checks across flags that clap's per-flag parsers cannot see, so a
+    /// contradiction is a usage error before anything runs, like clap's
+    /// own.
+    pub fn check(&self) -> Result<(), String> {
+        self.range().map(|_| ())
     }
 
     /// Builds the `Resolver` every conversion, `doctor`, and `update` run
@@ -371,6 +424,9 @@ mod tests {
             crf: None,
             max_size: None,
             strip_metadata: false,
+            start: None,
+            end: None,
+            duration: None,
             yes: false,
             no_install: false,
             outdir: None,
@@ -427,6 +483,34 @@ mod tests {
         assert_eq!(c.tuning().max_size, c.max_size);
         let e = Cli::try_parse_from(["conv", "a.mp4", "--max-size", "10"]).unwrap_err();
         assert!(e.to_string().contains("add a unit"), "{e}");
+    }
+
+    #[test]
+    fn times_parse_including_ones_counted_from_the_end() {
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--start", "-30"]).unwrap();
+        assert_eq!(
+            c.start.as_ref().map(|t| (t.ms, t.from_end)),
+            Some((30_000, true))
+        );
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--start=-0:30", "--end", "-5"]).unwrap();
+        assert!(c.end.as_ref().is_some_and(|t| t.from_end));
+        assert!(c.tuning().range.is_some());
+    }
+
+    #[test]
+    fn end_and_duration_conflict() {
+        let e =
+            Cli::try_parse_from(["conv", "a.mp4", "--end", "10", "--duration", "5"]).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn an_order_that_cannot_work_fails_the_check() {
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--start", "1:10", "--end", "1:02"]).unwrap();
+        assert_eq!(
+            c.check().unwrap_err(),
+            "--start 1:10 is not before --end 1:02"
+        );
     }
 
     #[test]

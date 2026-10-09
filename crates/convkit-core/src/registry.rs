@@ -485,6 +485,7 @@ const VIDEO_TO_MP4: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
         [
+            Arg::Trim,
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-vf"),
@@ -555,6 +556,7 @@ macro_rules! video_to_mkv_recipe {
         step!(
             Backend::Ffmpeg,
             [
+                Arg::Trim,
                 Arg::Lit("-i"),
                 Arg::Input,
                 Arg::Lit("-map"),
@@ -658,6 +660,7 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
         [
+            Arg::Trim,
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-c:v"),
@@ -700,6 +703,7 @@ const TO_GIF: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
         [
+            Arg::Trim,
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-vf"),
@@ -733,6 +737,7 @@ pub const TO_GIF_TONEMAP: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
         [
+            Arg::Trim,
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-vf"),
@@ -784,6 +789,7 @@ const GIF_TO_MP4: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
         [
+            Arg::Trim,
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-vf"),
@@ -821,7 +827,7 @@ macro_rules! audio_recipe {
             steps: &[step!(
                 Backend::Ffmpeg,
                 [
-                    Arg::Lit("-i"), Arg::Input,
+                    Arg::Trim, Arg::Lit("-i"), Arg::Input,
                     Arg::Lit("-vn"),
                     $($codec,)*
                     Arg::StripMetadata,
@@ -836,7 +842,7 @@ macro_rules! audio_recipe {
             steps: &[step!(
                 Backend::Ffmpeg,
                 [
-                    Arg::Lit("-i"), Arg::Input,
+                    Arg::Trim, Arg::Lit("-i"), Arg::Input,
                     Arg::Lit("-map"), Arg::Lit("0:a"),
                     Arg::Lit("-map"), Arg::Lit("0:v?"),
                     Arg::Lit("-c:v"), Arg::Lit("copy"),
@@ -879,6 +885,7 @@ const TO_WAV: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
         [
+            Arg::Trim,
             Arg::Lit("-i"),
             Arg::Input,
             Arg::Lit("-vn"),
@@ -1445,7 +1452,8 @@ pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> V
 /// only `media::transcoded_invocation` can apply `--fps` or `--resize`
 /// there, and it needs the probe to map the streams. And any `--max-size`
 /// conversion to a video target that convkit can convert to, which needs the
-/// duration to set a bitrate at all.
+/// duration to set a bitrate at all. And any range on a pair it can cut,
+/// which needs the file's length to place the cut.
 pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     // --max-size needs the duration and the picture; there is no fallback.
     // Only for a pair that can be converted at all, so an unsupported one is
@@ -1456,7 +1464,42 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     let webm_knob = to == Format::Webm
         && needs_probe(from, to)
         && (tuning.fps.is_some() || tuning.resize.is_some());
-    sized || webm_knob
+    // A range needs the file's length: to count back from the end, to stop
+    // at the end, and to say so. Only on a pair it can cut, so a refusal is
+    // not preceded by a wasted spawn.
+    let cut = tuning.range.is_some() && takes_range(from, to);
+    sized || webm_knob || cut
+}
+
+/// What a format cut into itself runs (`conv talk.mp4 --start 1:02`): the
+/// recipe any other source of the same family uses to reach it. Only ever
+/// consulted for a range. Without one, converting a file into its own
+/// format is no conversion at all, which is why these pairs are not in the
+/// table. GIF has none: its recipe caps the result at 15 fps and 640 px, so
+/// cutting one into itself would also shrink it.
+pub fn same_format_recipe(f: Format) -> Option<Recipe> {
+    match f {
+        Format::Mp4 => Some(VIDEO_TO_MP4),
+        Format::Mov => Some(VIDEO_TO_MOV),
+        Format::Mkv => Some(VIDEO_TO_MKV),
+        Format::Webm => Some(VIDEO_TO_WEBM),
+        Format::Mp3 => Some(TO_MP3_KEEP_ART),
+        Format::M4a => Some(TO_M4A_KEEP_ART),
+        Format::Wav => Some(TO_WAV),
+        Format::Flac => Some(TO_FLAC_KEEP_ART),
+        _ => None,
+    }
+}
+
+/// Whether a range can cut this pair: its recipe carries an `Arg::Trim`
+/// slot. The same slot check `plan::build_tuned` refuses a knob by.
+pub fn takes_range(from: Format, to: Format) -> bool {
+    let recipe = if from == to {
+        same_format_recipe(to)
+    } else {
+        lookup(from, to)
+    };
+    recipe.is_some_and(|r| r.steps.iter().any(|s| s.args.contains(&Arg::Trim)))
 }
 
 /// The verified codec-compatibility tables for a remuxable target
@@ -2593,5 +2636,40 @@ mod tests {
             out.find("fps=12").unwrap() < out.find("split[a][b]").unwrap(),
             "{out}"
         );
+    }
+
+    #[test]
+    fn every_ffmpeg_recipe_and_only_those_can_be_cut() {
+        for (from, to) in all_pairs() {
+            let ffmpeg = backends_for(from, to) == [Backend::Ffmpeg];
+            assert_eq!(takes_range(from, to), ffmpeg, "{from:?} -> {to:?}");
+        }
+        for f in [
+            Format::Mp4,
+            Format::Mov,
+            Format::Mkv,
+            Format::Webm,
+            Format::Mp3,
+            Format::M4a,
+            Format::Wav,
+            Format::Flac,
+        ] {
+            assert!(takes_range(f, f), "{f:?} into itself");
+        }
+        for f in [Format::Gif, Format::Avi, Format::Png, Format::Pdf] {
+            assert!(!takes_range(f, f), "{f:?} into itself");
+        }
+    }
+
+    #[test]
+    fn a_range_needs_the_probe_only_where_it_can_cut() {
+        let t = Tuning {
+            range: crate::trim::Range::new(Some(crate::trim::parse_time("5").unwrap()), None, None)
+                .unwrap(),
+            ..Tuning::default()
+        };
+        assert!(requires_probe(Format::Mp3, Format::Flac, &t));
+        assert!(requires_probe(Format::Mp4, Format::Mp4, &t));
+        assert!(!requires_probe(Format::Png, Format::Jpg, &t));
     }
 }

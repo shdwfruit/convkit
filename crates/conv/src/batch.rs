@@ -274,6 +274,7 @@ mod tests {
             elapsed_ms: 0,
             sizing: None,
             enlarged: None,
+            range: None,
         })
     }
 
@@ -329,6 +330,9 @@ mod tests {
             crf: None,
             max_size: None,
             strip_metadata: false,
+            start: None,
+            end: None,
+            duration: None,
             yes: false,
             no_install: false,
             outdir: None,

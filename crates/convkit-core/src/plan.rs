@@ -70,7 +70,15 @@ pub struct ConversionPlan {
     /// like `sizing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enlarged: Option<Enlargement>,
+    /// The cut a `--start`/`--end`/`--duration` conversion made. Skipped
+    /// when absent, like `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<crate::trim::RangeReport>,
 }
+
+/// Why a probe-aware media pair re-encoded instead of copying: a video knob.
+const REENCODED_FOR_KNOB_NOTE: &str = "Re-encoded rather than stream-copied, because a video \
+     knob changes the picture; the copy path cannot filter.";
 
 /// Chooses a recipe and renders it with default tuning. Pure: no
 /// filesystem, no process spawning, no executable resolution. The
@@ -122,8 +130,10 @@ pub fn build_tuned(
     }
 
     // A file stripped into its own format: no registry pair covers it, so
-    // it is planned here, as `--max-size` plans its own (above).
-    if from == to && tuning.strip_metadata {
+    // it is planned here, as `--max-size` plans its own (above). A clip is
+    // not a copy of the whole file, so a range takes the cut's path below,
+    // which strips as it cuts.
+    if from == to && tuning.strip_metadata && tuning.range.is_none() {
         return in_place(from, inputs, output, probe, tuning);
     }
 
@@ -136,7 +146,19 @@ pub fn build_tuned(
     // resolves to `ResolvedVideo::default()` with no notes regardless of
     // `probe`, which is what keeps the untuned argv snapshot byte-identical.
     //
-    let resolved = crate::video::resolve(tuning, probe, target_for(to));
+    // A range is resolved first, against the whole source, and everything
+    // after it plans against the clip: the notes, the --upscale estimate.
+    let clip = tuning
+        .range
+        .as_ref()
+        .map(|r| crate::trim::clip(from, to, r, probe, &inputs[0]))
+        .transpose()?;
+    let probe = clip.as_ref().map(|c| &c.probe).or(probe);
+    let cut = clip.as_ref().and_then(|c| c.cut);
+    let range = clip.as_ref().map(|c| c.report.clone());
+    let clip_notes = clip.as_ref().map(|c| c.notes.clone()).unwrap_or_default();
+    let mut resolved = crate::video::resolve(tuning, probe, target_for(to));
+    resolved.cut = cut;
 
     // Probe-aware media paths first: a container change whose video codec
     // already fits the target gets a stream-mapped copy (or hybrid
@@ -149,7 +171,11 @@ pub fn build_tuned(
     // supported at all); these only change *how* an already-supported pair
     // runs when a probe is in hand.
     if let Some(p) = probe {
-        if registry::lookup(from, to).is_some() && registry::needs_probe(from, to) {
+        // A format cut into itself is no registered pair, so it reaches the
+        // probe-aware paths by its range instead.
+        let same_format = from == to && tuning.range.is_some();
+        if same_format || (registry::lookup(from, to).is_some() && registry::needs_probe(from, to))
+        {
             // A video knob changes the picture, and ffmpeg refuses a filter
             // alongside -c:v copy -- so consult the tuning before choosing
             // the path, not after. Choosing first is why `select()` below
@@ -166,27 +192,52 @@ pub fn build_tuned(
             let wants_video =
                 resolved.fps.is_some() || resolved.scale.is_some() || tuning.crf.is_some();
             let strip = tuning.strip_metadata;
-            let dynamic = if wants_video {
+            // A copy can only make some cuts exactly (see
+            // `trim::Cut::why_not_copied`); any other re-encodes the video to
+            // cut where it was asked. Asked of the copy path itself, so the
+            // note is only said where a copy was otherwise on offer.
+            let not_copied = cut.and_then(|c| c.why_not_copied(p)).filter(|_| {
+                media::stream_mapped_invocation(to, p, strip, cut.as_ref(), &inputs[0], output)
+                    .is_some()
+            });
+            let dynamic = if wants_video || not_copied.is_some() {
                 media::transcoded_invocation(
                     to, p, &resolved, tuning.crf, strip, &inputs[0], output,
                 )
-            } else {
-                media::stream_mapped_invocation(to, p, strip, &inputs[0], output).or_else(|| {
-                    media::audio_copy_invocation(from, to, p, strip, &inputs[0], output)
+                .map(|mut m| {
+                    m.warnings.push(match not_copied.filter(|_| !wants_video) {
+                        Some(why) => format!("Re-encoded rather than stream-copied, because {why}"),
+                        None => REENCODED_FOR_KNOB_NOTE.to_string(),
+                    });
+                    m
                 })
+            } else {
+                media::stream_mapped_invocation(to, p, strip, cut.as_ref(), &inputs[0], output)
+                    .or_else(|| {
+                        media::audio_copy_invocation(
+                            from,
+                            to,
+                            p,
+                            strip,
+                            cut.as_ref(),
+                            &inputs[0],
+                            output,
+                        )
+                    })
             };
             if let Some(mut m) = dynamic {
                 validate_tuning_for_dynamic_media(from, to, tuning)?;
                 m.warnings.extend(resolved.notes.iter().cloned());
+                m.warnings.extend(clip_notes.iter().cloned());
                 m.warnings
                     .extend(crate::metadata::location_note(from, to, probe, tuning));
                 m.warnings
                     .extend(crate::metadata::labels_note(to, tuning, probe));
-                // Every invocation `media.rs` builds opens with
-                // `-i <input>` and closes with the output path, so the
-                // path positions (for the Windows long-path rewriter) are
-                // exactly argv[1] and the final element.
-                let path_args = vec![1, m.argv.len() - 1];
+                // Every invocation `media.rs` builds opens with `-i <input>`,
+                // after a cut's `-ss`/`-t` when there is one, and closes with
+                // the output path: those are the path positions the Windows
+                // long-path rewriter needs.
+                let path_args = vec![media::input_position(&m.argv), m.argv.len() - 1];
                 return Ok(ConversionPlan {
                     from,
                     to,
@@ -204,13 +255,19 @@ pub fn build_tuned(
                     warnings: m.warnings,
                     sizing: None,
                     enlarged: resolved.enlarged.clone(),
+                    range,
                 });
             }
         }
     }
 
-    let recipe =
-        select(from, to, probe, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
+    let recipe = select(from, to, probe, available)
+        .or_else(|| {
+            (from == to && tuning.range.is_some())
+                .then(|| registry::same_format_recipe(to))
+                .flatten()
+        })
+        .ok_or_else(|| ConvError::unsupported_pair(from, to))?;
     let recipe = if tuning.strip_metadata {
         registry::strip_variant(to, recipe)
     } else {
@@ -228,6 +285,7 @@ pub fn build_tuned(
     // -- a static recipe carrying an `Arg::VideoChain` slot gets the same
     // honesty about a cap that did not bind or a probe that never ran.
     warnings.extend(resolved.notes.iter().cloned());
+    warnings.extend(clip_notes);
     warnings.extend(crate::metadata::tags_unread_note(from, to, tuning, probe));
     warnings.extend(crate::metadata::location_note(from, to, probe, tuning));
     warnings.extend(crate::metadata::labels_note(to, tuning, probe));
@@ -241,6 +299,7 @@ pub fn build_tuned(
         warnings,
         sizing: None,
         enlarged: resolved.enlarged.clone(),
+        range,
     })
 }
 
@@ -387,6 +446,7 @@ fn in_place(
         warnings,
         sizing: None,
         enlarged,
+        range: None,
     })
 }
 
@@ -1605,6 +1665,7 @@ mod tests {
             max_size: None,
             upscale: false,
             strip_metadata: false,
+            range: None,
         }
     }
 
@@ -2518,5 +2579,417 @@ mod tests {
         .unwrap();
         let v = serde_json::to_value(&plan).unwrap();
         assert!(v.get("sizing").is_none(), "{v}");
+    }
+
+    // --- Ranges: --start / --end / --duration ------------------------------
+
+    fn ranged(start: Option<&str>, end: Option<&str>) -> Tuning {
+        Tuning {
+            range: crate::trim::Range::new(
+                start.map(|s| crate::trim::parse_time(s).unwrap()),
+                end.map(|s| crate::trim::parse_time(s).unwrap()),
+                None,
+            )
+            .unwrap(),
+            ..Tuning::default()
+        }
+    }
+
+    fn clip_probe(secs: u64) -> MediaProbe {
+        MediaProbe {
+            video_codec: Some("h264".into()),
+            video_streams: 1,
+            audio_codecs: vec!["aac".into()],
+            width: Some(1280),
+            height: Some(720),
+            frame_rate: Some((30, 1)),
+            duration_ms: Some(secs * 1000),
+            size_bytes: Some(secs * 250_000),
+            ..MediaProbe::default()
+        }
+    }
+
+    fn cut_plan(from: Format, to: Format, t: &Tuning, secs: u64) -> Result<ConversionPlan> {
+        let input = p(&format!("in.{}", from.ext()));
+        let output = format!("out.{}", to.ext());
+        build_tuned(
+            from,
+            to,
+            &[input],
+            Path::new(&output),
+            Some(&clip_probe(secs)),
+            None,
+            t,
+        )
+    }
+
+    #[test]
+    fn a_cut_from_zero_keeps_the_stream_copy() {
+        let plan = cut_plan(Format::Mkv, Format::Mp4, &ranged(None, Some("30")), 600).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert_eq!(&argv[..4], ["-t", "30", "-i", "in.mkv"], "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "copy"]), "{argv:?}");
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        assert_eq!(plan.steps[0].path_args, [3, argv.len() - 1]);
+        let r = plan.range.expect("a cut plan reports its range");
+        assert_eq!((r.start_ms, r.end_ms), (0, Some(30_000)));
+    }
+
+    /// With B-frames, a frame shown before the end can be stored after a
+    /// frame shown after it, so a copy that stops at the end carries two
+    /// frames past it (measured on 6.1 and 9.0). A copy to the end of the
+    /// file has no end to run past.
+    #[test]
+    fn a_cut_from_zero_of_video_with_b_frames_re_encodes_to_end_exactly() {
+        let mut probe = clip_probe(600);
+        probe.video_reorders = true;
+        let plan = |t: &Tuning| {
+            build_tuned(
+                Format::Mkv,
+                Format::Mp4,
+                &[p("in.mkv")],
+                Path::new("out.mp4"),
+                Some(&probe),
+                None,
+                t,
+            )
+            .unwrap()
+        };
+        let cut = plan(&ranged(None, Some("30")));
+        let argv = &cut.steps[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w == ["-c:v", "libx264"]),
+            "{argv:?}"
+        );
+        assert_eq!(
+            cut.warnings,
+            [
+                "Re-encoded rather than stream-copied, because this video stores some frames \
+                 after ones shown later, so a copied cut would run past its end; this one \
+                 ends exactly at 0:30."
+            ]
+        );
+        let to_the_end = plan(&ranged(Some("0"), Some("20:00")));
+        let argv = &to_the_end.steps[0].argv;
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "copy"]), "{argv:?}");
+    }
+
+    /// A clip is not a copy of the whole file, so a cut into its own format
+    /// that also strips takes the cut's path and clears the tags there,
+    /// copying or re-encoding as any cut would.
+    #[test]
+    fn a_cut_into_its_own_format_strips_as_it_cuts() {
+        for (start, copied) in [(None, true), (Some("1:02"), false)] {
+            let mut t = ranged(start, Some("1:10"));
+            t.strip_metadata = true;
+            let plan = cut_plan(Format::Mp4, Format::Mp4, &t, 600).unwrap();
+            let argv = &plan.steps[0].argv;
+            let has = |pair: [&str; 2]| argv.windows(2).any(|w| w == pair);
+            assert!(has(["-t", "8"]) || has(["-t", "70"]), "{argv:?}");
+            assert!(has(["-map_metadata", "-1"]), "{argv:?}");
+            assert_eq!(has(["-c:v", "copy"]), copied, "{argv:?}");
+            assert!(plan.range.is_some());
+        }
+    }
+
+    #[test]
+    fn a_cut_after_zero_re_encodes_to_start_exactly_and_says_why() {
+        let plan = cut_plan(
+            Format::Mkv,
+            Format::Mp4,
+            &ranged(Some("1:02"), Some("1:10")),
+            600,
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert_eq!(
+            &argv[..6],
+            ["-ss", "62", "-t", "8", "-i", "in.mkv"],
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2).any(|w| w == ["-c:v", "libx264"]),
+            "{argv:?}"
+        );
+        assert_eq!(
+            plan.warnings,
+            [
+                "Re-encoded rather than stream-copied, because a copied cut can only start \
+              on a keyframe; this one starts exactly at 1:02."
+            ]
+        );
+        assert_eq!(plan.steps[0].path_args, [5, argv.len() - 1]);
+    }
+
+    #[test]
+    fn a_knob_with_a_cut_says_the_knob_forced_the_encode() {
+        let mut t = ranged(Some("1:02"), Some("1:10"));
+        t.fps = Some("24".into());
+        let plan = cut_plan(Format::Mkv, Format::Mp4, &t, 600).unwrap();
+        assert!(plan.steps[0].argv.iter().any(|a| a.contains("fps=24")));
+        assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+        assert!(plan.warnings[0].contains("a video knob changes the picture"));
+    }
+
+    #[test]
+    fn an_audio_copy_keeps_the_copy_whatever_the_start() {
+        let plan = cut_plan(
+            Format::Mp4,
+            Format::M4a,
+            &ranged(Some("1:02"), Some("1:10")),
+            600,
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert_eq!(
+            &argv[..6],
+            ["-ss", "62", "-t", "8", "-i", "in.mp4"],
+            "{argv:?}"
+        );
+        assert!(argv.windows(2).any(|w| w == ["-c:a", "copy"]), "{argv:?}");
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn a_static_recipe_takes_the_cut_in_its_slot() {
+        let plan = cut_plan(
+            Format::Mp4,
+            Format::Mp3,
+            &ranged(Some("1:02"), Some("1:10")),
+            600,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.steps[0].argv,
+            [
+                "-ss",
+                "62",
+                "-t",
+                "8",
+                "-i",
+                "in.mp4",
+                "-vn",
+                "-c:a",
+                "libmp3lame",
+                "-q:a",
+                "2",
+                "-y",
+                "-map_chapters",
+                "-1",
+                "-copypriorss:s",
+                "0",
+                "out.mp3"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_gif_memory_note_is_about_the_clip_not_the_file() {
+        let short = cut_plan(
+            Format::Mp4,
+            Format::Gif,
+            &ranged(Some("1:00"), Some("1:10")),
+            600,
+        )
+        .unwrap();
+        assert!(
+            short
+                .warnings
+                .iter()
+                .all(|w| !w.contains("buffered in memory")),
+            "{:?}",
+            short.warnings
+        );
+        let long = cut_plan(
+            Format::Mp4,
+            Format::Gif,
+            &ranged(Some("1:00"), Some("2:00")),
+            600,
+        )
+        .unwrap();
+        assert!(
+            long.warnings
+                .iter()
+                .any(|w| w.contains("buffered in memory")),
+            "{:?}",
+            long.warnings
+        );
+    }
+
+    #[test]
+    fn a_range_on_a_pair_without_a_timeline_is_refused_by_name() {
+        for (from, to, why) in [
+            (Format::Png, Format::Jpg, "jpg is a still image"),
+            (Format::Gif, Format::Png, "png is a still image"),
+            (
+                Format::Docx,
+                Format::Pdf,
+                "docx -> pdf has no timeline to cut",
+            ),
+        ] {
+            let input = p(&format!("in.{}", from.ext()));
+            let e = build_tuned(
+                from,
+                to,
+                &[input],
+                Path::new("out"),
+                None,
+                None,
+                &ranged(Some("5"), None),
+            )
+            .unwrap_err();
+            assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
+            assert_eq!(
+                e.message,
+                format!(
+                    "--start does not apply to {} -> {}: {why}; --start cuts video and audio",
+                    from.ext(),
+                    to.ext()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_without_a_probe_names_ffprobe() {
+        let e = build_tuned(
+            Format::Mkv,
+            Format::Mp4,
+            &[p("in.mkv")],
+            Path::new("o.mp4"),
+            None,
+            None,
+            &ranged(Some("5"), None),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::ConversionFailed);
+        assert!(e.message.contains("needs ffprobe"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_whole_file_range_converts_as_if_none_were_given_with_a_note() {
+        let plan = cut_plan(Format::Mkv, Format::Mp4, &ranged(None, Some("20:00")), 600).unwrap();
+        assert_eq!(plan.steps[0].argv[0], "-i");
+        assert!(plan.steps[0].argv.windows(2).any(|w| w == ["-c:v", "copy"]));
+        assert_eq!(
+            plan.warnings,
+            ["The range covers all of the 10:00 source, so nothing was cut."]
+        );
+    }
+
+    #[test]
+    fn a_plan_without_a_range_serialises_without_one() {
+        let plan = build(
+            Format::Mp4,
+            Format::Gif,
+            &[p("a.mp4")],
+            Path::new("a.gif"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(serde_json::to_value(&plan).unwrap().get("range").is_none());
+    }
+
+    #[test]
+    fn a_video_cut_into_its_own_format_copies_from_zero_and_encodes_after() {
+        let from_zero = cut_plan(Format::Mp4, Format::Mp4, &ranged(None, Some("30")), 600).unwrap();
+        assert!(from_zero.steps[0]
+            .argv
+            .windows(2)
+            .any(|w| w == ["-c:v", "copy"]));
+        let later = cut_plan(Format::Mp4, Format::Mp4, &ranged(Some("1:02"), None), 600).unwrap();
+        assert!(later.steps[0]
+            .argv
+            .windows(2)
+            .any(|w| w == ["-c:v", "libx264"]));
+        assert_eq!(&later.steps[0].argv[..3], ["-ss", "62", "-i"]);
+    }
+
+    #[test]
+    fn an_audio_file_cut_into_its_own_format_copies_what_it_can() {
+        let mut probe = clip_probe(600);
+        probe.video_codec = None;
+        probe.video_streams = 0;
+        probe.audio_codecs = vec!["aac".into()];
+        let plan = build_tuned(
+            Format::M4a,
+            Format::M4a,
+            &[p("memo.m4a")],
+            Path::new("o.m4a"),
+            Some(&probe),
+            None,
+            &ranged(Some("10"), Some("20")),
+        )
+        .unwrap();
+        assert!(
+            plan.steps[0].argv.windows(2).any(|w| w == ["-c:a", "copy"]),
+            "{:?}",
+            plan.steps[0].argv
+        );
+
+        // A file cut into its own format keeps its own codec: a 24-bit or
+        // float take stays what it was, though converting to wav from
+        // anything else writes 16-bit. PCM is written out again in that
+        // codec rather than copied, which is as lossless and cuts to the
+        // sample.
+        for codec in ["pcm_s24le", "pcm_f32le"] {
+            probe.audio_codecs = vec![codec.into()];
+            let plan = build_tuned(
+                Format::Wav,
+                Format::Wav,
+                &[p("take.wav")],
+                Path::new("o.wav"),
+                Some(&probe),
+                None,
+                &ranged(Some("10"), Some("20")),
+            )
+            .unwrap();
+            let argv = &plan.steps[0].argv;
+            assert_eq!(&argv[..6], ["-ss", "10", "-t", "10", "-i", "take.wav"]);
+            assert!(argv.windows(2).any(|w| w == ["-c:a", codec]), "{argv:?}");
+            assert!(plan.warnings.is_empty(), "{codec}: {:?}", plan.warnings);
+        }
+    }
+
+    /// A copied FLAC cut keeps the source's header, which gives the whole
+    /// source's length, and stops on a frame boundary. Written out again
+    /// as FLAC it is as lossless, says its own length and is cut to the
+    /// sample.
+    #[test]
+    fn a_flac_cut_into_flac_is_written_out_again() {
+        let mut probe = clip_probe(600);
+        probe.video_codec = None;
+        probe.video_streams = 0;
+        probe.audio_codecs = vec!["flac".into()];
+        let plan = build_tuned(
+            Format::Flac,
+            Format::Flac,
+            &[p("song.flac")],
+            Path::new("o.flac"),
+            Some(&probe),
+            None,
+            &ranged(Some("10"), Some("20")),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(argv.windows(2).any(|w| w == ["-c:a", "flac"]), "{argv:?}");
+        assert!(!argv.windows(2).any(|w| w == ["-c:a", "copy"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "copy"]), "cover art");
+    }
+
+    #[test]
+    fn a_format_into_itself_without_a_range_is_still_no_conversion() {
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Mp4,
+            &[p("a.mp4")],
+            Path::new("b.mp4"),
+            Some(&clip_probe(60)),
+            None,
+            &Tuning::default(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::UnsupportedPair);
     }
 }

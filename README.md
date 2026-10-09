@@ -100,6 +100,7 @@ conv a.png b.png out.pdf         # merge two or more images into one PDF
 conv scan                        # list the files here and what each can become
 conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
+conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -277,17 +278,17 @@ $ conv capabilities mp4
 mp4 (Video)
 
   as source, converts to:
-    mp4 -> mov      [--resize --upscale --fps --crf --strip-metadata --max-size]
-    mp4 -> mkv      [--resize --upscale --fps --crf --strip-metadata --max-size]
-    mp4 -> webm     [--crf --resize --upscale --fps --strip-metadata --max-size]
-    mp4 -> mp3      [--strip-metadata]
-    mp4 -> m4a      [--strip-metadata]
-    mp4 -> wav      [--strip-metadata]
-    mp4 -> flac     [--strip-metadata]
-    mp4 -> gif      [--resize --upscale --fps --strip-metadata]
+    mp4 -> mov      [--resize --upscale --fps --crf --strip-metadata --start --end --duration --max-size]
+    mp4 -> mkv      [--resize --upscale --fps --crf --strip-metadata --start --end --duration --max-size]
+    mp4 -> webm     [--crf --resize --upscale --fps --strip-metadata --start --end --duration --max-size]
+    mp4 -> mp3      [--strip-metadata --start --end --duration]
+    mp4 -> m4a      [--strip-metadata --start --end --duration]
+    mp4 -> wav      [--strip-metadata --start --end --duration]
+    mp4 -> flac     [--strip-metadata --start --end --duration]
+    mp4 -> gif      [--resize --upscale --fps --strip-metadata --start --end --duration]
 
   as target, accepts: mov mkv webm avi gif
-  tuning flags when writing mp4: --resize --upscale --fps --crf --strip-metadata --max-size
+  tuning flags when writing mp4: --resize --upscale --fps --crf --strip-metadata --start --end --duration --max-size
 
   defaults: crf 20 (override with --crf)
   note: Subtitle tracks and any audio tracks beyond the first are dropped (--max-size keeps every audio track and every text subtitle).
@@ -461,6 +462,53 @@ converts none of them.
 `--json` adds a `sizing` object to each result: the choice it made, the
 number of attempts, and `over_target`.
 
+## Cutting a clip
+
+`--start` and `--end` keep part of a video or audio file:
+
+```console
+$ conv talk.mp4 --start 1:02 --end 1:10
+OK talk-1m02s-1m10s.mp4 - 2.4 MB - 0.9s
+  /home/user/Videos/talk-1m02s-1m10s.mp4
+  note  Re-encoded rather than stream-copied, because a copied cut can only start on a keyframe; this one starts exactly at 1:02.
+```
+
+Times are seconds (`90`, `90.5`), `m:ss` (`1:02.5`) or `h:mm:ss`
+(`1:02:03`). A leading `-` counts back from the end: `--start -30` keeps the
+last 30 seconds and `--end -5` drops the last 5. `--duration 8` can stand in
+for `--end`.
+
+With one file and no output name, conv keeps the format and puts the range
+in the name, the way `--max-size` puts the size there, and it does so with
+`-o` too, so two clips of one file never share a name. Name an output to
+change the format too; GIF and audio targets cut the same way:
+
+```console
+conv talk.mp4 clip.gif --start 1:02 --duration 4
+conv memo.m4a .mp3 --start 0:10 --end 0:40
+```
+
+The cut starts and ends on the exact frames you asked for. A stream copy
+can only start on a keyframe, which can be seconds earlier, so a cut that
+starts after 0 re-encodes the video, and the note says so. A cut from the
+start keeps the copy, unless the video has B-frames (frames stored after
+ones shown later), which would carry a copy past the end:
+
+```console
+$ conv screen.mp4 --end 30
+OK screen-0s-30s.mp4 - 5.8 MB - 0.1s - stream copy, no re-encode
+  /home/user/Videos/screen-0s-30s.mp4
+```
+
+A clip leaves out the source's chapters. An end past the file stops at its
+end, and a note says so. In a batch the range applies to every file, a
+negative time counts from each file's own end, and a file shorter than the
+start fails on its own. A batch writes into a folder named after the range
+(`1m02s-1m10s/talk.mp4`), the way a sized batch does, unless you give `-o`.
+`--max-size` sizes the clip rather than the whole file, and `--fps`,
+`--resize` and `--crf` work as usual. On an image or a document the flags
+are refused, with the reason.
+
 ## Discovering formats and capabilities
 
 `conv capabilities` lists every registered pair and the backend(s) behind it:
@@ -530,7 +578,7 @@ its name.
 `--dry-run` prints the real backend command without running the conversion —
 it never creates directories, and it probes the input only where the plan
 depends on its streams, such as a container change, a GIF target, a video
-knob or `--max-size`. `-v/--verbose` streams each spawned command and the
+knob, a cut or `--max-size`. `-v/--verbose` streams each spawned command and the
 backend's full output to stderr as a job runs.
 
 ## Batch conversion
@@ -681,8 +729,9 @@ the notes the human output prints under the path, the same ones a
 `--dry-run` plan carries, so it is empty when nothing applies. `backend_output`
 always holds each step's raw output, tail-capped at 16 KiB; `notes` is the
 small distilled subset worth a person's attention, usually empty on a clean
-run. For the full shapes of every command, run it with `--json` — the binary
-is the reference.
+run. A cut adds `range`: where the cut was made, in milliseconds, and the
+times as typed. For the full shapes of every command, run it with `--json`
+— the binary is the reference.
 
 ## Troubleshooting
 
