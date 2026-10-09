@@ -337,6 +337,16 @@ OK IMG_0042-stripped.jpg - 2.5 MB - 0.3s
   note  The jpg is re-encoded at quality 92 to remove its metadata; ImageMagick cannot take it out of a jpg without re-encoding.
 ```
 
+A batch writes into a `stripped` folder next to its files, under their own
+names, unless you give `-o`. The originals stay as they are, and running the
+same command again converts only what is new:
+
+```console
+$ conv photos --to jpg --strip-metadata
+OK 3 converted - 0 skipped - 0 failed - 0.5s
+  /home/user/photos/stripped
+```
+
 Track languages and chapter names go with the other tags, and a note says
 so when the file has them. Cover art is kept as it is, so a cover made from
 a phone photo can still carry that photo's EXIF.
@@ -391,11 +401,14 @@ output, or use `--to` for a batch, as usual. An output that is the input
 itself is refused, even with `-y`, and so is an existing output in the
 input's own format: in a folder of two clips, the shell turns
 `conv *.mp4 --max-size 8mb` into `conv a.mp4 b.mp4 --max-size 8mb`, which
-would replace `b.mp4` with a sized copy of `a.mp4`. A batch needs `--to`:
+would replace `b.mp4` with a sized copy of `a.mp4`. A batch needs `--to`,
+and writes into a folder named after the size next to its files
+(`8mb/clip.mp4`), unless you give `-o`. A folder input never reads that
+folder back, so running the same batch again sizes only what is new:
 
 ```console
 conv clip.mov small.mp4 --max-size 25mb   # name the output
-conv *.mov --to mp4 --max-size 8mb        # a batch: each file is sized on its own
+conv *.mov --to mp4 --max-size 8mb        # a batch: each file is sized on its own, into 8mb/
 ```
 
 `--resize` and `--fps` become limits it stays within. What they cut is your
@@ -536,6 +549,10 @@ OK 2 converted - 0 skipped - 0 failed - 0.1s
 Existing outputs are never overwritten by default — a collision skips that
 one file and reports it; `-y/--overwrite` opts in. `-q/--quiet` silences
 success output but never a failure or a backend warning.
+
+Two inputs that would write the same file keep their source format in the
+name instead: `a.jpg` and `a.png` with `--to webp` write `a-jpg.webp` and
+`a-png.webp`.
 
 ## Backends
 

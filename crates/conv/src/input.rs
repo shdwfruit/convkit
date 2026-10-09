@@ -190,14 +190,6 @@ pub fn jobs_from(
     if let Some(to_str) = to {
         let to_fmt = output_format_of_ext(to_str)?;
         let mut jobs = Vec::with_capacity(paths.len());
-        // Two inputs that differ only in extension (`a.jpg a.png --to webp`)
-        // — or, where the filesystem is case-insensitive, only in letter
-        // case — plan onto one output path. The jobs then race in rayon,
-        // one result silently replaces the other, and both report OK; so
-        // the collision check runs for every `--to` batch, not only under
-        // `-o`, and compares `collision_key`s rather than raw paths. Maps
-        // key → first input so the error can name both colliding inputs.
-        let mut seen: HashMap<PathBuf, PathBuf> = HashMap::new();
         for input in paths {
             let from_fmt = format_of(input)?;
             let base = input.with_extension(to_fmt.ext());
@@ -216,23 +208,34 @@ pub fn jobs_from(
                 }
                 None => base,
             };
-            if let Some(prev) = seen.insert(collision_key(&output), input.clone()) {
-                return Err(ConvError::new(
-                    ErrorCode::InvalidInvocation,
-                    format!(
-                        "outputs collide: {} and {} both produce {}",
-                        prev.display(),
-                        input.display(),
-                        output.display()
-                    ),
-                ));
-            }
             jobs.push(Job {
                 inputs: vec![input.clone()],
                 output,
                 from: from_fmt,
                 to: to_fmt,
             });
+        }
+        // Two inputs that differ only in extension (`a.jpg a.png --to
+        // webp`) -- or, where the filesystem is case-insensitive, only in
+        // letter case -- plan onto one output path. The jobs would race in
+        // rayon and one result silently replace the other, so each keeps its
+        // source format in its name instead. What renaming cannot keep apart
+        // (one format twice, as `x/a.heic y/a.heic -o out`) is refused,
+        // comparing `collision_key`s rather than raw paths.
+        keep_apart(&mut jobs);
+        let mut seen: HashMap<PathBuf, usize> = HashMap::new();
+        for (i, job) in jobs.iter().enumerate() {
+            if let Some(prev) = seen.insert(collision_key(&job.output), i) {
+                return Err(ConvError::new(
+                    ErrorCode::InvalidInvocation,
+                    format!(
+                        "outputs collide: {} and {} both produce {}",
+                        jobs[prev].inputs[0].display(),
+                        job.inputs[0].display(),
+                        job.output.display()
+                    ),
+                ));
+            }
         }
         return Ok(jobs);
     }
@@ -424,6 +427,9 @@ fn name_own_format_outputs(
             job.output = suffixed_name(&job.output, suffix);
         }
     }
+    // The suffix can land a sized copy on a name a conversion already
+    // plans (`clip.mp4` -> `clip-80kb.mp4` beside `clip-80kb.mov`).
+    keep_apart(&mut jobs);
 
     let input_keys: Vec<PathBuf> = jobs
         .iter()
@@ -455,6 +461,48 @@ fn name_own_format_outputs(
         }
     }
     Ok(jobs)
+}
+
+/// Gives a converted file whose name another file in the same run claims,
+/// as its output or as its input, its source format in its name:
+/// `IMG_1.heic` beside an `IMG_1.jpg` writes `IMG_1-heic.jpg`, and `a.jpg`
+/// and `a.png` to webp write `a-jpg.webp` and `a-png.webp`. Neither file is
+/// lost, overwritten or refused for the other's sake. Only conversions to
+/// another format are renamed: a sized or stripped copy already has its
+/// own suffix, and a clash between two of the same format is left for the
+/// caller to refuse, since no name can keep them apart.
+fn keep_apart(jobs: &mut [Job]) {
+    let source = |job: &Job| {
+        job.inputs[0]
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    };
+    let sources: Vec<String> = jobs.iter().map(source).collect();
+    let outputs: Vec<PathBuf> = jobs.iter().map(|j| collision_key(&j.output)).collect();
+    let inputs: Vec<(usize, PathBuf)> = jobs
+        .iter()
+        .enumerate()
+        .flat_map(|(i, j)| j.inputs.iter().map(move |p| (i, collision_key(p))))
+        .collect();
+    // Claimed by something a different name can get away from: another
+    // job's input, or another job's output from a different format.
+    let claimed: Vec<bool> = outputs
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            outputs
+                .iter()
+                .enumerate()
+                .any(|(k, o)| k != i && o == key && sources[k] != sources[i])
+                || inputs.iter().any(|(k, p)| *k != i && p == key)
+        })
+        .collect();
+    for ((job, claimed), source) in jobs.iter_mut().zip(claimed).zip(sources) {
+        if claimed && job.from != job.to && job.inputs.len() == 1 {
+            job.output = suffixed_name(&job.output, &source);
+        }
+    }
 }
 
 /// `clip.mp4` + `10mb` -> `clip-10mb.mp4`, keeping the extension's case.
@@ -560,18 +608,7 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
     // Skipped under `--dry-run`, which is documented as inert: a preview
     // must not leave a directory behind.
     if let Some(dir) = cli.outdir.as_ref().filter(|_| !cli.dry_run) {
-        std::fs::create_dir_all(dir).map_err(|e| ConvError {
-            code: ErrorCode::InvalidInvocation,
-            message: format!("cannot create output directory {}: {e}", dir.display()),
-            backend: None,
-            remediation: Some(Remediation {
-                managed: None,
-                manual: Some(format!(
-                    "create it yourself and check permissions, e.g. `mkdir -p {}`",
-                    dir.display()
-                )),
-            }),
-        })?;
+        create_output_dir(dir)?;
     }
 
     let target_format = cli.to.as_deref().and_then(Format::from_ext);
@@ -739,11 +776,60 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
         refuse_a_batch_without_to(&expanded, explicit_output, &own)?;
     }
     // The one form these flags add: a lone path keeps its own format.
-    let jobs = match (cli.to.as_deref(), expanded.as_slice()) {
+    let mut jobs = match (cli.to.as_deref(), expanded.as_slice()) {
         (None, [single]) => vec![own_format_job(single, cli.outdir.as_deref(), &own)?],
         _ => jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?,
     };
-    name_own_format_outputs(jobs, own.suffix, explicit_output)
+    // A batch writes into a subfolder beside its inputs (`photos/stripped/`,
+    // `clips/10mb/`) unless `-o` says where. These runs take files already
+    // in the target format as inputs, so outputs written among them would
+    // be taken for new inputs by the next run, which would size or strip
+    // its own results again. A folder input never reads its subfolders, so
+    // a re-run converts only what is new; what is already in the subfolder
+    // is an existing file, never overwritten without -y.
+    let into_subfolder = cli.to.is_some() && cli.outdir.is_none();
+    if into_subfolder {
+        for job in &mut jobs {
+            job.output = in_subfolder(&job.output, own.suffix);
+        }
+    }
+    let jobs = name_own_format_outputs(jobs, own.suffix, explicit_output)?;
+    if into_subfolder && !cli.dry_run {
+        let mut made: Vec<&Path> = Vec::new();
+        for dir in jobs.iter().filter_map(|j| j.output.parent()) {
+            if !made.contains(&dir) {
+                create_output_dir(dir)?;
+                made.push(dir);
+            }
+        }
+    }
+    Ok(jobs)
+}
+
+/// `photos/IMG_2.jpg` + `stripped` -> `photos/stripped/IMG_2.jpg`.
+fn in_subfolder(output: &Path, folder: &str) -> PathBuf {
+    let name = output.file_name().unwrap_or_default();
+    match output.parent() {
+        Some(dir) => dir.join(folder).join(name),
+        None => Path::new(folder).join(name),
+    }
+}
+
+/// Creates an output directory, or says why it cannot be: a usage problem
+/// (an unwritable path, or a file in the way), not a conversion failure.
+fn create_output_dir(dir: &Path) -> Result<(), ConvError> {
+    std::fs::create_dir_all(dir).map_err(|e| ConvError {
+        code: ErrorCode::InvalidInvocation,
+        message: format!("cannot create output directory {}: {e}", dir.display()),
+        backend: None,
+        remediation: Some(Remediation {
+            managed: None,
+            manual: Some(format!(
+                "create it yourself and check permissions, e.g. `mkdir -p {}`",
+                dir.display()
+            )),
+        }),
+    })
 }
 
 /// Under `--max-size` or `--strip-metadata` with no `--to`, a glob
@@ -829,6 +915,23 @@ mod tests {
             std::fs::write(photos.join(name), b"x").unwrap();
         }
         dir
+    }
+
+    fn outputs(jobs: &[Job]) -> Vec<PathBuf> {
+        jobs.iter().map(|j| j.output.clone()).collect()
+    }
+
+    /// The outputs as paths under `dir`, `/`-separated on every platform.
+    fn under(dir: &Path, jobs: &[Job]) -> Vec<String> {
+        jobs.iter()
+            .map(|j| {
+                let rel = j.output.strip_prefix(dir).unwrap_or(&j.output);
+                rel.components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .collect()
     }
 
     fn names(paths: &[PathBuf]) -> Vec<String> {
@@ -1002,21 +1105,47 @@ mod tests {
     /// `-o`. It must run for every `--to` batch.
     #[test]
     fn same_stem_inputs_collide_even_without_outdir() {
-        let e = jobs_from(&v(&["a.jpg", "a.png"]), Some("webp"), None).unwrap_err();
+        // The same file named twice: one format, so no name keeps them apart.
+        let e = jobs_from(&v(&["a.jpg", "a.jpg"]), Some("webp"), None).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidInvocation);
-        assert!(e.message.contains("collide"), "{}", e.message);
-        assert!(
-            e.message.contains("a.jpg") && e.message.contains("a.png"),
-            "the error must name both colliding inputs: {}",
-            e.message
+        assert_eq!(
+            e.message,
+            "outputs collide: a.jpg and a.jpg both produce a.webp"
         );
+    }
+
+    /// Two inputs that differ only in format would write one file; each
+    /// keeps its source format in its name instead, so neither is lost and
+    /// neither is refused.
+    #[test]
+    fn same_stem_inputs_of_two_formats_keep_their_source_format() {
+        let jobs = jobs_from(&v(&["a.jpg", "a.PNG"]), Some("webp"), None).unwrap();
+        assert_eq!(names(&outputs(&jobs)), ["a-jpg.webp", "a-png.webp"]);
+        let jobs = jobs_from(&v(&["a.jpg", "b.png"]), Some("webp"), None).unwrap();
+        assert_eq!(
+            names(&outputs(&jobs)),
+            ["a.webp", "b.webp"],
+            "no clash, no rename"
+        );
+    }
+
+    /// The clash is found through every spelling the check knows, so the
+    /// rename happens there too.
+    #[test]
+    fn a_clash_spelled_differently_is_still_kept_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let a = dir.path().join("a.jpg");
+        let b = dir.path().join("sub").join("..").join("a.png");
+        let jobs = jobs_from(&[a, b], Some("webp"), None).unwrap();
+        assert_eq!(names(&outputs(&jobs)), ["a-jpg.webp", "a-png.webp"]);
     }
 
     /// `./a.png` and `a.png` are one file; comparing raw paths would let
     /// them slip past the collision check.
     #[test]
     fn relative_and_absolute_spellings_of_one_output_collide() {
-        let e = jobs_from(&v(&["a.jpg", "./a.png"]), Some("webp"), None).unwrap_err();
+        let e = jobs_from(&v(&["a.jpg", "./a.jpg"]), Some("webp"), None).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidInvocation);
         assert!(e.message.contains("collide"), "{}", e.message);
     }
@@ -1027,7 +1156,7 @@ mod tests {
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn outputs_differing_only_by_case_collide_on_case_insensitive_platforms() {
-        let e = jobs_from(&v(&["A.jpg", "a.png"]), Some("webp"), None).unwrap_err();
+        let e = jobs_from(&v(&["A.jpg", "a.jpg"]), Some("webp"), None).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidInvocation);
         assert!(e.message.contains("collide"), "{}", e.message);
     }
@@ -1048,7 +1177,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         let a = dir.path().join("a.jpg");
-        let b = dir.path().join("sub").join("..").join("a.png");
+        let b = dir.path().join("sub").join("..").join("a.jpg");
         let e = jobs_from(&[a, b], Some("webp"), None).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidInvocation);
         assert!(e.message.contains("collide"), "{}", e.message);
@@ -1063,7 +1192,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, dir.path().join("alias")).unwrap();
 
         let a = real.join("x.jpg");
-        let b = dir.path().join("alias").join("x.png");
+        let b = dir.path().join("alias").join("x.jpg");
         let e = jobs_from(&[a, b], Some("webp"), None).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidInvocation);
         assert!(e.message.contains("collide"), "{}", e.message);
@@ -1076,7 +1205,7 @@ mod tests {
     #[test]
     fn nfc_and_nfd_spellings_of_one_stem_collide_on_macos() {
         let e = jobs_from(
-            &v(&["caf\u{e9}.jpg", "cafe\u{301}.png"]),
+            &v(&["caf\u{e9}.jpg", "cafe\u{301}.jpg"]),
             Some("webp"),
             None,
         )
@@ -1490,25 +1619,49 @@ mod tests {
         assert_eq!(jobs[0].output, dir.path().join("clip-10mb.mp4"));
     }
 
+    /// A batch writes into a subfolder named after the size, under plain
+    /// names, and creates it; a re-run never reads it back as input.
     #[test]
-    fn a_fan_out_suffixes_only_the_outputs_that_would_land_on_their_input() {
+    fn a_sized_batch_writes_into_a_subfolder() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.mp4");
         let b = dir.path().join("b.mov");
         let jobs = plan_jobs(&sized(vec![a, b], Some("mp4"), None)).unwrap();
-        assert_eq!(jobs[0].output, dir.path().join("a-10mb.mp4"));
-        assert_eq!(jobs[1].output, dir.path().join("b.mp4"));
+        assert_eq!(under(dir.path(), &jobs), ["10mb/a.mp4", "10mb/b.mp4"]);
+        assert!(dir.path().join("10mb").is_dir());
     }
 
-    /// `a.mov -> a.mp4` would overwrite the input `a.mp4` while it is read;
-    /// jobs_from's collision check refuses it before any renaming.
+    /// `--dry-run` previews where the batch would write, and creates
+    /// nothing.
     #[test]
-    fn an_output_landing_on_another_inputs_path_is_refused() {
+    fn a_dry_run_batch_does_not_create_the_subfolder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = stripped(vec![dir.path().join("a.jpg")], Some("jpg"), None);
+        cli.dry_run = true;
+        let jobs = plan_jobs(&cli).unwrap();
+        assert_eq!(under(dir.path(), &jobs), ["stripped/a.jpg"]);
+        assert!(!dir.path().join("stripped").exists());
+    }
+
+    /// `-o` says where, so no subfolder is added.
+    #[test]
+    fn a_batch_with_an_outdir_writes_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        let a = dir.path().join("a.heic");
+        let jobs = plan_jobs(&stripped(vec![a], Some("jpg"), Some(out.clone()))).unwrap();
+        assert_eq!(jobs[0].output, out.join("a.jpg"));
+    }
+
+    /// `a.mov -> a.mp4` would overwrite the input `a.mp4` while it is read,
+    /// so the converted file keeps its source format in its name instead.
+    #[test]
+    fn an_output_landing_on_another_inputs_path_keeps_its_source_format() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.mp4");
         let b = dir.path().join("a.mov");
-        let e = plan_jobs(&sized(vec![a, b], Some("mp4"), None)).unwrap_err();
-        assert!(e.message.starts_with("outputs collide"), "{}", e.message);
+        let jobs = plan_jobs(&sized(vec![a, b], Some("mp4"), None)).unwrap();
+        assert_eq!(under(dir.path(), &jobs), ["10mb/a.mp4", "10mb/a-mov.mp4"]);
     }
 
     #[test]
@@ -1539,26 +1692,28 @@ mod tests {
         assert_eq!(jobs[0].output, dir.path().join("clip-10mb.mp4"));
     }
 
-    /// `clip.mp4` is renamed to `clip-80kb.mp4` only after `jobs_from` has
-    /// compared outputs, and `clip-80kb.mov` already plans onto that name:
-    /// both would write one file and both would report success.
+    /// A lone sized copy beside its clip (`clip-80kb.mp4`) and a clip of
+    /// that name in another format both land in the batch's subfolder under
+    /// their own names.
     #[test]
-    fn a_derived_name_that_another_job_also_writes_is_refused() {
+    fn a_derived_name_that_another_job_also_writes_keeps_them_apart() {
         let dir = tempfile::tempdir().unwrap();
         let clip = dir.path().join("clip.mp4");
         let other = dir.path().join("clip-80kb.mov");
         std::fs::write(&clip, b"x").unwrap();
         std::fs::write(&other, b"x").unwrap();
         let cli = sized_to("80kb", vec![clip, other], Some("mp4"), None);
-        let e = plan_jobs(&cli).unwrap_err();
-        assert!(e.message.starts_with("outputs collide"), "{}", e.message);
-        for name in ["clip.mp4", "clip-80kb.mov", "clip-80kb.mp4"] {
-            assert!(e.message.contains(name), "{name} missing: {}", e.message);
-        }
+        let jobs = plan_jobs(&cli).unwrap();
+        assert_eq!(
+            under(dir.path(), &jobs),
+            ["80kb/clip.mp4", "80kb/clip-80kb.mp4"]
+        );
     }
 
-    /// A repeat run over `*.mp4` picks up the last run's `clip-80kb.mp4`. The
-    /// first job would write the second job's input while it is being read.
+    /// An output named as another job's input is still refused: that job
+    /// would be read while this one overwrites it. With `-o` into the inputs'
+    /// own folder, `clip.mp4` is sized to `clip-80kb.mp4`, which a glob of
+    /// `*.mp4` also took as an input.
     #[test]
     fn a_derived_name_that_is_another_jobs_input_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1566,11 +1721,12 @@ mod tests {
         let previous = dir.path().join("clip-80kb.mp4");
         std::fs::write(&clip, b"x").unwrap();
         std::fs::write(&previous, b"x").unwrap();
+        let here = Some(dir.path().to_path_buf());
         for order in [
             vec![clip.clone(), previous.clone()],
             vec![previous.clone(), clip.clone()],
         ] {
-            let e = plan_jobs(&sized_to("80kb", order, Some("mp4"), None)).unwrap_err();
+            let e = plan_jobs(&sized_to("80kb", order, Some("mp4"), here.clone())).unwrap_err();
             assert!(e.message.starts_with("outputs collide"), "{}", e.message);
             assert!(
                 e.message.contains("would write") && e.message.ends_with("which is also an input"),
@@ -1599,8 +1755,7 @@ mod tests {
             vec!["a.mp4", "b.mov"],
             "{jobs:?}"
         );
-        assert_eq!(jobs[0].output, clips.join("a-10mb.mp4"));
-        assert_eq!(jobs[1].output, clips.join("b.mp4"));
+        assert_eq!(under(&clips, &jobs), ["10mb/a.mp4", "10mb/b.mp4"]);
 
         let jobs = plan_jobs(&cli_for(vec![clips.clone()], Some("mp4"), None)).unwrap();
         assert_eq!(
@@ -1821,11 +1976,10 @@ mod tests {
             std::fs::write(dir.path().join(n), b"x").unwrap();
         }
         let jobs = plan_jobs(&stripped(vec![dir.path().to_path_buf()], Some("jpg"), None)).unwrap();
-        let outs: Vec<String> = jobs
-            .iter()
-            .map(|j| j.output.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(outs, ["a-stripped.jpg", "b.jpg"]);
+        assert_eq!(
+            under(dir.path(), &jobs),
+            ["stripped/a.jpg", "stripped/b.jpg"]
+        );
     }
 
     /// A file already in the target format is kept for stripping only where
@@ -1849,6 +2003,26 @@ mod tests {
             })
             .collect();
         assert_eq!(inputs, ["a.jpg", "b.png"]);
+    }
+
+    /// A folder holding `IMG_1.heic` and `IMG_1.jpg`: both would be
+    /// `stripped/IMG_1.jpg`, so the converted heic keeps its format in its
+    /// name. Nothing is refused or skipped.
+    #[test]
+    fn a_heic_beside_a_jpg_of_the_same_name_keeps_its_format() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["IMG_1.heic", "IMG_1.jpg", "IMG_2.heic"] {
+            std::fs::write(dir.path().join(n), b"x").unwrap();
+        }
+        let jobs = plan_jobs(&stripped(vec![dir.path().to_path_buf()], Some("jpg"), None)).unwrap();
+        assert_eq!(
+            under(dir.path(), &jobs),
+            [
+                "stripped/IMG_1-heic.jpg",
+                "stripped/IMG_1.jpg",
+                "stripped/IMG_2.jpg"
+            ]
+        );
     }
 
     /// Both flags keep the format; the size names the file, as its rules
