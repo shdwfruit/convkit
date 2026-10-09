@@ -142,6 +142,9 @@ pub(crate) enum AudioDisposition {
     /// Stream-copy every track, whether or not the target would keep it.
     /// For a pass whose output is discarded.
     Copy,
+    /// No audio at all: a silent clip. `-an`, which also overrides the
+    /// mkv branch's `-map 0`.
+    Drop,
 }
 
 /// Emits the video codec and, for a transcode, its filter chain.
@@ -218,6 +221,7 @@ fn push_audio_args(
         AudioDisposition::Fit => audio_codec_args(argv, warnings, to, audio_ok, audios),
         AudioDisposition::Reencode { kbps } => reencode_audio_args(argv, to, kbps, audios.len()),
         AudioDisposition::Copy => push(argv, &["-c:a", "copy"]),
+        AudioDisposition::Drop => push(argv, &["-an"]),
     }
 }
 
@@ -311,7 +315,10 @@ fn mapped_invocation(
         }
     } else {
         // mp4/mov/webm: name exactly what is carried, per stream.
-        push(&mut argv, &["-map", "0:v:0", "-map", "0:a?"]);
+        push(&mut argv, &["-map", "0:v:0"]);
+        if !matches!(audio, AudioDisposition::Drop) {
+            push(&mut argv, &["-map", "0:a?"]);
+        }
         if probe.video_streams > 1 {
             warnings.push(format!(
                 "{} additional video stream(s) in the source are not carried by {}; \
@@ -394,7 +401,12 @@ fn mapped_invocation(
     }
     // Only where audio may be copied: a track re-encoded at a set rate is
     // trimmed by its decoder.
-    if !audios.is_empty() && !matches!(audio, AudioDisposition::Reencode { .. }) {
+    if !audios.is_empty()
+        && !matches!(
+            audio,
+            AudioDisposition::Reencode { .. } | AudioDisposition::Drop
+        )
+    {
         push_cut_audio(&mut argv, cut);
     }
     if let Some(cut) = cut {
@@ -422,7 +434,7 @@ pub(crate) fn stream_mapped_invocation(
     to: Format,
     probe: &MediaProbe,
     strip: bool,
-    cut: Option<&Cut>,
+    resolved: &ResolvedVideo,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
@@ -435,12 +447,22 @@ pub(crate) fn stream_mapped_invocation(
         to,
         probe,
         VideoDisposition::Copy,
-        AudioDisposition::Fit,
+        audio_for(resolved),
         strip,
-        cut,
+        resolved.cut.as_ref(),
         input,
         output,
     )
+}
+
+/// What the audio of an ordinary invocation does: fit the target, or go,
+/// for a silent clip.
+fn audio_for(resolved: &ResolvedVideo) -> AudioDisposition {
+    if resolved.mute {
+        AudioDisposition::Drop
+    } else {
+        AudioDisposition::Fit
+    }
 }
 
 /// The same stream mapping, with the video re-encoded.
@@ -487,7 +509,7 @@ pub(crate) fn transcoded_invocation(
                 .unwrap_or_else(|| anchor.to_string()),
             companions,
         },
-        AudioDisposition::Fit,
+        audio_for(resolved),
         strip,
         resolved.cut.as_ref(),
         input,
@@ -827,7 +849,7 @@ mod tests {
             to,
             p,
             false,
-            None,
+            &ResolvedVideo::default(),
             &PathBuf::from("in"),
             &PathBuf::from("out"),
         )
@@ -843,12 +865,15 @@ mod tests {
         let mut p = probe(Some("h264"), &["aac"], &[], 0);
         p.kept_tags = vec![("title".into(), "Clip".into())];
         let (i, o) = (PathBuf::from("in.mov"), PathBuf::from("out.mp4"));
-        let m = stream_mapped_invocation(Format::Mp4, &p, true, None, &i, &o).unwrap();
+        let m = stream_mapped_invocation(Format::Mp4, &p, true, &ResolvedVideo::default(), &i, &o)
+            .unwrap();
         assert!(has(&m.argv, ["-map_metadata", "-1"]), "{:?}", m.argv);
         assert!(has(&m.argv, ["-metadata", "title=Clip"]), "{:?}", m.argv);
         assert!(has(&m.argv, ["-c:v", "copy"]), "{:?}", m.argv);
         assert_eq!(m.argv.last().unwrap(), "out.mp4");
-        let plain = stream_mapped_invocation(Format::Mp4, &p, false, None, &i, &o).unwrap();
+        let plain =
+            stream_mapped_invocation(Format::Mp4, &p, false, &ResolvedVideo::default(), &i, &o)
+                .unwrap();
         assert!(!plain.argv.iter().any(|a| a == "-map_metadata"));
     }
 
@@ -872,9 +897,19 @@ mod tests {
         assert!(has(&m.argv, ["-map", "-0:t"]), "{:?}", m.argv);
         assert!(!has(&m.argv, restore), "{:?}", m.argv);
 
-        let m = stream_mapped_invocation(Format::Mkv, &fonts, true, None, &i, &o).unwrap();
+        let m =
+            stream_mapped_invocation(Format::Mkv, &fonts, true, &ResolvedVideo::default(), &i, &o)
+                .unwrap();
         assert!(has(&m.argv, restore), "{:?}", m.argv);
-        let m = stream_mapped_invocation(Format::Mkv, &fonts, false, None, &i, &o).unwrap();
+        let m = stream_mapped_invocation(
+            Format::Mkv,
+            &fonts,
+            false,
+            &ResolvedVideo::default(),
+            &i,
+            &o,
+        )
+        .unwrap();
         assert!(!has(&m.argv, restore), "{:?}", m.argv);
     }
 
@@ -927,7 +962,10 @@ mod tests {
             Format::Mp4,
             &probe(Some("h264"), &["aac"], &[], 0),
             false,
-            Some(&cut),
+            &ResolvedVideo {
+                cut: Some(cut),
+                ..ResolvedVideo::default()
+            },
             &PathBuf::from("in"),
             &PathBuf::from("out"),
         )
@@ -1613,6 +1651,7 @@ mod tests {
             keep_source_size: false,
             enlarged: None,
             cut: None,
+            mute: false,
         }
     }
 

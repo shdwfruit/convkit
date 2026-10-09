@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use convkit_core::{Resolver, Tuning};
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "conv",
     version,
@@ -182,10 +182,56 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Report which backends are installed and how to install the rest.
     Doctor,
+    /// Cut clips out of a video or audio file in the terminal.
+    #[command(long_about = "\
+Cut clips out of a video or audio file in the terminal. The frame under \
+the slider is drawn at the top, with a video bar and a loudness bar \
+below it.
+
+←/→ move the slider 10 ms; held, they move 2 s a second. PgUp/PgDn jump \
+a tenth of the bars, ,/. step a frame, +/- zoom the bars, Home/End go to \
+either end.
+
+c marks a clip's start, then its end. With no bar selected a clip keeps \
+the picture and the sound; ↑/↓ and Enter select a bar, and a clip then \
+keeps that bar alone (a silent video, or the sound as m4a). u undoes, \
+Esc drops an open mark, w writes every clip, q quits.
+
+Each clip is written as conv FILE --start T --end T would write it, \
+named for its range: talk-1m02s-1m10s.mp4, and w asks before it \
+replaces a file already there.")]
+    Trim {
+        /// The video or audio file to cut.
+        file: PathBuf,
+        /// Write the clips with a picture in this format (an audio format
+        /// keeps only the sound).
+        #[arg(long)]
+        to: Option<String>,
+        /// Write the clips into this directory.
+        #[arg(short = 'o', long)]
+        outdir: Option<PathBuf>,
+        /// Overwrite clips that already exist, without asking.
+        #[arg(short = 'y', long)]
+        overwrite: bool,
+        /// Print each clip's command instead of running it.
+        #[arg(long)]
+        dry_run: bool,
+        /// How to draw the picture. By default it is told from the
+        /// terminal: kitty's protocol in kitty and Ghostty, iTerm2's in
+        /// iTerm2 and WezTerm, half blocks in Apple's Terminal, and
+        /// sextants (six pixels a character) elsewhere and under tmux.
+        /// Use blocks where sextants show as boxes or question marks.
+        #[arg(
+            long,
+            value_name = "HOW",
+            value_parser = ["sextants", "blocks", "kitty", "iterm"]
+        )]
+        graphics: Option<String>,
+    },
     /// Download and verify a managed backend.
     Install { backend: String },
     /// List every supported conversion; with a FORMAT, show that format's
@@ -362,6 +408,8 @@ impl Cli {
             // `check` has already refused a range that does not hold
             // together; see main.
             range: self.range().ok().flatten(),
+            // No flag asks for a silent clip; conv trim sets it per clip.
+            mute: false,
         }
     }
 

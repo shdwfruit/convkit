@@ -49,12 +49,16 @@ pub struct Tuning {
     /// typed. Resolved against the probe by `trim::resolve`; the cut reaches
     /// argv through `ResolvedVideo::cut`.
     pub range: Option<crate::trim::Range>,
+    /// Drop every audio track: a silent clip, as `conv trim` writes for a
+    /// cut made on its video bar alone. Video targets only.
+    pub mute: bool,
 }
 
 impl Tuning {
     pub fn is_empty(&self) -> bool {
         !self.upscale
             && !self.strip_metadata
+            && !self.mute
             && self.range.is_none()
             && self.resize.is_none()
             && self.quality.is_none()
@@ -175,6 +179,11 @@ pub enum Arg {
     /// `trim::Cut::input_args`. A step with this slot also gets the cut's
     /// output options just before its `Output` (`trim::Cut::output_args`).
     Trim,
+    /// `-an` for a silent clip; renders nothing otherwise. An output
+    /// option, so authored just before the output in the video recipes. It
+    /// drops audio even where a recipe maps it explicitly (`-map 0`),
+    /// checked on ffmpeg 6.1 and 9.0.
+    Mute,
     /// The first (usually only) input path.
     Input,
     /// The first input path with ImageMagick's `[0]` frame selector
@@ -341,6 +350,11 @@ impl Step {
                 Arg::Trim => {
                     if let Some(cut) = &video.cut {
                         argv.extend(cut.input_args());
+                    }
+                }
+                Arg::Mute => {
+                    if tuning.mute {
+                        argv.push("-an".to_string());
                     }
                 }
                 Arg::Input => {
@@ -602,6 +616,7 @@ mod tests {
             upscale: false,
             strip_metadata: false,
             range: None,
+            mute: false,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],
@@ -712,6 +727,10 @@ mod tests {
                 .unwrap(),
                 ..Default::default()
             },
+            Tuning {
+                mute: true,
+                ..Default::default()
+            },
         ];
         assert!(Tuning::default().is_empty());
         for t in &each {
@@ -720,9 +739,34 @@ mod tests {
         // If a field is added without extending this list, this catches it.
         assert_eq!(
             each.len(),
-            6,
+            7,
             "Tuning gained a field; add it to `each` and to is_empty()"
         );
+    }
+
+    #[test]
+    fn a_mute_slot_renders_an_only_for_a_silent_clip() {
+        let step = Step {
+            backend: Backend::Ffmpeg,
+            args: &[Arg::Lit("-i"), Arg::Input, Arg::Mute, Arg::Output],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let render = |mute| {
+            step.render_full(
+                &[Path::new("in.avi")],
+                Path::new("out.mp4"),
+                &Tuning {
+                    mute,
+                    ..Tuning::default()
+                },
+                &ResolvedVideo::default(),
+                &[],
+            )
+            .argv
+        };
+        assert_eq!(render(false), ["-i", "in.avi", "out.mp4"]);
+        assert_eq!(render(true), ["-i", "in.avi", "-an", "out.mp4"]);
     }
 
     #[test]

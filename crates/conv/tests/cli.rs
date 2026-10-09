@@ -2926,3 +2926,288 @@ fn a_batch_cut_fails_only_the_file_too_short_for_it() {
     assert!(clips.join("long.mkv").is_file());
     assert!(!clips.join("short.mkv").exists());
 }
+
+// --- conv trim -----------------------------------------------------------
+
+/// Without a terminal to draw on there is nothing to show, so conv trim
+/// refuses and points at the flags, which need none. assert_cmd runs it
+/// with pipes, not a terminal.
+#[test]
+fn conv_trim_without_a_terminal_points_at_the_flags() {
+    conv()
+        .args(["trim", "talk.mp4"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "conv trim needs a terminal; use conv FILE --start T --end T to cut without one",
+        ));
+    conv()
+        .args(["trim", "talk.mp4", "--json"])
+        .assert()
+        .code(2)
+        .stderr(contains("conv trim needs a terminal"));
+}
+
+#[test]
+fn conv_trim_refuses_what_it_cannot_cut_before_anything_else() {
+    conv()
+        .args(["trim", "photo.png"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "conv trim cuts video and audio; photo.png is a still image",
+        ));
+    conv()
+        .args(["trim", "anim.gif"])
+        .assert()
+        .code(2)
+        .stderr(contains("add --to mp4"));
+    conv()
+        .args(["trim", "talk.mp4", "--to", "png"])
+        .assert()
+        .code(2)
+        .stderr(contains("--to png is a still image"));
+    conv()
+        .args(["trim", "talk.mp4", "--graphics", "sixel"])
+        .assert()
+        .code(2);
+}
+
+/// The clips are only written after the session, so an `-o` that can't
+/// hold them is refused before it: found at `w`, every mark was lost.
+#[test]
+fn conv_trim_refuses_an_outdir_that_is_a_file_before_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["trim", "talk.mp4", "-o", "notes.txt"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "-o notes.txt is a file; give a directory to write the clips into",
+        ));
+}
+
+/// Drives `conv trim` in a pseudo-terminal 100 columns by 30 rows, then
+/// prints its exit code and `stty -a` from the same terminal, so the test
+/// can see the tty was given back. `mode` is:
+/// - `write`: two clips, one whole and one of the sound alone, then w;
+/// - `replace`: the same, into a folder that has the first clip already,
+///   answering y to the question;
+/// - `quit`: a clip, then q and y;
+/// - `ctrlc`: a burst of arrows, as a held key sends them, which must not
+///   be echoed; a clip one tap long, which is shorter than a frame and
+///   refused; then a clip, Ctrl-C and y;
+/// - `nolength`: no keys, for a file that is refused.
+#[cfg(unix)]
+const TRIM_EXPECT: &str = r#"
+set timeout 60
+lassign $argv conv src out mode
+log_user 0
+spawn -noecho sh -c "stty rows 30 cols 100; TERM=xterm-256color COLORTERM= TERM_PROGRAM= TMUX= '$conv' trim '$src' -o '$out'; echo EXIT=\$?; stty -a"
+if {$mode == "nolength"} {
+    expect {
+        "cannot read the length" {}
+        timeout { puts "no refusal"; exit 1 }
+    }
+} else {
+    expect {
+        "w write" {}
+        timeout { puts "no screen"; exit 1 }
+    }
+    expect -timeout 1 "zz-never-zz"
+}
+set pgdn "\033\[6~"
+if {$mode == "write" || $mode == "replace"} {
+    send $pgdn; send "c"; send $pgdn; send $pgdn; send "c"
+    send "\033\[B"; send "\r"
+    send "c"; send $pgdn; send "c"
+    send "w"
+    if {$mode == "replace"} {
+        expect {
+            "src-2s-6s.mp4 is already there. Replace it?" {}
+            timeout { puts "no question"; exit 1 }
+        }
+        send "y"
+    }
+} elseif {$mode == "quit"} {
+    send "c"; send $pgdn; send "c"; send "q"; send "y"
+} elseif {$mode == "ctrlc"} {
+    for {set i 0} {$i < 40} {incr i} { send "\033\[C" }
+    set timeout 2
+    expect {
+        -ex "^\[\[C" { puts "echoed"; exit 1 }
+        timeout {}
+    }
+    set timeout 60
+    send "c"; send "\033\[C"; send "c"
+    expect {
+        "Not marked: the cut" {}
+        timeout { puts "a clip of one tap was kept"; exit 1 }
+    }
+    send "c"; send $pgdn; send "c"; send "\003"
+    expect {
+        "Quit without writing 1 clip?" {}
+        timeout { puts "no question"; exit 1 }
+    }
+    send "y"
+}
+expect {
+    -re {EXIT=(\d+)} { set code $expect_out(1,string) }
+    timeout { puts "no exit"; exit 1 }
+}
+expect {
+    -re {lflags:[^\n]*} { set lflags $expect_out(0,string) }
+    -re {(-?icanon[^\n]*)} { set lflags $expect_out(0,string) }
+    timeout { puts "no stty"; exit 1 }
+}
+expect eof
+puts "code=$code"
+puts "tty=$lflags"
+"#;
+
+/// Line editing and echo are on again: `stty -a` lists `icanon` and `echo`
+/// without a `-` (the format differs between macOS and GNU, the words do
+/// not).
+#[cfg(unix)]
+fn tty_given_back(stdout: &str) -> bool {
+    let tty = stdout.lines().find(|l| l.starts_with("tty=")).unwrap_or("");
+    tty.contains("icanon")
+        && !tty.contains("-icanon")
+        && tty.split_whitespace().any(|w| w == "echo")
+}
+
+#[cfg(unix)]
+fn run_trim_session(mode: &str) -> (String, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let ffmpeg = std::env::var_os("CONVKIT_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+    let mut make = std::process::Command::new(&ffmpeg);
+    make.args(["-v", "error", "-y"]);
+    let src = if mode == "nolength" {
+        // Written live, as a browser records one: no length in it.
+        make.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x90:rate=30:duration=2",
+        ])
+        .args([
+            "-c:v",
+            "libvpx-vp9",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+        ])
+        .args(["-live", "1"]);
+        dir.path().join("src.webm")
+    } else {
+        make.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=30:duration=20",
+        ])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=20"])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args(["-c:a", "aac"]);
+        dir.path().join("src.mp4")
+    };
+    assert!(make.arg(&src).status().unwrap().success());
+    let script = dir.path().join("trim.exp");
+    std::fs::write(&script, TRIM_EXPECT).unwrap();
+    let out = dir.path().join("clips");
+    if mode == "replace" {
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("src-2s-6s.mp4"), b"").unwrap();
+    }
+    let run = std::process::Command::new("expect")
+        .arg(&script)
+        .arg(assert_cmd::cargo::cargo_bin("conv"))
+        .arg(&src)
+        .arg(&out)
+        .arg(mode)
+        .output()
+        .expect("expect is needed for this test: apt-get install expect, or brew install expect");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert!(
+        run.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    (stdout, dir)
+}
+
+/// The whole of conv trim in a real terminal: marking a clip whole and a
+/// clip of the sound alone, writing both as they would be by the flags,
+/// and handing the terminal back with echo and line editing on.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_writes_the_clips_marked_in_a_real_terminal() {
+    let (stdout, dir) = run_trim_session("write");
+    assert!(stdout.contains("code=0"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
+    let clips = dir.path().join("clips");
+    let mut names: Vec<String> = std::fs::read_dir(&clips)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["src-2s-6s.mp4", "src-6s-8s.m4a"]);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_quits_without_writing_when_asked() {
+    let (stdout, dir) = run_trim_session("quit");
+    assert!(stdout.contains("code=0"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
+    assert!(!dir.path().join("clips").exists());
+}
+
+/// A clip already on disk is found while the marks are still on screen,
+/// and replaced only once w's question is answered y.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_asks_before_replacing_a_clip_already_there() {
+    let (stdout, dir) = run_trim_session("replace");
+    assert!(stdout.contains("code=0"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
+    let clips = dir.path().join("clips");
+    let replaced = std::fs::metadata(clips.join("src-2s-6s.mp4")).unwrap();
+    assert!(replaced.len() > 0, "the empty file was written over");
+    assert!(clips.join("src-6s-8s.m4a").exists());
+}
+
+/// Held keys reach conv rather than the screen, and Ctrl-C is a key that
+/// asks before throwing marked clips away, rather than a signal that
+/// stops conv with the terminal still held.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_takes_ctrl_c_and_held_arrows_as_keys() {
+    let (stdout, dir) = run_trim_session("ctrlc");
+    assert!(stdout.contains("code=0"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
+    assert!(!dir.path().join("clips").exists());
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn conv_trim_refuses_a_file_without_a_length() {
+    let (stdout, _dir) = run_trim_session("nolength");
+    assert!(stdout.contains("code=2"), "{stdout}");
+    assert!(tty_given_back(&stdout), "{stdout}");
+}

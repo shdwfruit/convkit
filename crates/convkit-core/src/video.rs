@@ -99,6 +99,9 @@ pub struct ResolvedVideo {
     /// cuts anything. Carried here because every ffmpeg invocation is built
     /// from this value, static recipe and probe-aware alike.
     pub cut: Option<crate::trim::Cut>,
+    /// A silent clip: every audio track dropped. Carried here for the same
+    /// reason as `cut`.
+    pub mute: bool,
 }
 
 /// Parses a user frame rate (`24`, `29.97`, `30000/1001`) into a float for

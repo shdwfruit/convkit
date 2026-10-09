@@ -206,14 +206,9 @@ pub(crate) fn plan(
                 range: p.range.clone(),
             });
         }
-        if let Some(m) = media::stream_mapped_invocation(
-            to,
-            &p.probe,
-            p.strip,
-            p.cut.as_ref(),
-            &inputs[0],
-            output,
-        ) {
+        if let Some(m) =
+            media::stream_mapped_invocation(to, &p.probe, p.strip, &p.copied(), &inputs[0], output)
+        {
             sizing.strategy = Strategy::Remux;
             let mut warnings = m.warnings;
             warnings.extend(p.clip_notes.iter().cloned());
@@ -293,6 +288,17 @@ impl Encoder<'_> {
     }
 }
 
+impl Prepared<'_> {
+    /// How a copied (remuxed) conversion is shaped: the cut and nothing
+    /// else, since a remux changes no picture.
+    fn copied(&self) -> ResolvedVideo {
+        ResolvedVideo {
+            cut: self.cut,
+            ..ResolvedVideo::default()
+        }
+    }
+}
+
 fn new_sizing(p: &Prepared<'_>, strategy: Strategy) -> SizingPlan {
     SizingPlan {
         target_bytes: p.max.bytes,
@@ -334,6 +340,14 @@ fn prepare<'a>(
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
             "--crf and --max-size ask for different things (constant quality vs a size); use one",
+        ));
+    }
+    // The size budget spends part of the target on audio; a silent clip
+    // would need a budget of its own. Nothing asks for both yet.
+    if tuning.mute {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            "--max-size cannot size a silent clip; size it with sound, or cut it without --max-size",
         ));
     }
     for (flag, given) in [
@@ -459,6 +473,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         keep_source_size: false,
         enlarged: None,
         cut: p.cut,
+        mute: false,
     };
     let passlog = p.output.with_extension("convkit-pass");
     let two = media::two_pass_invocations(

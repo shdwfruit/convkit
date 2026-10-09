@@ -44,6 +44,12 @@ anstyle = "1"
 # `render::ansi_supported`). Already in the tree via clap/anstream, which is
 # why `--help` rendered correctly on conhost while conv's own output did not.
 anstyle-query = "1"
+# conv trim sends its picture to kitty and iTerm2 as base64. Already in the
+# tree through ureq.
+base64 = "0.22"
+# conv trim reads keys with it, on macOS, Linux and Windows. Already in the
+# tree through indicatif.
+console = { version = "0.15", default-features = false }
 
 # APFS resolves names normalization-insensitively (NFC and NFD spellings of
 # one stem land on one physical file), so the batch output-collision key
@@ -51,6 +57,11 @@ anstyle-query = "1"
 # are byte-preserving.
 [target.'cfg(target_os = "macos")'.dependencies]
 unicode-normalization = "0.1"
+
+# conv trim holds the tty's mode for its whole session (see trim/term.rs).
+# Already in the tree through several crates.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"

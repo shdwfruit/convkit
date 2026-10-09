@@ -157,8 +157,20 @@ pub fn build_tuned(
     let cut = clip.as_ref().and_then(|c| c.cut);
     let range = clip.as_ref().map(|c| c.report.clone());
     let clip_notes = clip.as_ref().map(|c| c.notes.clone()).unwrap_or_default();
+    if tuning.mute && !crate::sized::is_video_target(to) {
+        let why = if to == Format::Gif {
+            "gif has no sound to drop".to_string()
+        } else {
+            format!("{} has no picture", to.ext())
+        };
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!("a silent clip needs a video target; {why}"),
+        ));
+    }
     let mut resolved = crate::video::resolve(tuning, probe, target_for(to));
     resolved.cut = cut;
+    resolved.mute = tuning.mute;
 
     // Probe-aware media paths first: a container change whose video codec
     // already fits the target gets a stream-mapped copy (or hybrid
@@ -197,7 +209,7 @@ pub fn build_tuned(
             // cut where it was asked. Asked of the copy path itself, so the
             // note is only said where a copy was otherwise on offer.
             let not_copied = cut.and_then(|c| c.why_not_copied(p)).filter(|_| {
-                media::stream_mapped_invocation(to, p, strip, cut.as_ref(), &inputs[0], output)
+                media::stream_mapped_invocation(to, p, strip, &resolved, &inputs[0], output)
                     .is_some()
             });
             let dynamic = if wants_video || not_copied.is_some() {
@@ -212,7 +224,7 @@ pub fn build_tuned(
                     m
                 })
             } else {
-                media::stream_mapped_invocation(to, p, strip, cut.as_ref(), &inputs[0], output)
+                media::stream_mapped_invocation(to, p, strip, &resolved, &inputs[0], output)
                     .or_else(|| {
                         media::audio_copy_invocation(
                             from,
@@ -1666,6 +1678,7 @@ mod tests {
             upscale: false,
             strip_metadata: false,
             range: None,
+            mute: false,
         }
     }
 
@@ -2991,5 +3004,77 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::UnsupportedPair);
+    }
+
+    // --- A silent clip (conv trim's video-only clips) -----------------------
+
+    fn muted(start: Option<&str>, end: Option<&str>) -> Tuning {
+        Tuning {
+            mute: true,
+            ..ranged(start, end)
+        }
+    }
+
+    fn has(argv: &[String], pair: [&str; 2]) -> bool {
+        argv.windows(2).any(|w| w == pair)
+    }
+
+    #[test]
+    fn a_silent_clip_maps_no_audio() {
+        let plan = cut_plan(Format::Mkv, Format::Mp4, &muted(None, Some("30")), 600).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(argv.contains(&"-an".to_string()), "{argv:?}");
+        assert!(!has(argv, ["-map", "0:a?"]), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "-copypriorss:a"), "{argv:?}");
+        assert!(
+            has(argv, ["-c:v", "copy"]),
+            "a cut from 0 still copies: {argv:?}"
+        );
+
+        let plan = cut_plan(Format::Mkv, Format::Mkv, &muted(Some("5"), None), 600).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(has(argv, ["-map", "0"]), "{argv:?}");
+        assert!(argv.contains(&"-an".to_string()), "{argv:?}");
+    }
+
+    #[test]
+    fn a_silent_clip_from_a_static_recipe_takes_its_slot() {
+        let plan = build_tuned(
+            Format::Avi,
+            Format::Mp4,
+            &[p("in.avi")],
+            Path::new("out.mp4"),
+            None,
+            None,
+            &Tuning {
+                mute: true,
+                ..Tuning::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            plan.steps[0].argv.contains(&"-an".to_string()),
+            "{:?}",
+            plan.steps[0].argv
+        );
+    }
+
+    #[test]
+    fn a_silent_clip_needs_a_video_target() {
+        let e = cut_plan(Format::Mp4, Format::Mp3, &muted(Some("5"), None), 600).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
+        assert_eq!(
+            e.message,
+            "a silent clip needs a video target; mp3 has no picture"
+        );
+    }
+
+    #[test]
+    fn a_silent_clip_is_not_sized() {
+        let mut t = muted(Some("5"), Some("10"));
+        t.max_size = Some(crate::size::parse("5mb").unwrap());
+        let e = cut_plan(Format::Mkv, Format::Mp4, &t, 600).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("silent clip"), "{}", e.message);
     }
 }

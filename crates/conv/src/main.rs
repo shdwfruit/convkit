@@ -5,6 +5,7 @@ mod input;
 mod install_prompt;
 mod prompt;
 mod render;
+mod trim;
 
 use clap::Parser;
 
@@ -30,6 +31,7 @@ fn main() {
     let code = match &cli.command {
         None => commands::convert::run(&cli),
         Some(cli::Command::Doctor) => commands::doctor::run(&cli),
+        Some(cli::Command::Trim { .. }) => trim::run(&cli),
         Some(cli::Command::Capabilities { ref format }) => {
             commands::capabilities::run(&cli, format.as_deref())
         }

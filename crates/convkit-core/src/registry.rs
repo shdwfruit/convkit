@@ -506,6 +506,7 @@ const VIDEO_TO_MP4: Recipe = Recipe {
             Arg::Lit("-movflags"),
             Arg::Lit("+faststart"),
             Arg::StripMetadata,
+            Arg::Mute,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -580,6 +581,7 @@ macro_rules! video_to_mkv_recipe {
                 Arg::Lit("-c:s"),
                 Arg::Lit($sub_codec),
                 Arg::StripMetadata,
+                Arg::Mute,
                 Arg::Lit("-y"),
                 Arg::Output,
             ]
@@ -680,6 +682,7 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
             Arg::Lit("-af"),
             Arg::Lit(OPUS_CHANNEL_LAYOUTS),
             Arg::StripMetadata,
+            Arg::Mute,
             Arg::Lit("-y"),
             Arg::Output,
         ]

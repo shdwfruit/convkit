@@ -90,7 +90,7 @@ fn output_format_of(p: &Path) -> Result<Format, ConvError> {
 /// overwrite.) On macOS the key is additionally NFC-normalized: APFS name
 /// lookup is normalization-insensitive, so an NFC `café.webp` and an NFD
 /// `café.webp` are one physical file despite differing bytes.
-fn collision_key(output: &Path) -> PathBuf {
+pub(crate) fn collision_key(output: &Path) -> PathBuf {
     let abs = std::path::absolute(output).unwrap_or_else(|_| output.to_path_buf());
     let abs = match (abs.parent(), abs.file_name()) {
         (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
