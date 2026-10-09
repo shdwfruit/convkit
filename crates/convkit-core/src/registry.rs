@@ -263,6 +263,29 @@ const SVG_TO_PNG_STRIPPED: Recipe = Recipe {
     warnings: &[],
 };
 
+/// `IMG_LOSSLESS` for a compressed tiff stripped into a tiff. ImageMagick
+/// writes a tiff uncompressed whatever the source used, so an LZW scan of
+/// 2.6 MB came back 5.8 MB, and a JPEG-compressed one of 0.85 MB the same,
+/// for no change to a pixel. Zip is lossless, so nothing is re-encoded; a
+/// JPEG-compressed source is not given JPEG back, which would be. Only when
+/// the source was compressed: an uncompressed tiff stays uncompressed.
+pub(crate) const IMG_TO_TIFF_ZIP: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::Input,
+            Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
+            Arg::TuneResize,
+            Arg::TuneColors,
+            Arg::Lit("-compress"),
+            Arg::Lit("zip"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
 /// The recipe `--strip-metadata` runs in place of `recipe`: a png target's
 /// TIFF detour, and `recipe` itself everywhere else (bmp shares png's
 /// recipe but writes no text).
@@ -1362,15 +1385,22 @@ pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::pr
 /// Whether a note on this pair depends on what the source image holds, so
 /// the caller should read it with `probe::image_traits` before planning:
 /// the frame and alpha notes, and the location note wherever the target
-/// keeps an EXIF GPS and the flag is not taking it out.
+/// keeps an EXIF GPS and the flag is not taking it out. Not for the
+/// location note alone from a WebP: its GPS survives, but ImageMagick's
+/// `-ping` loads no WebP EXIF, so the read could never find it.
 pub fn notes_need_image(from: Format, to: Format, tuning: &Tuning) -> bool {
     let frame_notes = recipe_read_for(from, to, tuning).is_some_and(|r| {
         r.warnings
             .iter()
             .any(|&w| matches!(w, FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE))
     });
+    // A tiff stripped into a tiff keeps its compression, which the read
+    // reports (see `IMG_TO_TIFF_ZIP`).
+    let tiff_in_place = from == Format::Tiff && to == Format::Tiff && tuning.strip_metadata;
     frame_notes
+        || tiff_in_place
         || (!tuning.strip_metadata
+            && from != Format::Webp
             && lookup(from, to).is_some()
             && crate::metadata::keeps_exif_location(from, to))
 }
@@ -1494,6 +1524,7 @@ mod tests {
                 alpha,
                 multi_frame,
                 location: false,
+                compressed: false,
             }),
             ..crate::MediaProbe::default()
         }
@@ -1581,10 +1612,12 @@ mod tests {
             }
             for to in [Format::Webp, Format::Avif, Format::Pdf] {
                 if from != to {
-                    let keeps_exif = !matches!(from, Format::Bmp | Format::Tiff);
+                    // A WebP's EXIF survives, but a header read cannot see
+                    // it, so reading one could never give the note.
+                    let readable_exif = !matches!(from, Format::Bmp | Format::Tiff | Format::Webp);
                     assert_eq!(
                         notes_need_image(from, to, &off),
-                        keeps_exif,
+                        readable_exif,
                         "{from:?} -> {to:?}"
                     );
                     assert!(!notes_need_image(from, to, &on), "{from:?} -> {to:?}");
@@ -1602,6 +1635,9 @@ mod tests {
         assert!(notes_need_image(Format::Png, Format::Png, &on));
         assert!(!notes_need_image(Format::Webp, Format::Webp, &on));
         assert!(!notes_need_image(Format::Jpg, Format::Jpg, &off));
+        // A tiff stripped into a tiff is read for its compression.
+        assert!(notes_need_image(Format::Tiff, Format::Tiff, &on));
+        assert!(!notes_need_image(Format::Tiff, Format::Tiff, &off));
         let opaque = read_image(Some(false), false);
         assert_eq!(
             notes(Format::Svg, Format::Jpg, Some(&opaque)),

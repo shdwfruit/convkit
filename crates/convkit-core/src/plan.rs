@@ -327,6 +327,13 @@ fn in_place(
     let (steps, mut warnings, enlarged) = match registry::image_recipe_for(format) {
         Some(recipe) => {
             let recipe = registry::strip_variant(format, recipe);
+            // A compressed tiff stays compressed; only the read can tell.
+            let compressed = probe.and_then(|p| p.image).is_some_and(|i| i.compressed);
+            let recipe = if format == Format::Tiff && compressed {
+                registry::IMG_TO_TIFF_ZIP
+            } else {
+                recipe
+            };
             let resolved = crate::video::resolve(tuning, probe, target_for(format));
             validate_tuning(&recipe, format, format, tuning, &resolved)?;
             let steps = render_steps(&recipe, inputs, output, tuning, &resolved, kept);
@@ -941,6 +948,45 @@ mod tests {
         assert!(png.warnings.iter().all(|w| !w.contains("re-encoded")));
     }
 
+    /// ImageMagick writes a tiff uncompressed unless told otherwise, so a
+    /// compressed tiff stripped into a tiff is written with lossless Zip,
+    /// and an uncompressed one, or one not read, stays as it is.
+    #[test]
+    fn a_compressed_tiff_stripped_in_place_stays_compressed() {
+        let read = |compressed| MediaProbe {
+            image: Some(crate::probe::ImageTraits {
+                alpha: None,
+                multi_frame: false,
+                location: false,
+                compressed,
+            }),
+            ..MediaProbe::default()
+        };
+        let plan_for = |probe: Option<&MediaProbe>| {
+            build_tuned(
+                Format::Tiff,
+                Format::Tiff,
+                &[p("scan.tiff")],
+                Path::new("scan-stripped.tiff"),
+                probe,
+                None,
+                &stripped(),
+            )
+            .unwrap()
+        };
+        let zipped = |plan: &ConversionPlan| {
+            plan.steps[0]
+                .argv
+                .windows(2)
+                .any(|w| w == ["-compress", "zip"])
+        };
+        let plan = plan_for(Some(&read(true)));
+        assert!(zipped(&plan), "{:?}", plan.steps[0].argv);
+        assert_eq!(plan.steps[0].argv.last().unwrap(), "scan-stripped.tiff");
+        assert!(!zipped(&plan_for(Some(&read(false)))));
+        assert!(!zipped(&plan_for(None)));
+    }
+
     /// Every stream is copied but the data tracks, which can carry a
     /// location of their own; the tags are cleared and the kept ones
     /// written back.
@@ -1076,6 +1122,7 @@ mod tests {
                 alpha: Some(false),
                 multi_frame: false,
                 location: false,
+                compressed: false,
             }),
             ..MediaProbe::default()
         };

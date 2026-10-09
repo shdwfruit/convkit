@@ -283,6 +283,7 @@ mod tests {
                 alpha: Some(false),
                 multi_frame: false,
                 location,
+                compressed: false,
             }),
             ..MediaProbe::default()
         }

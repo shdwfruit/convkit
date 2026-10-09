@@ -108,6 +108,9 @@ pub struct ImageTraits {
     /// Only a positive answer counts: a WebP's `-ping` loads no EXIF, so a
     /// WebP reads as having none.
     pub location: bool,
+    /// Whether the first input's pixels are stored compressed (anything
+    /// but `None`), so a tiff stripped into a tiff can stay compressed.
+    pub compressed: bool,
 }
 
 impl MediaProbe {
@@ -531,7 +534,7 @@ pub fn image_traits(magick: &Path, inputs: &[std::path::PathBuf]) -> Result<Imag
         .first()
         .ok_or_else(|| ConvError::new(ErrorCode::InputNotFound, "no input files were given"))?;
     let out = cmd
-        .args(["-format", "%m %A %n [%[EXIF:GPSLatitude]]\n", "info:"])
+        .args(["-format", "%m %A %n %C [%[EXIF:GPSLatitude]]\n", "info:"])
         .output()
         .map_err(|e| {
             ConvError::new(
@@ -551,8 +554,9 @@ pub fn image_traits(magick: &Path, inputs: &[std::path::PathBuf]) -> Result<Imag
         })
 }
 
-/// Parses the `-ping` lines, `CODER ALPHA FRAMES [GPS LATITUDE]`, one per
-/// frame read. Alpha and frames come from the first line. ImageMagick 7
+/// Parses the `-ping` lines, `CODER ALPHA FRAMES COMPRESSION [GPS
+/// LATITUDE]`, one per frame read. Alpha, frames and compression come from
+/// the first line. ImageMagick 7
 /// names the alpha trait (`Undefined` for none); 6 says `True` or `False`.
 /// "No alpha" is believed only from coders that set alpha before a ping
 /// stops: TIFF's does not, and says `Undefined` for a transparent file too.
@@ -568,6 +572,10 @@ fn parse_traits(text: &str, inputs: usize) -> Option<ImageTraits> {
         _ => return None,
     };
     let frames = it.next()?.parse::<u32>().ok().filter(|&n| n > 0)?;
+    // `%C`, ImageMagick's name for how the pixels are stored.
+    let compressed = it
+        .next()
+        .is_some_and(|c| !c.starts_with('[') && !matches!(c, "None" | "Undefined"));
     let trusted = matches!(
         coder,
         "JPEG" | "PNG" | "WEBP" | "AVIF" | "HEIC" | "HEIF" | "BMP" | "BMP2" | "BMP3"
@@ -581,6 +589,7 @@ fn parse_traits(text: &str, inputs: usize) -> Option<ImageTraits> {
         alpha: (alpha || trusted).then_some(alpha),
         multi_frame: inputs == 1 && frames > 1,
         location,
+        compressed,
     })
 }
 
@@ -644,6 +653,7 @@ mod tests {
                 alpha: Some(false),
                 multi_frame: false,
                 location: false,
+                compressed: false,
             }
         );
         assert_eq!(t("PNG Blend 1\n").alpha, Some(true));
@@ -651,6 +661,18 @@ mod tests {
         // ImageMagick 6, and a Windows line ending.
         assert_eq!(t("PNG False 1\r\n").alpha, Some(false));
         assert_eq!(t("BMP3 True 1\r\n").alpha, Some(true));
+    }
+
+    /// The fourth field is the compression, so a tiff stripped into a tiff
+    /// can stay compressed; `None` (and a line that has none) is not.
+    #[test]
+    fn traits_read_whether_the_source_is_compressed() {
+        let t = |text| parse_traits(text, 1).unwrap();
+        assert!(t("TIFF Undefined 1 LZW []\n").compressed);
+        assert!(t("TIFF Undefined 2 JPEG [51/1,30/1,63/25]\n").compressed);
+        assert!(!t("TIFF Undefined 1 None []\n").compressed);
+        assert!(!t("PNG Blend 1\n").compressed);
+        assert!(t("TIFF Undefined 1 Zip [51/1,30/1,63/25]\n").location);
     }
 
     /// The bracketed field is the EXIF GPS latitude; empty when there is

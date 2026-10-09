@@ -2569,6 +2569,35 @@ fn a_video_stripped_in_place_is_copied_not_re_encoded() {
     assert_eq!(after.rotation.map(i32::abs), Some(90));
 }
 
+/// A compressed tiff stripped into a tiff stays compressed, losslessly;
+/// an uncompressed one stays uncompressed.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_tiff_stripped_in_place_keeps_its_compression() {
+    let dir = tmp();
+    for (compression, expected) in [("LZW", "Zip"), ("None", "None")] {
+        let src = dir.path().join(format!("scan-{compression}.tiff"));
+        run_magick(&[
+            "-size",
+            "256x256",
+            "gradient:red-blue",
+            "-compress",
+            compression,
+            &src.to_string_lossy(),
+        ]);
+        let out = dir.path().join(format!("scan-{compression}-stripped.tiff"));
+        convert_tuned(&src, &out, &stripped()).unwrap();
+        assert_eq!(identify_format(&out, "%C"), expected, "{compression}");
+        // `%#` hashes the pixels alone, so the same picture stored another
+        // way hashes the same.
+        assert_eq!(
+            identify_format(&out, "%#"),
+            identify_format(&src, "%#"),
+            "{compression}: the pixels changed"
+        );
+    }
+}
+
 /// An mkv carrying a font attachment, as subtitled anime does: Matroska
 /// refuses an attachment whose tags were cleared, so the strip has to give
 /// them back. The font stays, the location goes.
