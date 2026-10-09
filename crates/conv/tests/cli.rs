@@ -2973,6 +2973,22 @@ fn conv_trim_refuses_what_it_cannot_cut_before_anything_else() {
         .code(2);
 }
 
+/// The clips are only written after the session, so an `-o` that can't
+/// hold them is refused before it: found at `w`, every mark was lost.
+#[test]
+fn conv_trim_refuses_an_outdir_that_is_a_file_before_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["trim", "talk.mp4", "-o", "notes.txt"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "-o notes.txt is a file; give a directory to write the clips into",
+        ));
+}
+
 /// Drives `conv trim` in a pseudo-terminal 100 columns by 30 rows, then
 /// prints its exit code and `stty -a` from the same terminal, so the test
 /// can see the tty was given back. `mode` is:

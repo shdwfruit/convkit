@@ -91,6 +91,17 @@ fn trim(cli: &Cli, args: &Args) -> Result<i32, ConvError> {
         .map(|t| Format::from_ext(t).ok_or_else(|| ConvError::unknown_format(t)))
         .transpose()?;
     let target = clips::targets(file, from, to)?;
+    // The clips are written after the session, so this is found now rather
+    // than at `w`, with the marks still to lose.
+    if let Some(dir) = args.outdir.filter(|d| d.exists() && !d.is_dir()) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "-o {} is a file; give a directory to write the clips into",
+                dir.display()
+            ),
+        ));
+    }
     if cli.json || !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
@@ -108,23 +119,7 @@ fn trim(cli: &Cli, args: &Args) -> Result<i32, ConvError> {
     let ffmpeg = resolver.resolve(Backend::Ffmpeg)?.path;
     let probe = probe::run(&ffprobe, file)?;
     let name = file.display();
-    let Some(duration) = probe.duration_ms.filter(|&d| d > 0) else {
-        return Err(ConvError::new(
-            ErrorCode::InvalidInvocation,
-            format!(
-                "cannot read the length of {name}, so the bars have nothing to span; \
-                 use conv {name} --start T --end T, which needs none"
-            ),
-        ));
-    };
-    let has_video = target.video.is_some() && probe.video_streams > 0;
-    let has_audio = !probe.audio_codecs.is_empty();
-    if !has_video && !has_audio {
-        return Err(ConvError::new(
-            ErrorCode::InvalidInvocation,
-            format!("{name} has no picture or sound for conv trim to cut"),
-        ));
-    }
+    let (duration, has_video, has_audio) = spans(&probe, &target, &name.to_string())?;
     let frame_ms = probe
         .frame_rate
         .filter(|&(n, _)| n > 0)
@@ -166,6 +161,35 @@ fn trim(cli: &Cli, args: &Args) -> Result<i32, ConvError> {
         Outcome::Quit | Outcome::Continue => return Ok(0),
     };
     write(cli, &writing, overwrite, session.clips())
+}
+
+/// How long the session spans, and whether it has a video bar and a sound
+/// bar; or why there is nothing to cut. A file with no picture or sound in
+/// it has no length either, so that is asked first: the flags the length
+/// refusal points at couldn't cut it either.
+fn spans(
+    probe: &MediaProbe,
+    target: &clips::Target,
+    name: &str,
+) -> Result<(u64, bool, bool), ConvError> {
+    let has_video = target.video.is_some() && probe.video_streams > 0;
+    let has_audio = !probe.audio_codecs.is_empty();
+    if !has_video && !has_audio {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!("{name} has no picture or sound for conv trim to cut"),
+        ));
+    }
+    let Some(duration) = probe.duration_ms.filter(|&d| d > 0) else {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "cannot read the length of {name}, so the bars have nothing to span; \
+                 use conv {name} --start T --end T, which needs none"
+            ),
+        ));
+    };
+    Ok((duration, has_video, has_audio))
 }
 
 fn fps_words((n, d): (u32, u32)) -> String {
@@ -382,10 +406,14 @@ fn redraw(session: &Session, info: &Info, shown: &mut Shown) {
         out.push_str("\x1b[2J");
     }
     let Some(layout) = shown.layout else {
-        out.push_str(
-            "\x1b[1;1Hconv trim needs a terminal at least 40 columns wide and 16 rows high; \
-             make it bigger, or press q",
-        );
+        out.push_str("\x1b[1;1H");
+        out.push_str(&draw::too_small(
+            info.size,
+            session.bars().len(),
+            session.message(),
+        ));
+        // Whatever an earlier message left below.
+        out.push_str("\x1b[J");
         term::put(&out);
         return;
     };
@@ -768,6 +796,27 @@ mod tests {
             overwrite: false,
             dry_run: false,
         }
+    }
+
+    /// A file ffprobe reads nothing from has no length either, and was told
+    /// to use the flags, which can't cut it any more than conv trim can.
+    #[test]
+    fn a_file_with_nothing_in_it_is_refused_as_that_not_for_its_length() {
+        let e = spans(&MediaProbe::default(), &MP4, "fake.mp4").unwrap_err();
+        assert_eq!(
+            e.message,
+            "fake.mp4 has no picture or sound for conv trim to cut"
+        );
+        let live = MediaProbe {
+            duration_ms: None,
+            ..probe()
+        };
+        let e = spans(&live, &MP4, "live.webm").unwrap_err();
+        assert!(e.message.starts_with("cannot read the length of live.webm"));
+        assert_eq!(
+            spans(&probe(), &MP4, "src.mp4").unwrap(),
+            (20_000, true, true)
+        );
     }
 
     /// Whatever `conv FILE --start --end` would refuse is refused as the

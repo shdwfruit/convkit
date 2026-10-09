@@ -262,6 +262,29 @@ fn text_rows(bars: usize) -> u16 {
     6 + bars as u16
 }
 
+/// The smallest terminal `layout` draws in, columns then rows: the header,
+/// three rows of picture when there is one, and the text.
+fn least_size(aspect: Option<(u32, u32)>, bars: usize) -> (u16, u16) {
+    let least_picture = if aspect.is_some() { 3 } else { 0 };
+    (40, 1 + least_picture + text_rows(bars))
+}
+
+/// What a terminal too small for `layout` shows: the size it needs, and a
+/// question waiting for its answer, which would otherwise be asked where it
+/// can't be seen.
+pub fn too_small(aspect: Option<(u32, u32)>, bars: usize, message: Option<&str>) -> String {
+    let (cols, rows) = least_size(aspect.filter(|&(w, h)| w > 0 && h > 0), bars);
+    let mut text = format!(
+        "conv trim needs a terminal at least {cols} columns wide and {rows} rows high; \
+         make it bigger, or press q"
+    );
+    if let Some(message) = message {
+        text.push_str("\r\n");
+        text.push_str(message);
+    }
+    text
+}
+
 /// Where everything goes in a terminal `cols` by `rows`: the header on the
 /// first row, the picture as large as the text under it allows with its
 /// shape kept, then the text. `None` when the terminal is too small to be
@@ -269,8 +292,8 @@ fn text_rows(bars: usize) -> u16 {
 pub fn layout(cols: u16, rows: u16, aspect: Option<(u32, u32)>, bars: usize) -> Option<Layout> {
     let aspect = aspect.filter(|&(w, h)| w > 0 && h > 0);
     let text = text_rows(bars);
-    let least_picture = if aspect.is_some() { 3 } else { 0 };
-    if cols < 40 || rows < 1 + text + least_picture {
+    let (least_cols, least_rows) = least_size(aspect, bars);
+    if cols < least_cols || rows < least_rows {
         return None;
     }
     let Some((w, h)) = aspect else {
@@ -715,6 +738,27 @@ mod tests {
         let audio = layout(80, 24, None, 1).unwrap();
         assert_eq!((audio.image, audio.below), (None, 2));
         assert_eq!(layout(30, 10, Some((16, 9)), 2), None, "too small");
+    }
+
+    /// The size it asks for is the size `layout` draws in, and a question
+    /// still shows, so q isn't answered blind.
+    #[test]
+    fn a_terminal_too_small_says_the_size_it_needs_and_any_question() {
+        for (aspect, bars, rows) in [(Some((16, 9)), 2, 12), (None, 1, 8)] {
+            assert!(layout(40, rows, aspect, bars).is_some(), "{rows}");
+            assert_eq!(layout(40, rows - 1, aspect, bars), None, "{rows}");
+            assert_eq!(layout(39, rows, aspect, bars), None, "{rows}");
+            let text = too_small(aspect, bars, None);
+            assert!(
+                text.contains(&format!("40 columns wide and {rows} rows high")),
+                "{text}"
+            );
+        }
+        let asking = too_small(None, 1, Some("Quit without writing 1 clip? [y/N]"));
+        assert!(
+            asking.ends_with("\r\nQuit without writing 1 clip? [y/N]"),
+            "{asking}"
+        );
     }
 
     #[test]
