@@ -79,6 +79,10 @@ pub struct MediaProbe {
     /// which it says when it does.
     pub track_languages: bool,
     pub chapter_titles: bool,
+    /// Whether the first real video stream stores some frames after ones
+    /// shown later (B-frames: ffprobe's `has_b_frames` above 0), which a
+    /// stream copy cannot stop exactly at a cut's end.
+    pub video_reorders: bool,
 }
 
 /// The two ways a video or audio file records where it was made. Outputs
@@ -226,6 +230,10 @@ pub fn parse(json: &str) -> MediaProbe {
                             .map(str::to_owned);
                         p.width = s.get("width").and_then(|w| w.as_u64()).map(|w| w as u32);
                         p.height = s.get("height").and_then(|h| h.as_u64()).map(|h| h as u32);
+                        p.video_reorders = s
+                            .get("has_b_frames")
+                            .and_then(|b| b.as_u64())
+                            .is_some_and(|b| b > 0);
                         p.rotation = s
                             .get("side_data_list")
                             .and_then(|l| l.as_array())
@@ -865,6 +873,19 @@ mod tests {
         assert_eq!(p.height, Some(1080));
         assert_eq!(p.frame_rate, Some((30000, 1001)));
         assert_eq!(p.rotation, None);
+        assert!(!p.video_reorders, "no has_b_frames: read as in order");
+    }
+
+    #[test]
+    fn b_frames_mean_the_video_reorders_its_frames() {
+        let p = |b: u32| {
+            parse(&format!(
+                r#"{{"streams":[{{"codec_type":"video","codec_name":"h264",
+                    "has_b_frames":{b}}}]}}"#
+            ))
+        };
+        assert!(p(2).video_reorders);
+        assert!(!p(0).video_reorders);
     }
 
     #[test]

@@ -2898,6 +2898,23 @@ fn a_cut_from_zero_is_a_stream_copy() {
     assert!(o.remuxed, "{:?}", o.warnings);
     let d = duration_ms(&out);
     assert!((9_900..=10_200).contains(&d), "{d}");
+    assert_eq!(decoded_frames(&out), 300);
+}
+
+/// With B-frames, a copy that stops at the end carried two frames past it,
+/// so a cut from 0 with an end re-encodes, and is exact.
+#[test]
+#[ignore]
+fn a_cut_from_zero_of_video_with_b_frames_ends_exactly() {
+    let dir = tmp();
+    let src = synth_cuttable(&dir, "src.mp4", "30", 4, &["-bf", "3"]);
+    assert!(probe_media(&src).video_reorders, "the source has B-frames");
+    for ext in ["mp4", "mkv"] {
+        let out = dir.path().join(format!("cut.{ext}"));
+        let o = convert_tuned(&src, &out, &ranged(None, Some("1.5"))).unwrap();
+        assert!(!o.remuxed, "{ext}");
+        assert_eq!(decoded_frames(&out), 45, "{ext}: 1.5 s at 30 fps");
+    }
 }
 
 #[test]

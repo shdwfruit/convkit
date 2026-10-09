@@ -192,24 +192,21 @@ pub fn build_tuned(
             let wants_video =
                 resolved.fps.is_some() || resolved.scale.is_some() || tuning.crf.is_some();
             let strip = tuning.strip_metadata;
-            // A copied cut can only start on a keyframe, so a cut that starts
-            // after 0 re-encodes the video to start where it was asked. Asked
-            // of the copy path itself, so the note is only said where a copy
-            // was otherwise on offer.
-            let start_needs_encode = cut.is_some_and(|c| c.start_ms > 0)
-                && media::stream_mapped_invocation(to, p, strip, cut.as_ref(), &inputs[0], output)
-                    .is_some();
-            let dynamic = if wants_video || start_needs_encode {
+            // A copy can only make some cuts exactly (see
+            // `trim::Cut::why_not_copied`); any other re-encodes the video to
+            // cut where it was asked. Asked of the copy path itself, so the
+            // note is only said where a copy was otherwise on offer.
+            let not_copied = cut.and_then(|c| c.why_not_copied(p)).filter(|_| {
+                media::stream_mapped_invocation(to, p, strip, cut.as_ref(), &inputs[0], output)
+                    .is_some()
+            });
+            let dynamic = if wants_video || not_copied.is_some() {
                 media::transcoded_invocation(
                     to, p, &resolved, tuning.crf, strip, &inputs[0], output,
                 )
                 .map(|mut m| {
-                    m.warnings.push(match cut.filter(|_| !wants_video) {
-                        Some(c) => format!(
-                            "Re-encoded rather than stream-copied, because a copied cut \
-                             can only start on a keyframe; this one starts exactly at {}.",
-                            crate::trim::format_time(c.start_ms)
-                        ),
+                    m.warnings.push(match not_copied.filter(|_| !wants_video) {
+                        Some(why) => format!("Re-encoded rather than stream-copied, because {why}"),
                         None => REENCODED_FOR_KNOB_NOTE.to_string(),
                     });
                     m
@@ -2636,6 +2633,45 @@ mod tests {
         assert_eq!(plan.steps[0].path_args, [3, argv.len() - 1]);
         let r = plan.range.expect("a cut plan reports its range");
         assert_eq!((r.start_ms, r.end_ms), (0, Some(30_000)));
+    }
+
+    /// With B-frames, a frame shown before the end can be stored after a
+    /// frame shown after it, so a copy that stops at the end carries two
+    /// frames past it (measured on 6.1 and 9.0). A copy to the end of the
+    /// file has no end to run past.
+    #[test]
+    fn a_cut_from_zero_of_video_with_b_frames_re_encodes_to_end_exactly() {
+        let mut probe = clip_probe(600);
+        probe.video_reorders = true;
+        let plan = |t: &Tuning| {
+            build_tuned(
+                Format::Mkv,
+                Format::Mp4,
+                &[p("in.mkv")],
+                Path::new("out.mp4"),
+                Some(&probe),
+                None,
+                t,
+            )
+            .unwrap()
+        };
+        let cut = plan(&ranged(None, Some("30")));
+        let argv = &cut.steps[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w == ["-c:v", "libx264"]),
+            "{argv:?}"
+        );
+        assert_eq!(
+            cut.warnings,
+            [
+                "Re-encoded rather than stream-copied, because this video stores some frames \
+                 after ones shown later, so a copied cut would run past its end; this one \
+                 ends exactly at 0:30."
+            ]
+        );
+        let to_the_end = plan(&ranged(Some("0"), Some("20:00")));
+        let argv = &to_the_end.steps[0].argv;
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "copy"]), "{argv:?}");
     }
 
     /// A clip is not a copy of the whole file, so a cut into its own format

@@ -319,6 +319,29 @@ impl Cut {
         }
         args
     }
+
+    /// Why a stream copy of the video cannot make this cut exactly, for the
+    /// note that says it was re-encoded instead; `None` when it can.
+    ///
+    /// A copy can only start on a keyframe. And with B-frames a frame shown
+    /// before the end can be stored after one shown after it, so a copy
+    /// that stops at the end carried two frames past it, out of order (6.1
+    /// and 9.0 alike). A cut from 0 to the end of the file has neither.
+    pub fn why_not_copied(&self, probe: &MediaProbe) -> Option<String> {
+        if self.start_ms > 0 {
+            return Some(format!(
+                "a copied cut can only start on a keyframe; this one starts exactly at {}.",
+                format_time(self.start_ms)
+            ));
+        }
+        self.end_ms.filter(|_| probe.video_reorders).map(|end| {
+            format!(
+                "this video stores some frames after ones shown later, so a copied cut \
+                 would run past its end; this one ends exactly at {}.",
+                format_time(end)
+            )
+        })
+    }
 }
 
 /// The times as typed, for `--json`.
@@ -513,9 +536,11 @@ fn requested(range: &Range) -> Requested {
     }
 }
 
-/// Refuses a cut too short to hold a frame, where the target has frames.
-/// One frame's length is rounded down: a cut of 33 ms at 30 fps still holds
-/// the frame it lands on.
+/// Refuses a cut shorter than a frame, where the target has frames: one
+/// shorter than a frame's length in whole milliseconds, and one that no
+/// frame starts inside. An exact cut keeps the frames that start inside
+/// it, so a 33 ms cut at 30 fps from 967 ms to 1 s, after the frame at
+/// 966.7 ms, would have no picture at all, while one from 966 ms holds it.
 fn refuse_less_than_a_frame(
     start: u64,
     end: u64,
@@ -524,16 +549,27 @@ fn refuse_less_than_a_frame(
     keeps_video: bool,
 ) -> crate::Result<()> {
     if let (true, true, Some((n, d))) = (keeps_video, probe.video_streams > 0, probe.frame_rate) {
-        let frame_ms = 1000 * u64::from(d) / u64::from(n);
-        if end - start < frame_ms {
+        let (n, d) = (u128::from(n), u128::from(d));
+        let (start, end) = (u128::from(start), u128::from(end));
+        // Frame k starts at k * 1000d/n ms: the first at or after the start
+        // has to start before the end.
+        let first = (start * n).div_ceil(1000 * d);
+        let short = (end - start) < 1000 * d / n;
+        if short || first * 1000 * d >= end * n {
+            let tenths = (10_000 * d + n / 2) / n;
+            let frame_ms = match tenths % 10 {
+                0 => format!("{}", tenths / 10),
+                t => format!("{}.{t}", tenths / 10),
+            };
             return Err(ConvError::new(
                 ErrorCode::InvalidInvocation,
                 format!(
-                    "the cut {}-{} is shorter than one frame of {} ({frame_ms} ms at {} fps)",
-                    format_time(start),
-                    format_time(end),
+                    "the cut {}-{} is shorter than one frame of {} ({frame_ms} ms at {} fps); \
+                     make it longer",
+                    format_time(start as u64),
+                    format_time(end as u64),
                     input.display(),
-                    crate::video::show_rate((n, d)),
+                    crate::video::show_rate((n as u32, d as u32)),
                 ),
             ));
         }
@@ -883,9 +919,30 @@ mod tests {
             "{}",
             e.message
         );
-        assert!(e.message.contains("33 ms at 30 fps"), "{}", e.message);
+        assert!(e.message.contains("33.3 ms at 30 fps"), "{}", e.message);
         // The same 10 ms of audio is a real, if short, clip.
         assert!(resolve(&r, &source(10), Path::new("a.mp4"), false).is_ok());
+    }
+
+    /// An exact cut keeps the frames that start inside it, so a cut as long
+    /// as a frame in whole milliseconds can still hold none.
+    #[test]
+    fn a_cut_is_refused_when_no_frame_starts_inside_it() {
+        // At 30 fps the last frame of the first second starts at 966.7 ms:
+        // a cut from 967 ms holds no frame, though it is 33 ms long.
+        let e = resolved(&range(Some("0.967"), Some("1"), None), 10).unwrap_err();
+        assert!(
+            e.message.contains("shorter than one frame"),
+            "{}",
+            e.message
+        );
+        // One frame each, though shorter than a frame's 33.3 ms.
+        for (s, e) in [("0", "0.033"), ("0.966", "1")] {
+            assert!(
+                resolved(&range(Some(s), Some(e), None), 10).is_ok(),
+                "{s}-{e}"
+            );
+        }
     }
 
     fn no_length() -> MediaProbe {

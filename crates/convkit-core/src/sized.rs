@@ -181,9 +181,9 @@ pub(crate) fn plan(
         || p.limits.max_fps.is_some_and(|r| {
             u64::from(r.0) * u64::from(src_rate.1) < u64::from(src_rate.0) * u64::from(r.1)
         });
-    // A copy can only be exact from the start of the file: a cut starting
-    // later re-encodes (see `plan::build_tuned`), so it is never copied.
-    let copy_ok = p.cut.is_none_or(|c| c.start_ms == 0);
+    // A copy can only make some cuts exactly (see `trim::Cut::why_not_copied`),
+    // and any other is never copied.
+    let copy_ok = p.cut.is_none_or(|c| c.why_not_copied(&p.probe).is_none());
     if !caps_bind && copy_ok && p.probe.size_bytes.is_some_and(|b| b <= max.bytes) {
         // A byte copy carries every tag along, so a stripped file is
         // remuxed instead, which clears them.
@@ -2315,6 +2315,20 @@ mod tests {
             Format::Mp4,
             &p,
             &sized_cut("8mb", Some("10"), Some("40")),
+        )
+        .unwrap();
+        assert_eq!(plan.sizing.as_ref().unwrap().strategy, Strategy::Encode);
+    }
+
+    #[test]
+    fn a_sized_cut_from_zero_of_video_with_b_frames_is_never_copied() {
+        let mut p = probe(600, 60_000_000);
+        p.video_reorders = true;
+        let plan = build(
+            Format::Mp4,
+            Format::Mp4,
+            &p,
+            &sized_cut("8mb", None, Some("30")),
         )
         .unwrap();
         assert_eq!(plan.sizing.as_ref().unwrap().strategy, Strategy::Encode);
