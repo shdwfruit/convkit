@@ -2916,6 +2916,32 @@ mod tests {
         }
     }
 
+    /// A copied FLAC cut keeps the source's header, which gives the whole
+    /// source's length, and stops on a frame boundary. Written out again
+    /// as FLAC it is as lossless, says its own length and is cut to the
+    /// sample.
+    #[test]
+    fn a_flac_cut_into_flac_is_written_out_again() {
+        let mut probe = clip_probe(600);
+        probe.video_codec = None;
+        probe.video_streams = 0;
+        probe.audio_codecs = vec!["flac".into()];
+        let plan = build_tuned(
+            Format::Flac,
+            Format::Flac,
+            &[p("song.flac")],
+            Path::new("o.flac"),
+            Some(&probe),
+            None,
+            &ranged(Some("10"), Some("20")),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(argv.windows(2).any(|w| w == ["-c:a", "flac"]), "{argv:?}");
+        assert!(!argv.windows(2).any(|w| w == ["-c:a", "copy"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "copy"]), "cover art");
+    }
+
     #[test]
     fn a_format_into_itself_without_a_range_is_still_no_conversion() {
         let e = build_tuned(

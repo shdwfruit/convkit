@@ -769,9 +769,13 @@ pub(crate) fn audio_copy_invocation(
         push(&mut argv, &["-map", "0:v?", "-c:v", "copy"]);
     }
     // A copied cut lands on the demuxer's packets, which for PCM are about
-    // 70 ms each on ffmpeg 9. Written out again in its own codec, PCM is
-    // just as lossless and is cut to the sample.
-    if cut.is_some() && to == Format::Wav && first.starts_with("pcm_") {
+    // 70 ms each on ffmpeg 9. A copied FLAC cut stops on a frame too, and
+    // keeps the source's header, so a 3 s cut of a 10 s file said it was
+    // 10 s long (6.1 and 9.0 alike). Written out again in their own codec,
+    // both are just as lossless and are cut to the sample.
+    let lossless = (to == Format::Wav && first.starts_with("pcm_"))
+        || (to == Format::Flac && *first == "flac");
+    if cut.is_some() && lossless {
         push(&mut argv, &["-c:a", first]);
     } else {
         push(&mut argv, &["-c:a", "copy"]);

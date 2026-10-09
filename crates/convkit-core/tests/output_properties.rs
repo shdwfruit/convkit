@@ -3031,6 +3031,39 @@ fn a_wav_cut_into_itself_keeps_its_bit_depth() {
     assert!((2_990..=3_010).contains(&d), "{d}");
 }
 
+/// A copied FLAC cut kept the source's header and said it was as long as
+/// the whole file.
+#[test]
+#[ignore]
+fn a_flac_cut_into_itself_says_its_own_length_and_keeps_its_bit_depth() {
+    let dir = tmp();
+    let src = dir.path().join("take.flac");
+    run_ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=96000:duration=10",
+        "-c:a",
+        "flac",
+        "-sample_fmt",
+        "s32",
+        "-bits_per_raw_sample",
+        "24",
+        src.to_str().unwrap(),
+    ]);
+    let out = dir.path().join("take-2s-5s.flac");
+    convert_tuned(&src, &out, &ranged(Some("2"), Some("5"))).unwrap();
+    let ffprobe = Resolver::new().resolve(Backend::Ffprobe).unwrap().path;
+    let streams = probe_streams_json(&ffprobe, &out);
+    assert_eq!(streams[0]["bits_per_raw_sample"], "24", "{streams:?}");
+    assert_eq!(
+        streams[0]["duration_ts"], 288_000,
+        "3 s at 96 kHz: {streams:?}"
+    );
+    let d = duration_ms(&out);
+    assert!((2_990..=3_010).contains(&d), "{d}");
+}
+
 #[test]
 #[ignore]
 fn a_sized_cut_is_sized_for_the_clip() {
