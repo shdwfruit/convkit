@@ -345,15 +345,20 @@ fn take_batch(first: Event, rx: &mpsc::Receiver<Event>, budget: std::time::Durat
     batch
 }
 
-/// What to grab for the picture box: exactly its pixels for half blocks;
-/// for kitty and iTerm2 a picture up to 960 wide, which the terminal fits
-/// to the box itself.
+/// What to grab for the picture box: exactly its pixels for half blocks
+/// and sextants, which stretches the frame to the box's 1x2 and 2x3 cells
+/// for the cells to stretch it back; for kitty and iTerm2 a picture up to
+/// 960 wide, which the terminal fits to the box itself.
 fn want_for(graphics: Graphics, image: ImageBox, (w, h): (u32, u32)) -> Want {
     let sharp = (u32::from(image.cols) * 8).min(960).min(w).max(2);
     match graphics {
         Graphics::Blocks { .. } => Want::Rgb {
             width: u32::from(image.cols),
             height: u32::from(image.rows) * 2,
+        },
+        Graphics::Sextants { .. } => Want::Rgb {
+            width: u32::from(image.cols) * 2,
+            height: u32::from(image.rows) * 3,
         },
         Graphics::Kitty => Want::Rgb {
             width: sharp,
@@ -398,7 +403,10 @@ fn redraw(session: &Session, info: &Info, shown: &mut Shown) {
         .map(|t| shown.strip.get(t).copied())
         .collect();
     let levels = draw::loudness_columns(&shown.loudness, session.view(), bar_width);
-    let truecolor = !matches!(shown.graphics, Graphics::Blocks { truecolor: false });
+    let truecolor = !matches!(
+        shown.graphics,
+        Graphics::Blocks { truecolor: false } | Graphics::Sextants { truecolor: false }
+    );
     for (k, line) in draw::below(session, &strip, &levels, layout.cols, true, truecolor)
         .iter()
         .enumerate()
@@ -418,6 +426,14 @@ fn picture(graphics: Graphics, image: ImageBox, pixels: &Pixels) -> String {
                 data,
             },
         ) => draw::blocks(data, *width, *height, truecolor, image.row, image.col),
+        (
+            Graphics::Sextants { truecolor },
+            Pixels::Rgb {
+                width,
+                height,
+                data,
+            },
+        ) => draw::sextants(data, *width, *height, truecolor, image.row, image.col),
         (
             Graphics::Kitty,
             Pixels::Rgb {
@@ -691,6 +707,26 @@ mod tests {
         assert!(took < Duration::from_millis(100), "{took:?}");
         // What it left is still there.
         assert!(rx.try_recv().is_ok());
+    }
+
+    /// Each way of drawing is grabbed the pixels it draws: two a cell for
+    /// half blocks, six for sextants, and for kitty a picture the terminal
+    /// fits to the box itself.
+    #[test]
+    fn the_picture_is_grabbed_at_the_size_it_is_drawn() {
+        let image = ImageBox {
+            row: 2,
+            col: 6,
+            cols: 110,
+            rows: 31,
+        };
+        let hd = (1920, 1080);
+        let rgb = |width, height| Want::Rgb { width, height };
+        let blocks = Graphics::Blocks { truecolor: true };
+        assert_eq!(want_for(blocks, image, hd), rgb(110, 62));
+        let sextants = Graphics::Sextants { truecolor: true };
+        assert_eq!(want_for(sextants, image, hd), rgb(220, 93));
+        assert_eq!(want_for(Graphics::Kitty, image, hd), rgb(880, 495));
     }
 
     fn probe() -> MediaProbe {

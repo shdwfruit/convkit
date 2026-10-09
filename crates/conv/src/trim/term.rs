@@ -21,15 +21,18 @@ pub fn choose(choice: Option<&str>, env: &dyn Fn(&str) -> Option<String>) -> Gra
     let truecolor =
         is("COLORTERM", "truecolor") || is("COLORTERM", "24bit") || env("WT_SESSION").is_some();
     let blocks = Graphics::Blocks { truecolor };
+    let sextants = Graphics::Sextants { truecolor };
     match choice {
         Some("blocks") => return blocks,
+        Some("sextants") => return sextants,
         Some("kitty") => return Graphics::Kitty,
         Some("iterm") => return Graphics::Iterm,
         _ => {}
     }
-    // tmux passes neither protocol through without its own wrapping.
+    // tmux passes neither protocol through without its own wrapping, but
+    // passes characters as they are.
     if env("TMUX").is_some() {
-        return blocks;
+        return sextants;
     }
     if is("TERM", "xterm-kitty") || is("TERM", "xterm-ghostty") || is("TERM_PROGRAM", "ghostty") {
         return Graphics::Kitty;
@@ -37,7 +40,12 @@ pub fn choose(choice: Option<&str>, env: &dyn Fn(&str) -> Option<String>) -> Gra
     if is("TERM_PROGRAM", "iTerm.app") || is("TERM_PROGRAM", "WezTerm") {
         return Graphics::Iterm;
     }
-    blocks
+    // Apple's Terminal draws sextants from its fonts, and its own fonts
+    // have none; half blocks are in every font.
+    if is("TERM_PROGRAM", "Apple_Terminal") {
+        return blocks;
+    }
+    sextants
 }
 
 /// A key as the session understands it.
@@ -262,22 +270,31 @@ mod tests {
             (&[("TERM_PROGRAM", "WezTerm")], Graphics::Iterm),
             (
                 &[("COLORTERM", "truecolor")],
-                Graphics::Blocks { truecolor: true },
+                Graphics::Sextants { truecolor: true },
             ),
             (
                 &[("COLORTERM", "24bit")],
-                Graphics::Blocks { truecolor: true },
+                Graphics::Sextants { truecolor: true },
             ),
-            (&[("WT_SESSION", "x")], Graphics::Blocks { truecolor: true }),
-            (&[], Graphics::Blocks { truecolor: false }),
-            // tmux would need its own escapes passed through: half blocks.
+            (
+                &[("WT_SESSION", "x")],
+                Graphics::Sextants { truecolor: true },
+            ),
+            (&[], Graphics::Sextants { truecolor: false }),
+            // Apple's Terminal draws sextants from its fonts, which lack them.
+            (
+                &[("TERM_PROGRAM", "Apple_Terminal")],
+                Graphics::Blocks { truecolor: false },
+            ),
+            // tmux would need its own escapes passed through, but passes
+            // characters as they are.
             (
                 &[
                     ("TMUX", "/tmp/s"),
                     ("TERM", "xterm-kitty"),
                     ("COLORTERM", "truecolor"),
                 ],
-                Graphics::Blocks { truecolor: true },
+                Graphics::Sextants { truecolor: true },
             ),
         ];
         for (pairs, want) in cases {
@@ -291,6 +308,10 @@ mod tests {
         assert_eq!(
             choose(Some("blocks"), &kitty),
             Graphics::Blocks { truecolor: true }
+        );
+        assert_eq!(
+            choose(Some("sextants"), &kitty),
+            Graphics::Sextants { truecolor: true }
         );
         assert_eq!(choose(Some("iterm"), &kitty), Graphics::Iterm);
         assert_eq!(choose(Some("kitty"), &env(&[])), Graphics::Kitty);

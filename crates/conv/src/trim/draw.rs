@@ -14,6 +14,9 @@ pub enum Graphics {
     /// Half blocks, which every terminal draws. Truecolor where the
     /// terminal says it has it, the 256-colour palette otherwise.
     Blocks { truecolor: bool },
+    /// Sextants: three times the pixels of half blocks, for terminals that
+    /// draw the characters themselves rather than from a font.
+    Sextants { truecolor: bool },
     /// kitty's graphics protocol (kitty, Ghostty, WezTerm).
     Kitty,
     /// iTerm2's inline images (iTerm2, WezTerm).
@@ -94,6 +97,93 @@ pub fn blocks(px: &[u8], w: u32, h: u32, truecolor: bool, row: u16, col: u16) ->
                 last = Some((top, bottom));
             }
             s.push('▀');
+        }
+        s.push_str("\x1b[0m");
+    }
+    s
+}
+
+/// The parts of a sextant cell, one bit each: top left, top right, middle
+/// left, middle right, bottom left, bottom right, as (column, row).
+const SPOTS: [(u32, u32); 6] = [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)];
+
+/// The character that fills the parts of a cell set in `mask` with the
+/// text colour. Unicode has U+1FB00 on for every mask but four that older
+/// characters already draw: empty, full, and the left and right halves.
+pub fn sextant(mask: u8) -> char {
+    match mask {
+        0 => ' ',
+        63 => '█',
+        21 => '▌',
+        42 => '▐',
+        m => {
+            let skipped = u32::from(m > 21) + u32::from(m > 42);
+            char::from_u32(0x1FB00 + u32::from(m) - 1 - skipped).expect("a sextant")
+        }
+    }
+}
+
+/// Splits a cell's six pixels into the two colours that fit them best:
+/// every split is tried, each side coloured with the mean of its pixels,
+/// and the one with the least squared error wins. A split and its inverse
+/// are the same, so only masks with the first part set are tried, the full
+/// cell first so that a cell of one colour is a plain block.
+pub fn fit_cell(six: [[u8; 3]; 6]) -> (u8, [u8; 3], [u8; 3]) {
+    let mean = |mask: u8, on: bool| {
+        let mut sum = [0u32; 3];
+        let mut n = 0;
+        for (i, p) in six.iter().enumerate() {
+            if (mask >> i & 1 == 1) == on {
+                for c in 0..3 {
+                    sum[c] += u32::from(p[c]);
+                }
+                n += 1;
+            }
+        }
+        (n > 0).then(|| sum.map(|s| (s / n) as u8))
+    };
+    let mut best = (u32::MAX, 63, [0; 3], [0; 3]);
+    for mask in (1..=63u8).rev().step_by(2) {
+        let fg = mean(mask, true).expect("the first part is set");
+        let bg = mean(mask, false).unwrap_or(fg);
+        let error: u32 = six
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let c = if mask >> i & 1 == 1 { fg } else { bg };
+                (0..3)
+                    .map(|k| (i32::from(p[k]) - i32::from(c[k])).pow(2) as u32)
+                    .sum::<u32>()
+            })
+            .sum();
+        if error < best.0 {
+            best = (error, mask, fg, bg);
+        }
+    }
+    (best.1, best.2, best.3)
+}
+
+/// The picture in sextants: each cell is 2x3 pixels in two colours, the
+/// best fit of the six. `w` and `h` are normally twice and three times the
+/// box's cells; a cell past the edge repeats the last row or column.
+pub fn sextants(px: &[u8], w: u32, h: u32, truecolor: bool, row: u16, col: u16) -> String {
+    let at = |x: u32, y: u32| {
+        let i = ((y.min(h - 1) * w + x.min(w - 1)) * 3) as usize;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    let mut s = String::new();
+    for cy in 0..h.div_ceil(3) {
+        s.push_str(&goto(row + cy as u16, col));
+        let mut last = None;
+        for cx in 0..w.div_ceil(2) {
+            let six = SPOTS.map(|(dx, dy)| at(cx * 2 + dx, cy * 3 + dy));
+            let (mask, top, under) = fit_cell(six);
+            if last != Some((top, under)) {
+                s.push_str(&fg(top, truecolor));
+                s.push_str(&bg(Some(under), truecolor));
+                last = Some((top, under));
+            }
+            s.push(sextant(mask));
         }
         s.push_str("\x1b[0m");
     }
@@ -510,6 +600,64 @@ mod tests {
     fn the_256_colour_palette_is_used_without_truecolor() {
         let s = blocks(&[255, 0, 0, 255, 255, 255], 1, 2, false, 1, 1);
         assert!(s.contains("\x1b[38;5;196m\x1b[48;5;231m▀"), "{s:?}");
+    }
+
+    #[test]
+    fn each_sextant_shape_has_its_character() {
+        assert_eq!(sextant(0), ' ');
+        assert_eq!(sextant(63), '█');
+        assert_eq!(sextant(21), '▌', "the left column");
+        assert_eq!(sextant(42), '▐', "the right column");
+        // The rest from U+1FB00, named for the parts they fill: 1 top left,
+        // 2 top right, 3 and 4 the middle, 5 and 6 the bottom.
+        assert_eq!(sextant(1), '\u{1FB00}', "SEXTANT-1");
+        assert_eq!(sextant(20), '\u{1FB13}', "SEXTANT-35");
+        assert_eq!(sextant(22), '\u{1FB14}', "SEXTANT-235, after ▌");
+        assert_eq!(sextant(43), '\u{1FB28}', "SEXTANT-1246, after ▐");
+        assert_eq!(sextant(62), '\u{1FB3B}', "SEXTANT-23456");
+    }
+
+    #[test]
+    fn six_pixels_are_split_into_the_two_colours_that_fit_them_best() {
+        const W: [u8; 3] = [255, 255, 255];
+        const K: [u8; 3] = [0, 0, 0];
+        const R: [u8; 3] = [200, 0, 0];
+        const B: [u8; 3] = [0, 0, 200];
+        assert_eq!(fit_cell([W, W, K, K, K, K]), (3, W, K), "white over black");
+        assert_eq!(fit_cell([R, B, R, B, R, B]), (21, R, B), "red beside blue");
+        assert_eq!(fit_cell([R; 6]), (63, R, R), "one colour fills the cell");
+        // More than two colours: each part gets the mean of its pixels.
+        let reds = [[90, 0, 0], K, [210, 0, 0], K, [150, 0, 0], K];
+        assert_eq!(fit_cell(reds), (21, [150, 0, 0], K));
+    }
+
+    #[test]
+    fn sextants_draw_six_pixels_a_cell() {
+        // Two cells: white over black, then all red.
+        let (w, k, r) = ([255, 255, 255], [0, 0, 0], [200, 0, 0]);
+        let rows = [[w, w, r, r], [k, k, r, r], [k, k, r, r]];
+        let px: Vec<u8> = rows.iter().flatten().flatten().copied().collect();
+        let s = sextants(&px, 4, 3, true, 3, 5);
+        assert!(s.starts_with("\x1b[3;5H"), "{s:?}");
+        assert!(
+            s.contains("\x1b[38;2;255;255;255m\x1b[48;2;0;0;0m\u{1FB02}"),
+            "{s:?}"
+        );
+        assert!(s.contains("\x1b[38;2;200;0;0m\x1b[48;2;200;0;0m█"), "{s:?}");
+        assert!(s.ends_with("\x1b[0m"), "{s:?}");
+        let palette = sextants(&px, 4, 3, false, 1, 1);
+        assert!(
+            palette.contains("\x1b[38;5;231m\x1b[48;5;16m\u{1FB02}"),
+            "{palette:?}"
+        );
+    }
+
+    /// A picture grabbed for an older box can be any size; the last row and
+    /// column are repeated where a cell runs past them.
+    #[test]
+    fn a_picture_that_does_not_fill_its_last_cells_still_draws() {
+        let s = sextants(&[1, 2, 3], 1, 1, true, 1, 1);
+        assert!(s.contains("\x1b[38;2;1;2;3m\x1b[48;2;1;2;3m█"), "{s:?}");
     }
 
     #[test]

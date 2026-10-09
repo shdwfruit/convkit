@@ -528,10 +528,11 @@ OK talk-3m00s-4m00s.m4a - 951 KB - 0.2s - stream copy, no re-encode
   /home/user/Videos/talk-3m00s-4m00s.m4a
 ```
 
-The picture is drawn in half blocks, which any terminal shows, or sharper
-through kitty's or iTerm2's graphics in kitty, Ghostty, WezTerm and iTerm2;
-`--graphics` picks one. Without a terminal, piped or under `--json`, it
-refuses and points at `--start` and `--end`.
+In kitty, Ghostty, WezTerm and iTerm2 the picture is sent through their
+graphics, as sharp as the file. Elsewhere it is drawn in characters:
+sextants, six pixels to a character, or half blocks in Apple's Terminal,
+whose fonts lack sextants. `--graphics` picks one. Without a terminal,
+piped or under `--json`, it refuses and points at `--start` and `--end`.
 
 ## Discovering formats and capabilities
 

@@ -222,8 +222,14 @@ replaces a file already there.")]
         dry_run: bool,
         /// How to draw the picture. By default it is told from the
         /// terminal: kitty's protocol in kitty and Ghostty, iTerm2's in
-        /// iTerm2 and WezTerm, half blocks elsewhere and under tmux.
-        #[arg(long, value_name = "HOW", value_parser = ["blocks", "kitty", "iterm"])]
+        /// iTerm2 and WezTerm, half blocks in Apple's Terminal, and
+        /// sextants (six pixels a character) elsewhere and under tmux.
+        /// Use blocks where sextants show as boxes or question marks.
+        #[arg(
+            long,
+            value_name = "HOW",
+            value_parser = ["sextants", "blocks", "kitty", "iterm"]
+        )]
         graphics: Option<String>,
     },
     /// Download and verify a managed backend.
