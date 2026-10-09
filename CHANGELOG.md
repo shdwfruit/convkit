@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0 - 2026-10-09
+
+### New
+
+- **Location note.** Phone photos and videos record where they were taken,
+  and a converted copy keeps that in most formats. conv now says so when it
+  applies: "The source records a GPS location, and the jpg keeps it; add
+  --strip-metadata to remove it." It reads an image's EXIF and a video or
+  audio file's tags. A WebP source, a location kept only in XMP, and a HEIC
+  photo on ImageMagick 6 get no note.
+- **`--strip-metadata`** removes the location and the rest of the metadata:
+  camera, serial number, owner, capture time. An image keeps only its colour
+  profile and is turned upright first. Video and audio keep their title,
+  artist, album, album artist, composer, genre and track and disc numbers,
+  and a stream copy stays a stream copy. `conv photo.jpg --strip-metadata`
+  writes `photo-stripped.jpg`; a jpg, webp or avif is re-encoded to do it,
+  and a note says so. Documents are not covered yet and refuse the flag.
+
+### Changed
+
+- **Sized and stripped batches write into a folder.** A `--to` batch with
+  `--max-size` or `--strip-metadata` now writes into a folder next to its
+  files, named after the flag (`clips/10mb/`, `photos/stripped/`), unless
+  `-o` says where. Both flags take files already in the target format as
+  inputs, so running the same batch again used to size or strip its own
+  results. Until now `--max-size` batches wrote beside their inputs. A
+  single file still gets `clip-10mb.mp4` beside it.
+- **Same-named inputs no longer stop a batch.** Two inputs that would write
+  one file, like `a.jpg` and `a.png` with `--to webp`, keep their source
+  format in the name (`a-jpg.webp`, `a-png.webp`) instead of the whole batch
+  being refused.
+
 ## 0.3.1 - 2026-10-02
 
 ### Changed
