@@ -172,7 +172,8 @@ pub enum Arg {
     /// given; renders *nothing* otherwise, keeping untuned argv
     /// byte-identical to the static table. Authored first in every ffmpeg
     /// recipe, ahead of `-i`, because these are input options: see
-    /// `trim::Cut::input_args`.
+    /// `trim::Cut::input_args`. A step with this slot also gets the cut's
+    /// output options just before its `Output` (`trim::Cut::output_args`).
     Trim,
     /// The first (usually only) input path.
     Input,
@@ -381,6 +382,13 @@ impl Step {
                     }
                 }
                 Arg::Output => {
+                    if let Some(cut) = video
+                        .cut
+                        .as_ref()
+                        .filter(|_| self.args.contains(&Arg::Trim))
+                    {
+                        argv.extend(cut.output_args());
+                    }
                     path_args.push(argv.len());
                     argv.push(output.to_string_lossy().into_owned());
                 }
@@ -741,8 +749,23 @@ mod tests {
             &video,
             &[],
         );
-        assert_eq!(r.argv, ["-ss", "62", "-t", "8", "-i", "in.mp4", "out.mp4"]);
-        assert_eq!(r.path_args, [5, 6], "the input and output, not the times");
+        assert_eq!(
+            r.argv,
+            [
+                "-ss",
+                "62",
+                "-t",
+                "8",
+                "-i",
+                "in.mp4",
+                "-map_chapters",
+                "-1",
+                "-copypriorss:s",
+                "0",
+                "out.mp4"
+            ]
+        );
+        assert_eq!(r.path_args, [5, 10], "the input and output, not the times");
     }
 
     #[test]

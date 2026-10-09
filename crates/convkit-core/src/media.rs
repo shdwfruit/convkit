@@ -397,6 +397,9 @@ fn mapped_invocation(
     if !audios.is_empty() && !matches!(audio, AudioDisposition::Reencode { .. }) {
         push_cut_audio(&mut argv, cut);
     }
+    if let Some(cut) = cut {
+        argv.extend(cut.output_args());
+    }
     if matches!(to, Format::Mp4 | Format::Mov) {
         push(&mut argv, &["-movflags", "+faststart"]);
     }
@@ -777,6 +780,9 @@ pub(crate) fn audio_copy_invocation(
     if strip {
         argv.extend(crate::metadata::ffmpeg_args(&probe.kept_tags));
     }
+    if let Some(cut) = cut {
+        argv.extend(cut.output_args());
+    }
     push(&mut argv, &["-y"]);
     argv.push(output.to_string_lossy().into_owned());
 
@@ -924,9 +930,76 @@ mod tests {
         .unwrap();
         assert_eq!(&m.argv[..4], ["-t", "30", "-i", "in"], "{:?}", m.argv);
         assert!(
-            !m.argv.iter().any(|a| a == "-copypriorss:a"),
+            !m.argv.iter().any(|a| a.starts_with("-copypriorss")),
             "a cut from 0 has nothing before it to drop: {:?}",
             m.argv
+        );
+        assert!(has(&m.argv, ["-map_chapters", "-1"]), "{:?}", m.argv);
+    }
+
+    /// A copied subtitle that starts before the cut otherwise keeps its
+    /// place before it, and matroska then delays every other stream by as
+    /// much so that no timestamp is negative: a cue from 1 s to 3 s, cut at
+    /// 3 s, started the clip's picture at 2 s. And ffmpeg moves the source's
+    /// chapters back by the start but never ends them at the clip's end.
+    #[test]
+    fn a_cut_drops_the_subtitles_before_it_and_the_chapters() {
+        let cut = crate::trim::Cut {
+            start_ms: 3_000,
+            end_ms: Some(6_000),
+        };
+        let resolved = ResolvedVideo {
+            cut: Some(cut),
+            ..ResolvedVideo::default()
+        };
+        let before_output = |argv: &[String], flag: &str| {
+            let at = argv.iter().position(|a| a == flag);
+            assert!(
+                at.is_some_and(|i| i > input_position(argv) && i < argv.len() - 1),
+                "{flag} is an output option: {argv:?}"
+            );
+        };
+        let p = probe(Some("h264"), &["aac"], &["subrip"], 0);
+        for to in [Format::Mkv, Format::Mp4, Format::Webm] {
+            let m = transcoded_invocation(
+                to,
+                &p,
+                &resolved,
+                None,
+                false,
+                &PathBuf::from("in"),
+                &PathBuf::from("out"),
+            )
+            .unwrap();
+            assert!(
+                has(&m.argv, ["-copypriorss:s", "0"]),
+                "{to:?}: {:?}",
+                m.argv
+            );
+            assert!(
+                has(&m.argv, ["-map_chapters", "-1"]),
+                "{to:?}: {:?}",
+                m.argv
+            );
+            before_output(&m.argv, "-map_chapters");
+        }
+        let m = audio_copy_invocation(
+            Format::M4a,
+            Format::M4a,
+            &probe(None, &["aac"], &[], 0),
+            false,
+            Some(&cut),
+            &PathBuf::from("in"),
+            &PathBuf::from("out"),
+        )
+        .unwrap();
+        assert!(has(&m.argv, ["-map_chapters", "-1"]), "{:?}", m.argv);
+        before_output(&m.argv, "-map_chapters");
+        let uncut = invoke(Format::Mkv, &p).unwrap();
+        assert!(
+            !uncut.argv.iter().any(|a| a == "-map_chapters"),
+            "{:?}",
+            uncut.argv
         );
     }
 

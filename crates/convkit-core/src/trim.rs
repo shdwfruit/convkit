@@ -297,6 +297,28 @@ impl Cut {
         }
         args
     }
+
+    /// The cut as ffmpeg output options, to go before the output path.
+    ///
+    /// `-map_chapters -1`: ffmpeg moves the source's chapters back by the
+    /// start but never ends them at the clip's end, so an 8 s clip of a long
+    /// file listed every chapter after it as well. Only an output `-t` makes
+    /// ffmpeg end them there, and on 6.1 that drops an mkv clip's last
+    /// frame, so a clip leaves the chapters out.
+    ///
+    /// `-copypriorss:s 0` when it starts after 0: a copied subtitle that
+    /// starts before the cut otherwise keeps its place before it, and
+    /// matroska then delays every other stream by as much so that no
+    /// timestamp is negative. A cue from 1 s to 3 s, cut at 3 s, started the
+    /// clip's picture at 2 s (6.1 and 9.0 alike). Re-encoded subtitles are
+    /// trimmed by their decoder and need nothing.
+    pub fn output_args(&self) -> Vec<String> {
+        let mut args = vec!["-map_chapters".to_string(), "-1".to_string()];
+        if self.start_ms > 0 {
+            args.extend(["-copypriorss:s".to_string(), "0".to_string()]);
+        }
+        args
+    }
 }
 
 /// The times as typed, for `--json`.
@@ -939,6 +961,30 @@ mod tests {
         assert_eq!(c(62_500, Some(70_250)), ["-ss", "62.5", "-t", "7.75"]);
         assert_eq!(c(0, Some(30_000)), ["-t", "30"], "from 0: no seek");
         assert_eq!(c(62_000, None), ["-ss", "62"], "to the end: no length");
+    }
+
+    #[test]
+    fn a_cut_leaves_out_the_chapters_and_any_subtitle_from_before_it() {
+        let c = |s, e| {
+            Cut {
+                start_ms: s,
+                end_ms: e,
+            }
+            .output_args()
+        };
+        assert_eq!(
+            c(62_000, Some(70_000)),
+            ["-map_chapters", "-1", "-copypriorss:s", "0"]
+        );
+        assert_eq!(
+            c(62_000, None),
+            ["-map_chapters", "-1", "-copypriorss:s", "0"]
+        );
+        assert_eq!(
+            c(0, Some(30_000)),
+            ["-map_chapters", "-1"],
+            "from 0: nothing comes before it"
+        );
     }
 
     #[test]

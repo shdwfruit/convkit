@@ -3086,3 +3086,82 @@ fn a_clip_cut_and_stripped_into_its_own_format_loses_its_location() {
         assert_eq!(tag(&tags, "artist"), Some("Band"), "{start:?}: {tags:?}");
     }
 }
+
+/// How many lines ffprobe prints for these arguments: one a chapter, or
+/// one a packet.
+fn ffprobe_lines(path: &Path, args: &[&str]) -> usize {
+    let ffprobe = Resolver::new().resolve(Backend::Ffprobe).unwrap().path;
+    let out = Command::new(ffprobe)
+        .args(["-v", "error"])
+        .args(args)
+        .args(["-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).lines().count()
+}
+
+fn chapters(path: &Path) -> usize {
+    ffprobe_lines(path, &["-show_chapters"])
+}
+
+/// A subtitle cue that starts before the cut is left out, rather than kept
+/// before it with the picture and sound pushed back to make room, and a
+/// clip lists none of the source's chapters, which ffmpeg moves back by the
+/// start but never ends at the clip's end.
+#[test]
+#[ignore]
+fn a_cut_mkv_with_subtitles_and_chapters_starts_at_the_cut() {
+    let dir = tmp();
+    let plain = synth_cuttable(&dir, "plain.mkv", "30", 20, &[]);
+    let srt = dir.path().join("subs.srt");
+    std::fs::write(
+        &srt,
+        "1\n00:00:05,000 --> 00:00:08,000\nacross the cut\n\n\
+         2\n00:00:08,500 --> 00:00:09,000\ninside it\n",
+    )
+    .unwrap();
+    let meta = dir.path().join("chapters.txt");
+    std::fs::write(
+        &meta,
+        ";FFMETADATA1\n\
+         [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=10000\ntitle=One\n\
+         [CHAPTER]\nTIMEBASE=1/1000\nSTART=10000\nEND=20000\ntitle=Two\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src.mkv");
+    run_ffmpeg(&[
+        "-i",
+        plain.to_str().unwrap(),
+        "-i",
+        srt.to_str().unwrap(),
+        "-i",
+        meta.to_str().unwrap(),
+        "-map",
+        "0",
+        "-map",
+        "1",
+        "-map_chapters",
+        "2",
+        "-c",
+        "copy",
+        src.to_str().unwrap(),
+    ]);
+    assert_eq!(chapters(&src), 2);
+
+    let mkv = dir.path().join("cut.mkv");
+    convert_tuned(&src, &mkv, &ranged(Some("7"), Some("10"))).unwrap();
+    let video_start = probe_value(&mkv, "stream=start_time", "v:0", false);
+    assert!(video_start < 0.1, "the picture starts at {video_start} s");
+    let cues = ffprobe_lines(
+        &mkv,
+        &["-select_streams", "s:0", "-show_entries", "packet=pts_time"],
+    );
+    assert_eq!(cues, 1, "only the cue inside the cut");
+    assert_eq!(decoded_frames(&mkv), 90);
+    assert_eq!(chapters(&mkv), 0);
+
+    let m4a = dir.path().join("cut.m4a");
+    convert_tuned(&src, &m4a, &ranged(Some("7"), Some("10"))).unwrap();
+    assert_eq!(chapters(&m4a), 0);
+}

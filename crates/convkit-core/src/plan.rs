@@ -2738,6 +2738,10 @@ mod tests {
                 "-q:a",
                 "2",
                 "-y",
+                "-map_chapters",
+                "-1",
+                "-copypriorss:s",
+                "0",
                 "out.mp3"
             ]
         );
