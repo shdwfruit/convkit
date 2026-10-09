@@ -107,6 +107,7 @@ mod tests {
             fps: None,
             crf: None,
             max_size: None,
+            strip_metadata: false,
             yes,
             no_install,
             outdir: None,

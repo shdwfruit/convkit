@@ -102,6 +102,9 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
         push_flag(&mut flags, "--upscale");
         push_flag(&mut flags, "--fps");
     }
+    if has(|a| matches!(a, Arg::StripMetadata)) {
+        push_flag(&mut flags, "--strip-metadata");
+    }
     // --max-size is a policy over a whole video conversion rather than a
     // slot in one recipe, so it is keyed on the target, not scanned.
     if convkit_core::sized::is_video_target(to) {

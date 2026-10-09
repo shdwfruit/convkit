@@ -18,6 +18,42 @@ fn dry_run_prints_the_expert_ffmpeg_command() {
         .stdout(contains("palettegen=stats_mode=diff"));
 }
 
+/// A lone photo under `--strip-metadata` keeps its format under a new name,
+/// and the command strips only after orienting.
+#[test]
+fn dry_run_strips_a_lone_photo_into_a_stripped_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("photo.jpg"), b"not really a jpeg").unwrap();
+    // The pattern is quoted for the shell the preview is for: '...' on
+    // Unix, "..." on Windows.
+    conv()
+        .current_dir(dir.path())
+        .args(["photo.jpg", "--strip-metadata", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("-auto-orient +profile "))
+        .stdout(contains("!icc,*"))
+        .stdout(contains(" +set comment +set label "))
+        .stdout(contains("photo-stripped.jpg"));
+}
+
+/// Where the flag cannot apply, it is refused with the reason and the fix.
+#[test]
+fn strip_metadata_is_refused_where_it_cannot_apply() {
+    conv()
+        .args(["a.docx", "a.pdf", "--strip-metadata", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--strip-metadata does not apply to docx -> pdf: it covers image, video and audio conversions",
+        ));
+    conv()
+        .args(["IMG_0042.heic", "--strip-metadata", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("conv cannot write heic; add --to jpg"));
+}
+
 #[test]
 fn unknown_extension_exits_two_and_suggests() {
     conv()
@@ -1287,6 +1323,20 @@ fn capabilities_with_a_format_lists_tuning_flags_and_defaults() {
         .assert()
         .failure()
         .code(2);
+}
+
+/// `--strip-metadata` is listed where it applies, image pairs among them,
+/// and not on a document pair, which refuses it.
+#[test]
+fn capabilities_lists_strip_metadata_where_it_applies() {
+    let assert = conv().args(["capabilities", "heic"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let jpg = stdout.lines().find(|l| l.contains("heic -> jpg")).unwrap();
+    assert!(jpg.contains("--strip-metadata"), "{stdout}");
+
+    let assert = conv().args(["capabilities", "docx"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(!stdout.contains("--strip-metadata"), "{stdout}");
 }
 
 /// `conv scan` answers the one question the tool could not: what is in front

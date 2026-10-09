@@ -452,13 +452,14 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     } else {
         None
     };
-    // Whether a jpg/png/bmp target's notes apply. A read that fails keeps
-    // them whole.
-    if registry::notes_need_image(req.from, req.to) {
+    // Whether a jpg/png/bmp target's notes apply, and whether the source
+    // records a location the output would keep. A read that fails keeps the
+    // frame and alpha notes whole, and gives no location note.
+    if registry::notes_need_image(req.from, req.to, &req.tuning) {
         let traits = resolver
             .resolve(Backend::Magick)
             .ok()
-            .and_then(|m| probe::image_traits(&m.path, &req.inputs[0]).ok());
+            .and_then(|m| probe::image_traits(&m.path, &req.inputs).ok());
         if let Some(t) = traits {
             probed.get_or_insert_with(MediaProbe::default).image = Some(t);
         }
@@ -493,7 +494,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     })?;
     let temp_final = scratch.join(final_name);
 
-    let built = plan::build_tuned(
+    let mut built = plan::build_tuned(
         req.from,
         req.to,
         &req.inputs,
@@ -502,6 +503,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         available.as_ref(),
         &req.tuning,
     )?;
+    crate::metadata::explain_missing_ffprobe(&mut built, resolver);
     let mut runner = StepRunner {
         resolver,
         guard: &mut guard,
@@ -2618,6 +2620,45 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert!(is_remux(&argv), "{argv:?}");
     }
 
+    /// With ffprobe missing, `--strip-metadata` still strips, removing every
+    /// tag since none could be read to keep, and the note says why and how to
+    /// fix it: the same install command a missing backend's error gives.
+    #[test]
+    fn a_strip_without_ffprobe_says_to_install_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("song.flac");
+        std::fs::write(&input, b"not really audio").unwrap();
+        let mut r = Resolver::new();
+        r.overrides_only();
+        r.with_override(Backend::Ffmpeg, stub_that_creates_its_output(dir.path()));
+        let req = Request {
+            from: Format::Flac,
+            to: Format::Mp3,
+            inputs: vec![input],
+            output: dir.path().join("song.mp3"),
+            overwrite: false,
+            tuning: crate::Tuning {
+                strip_metadata: true,
+                ..Default::default()
+            },
+            allow_extreme: false,
+        };
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        let missing = crate::ConvError::backend_missing(Backend::Ffprobe);
+        let fix = missing
+            .remediation
+            .as_ref()
+            .and_then(|r| r.managed.clone().or_else(|| r.manual.clone()));
+        assert_eq!(
+            o.warnings,
+            [format!(
+                "ffprobe not found, so every tag was removed, title and artist included. \
+                 To keep them: {}",
+                fix.unwrap()
+            )]
+        );
+    }
+
     /// A webm video knob can only be applied by the probe-aware path, so an
     /// unresolvable ffprobe is the real error and must reach the caller as
     /// `backend_missing` naming ffprobe -- that pair of fields is what makes
@@ -3539,6 +3580,35 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             assert_eq!(said("first frame"), frames, "{answer}: {:?}", o.warnings);
             assert!(o.warnings.len() <= 1, "one sentence: {:?}", o.warnings);
         }
+    }
+
+    /// A source the read finds GPS in gets the location note, once, and the
+    /// flag that removes the location takes the note with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_conversion_says_when_it_keeps_a_gps_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "PNG Undefined 1 [51/1,30/1,63/25]");
+        let mut req = upscale_request(dir.path(), "320x", false, false);
+        req.tuning = crate::Tuning::default();
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(
+            o.warnings,
+            [
+                "The source records a GPS location, and the jpg keeps it; add \
+              --strip-metadata to remove it."
+            ]
+        );
+
+        req.output = dir.path().join("out").join("again.jpg");
+        req.tuning.strip_metadata = true;
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+        let calls = std::fs::read_to_string(dir.path().join("bin").join("calls")).unwrap();
+        assert!(
+            calls.lines().last().unwrap().contains("+profile !icc,*"),
+            "{calls}"
+        );
     }
 
     #[cfg(unix)]

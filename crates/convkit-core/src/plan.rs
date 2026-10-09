@@ -121,6 +121,12 @@ pub fn build_tuned(
         return crate::sized::plan(from, to, inputs, output, probe, tuning, max);
     }
 
+    // A file stripped into its own format: no registry pair covers it, so
+    // it is planned here, as `--max-size` plans its own (above).
+    if from == to && tuning.strip_metadata {
+        return in_place(from, inputs, output, probe, tuning);
+    }
+
     // Resolved once, above every branch below, so the probe-aware dynamic
     // path and the static-recipe path both render against the same value
     // instead of the static path discarding it for `ResolvedVideo::default()`
@@ -159,15 +165,23 @@ pub fn build_tuned(
             // and silently discard the flag.
             let wants_video =
                 resolved.fps.is_some() || resolved.scale.is_some() || tuning.crf.is_some();
+            let strip = tuning.strip_metadata;
             let dynamic = if wants_video {
-                media::transcoded_invocation(to, p, &resolved, tuning.crf, &inputs[0], output)
+                media::transcoded_invocation(
+                    to, p, &resolved, tuning.crf, strip, &inputs[0], output,
+                )
             } else {
-                media::stream_mapped_invocation(to, p, &inputs[0], output)
-                    .or_else(|| media::audio_copy_invocation(from, to, p, &inputs[0], output))
+                media::stream_mapped_invocation(to, p, strip, &inputs[0], output).or_else(|| {
+                    media::audio_copy_invocation(from, to, p, strip, &inputs[0], output)
+                })
             };
             if let Some(mut m) = dynamic {
                 validate_tuning_for_dynamic_media(from, to, tuning)?;
                 m.warnings.extend(resolved.notes.iter().cloned());
+                m.warnings
+                    .extend(crate::metadata::location_note(from, to, probe, tuning));
+                m.warnings
+                    .extend(crate::metadata::labels_note(to, tuning, probe));
                 // Every invocation `media.rs` builds opens with
                 // `-i <input>` and closes with the output path, so the
                 // path positions (for the Windows long-path rewriter) are
@@ -197,8 +211,50 @@ pub fn build_tuned(
 
     let recipe =
         select(from, to, probe, available).ok_or_else(|| ConvError::unsupported_pair(from, to))?;
+    let recipe = if tuning.strip_metadata {
+        registry::strip_variant(to, recipe)
+    } else {
+        recipe
+    };
     validate_tuning(&recipe, from, to, tuning, &resolved)?;
+    // The tags `--strip-metadata` writes back on an ffmpeg step.
+    let kept = probe.map_or(&[][..], |p| p.kept_tags.as_slice());
 
+    let steps = render_steps(&recipe, inputs, output, tuning, &resolved, kept);
+
+    // Only the notes that apply to this source, as far as the probe knows.
+    let mut warnings = registry::notes_for(&recipe, probe);
+    // Mirrors the dynamic branch above (`m.warnings.extend(resolved.notes...)`)
+    // -- a static recipe carrying an `Arg::VideoChain` slot gets the same
+    // honesty about a cap that did not bind or a probe that never ran.
+    warnings.extend(resolved.notes.iter().cloned());
+    warnings.extend(crate::metadata::tags_unread_note(from, to, tuning, probe));
+    warnings.extend(crate::metadata::location_note(from, to, probe, tuning));
+    warnings.extend(crate::metadata::labels_note(to, tuning, probe));
+
+    Ok(ConversionPlan {
+        from,
+        to,
+        inputs: inputs.to_vec(),
+        output: output.to_path_buf(),
+        steps,
+        warnings,
+        sizing: None,
+        enlarged: resolved.enlarged.clone(),
+    })
+}
+
+/// Renders a static recipe's steps: each step's output (the final output, or
+/// an intermediate named after it), its argv, and the positions of its
+/// paths. Shared by `build_tuned` and `in_place`.
+fn render_steps(
+    recipe: &Recipe,
+    inputs: &[PathBuf],
+    output: &Path,
+    tuning: &Tuning,
+    resolved: &ResolvedVideo,
+    kept: &[(String, String)],
+) -> Vec<PlannedStep> {
     let last = recipe.steps.len() - 1;
 
     // Two passes: first compute every step's output path as an owned
@@ -228,7 +284,7 @@ pub fn build_tuned(
         let crate::recipe::Rendered {
             mut argv,
             mut path_args,
-        } = step.render_full(&inputs_here, &step_outputs[i], tuning, &resolved);
+        } = step.render_full(&inputs_here, &step_outputs[i], tuning, resolved, kept);
         if step.backend == Backend::Soffice {
             // See `USER_INSTALLATION_PLACEHOLDER`'s docs: every real
             // Soffice invocation gets this flag from `exec::run`, so the
@@ -251,23 +307,86 @@ pub fn build_tuned(
             path_args,
         });
     }
+    steps
+}
 
-    // Only the notes that apply to this source, as far as the probe knows.
-    let mut warnings = registry::notes_for(&recipe, probe);
-    // Mirrors the dynamic branch above (`m.warnings.extend(resolved.notes...)`)
-    // -- a static recipe carrying an `Arg::VideoChain` slot gets the same
-    // honesty about a cap that did not bind or a probe that never ran.
-    warnings.extend(resolved.notes.iter().cloned());
-
+/// `photo.jpg --strip-metadata` -> `photo-stripped.jpg`, and the same for
+/// video and audio. An image runs the recipe any raster takes to its format
+/// (through the TIFF for png), which re-encodes a lossy one, so that is
+/// said. Video and audio are stream-copied with their tags cleared.
+fn in_place(
+    format: Format,
+    inputs: &[PathBuf],
+    output: &Path,
+    probe: Option<&MediaProbe>,
+    tuning: &Tuning,
+) -> Result<ConversionPlan> {
+    crate::metadata::in_place(format)
+        .map_err(|why| ConvError::new(ErrorCode::InvalidInvocation, why))?;
+    let kept = probe.map_or(&[][..], |p| p.kept_tags.as_slice());
+    let (steps, mut warnings, enlarged) = match registry::image_recipe_for(format) {
+        Some(recipe) => {
+            let recipe = registry::strip_variant(format, recipe);
+            // A compressed tiff stays compressed; only the read can tell.
+            let compressed = probe.and_then(|p| p.image).is_some_and(|i| i.compressed);
+            let recipe = if format == Format::Tiff && compressed {
+                registry::IMG_TO_TIFF_ZIP
+            } else {
+                recipe
+            };
+            let resolved = crate::video::resolve(tuning, probe, target_for(format));
+            validate_tuning(&recipe, format, format, tuning, &resolved)?;
+            let steps = render_steps(&recipe, inputs, output, tuning, &resolved, kept);
+            let mut warnings = registry::notes_for(&recipe, probe);
+            if matches!(format, Format::Jpg | Format::Webp | Format::Avif) {
+                warnings.push(crate::metadata::reencode_note(format, tuning));
+            }
+            (steps, warnings, resolved.enlarged)
+        }
+        None => {
+            // A stream copy cannot filter or re-encode, so a video knob
+            // would be silently ignored here; refuse it instead.
+            let others = Tuning {
+                strip_metadata: false,
+                ..tuning.clone()
+            };
+            if !others.is_empty() {
+                return Err(ConvError::new(
+                    ErrorCode::InvalidInvocation,
+                    format!(
+                        "--strip-metadata on a {0} kept as {0} copies its streams, so no \
+                         other tuning flag applies; add --to <format> to convert it",
+                        format.ext()
+                    ),
+                ));
+            }
+            let m = media::same_format_copy(format, probe, &inputs[0], output);
+            let path_args = vec![1, m.argv.len() - 1];
+            let step = PlannedStep {
+                backend: Backend::Ffmpeg,
+                program: Backend::Ffmpeg.exe_name().to_string(),
+                argv: m.argv,
+                output_mode: OutputMode::Path,
+                output: output.to_path_buf(),
+                intermediate_ext: None,
+                path_args,
+            };
+            (vec![step], m.warnings, None)
+        }
+    };
+    warnings.extend(crate::metadata::tags_unread_note(
+        format, format, tuning, probe,
+    ));
+    warnings.extend(crate::metadata::labels_note(format, tuning, probe));
     Ok(ConversionPlan {
-        from,
-        to,
+        from: format,
+        to: format,
         inputs: inputs.to_vec(),
         output: output.to_path_buf(),
         steps,
         warnings,
         sizing: None,
-        enlarged: resolved.enlarged.clone(),
+        enlarged,
     })
 }
 
@@ -474,6 +593,17 @@ fn validate_tuning(
             ),
         ));
     }
+    if tuning.strip_metadata && !has_slot(|a| matches!(a, Arg::StripMetadata)) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--strip-metadata does not apply to {} -> {}: it covers image, video and \
+                 audio conversions",
+                from.ext(),
+                to.ext(),
+            ),
+        ));
+    }
     check_crf_range(to, tuning)
 }
 
@@ -526,6 +656,122 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn strip_metadata_is_refused_on_a_document_pair() {
+        let e = build_tuned(
+            Format::Docx,
+            Format::Pdf,
+            &[p("a.docx")],
+            Path::new("a.pdf"),
+            None,
+            None,
+            &Tuning {
+                strip_metadata: true,
+                ..Tuning::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert_eq!(
+            e.message,
+            "--strip-metadata does not apply to docx -> pdf: it covers image, video and \
+             audio conversions"
+        );
+    }
+
+    /// The flag swaps a png target onto its TIFF detour, and nothing else
+    /// about the plan.
+    #[test]
+    fn a_stripped_png_plan_writes_a_tiff_first() {
+        let plan = build_tuned(
+            Format::Heic,
+            Format::Png,
+            &[p("a.heic")],
+            Path::new("a.png"),
+            None,
+            None,
+            &Tuning {
+                strip_metadata: true,
+                ..Tuning::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].output, Path::new("a.convkit-step0.tiff"));
+        assert_eq!(plan.steps[1].argv, ["a.convkit-step0.tiff", "a.png"]);
+    }
+
+    /// With no probe there is nothing to write back, so every tag goes and
+    /// the note says title and artist went with them.
+    #[test]
+    fn without_a_probe_a_stripped_audio_conversion_says_its_tags_went_too() {
+        let t = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        let plan = build_tuned(
+            Format::Flac,
+            Format::Mp3,
+            &[p("a.flac")],
+            Path::new("a.mp3"),
+            None,
+            None,
+            &t,
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w == ["-map_metadata", "-1"]),
+            "{argv:?}"
+        );
+        assert!(
+            plan.warnings.iter().any(|w| w.contains("title and artist")),
+            "{:?}",
+            plan.warnings
+        );
+        // A gif holds no tags, so there is nothing to say.
+        let gif = build_tuned(
+            Format::Mp4,
+            Format::Gif,
+            &[p("a.mp4")],
+            Path::new("a.gif"),
+            None,
+            None,
+            &t,
+        )
+        .unwrap();
+        assert!(gif.warnings.iter().all(|w| !w.contains("title")));
+    }
+
+    /// A static recipe writes back what the probe read.
+    #[test]
+    fn a_stripped_transcode_writes_back_the_kept_tags() {
+        let probe = MediaProbe {
+            audio_codecs: vec!["flac".into()],
+            kept_tags: vec![("title".into(), "Song".into())],
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Flac,
+            Format::Mp3,
+            &[p("a.flac")],
+            Path::new("a.mp3"),
+            Some(&probe),
+            None,
+            &Tuning {
+                strip_metadata: true,
+                ..Tuning::default()
+            },
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w == ["-metadata", "title=Song"]),
+            "{argv:?}"
+        );
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
     }
 
     #[test]
@@ -643,6 +889,230 @@ mod tests {
         assert_eq!(plan.warnings.len(), 1);
     }
 
+    fn stripped() -> Tuning {
+        Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        }
+    }
+
+    /// A lossy image stripped into its own format is re-encoded, and says
+    /// so; a lossless one is not worth a note. png still takes its TIFF
+    /// detour.
+    #[test]
+    fn an_image_stripped_in_place_is_re_encoded_and_says_so_when_lossy() {
+        let plan = build_tuned(
+            Format::Jpg,
+            Format::Jpg,
+            &[p("a.jpg")],
+            Path::new("a-stripped.jpg"),
+            None,
+            None,
+            &stripped(),
+        )
+        .unwrap();
+        assert!(plan.steps[0].argv.contains(&"+profile".to_string()));
+        assert!(
+            plan.warnings.iter().any(|w| w
+                == "The jpg is re-encoded at quality 92 to remove its metadata; ImageMagick \
+                    cannot take it out of a jpg without re-encoding."),
+            "{:?}",
+            plan.warnings
+        );
+        let q70 = Tuning {
+            quality: Some(70),
+            ..stripped()
+        };
+        let webp = build_tuned(
+            Format::Webp,
+            Format::Webp,
+            &[p("a.webp")],
+            Path::new("a-stripped.webp"),
+            None,
+            None,
+            &q70,
+        )
+        .unwrap();
+        assert!(webp.warnings.iter().any(|w| w.contains("quality 70")));
+        let png = build_tuned(
+            Format::Png,
+            Format::Png,
+            &[p("a.png")],
+            Path::new("a-stripped.png"),
+            None,
+            None,
+            &stripped(),
+        )
+        .unwrap();
+        assert_eq!(png.steps.len(), 2);
+        assert!(png.warnings.iter().all(|w| !w.contains("re-encoded")));
+    }
+
+    /// ImageMagick writes a tiff uncompressed unless told otherwise, so a
+    /// compressed tiff stripped into a tiff is written with lossless Zip,
+    /// and an uncompressed one, or one not read, stays as it is.
+    #[test]
+    fn a_compressed_tiff_stripped_in_place_stays_compressed() {
+        let read = |compressed| MediaProbe {
+            image: Some(crate::probe::ImageTraits {
+                alpha: None,
+                multi_frame: false,
+                location: false,
+                compressed,
+            }),
+            ..MediaProbe::default()
+        };
+        let plan_for = |probe: Option<&MediaProbe>| {
+            build_tuned(
+                Format::Tiff,
+                Format::Tiff,
+                &[p("scan.tiff")],
+                Path::new("scan-stripped.tiff"),
+                probe,
+                None,
+                &stripped(),
+            )
+            .unwrap()
+        };
+        let zipped = |plan: &ConversionPlan| {
+            plan.steps[0]
+                .argv
+                .windows(2)
+                .any(|w| w == ["-compress", "zip"])
+        };
+        let plan = plan_for(Some(&read(true)));
+        assert!(zipped(&plan), "{:?}", plan.steps[0].argv);
+        assert_eq!(plan.steps[0].argv.last().unwrap(), "scan-stripped.tiff");
+        assert!(!zipped(&plan_for(Some(&read(false)))));
+        assert!(!zipped(&plan_for(None)));
+    }
+
+    /// Every stream is copied but the data tracks, which can carry a
+    /// location of their own; the tags are cleared and the kept ones
+    /// written back.
+    #[test]
+    fn a_video_stripped_in_place_is_a_stream_copy() {
+        let probe = MediaProbe {
+            video_codec: Some("hevc".into()),
+            audio_codecs: vec!["aac".into()],
+            kept_tags: vec![("title".into(), "Clip".into())],
+            ..MediaProbe::default()
+        };
+        let plan = build_tuned(
+            Format::Mov,
+            Format::Mov,
+            &[p("a.mov")],
+            Path::new("a-stripped.mov"),
+            Some(&probe),
+            None,
+            &stripped(),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        let has = |pair: [&str; 2]| argv.windows(2).any(|w| w == pair);
+        assert!(has(["-c", "copy"]), "{argv:?}");
+        assert!(has(["-map", "-0:d"]), "{argv:?}");
+        assert!(has(["-map_metadata", "-1"]), "{argv:?}");
+        assert!(has(["-metadata", "title=Clip"]), "{argv:?}");
+        assert_eq!(plan.steps[0].path_args, [1, argv.len() - 1]);
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+
+        let unread = build_tuned(
+            Format::Mp3,
+            Format::Mp3,
+            &[p("a.mp3")],
+            Path::new("a-stripped.mp3"),
+            None,
+            None,
+            &stripped(),
+        )
+        .unwrap();
+        assert!(unread
+            .warnings
+            .iter()
+            .any(|w| w.contains("title and artist")));
+    }
+
+    /// A stream copy cannot honour a video knob, so one is refused rather
+    /// than ignored; an image kept in its format still takes its knobs.
+    #[test]
+    fn a_same_format_video_copy_refuses_a_knob_it_cannot_apply() {
+        let t = Tuning {
+            fps: Some("24".into()),
+            ..stripped()
+        };
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Mp4,
+            &[p("a.mp4")],
+            Path::new("a-stripped.mp4"),
+            None,
+            None,
+            &t,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("add --to <format>"), "{}", e.message);
+        let resized = Tuning {
+            resize: Some("50%".into()),
+            ..stripped()
+        };
+        let plan = build_tuned(
+            Format::Jpg,
+            Format::Jpg,
+            &[p("a.jpg")],
+            Path::new("a-stripped.jpg"),
+            None,
+            None,
+            &resized,
+        )
+        .unwrap();
+        assert!(plan.steps[0].argv.contains(&"50%>".to_string()));
+    }
+
+    /// conv cannot write heic, and without the flag a same-format pair is
+    /// still no pair at all.
+    #[test]
+    fn only_the_flag_and_a_writable_format_strip_in_place() {
+        let e = build_tuned(
+            Format::Heic,
+            Format::Heic,
+            &[p("a.heic")],
+            Path::new("b.heic"),
+            None,
+            None,
+            &stripped(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert_eq!(
+            e.message,
+            "conv cannot write heic; add --to jpg to strip it into a jpg"
+        );
+        let e = build_tuned(
+            Format::Docx,
+            Format::Docx,
+            &[p("a.docx")],
+            Path::new("b.docx"),
+            None,
+            None,
+            &stripped(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        let e = build_tuned(
+            Format::Jpg,
+            Format::Jpg,
+            &[p("a.jpg")],
+            Path::new("b.jpg"),
+            None,
+            None,
+            &Tuning::default(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::UnsupportedPair);
+    }
+
     /// The plan carries only the notes that apply to the source the probe
     /// read, and its argv does not change with them.
     #[test]
@@ -651,6 +1121,8 @@ mod tests {
             image: Some(crate::probe::ImageTraits {
                 alpha: Some(false),
                 multi_frame: false,
+                location: false,
+                compressed: false,
             }),
             ..MediaProbe::default()
         };
@@ -1132,6 +1604,7 @@ mod tests {
             crf: None,
             max_size: None,
             upscale: false,
+            strip_metadata: false,
         }
     }
 

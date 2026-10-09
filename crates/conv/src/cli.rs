@@ -12,8 +12,9 @@ use convkit_core::{Resolver, Tuning};
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     /// Input paths, then optionally an output path or a bare `.ext`. With
-    /// `--max-size`, a lone input keeps its format and is written as
-    /// NAME-SIZE.EXT (`clip.mp4` -> `clip-10mb.mp4`).
+    /// `--max-size` or `--strip-metadata`, a lone input keeps its format and
+    /// is written as NAME-SIZE.EXT or NAME-stripped.EXT (`clip.mp4` ->
+    /// `clip-10mb.mp4`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -90,10 +91,21 @@ pub struct Cli {
     /// Keep each output at or under this size, choosing resolution, frame
     /// rate and bitrates to fit. Video targets only. SIZE is a number and a
     /// unit: 500kb, 10mb, 1.5gb, 10mib. A lone input keeps its format and is
-    /// written as NAME-SIZE.EXT, e.g. clip-10mb.mp4.
+    /// written as NAME-SIZE.EXT, e.g. clip-10mb.mp4; a --to batch writes into a
+    /// folder named after the size, e.g. 10mb/clip.mp4, unless -o is given.
     // Not `global` -- see `dry_run`'s comment.
     #[arg(long, value_name = "SIZE", value_parser = parse_max_size, conflicts_with = "crf")]
     pub max_size: Option<convkit_core::size::MaxSize>,
+
+    /// Remove location and the rest of the metadata: everything but the
+    /// colour profile from images (orientation is applied first), and every
+    /// tag but title, artist, album, album artist, composer, genre and
+    /// track/disc numbers from video and audio. A lone input keeps its
+    /// format: photo.jpg -> photo-stripped.jpg; a --to batch writes into a
+    /// stripped folder, e.g. stripped/photo.jpg, unless -o is given.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long)]
+    pub strip_metadata: bool,
 
     /// Assume yes to every prompt: installing a missing backend, or
     /// converting an extreme --max-size target or a large --upscale. For a script that wants
@@ -309,6 +321,7 @@ impl Cli {
             crf: self.crf,
             max_size: self.max_size.clone(),
             upscale: self.upscale,
+            strip_metadata: self.strip_metadata,
         }
     }
 
@@ -357,6 +370,7 @@ mod tests {
             fps: None,
             crf: None,
             max_size: None,
+            strip_metadata: false,
             yes: false,
             no_install: false,
             outdir: None,

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::recipe::{ScaleStyle, VideoChainSpec};
-use crate::{Arg, Backend, Format, OutputMode, Recipe, Step, Tuning};
+use crate::{Arg, Backend, Format, Kind, OutputMode, Recipe, Step, Tuning};
 
 /// JPEG/WebP/AVIF quality. Visually transparent without bloat; see spec §7.4.
 /// `pub` so `conv capabilities <format>` can state the default it is
@@ -40,6 +40,7 @@ const IMG_LOSSY: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Lit("-quality"),
@@ -78,6 +79,7 @@ const IMG_TO_JPG: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::Lit("-background"),
             Arg::Lit("white"),
             Arg::Lit("-alpha"),
@@ -102,6 +104,7 @@ const IMG_LOSSLESS: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Output,
@@ -120,6 +123,7 @@ const IMG_LOSSLESS_SINGLE_FRAME: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Output,
@@ -148,6 +152,7 @@ const SVG_TO_LOSSY: Recipe = Recipe {
             Arg::Lit("-alpha"),
             Arg::Lit("off"),
             Arg::Lit("-flatten"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Lit("-quality"),
@@ -167,6 +172,7 @@ const SVG_TO_LOSSLESS: Recipe = Recipe {
             Arg::Lit("-background"),
             Arg::Lit("none"),
             Arg::Input,
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
             Arg::Output,
@@ -186,6 +192,7 @@ const IMG_TO_PDF: Recipe = Recipe {
         [
             Arg::Inputs,
             Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
             Arg::TuneResize,
             Arg::Lit("-compress"),
             Arg::Lit("jpeg"),
@@ -196,6 +203,99 @@ const IMG_TO_PDF: Recipe = Recipe {
     )],
     warnings: &[],
 };
+
+/// ImageMagick reads every EXIF field into an image property, and its PNG
+/// writer writes every property as a tEXt chunk, GPS included, after
+/// `+profile` has removed the EXIF itself. No option avoids that: the
+/// writer emits the colour profile (iCCP) only while text chunks are
+/// enabled (png.c, ImageMagick 6 and 7 alike), and `+set` deletes one
+/// exact property name. So under `--strip-metadata` a png target goes
+/// through a TIFF, whose writer takes only `label` and `comment` from
+/// properties: the intermediate holds the pixels and the colour profile,
+/// and the PNG written from it carries no text from the source.
+/// `-compress none` keeps a JPEG source's compression from being carried
+/// into the intermediate, which would make it lossy; 16 bits stay 16.
+const IMG_TO_PNG_STRIPPED: Recipe = Recipe {
+    steps: &[
+        Step {
+            backend: Backend::Magick,
+            args: &[
+                Arg::InputFirstFrame,
+                Arg::Lit("-auto-orient"),
+                Arg::StripMetadata,
+                Arg::TuneResize,
+                Arg::Lit("-compress"),
+                Arg::Lit("none"),
+                Arg::Output,
+            ],
+            output: OutputMode::Path,
+            intermediate_ext: Some("tiff"),
+        },
+        step!(Backend::Magick, [Arg::Input, Arg::TuneColors, Arg::Output]),
+    ],
+    warnings: &[FIRST_FRAME_NOTE],
+};
+
+/// `SVG_TO_LOSSLESS` under `--strip-metadata`, through a TIFF for
+/// `IMG_TO_PNG_STRIPPED`'s reason: the SVG's own `<title>` would otherwise
+/// land in a tEXt chunk.
+const SVG_TO_PNG_STRIPPED: Recipe = Recipe {
+    steps: &[
+        Step {
+            backend: Backend::Magick,
+            args: &[
+                Arg::Lit("-density"),
+                Arg::Lit(SVG_DENSITY),
+                Arg::Lit("-background"),
+                Arg::Lit("none"),
+                Arg::Input,
+                Arg::StripMetadata,
+                Arg::TuneResize,
+                Arg::Lit("-compress"),
+                Arg::Lit("none"),
+                Arg::Output,
+            ],
+            output: OutputMode::Path,
+            intermediate_ext: Some("tiff"),
+        },
+        step!(Backend::Magick, [Arg::Input, Arg::TuneColors, Arg::Output]),
+    ],
+    warnings: &[],
+};
+
+/// `IMG_LOSSLESS` for a compressed tiff stripped into a tiff. ImageMagick
+/// writes a tiff uncompressed whatever the source used, so an LZW scan of
+/// 2.6 MB came back 5.8 MB, and a JPEG-compressed one of 0.85 MB the same,
+/// for no change to a pixel. Zip is lossless, so nothing is re-encoded; a
+/// JPEG-compressed source is not given JPEG back, which would be. Only when
+/// the source was compressed: an uncompressed tiff stays uncompressed.
+pub(crate) const IMG_TO_TIFF_ZIP: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::Input,
+            Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
+            Arg::TuneResize,
+            Arg::TuneColors,
+            Arg::Lit("-compress"),
+            Arg::Lit("zip"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+/// The recipe `--strip-metadata` runs in place of `recipe`: a png target's
+/// TIFF detour, and `recipe` itself everywhere else (bmp shares png's
+/// recipe but writes no text).
+pub(crate) fn strip_variant(to: Format, recipe: Recipe) -> Recipe {
+    match to {
+        Format::Png if recipe == IMG_LOSSLESS_SINGLE_FRAME => IMG_TO_PNG_STRIPPED,
+        Format::Png if recipe == SVG_TO_LOSSLESS => SVG_TO_PNG_STRIPPED,
+        _ => recipe,
+    }
+}
 
 /// Raster image formats that participate in the all-directions image family.
 const RASTER: &[Format] = &[
@@ -222,22 +322,28 @@ const RASTER_WRITABLE: &[Format] = &[
 
 type Table = BTreeMap<(Format, Format), Recipe>;
 
+/// The recipe every raster source takes to `to`, by `to`'s frame policy:
+/// jpg/png/bmp hold one image, so they take the first frame explicitly (jpg
+/// additionally flattens alpha); webp/avif hold animation and alpha as-is;
+/// tiff holds multi-page sources faithfully. `None` for a format conv does
+/// not write. Also what a raster stripped into its own format runs.
+pub(crate) fn image_recipe_for(to: Format) -> Option<Recipe> {
+    Some(match to {
+        Format::Jpg => IMG_TO_JPG,
+        Format::Png | Format::Bmp => IMG_LOSSLESS_SINGLE_FRAME,
+        _ if !RASTER_WRITABLE.contains(&to) => return None,
+        _ if is_lossy(to) => IMG_LOSSY,
+        _ => IMG_LOSSLESS,
+    })
+}
+
 fn insert_image_family(t: &mut Table) {
     for &from in RASTER {
         for &to in RASTER_WRITABLE {
             if from == to {
                 continue;
             }
-            // Frame policy per target: jpg/png/bmp hold one image, so they
-            // take the first frame explicitly (jpg additionally flattens
-            // alpha); webp/avif hold animation and alpha as-is; tiff holds
-            // multi-page sources faithfully.
-            let recipe = match to {
-                Format::Jpg => IMG_TO_JPG,
-                Format::Png | Format::Bmp => IMG_LOSSLESS_SINGLE_FRAME,
-                _ if is_lossy(to) => IMG_LOSSY,
-                _ => IMG_LOSSLESS,
-            };
+            let recipe = image_recipe_for(to).expect("every writable raster has a recipe");
             t.insert((from, to), recipe);
         }
         t.insert((from, Format::Pdf), IMG_TO_PDF);
@@ -398,6 +504,7 @@ const VIDEO_TO_MP4: Recipe = Recipe {
             Arg::Lit("-sn"),
             Arg::Lit("-movflags"),
             Arg::Lit("+faststart"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -470,6 +577,7 @@ macro_rules! video_to_mkv_recipe {
                 Arg::Lit(AUDIO_BITRATE),
                 Arg::Lit("-c:s"),
                 Arg::Lit($sub_codec),
+                Arg::StripMetadata,
                 Arg::Lit("-y"),
                 Arg::Output,
             ]
@@ -568,6 +676,7 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
             Arg::Lit(WEBM_AUDIO_BITRATE),
             Arg::Lit("-af"),
             Arg::Lit(OPUS_CHANNEL_LAYOUTS),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -597,6 +706,7 @@ const TO_GIF: Recipe = Recipe {
             Arg::VideoChain(&TO_GIF_CHAIN),
             Arg::Lit("-loop"),
             Arg::Lit("0"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -629,6 +739,7 @@ pub const TO_GIF_TONEMAP: Recipe = Recipe {
             Arg::VideoChain(&TO_GIF_TONEMAP_CHAIN),
             Arg::Lit("-loop"),
             Arg::Lit("0"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -685,6 +796,7 @@ const GIF_TO_MP4: Recipe = Recipe {
             Arg::Lit("yuv420p"),
             Arg::Lit("-movflags"),
             Arg::Lit("+faststart"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -712,6 +824,7 @@ macro_rules! audio_recipe {
                     Arg::Lit("-i"), Arg::Input,
                     Arg::Lit("-vn"),
                     $($codec,)*
+                    Arg::StripMetadata,
                     Arg::Lit("-y"), Arg::Output,
                 ]
             )],
@@ -728,6 +841,7 @@ macro_rules! audio_recipe {
                     Arg::Lit("-map"), Arg::Lit("0:v?"),
                     Arg::Lit("-c:v"), Arg::Lit("copy"),
                     $($codec,)*
+                    Arg::StripMetadata,
                     Arg::Lit("-y"), Arg::Output,
                 ]
             )],
@@ -770,6 +884,7 @@ const TO_WAV: Recipe = Recipe {
             Arg::Lit("-vn"),
             Arg::Lit("-c:a"),
             Arg::Lit("pcm_s16le"),
+            Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
         ]
@@ -1206,6 +1321,18 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
     if needs_probe(from, to) {
         return true;
     }
+    // --strip-metadata writes back the content tags the probe reads, on
+    // every ffmpeg pair and on a video or audio file stripped into its own
+    // format. A gif holds no tags, so there is nothing to read.
+    if tuning.strip_metadata {
+        let ffmpeg = from != Format::Gif
+            && lookup(from, to)
+                .is_some_and(|r| r.steps.iter().any(|s| s.backend == Backend::Ffmpeg));
+        let in_place = from == to && matches!(from.kind(), Kind::Video | Kind::Audio);
+        if ffmpeg || in_place {
+            return true;
+        }
+    }
     if tuning.fps.is_none() && tuning.resize.is_none() {
         return false;
     }
@@ -1226,11 +1353,22 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
 /// own args, so the size is taken the way the recipe takes its input: every
 /// input or the first, every page or the first frame, and at the density it
 /// renders a vector source at.
+/// The recipe whose reads (a size, the notes' traits) a conversion makes:
+/// the pair's own, or for a file stripped into its own format, which has no
+/// pair, the recipe any raster takes to that format.
+fn recipe_read_for(from: Format, to: Format, tuning: &Tuning) -> Option<Recipe> {
+    lookup(from, to).or_else(|| {
+        (from == to && tuning.strip_metadata)
+            .then(|| image_recipe_for(to))
+            .flatten()
+    })
+}
+
 pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::probe::ImageRead> {
     if !tuning.upscale || tuning.resize.is_none() {
         return None;
     }
-    let step = lookup(from, to)?
+    let step = recipe_read_for(from, to, tuning)?
         .steps
         .iter()
         .find(|s| s.args.iter().any(|a| matches!(a, Arg::TuneResize)))?;
@@ -1245,13 +1383,26 @@ pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::pr
 }
 
 /// Whether a note on this pair depends on what the source image holds, so
-/// the caller should read it with `probe::image_traits` before planning.
-pub fn notes_need_image(from: Format, to: Format) -> bool {
-    lookup(from, to).is_some_and(|r| {
+/// the caller should read it with `probe::image_traits` before planning:
+/// the frame and alpha notes, and the location note wherever the target
+/// keeps an EXIF GPS and the flag is not taking it out. Not for the
+/// location note alone from a WebP: its GPS survives, but ImageMagick's
+/// `-ping` loads no WebP EXIF, so the read could never find it.
+pub fn notes_need_image(from: Format, to: Format, tuning: &Tuning) -> bool {
+    let frame_notes = recipe_read_for(from, to, tuning).is_some_and(|r| {
         r.warnings
             .iter()
             .any(|&w| matches!(w, FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE))
-    })
+    });
+    // A tiff stripped into a tiff keeps its compression, which the read
+    // reports (see `IMG_TO_TIFF_ZIP`).
+    let tiff_in_place = from == Format::Tiff && to == Format::Tiff && tuning.strip_metadata;
+    frame_notes
+        || tiff_in_place
+        || (!tuning.strip_metadata
+            && from != Format::Webp
+            && lookup(from, to).is_some()
+            && crate::metadata::keeps_exif_location(from, to))
 }
 
 /// The recipe's notes for this source: a note about something the source
@@ -1356,11 +1507,25 @@ mod tests {
             None,
             "video is probed"
         );
+        // A photo stripped into its own format is sized like any other, so
+        // a large upscale still asks first.
+        let stripped_up = Tuning {
+            strip_metadata: true,
+            ..up.clone()
+        };
+        let jpg = image_read(Format::Jpg, Format::Jpg, &stripped_up).unwrap();
+        assert!(!jpg.every_page && !jpg.every_input, "{jpg:?}");
+        assert_eq!(image_read(Format::Jpg, Format::Jpg, &up), None, "no pair");
     }
 
     fn read_image(alpha: Option<bool>, multi_frame: bool) -> crate::MediaProbe {
         crate::MediaProbe {
-            image: Some(crate::probe::ImageTraits { alpha, multi_frame }),
+            image: Some(crate::probe::ImageTraits {
+                alpha,
+                multi_frame,
+                location: false,
+                compressed: false,
+            }),
             ..crate::MediaProbe::default()
         }
     }
@@ -1426,24 +1591,53 @@ mod tests {
         }
     }
 
-    /// Only the jpg/png/bmp targets read the image, and not from an SVG,
-    /// whose transparency a ping cannot see: its note always shows.
+    /// jpg/png/bmp targets read the image for their frame and alpha notes;
+    /// webp/avif/pdf targets read it only for the location note, so not
+    /// under --strip-metadata, and not from a source that keeps no EXIF
+    /// there. Never an SVG, whose transparency a ping cannot see, and never
+    /// for a tiff target, which keeps no EXIF.
     #[test]
-    fn only_single_image_raster_targets_read_the_source() {
+    fn a_source_is_read_only_where_its_notes_depend_on_it() {
+        let off = Tuning::default();
+        let on = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
         for &from in RASTER {
             for to in [Format::Jpg, Format::Png, Format::Bmp] {
                 if from != to {
-                    assert!(notes_need_image(from, to), "{from:?} -> {to:?}");
+                    assert!(notes_need_image(from, to, &off), "{from:?} -> {to:?}");
+                    assert!(notes_need_image(from, to, &on), "{from:?} -> {to:?}");
                 }
             }
-            for to in [Format::Webp, Format::Avif, Format::Tiff, Format::Pdf] {
+            for to in [Format::Webp, Format::Avif, Format::Pdf] {
                 if from != to {
-                    assert!(!notes_need_image(from, to), "{from:?} -> {to:?}");
+                    // A WebP's EXIF survives, but a header read cannot see
+                    // it, so reading one could never give the note.
+                    let readable_exif = !matches!(from, Format::Bmp | Format::Tiff | Format::Webp);
+                    assert_eq!(
+                        notes_need_image(from, to, &off),
+                        readable_exif,
+                        "{from:?} -> {to:?}"
+                    );
+                    assert!(!notes_need_image(from, to, &on), "{from:?} -> {to:?}");
                 }
+            }
+            if from != Format::Tiff {
+                assert!(!notes_need_image(from, Format::Tiff, &off), "{from:?}");
             }
         }
-        assert!(!notes_need_image(Format::Svg, Format::Jpg));
-        assert!(!notes_need_image(Format::Mp4, Format::Gif));
+        assert!(!notes_need_image(Format::Svg, Format::Jpg, &off));
+        assert!(!notes_need_image(Format::Mp4, Format::Gif, &off));
+        // Stripped into its own format, a jpg/png/bmp is read like any
+        // other source to one; without the flag there is no such pair.
+        assert!(notes_need_image(Format::Jpg, Format::Jpg, &on));
+        assert!(notes_need_image(Format::Png, Format::Png, &on));
+        assert!(!notes_need_image(Format::Webp, Format::Webp, &on));
+        assert!(!notes_need_image(Format::Jpg, Format::Jpg, &off));
+        // A tiff stripped into a tiff is read for its compression.
+        assert!(notes_need_image(Format::Tiff, Format::Tiff, &on));
+        assert!(!notes_need_image(Format::Tiff, Format::Tiff, &off));
         let opaque = read_image(Some(false), false);
         assert_eq!(
             notes(Format::Svg, Format::Jpg, Some(&opaque)),
@@ -1503,6 +1697,94 @@ mod tests {
     }
 
     use crate::video::ResolvedVideo;
+
+    /// Stripping probes for the tags it keeps, so only where there can be
+    /// some: not a gif, which holds none.
+    #[test]
+    fn stripping_probes_only_a_source_with_tags_to_keep() {
+        let on = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        assert!(needs_probe_tuned(Format::Flac, Format::Mp3, &on));
+        assert!(needs_probe_tuned(Format::Mp3, Format::Mp3, &on));
+        assert!(!needs_probe_tuned(Format::Gif, Format::Mp4, &on));
+        assert!(!needs_probe_tuned(
+            Format::Flac,
+            Format::Mp3,
+            &Tuning::default()
+        ));
+    }
+
+    /// Every ImageMagick and ffmpeg recipe carries the strip slot, so the
+    /// flag is refused only where it truly does not apply (documents), and
+    /// an image recipe strips only after orienting the picture:
+    /// `-auto-orient` reads the EXIF orientation the strip removes.
+    #[test]
+    fn every_image_and_media_recipe_strips_and_only_after_orienting() {
+        for (from, to) in all_pairs() {
+            let r = lookup(from, to).unwrap();
+            for s in r.steps {
+                let strip = s.args.iter().position(|a| *a == Arg::StripMetadata);
+                if matches!(s.backend, Backend::Magick | Backend::Ffmpeg) {
+                    assert!(strip.is_some(), "{from:?} -> {to:?}");
+                }
+                if strip.is_some() {
+                    assert!(
+                        matches!(s.backend, Backend::Magick | Backend::Ffmpeg),
+                        "{from:?} -> {to:?}"
+                    );
+                }
+                let orient = s.args.iter().position(|a| *a == Arg::Lit("-auto-orient"));
+                if let (Some(o), Some(st)) = (orient, strip) {
+                    assert!(o < st, "{from:?} -> {to:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stripped_jpg_drops_everything_but_the_colour_profile_after_orienting() {
+        let tuning = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        let argv = lookup(Format::Heic, Format::Jpg).unwrap().steps[0]
+            .render_full(
+                &[Path::new("in.heic")],
+                Path::new("out.jpg"),
+                &tuning,
+                &ResolvedVideo::default(),
+                &[],
+            )
+            .argv;
+        let at = argv.iter().position(|a| a == "-auto-orient").unwrap();
+        assert_eq!(
+            argv[at + 1..at + 7],
+            ["+profile", "!icc,*", "+set", "comment", "+set", "label"],
+            "{argv:?}"
+        );
+    }
+
+    /// png's writer turns every property into text, so a stripped png goes
+    /// through a TIFF; bmp shares png's recipe but writes no text.
+    #[test]
+    fn a_stripped_png_goes_through_an_uncompressed_tiff() {
+        for from in [Format::Jpg, Format::Svg] {
+            let r = strip_variant(Format::Png, lookup(from, Format::Png).unwrap());
+            assert_eq!(r.steps.len(), 2, "{from:?}");
+            assert_eq!(r.steps[0].intermediate_ext, Some("tiff"));
+            assert!(r.steps[0]
+                .args
+                .windows(2)
+                .any(|w| w == [Arg::Lit("-compress"), Arg::Lit("none")]));
+            assert!(r.steps[0].args.contains(&Arg::StripMetadata));
+        }
+        let bmp = lookup(Format::Jpg, Format::Bmp).unwrap();
+        assert_eq!(strip_variant(Format::Bmp, bmp), bmp);
+        let jpg = lookup(Format::Png, Format::Jpg).unwrap();
+        assert_eq!(strip_variant(Format::Jpg, jpg), jpg);
+    }
 
     #[test]
     fn heic_to_jpg_auto_orients_and_sets_quality() {

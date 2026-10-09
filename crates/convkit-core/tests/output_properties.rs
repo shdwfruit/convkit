@@ -1265,7 +1265,8 @@ fn synth_image(dir: &tempfile::TempDir, args: &[&str], out: &str) -> PathBuf {
     path
 }
 
-/// A phone photo gets no note; a transparent PNG the alpha half; a
+/// A phone photo gets no frame or alpha note, only the one saying it
+/// records where it was taken; a transparent PNG the alpha half; a
 /// multi-page TIFF the frame half, plus the alpha half, which a TIFF's
 /// header read cannot rule out.
 #[test]
@@ -1273,7 +1274,15 @@ fn synth_image(dir: &tempfile::TempDir, args: &[&str], out: &str) -> PathBuf {
 fn image_notes_say_only_what_the_source_holds() {
     let said = |o: &exec::Outcome, what: &str| o.warnings.iter().any(|w| w.contains(what));
     let (_, photo) = convert_path(&fixture("photo.heic"), "jpg");
-    assert!(photo.warnings.is_empty(), "{:?}", photo.warnings);
+    let expected: &[&str] = if reads_heic_exif() {
+        &[
+            "The source records a GPS location, and the jpg keeps it; add \
+           --strip-metadata to remove it.",
+        ]
+    } else {
+        &[]
+    };
+    assert_eq!(photo.warnings, expected);
 
     let dir = tmp();
     let transparent = synth_image(
@@ -2090,4 +2099,570 @@ fn several_images_into_one_pdf_are_decided_by_the_one_enlarged_most() {
     let outcome = exec::run(&req(true), &resolver, &mut |_| {}).unwrap();
     let w = outcome.enlarged.unwrap().warning;
     assert!(w.contains("enlarges tiny.png (50x50) to 400x400"), "{w}");
+}
+
+// --- Metadata: the location note and --strip-metadata ----------------------
+
+fn stripped() -> Tuning {
+    Tuning {
+        strip_metadata: true,
+        ..Tuning::default()
+    }
+}
+
+fn magick() -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+    resolver.resolve(Backend::Magick).unwrap().path
+}
+
+/// Runs the resolved ImageMagick (`magick`, or ImageMagick 6's `convert`,
+/// which takes the same arguments for everything this file builds).
+fn run_magick(args: &[&str]) {
+    let out = Command::new(magick())
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ImageMagick: {e}"));
+    assert!(
+        out.status.success(),
+        "ImageMagick {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// One `identify -format` answer for the first frame.
+fn identify_format(path: &Path, format: &str) -> String {
+    let first_frame = format!("{}[0]", path.display());
+    run_identify(&magick(), &["-format", format, &first_frame])
+}
+
+/// Whether this ImageMagick can write `format` (Ubuntu's ImageMagick 6
+/// may have no AVIF encoder).
+fn magick_writes(format: &str) -> bool {
+    let out = Command::new(magick())
+        .args(["-list", "format"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ImageMagick: {e}"));
+    String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+        let mut it = l.split_whitespace();
+        it.next().map(|f| f.trim_end_matches('*')) == Some(format)
+            && it.nth(1).is_some_and(|mode| mode.contains('w'))
+    })
+}
+
+/// One IFD of a big-endian EXIF block placed at offset `at`: entries are
+/// `(tag, type, count, value)`, values of four bytes or less inline and the
+/// rest after the IFD, padded to an even length. No next IFD.
+fn exif_ifd(entries: &[(u16, u16, u32, Vec<u8>)], at: u32) -> Vec<u8> {
+    let n = u16::try_from(entries.len()).unwrap();
+    let data_at = at + 2 + 12 * u32::from(n) + 4;
+    let (mut head, mut data) = (n.to_be_bytes().to_vec(), Vec::new());
+    for (tag, kind, count, value) in entries {
+        head.extend(tag.to_be_bytes());
+        head.extend(kind.to_be_bytes());
+        head.extend(count.to_be_bytes());
+        if value.len() <= 4 {
+            let mut inline = value.clone();
+            inline.resize(4, 0);
+            head.extend(inline);
+        } else {
+            head.extend((data_at + u32::try_from(data.len()).unwrap()).to_be_bytes());
+            data.extend(value);
+            if data.len() % 2 == 1 {
+                data.push(0);
+            }
+        }
+    }
+    head.extend(0u32.to_be_bytes());
+    head.extend(data);
+    head
+}
+
+/// The EXIF a phone writes, in miniature: IFD0 with the camera, the owner
+/// (Artist) and Orientation 6 (stored on its side, as a portrait photo is);
+/// an EXIF sub-IFD with the capture time and the body's serial number; and a
+/// GPS sub-IFD at 51°30'2.52"N 0°7'28.56"W. Built by hand so no metadata
+/// tool is needed; `carries_identifying` looks for these values.
+fn gps_exif() -> Vec<u8> {
+    let ascii = |tag: u16, s: &str| {
+        let bytes = format!("{s}\0").into_bytes();
+        (tag, 2u16, u32::try_from(bytes.len()).unwrap(), bytes)
+    };
+    let rationals = |parts: &[(u32, u32)]| -> Vec<u8> {
+        parts
+            .iter()
+            .flat_map(|(n, d)| n.to_be_bytes().into_iter().chain(d.to_be_bytes()))
+            .collect()
+    };
+    // The sub-IFDs follow IFD0, whose size does not depend on the two
+    // pointers' values (inline LONGs), so it is measured with zeros first.
+    let ifd0 = |exif_at: u32, gps_at: u32| {
+        vec![
+            ascii(0x010F, "FakeCam"),
+            ascii(0x0110, "FakeCam 9"),
+            (0x0112, 3, 1, 6u16.to_be_bytes().to_vec()),
+            ascii(0x013B, "Jane Q Owner"),
+            (0x8769, 4, 1, exif_at.to_be_bytes().to_vec()),
+            (0x8825, 4, 1, gps_at.to_be_bytes().to_vec()),
+        ]
+    };
+    let exif = vec![
+        ascii(0x9003, "2026:01:02 03:04:05"),
+        ascii(0xA431, "SERIAL-0123456789"),
+    ];
+    let gps = vec![
+        (0x0000, 1, 4, vec![2, 3, 0, 0]),
+        ascii(0x0001, "N"),
+        (0x0002, 5, 3, rationals(&[(51, 1), (30, 1), (63, 25)])),
+        ascii(0x0003, "W"),
+        (0x0004, 5, 3, rationals(&[(0, 1), (7, 1), (714, 25)])),
+    ];
+    let exif_at = 8 + u32::try_from(exif_ifd(&ifd0(0, 0), 8).len()).unwrap();
+    let exif_block = exif_ifd(&exif, exif_at);
+    let gps_at = exif_at + u32::try_from(exif_block.len()).unwrap();
+    let mut tiff = b"MM\0*\0\0\0\x08".to_vec();
+    tiff.extend(exif_ifd(&ifd0(exif_at, gps_at), 8));
+    tiff.extend(exif_block);
+    tiff.extend(exif_ifd(&gps, gps_at));
+    tiff
+}
+
+/// A phone photo in miniature: stored 96x192 (blue over red) and shown
+/// 192x96 with red on the left, because its EXIF says to turn it; the
+/// Display P3 colour profile of the committed iPhone photo; and
+/// `gps_exif` spliced in as APP1 right after SOI.
+fn gps_photo(dir: &tempfile::TempDir) -> PathBuf {
+    let icc = dir.path().join("p3.icc");
+    let plain = dir.path().join("plain.jpg");
+    run_magick(&[
+        &fixture("photo.heic").to_string_lossy(),
+        &format!("icc:{}", icc.display()),
+    ]);
+    run_magick(&[
+        "-size",
+        "96x96",
+        "xc:blue",
+        "-size",
+        "96x96",
+        "xc:red",
+        "-append",
+        "-profile",
+        &icc.to_string_lossy(),
+        &plain.to_string_lossy(),
+    ]);
+    let jpeg = std::fs::read(&plain).unwrap();
+    assert_eq!(&jpeg[..2], b"\xff\xd8", "a JPEG starts with SOI");
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend(gps_exif());
+    let len = u16::try_from(payload.len() + 2).unwrap().to_be_bytes();
+    let mut out = jpeg[..2].to_vec();
+    out.extend([0xff, 0xe1, len[0], len[1]]);
+    out.extend(payload);
+    out.extend(&jpeg[2..]);
+    let photo = dir.path().join("IMG_0042.jpg");
+    std::fs::write(&photo, out).unwrap();
+    assert_eq!(identify_format(&photo, "%[orientation]"), "RightTop");
+    photo
+}
+
+/// Whether the file still holds any of `gps_exif`'s identifying values,
+/// in any form ImageMagick writes them: the raw GPS rationals, the text
+/// it gives a PNG (ImageMagick 6 spaces them out), the serial number, the
+/// owner, or the camera.
+fn carries_identifying(path: &Path) -> bool {
+    let bytes = std::fs::read(path).unwrap();
+    let needles: [&[u8]; 6] = [
+        b"\x00\x00\x00\x33\x00\x00\x00\x01\x00\x00\x00\x1e\x00\x00\x00\x01",
+        b"51/1,30/1",
+        b"51/1, 30/1",
+        b"SERIAL-0123456789",
+        b"Jane Q Owner",
+        b"FakeCam",
+    ];
+    needles
+        .iter()
+        .any(|n| bytes.windows(n.len()).any(|w| w == *n))
+}
+
+fn says_location(outcome: &exec::Outcome) -> bool {
+    outcome.warnings.iter().any(|w| w.contains("GPS location"))
+}
+
+/// For every image target: without the flag the output keeps what the
+/// photo carries exactly where the note says it does; with it, nothing
+/// identifying is left, the colour profile is still Display P3, and the
+/// picture is still upright (shown 192x96, red on the left), which
+/// `-auto-orient` running before the strip is what guarantees.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn stripped_images_lose_their_location_and_keep_colour_and_orientation() {
+    let dir = tmp();
+    let photo = gps_photo(&dir);
+    let mut targets = vec!["jpg", "png", "webp", "tiff", "pdf"];
+    if magick_writes("AVIF") {
+        targets.push("avif");
+    } else {
+        eprintln!("this ImageMagick cannot write AVIF; the avif target is not checked");
+    }
+    for ext in targets {
+        // jpg -> jpg is no pair without the flag; heic -> jpg's note is
+        // checked against the real iPhone photo below.
+        if ext != "jpg" {
+            let kept = dir.path().join(format!("kept.{ext}"));
+            let outcome = convert_tuned(&photo, &kept, &Tuning::default()).unwrap();
+            assert_eq!(
+                carries_identifying(&kept),
+                says_location(&outcome),
+                "{ext}: the note must say exactly when the location survives: {:?}",
+                outcome.warnings
+            );
+            assert_eq!(carries_identifying(&kept), ext != "tiff", "{ext}");
+        }
+
+        let clean = dir.path().join(format!("clean.{ext}"));
+        let outcome = convert_tuned(&photo, &clean, &stripped()).unwrap();
+        assert!(!carries_identifying(&clean), "{ext} still identifies");
+        assert!(!says_location(&outcome), "{ext}: {:?}", outcome.warnings);
+        if ext == "pdf" {
+            // Reading a PDF back needs Ghostscript; its colour profile is
+            // there as an ICCBased colour space.
+            let bytes = std::fs::read(&clean).unwrap();
+            assert!(bytes.windows(8).any(|w| w == b"ICCBased"), "pdf");
+            continue;
+        }
+        assert_eq!(
+            identify_format(&clean, "%[icc:description]"),
+            "Display P3",
+            "{ext}"
+        );
+        assert_eq!(
+            imagemagick_dimensions(&clean),
+            (192, 96),
+            "{ext} is on its side"
+        );
+        let red_left = identify_format(&clean, "%[fx:p{10,48}.r > 0.8 && p{10,48}.b < 0.2]");
+        assert_eq!(red_left.trim(), "1", "{ext} is turned the wrong way");
+    }
+}
+
+/// The committed iPhone photo carries real GPS coordinates; stripped, the
+/// jpg has none, and keeps its size and colour profile.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_real_iphone_photo_loses_its_gps() {
+    let dir = tmp();
+    let src = fixture("photo.heic");
+    // The photo's GPS latitude as its big-endian EXIF stores it: 35/1, 43/1.
+    let latitude = b"\x00\x00\x00\x23\x00\x00\x00\x01\x00\x00\x00\x2b\x00\x00\x00\x01";
+    let has_gps = |p: &Path| {
+        std::fs::read(p)
+            .unwrap()
+            .windows(latitude.len())
+            .any(|w| w == latitude)
+    };
+    let kept = dir.path().join("kept.jpg");
+    let outcome = convert_tuned(&src, &kept, &Tuning::default()).unwrap();
+    assert!(has_gps(&kept));
+    if reads_heic_exif() {
+        assert!(says_location(&outcome), "{:?}", outcome.warnings);
+    } else {
+        eprintln!("this ImageMagick cannot read a HEIC's EXIF; the note is not checked");
+    }
+
+    let clean = dir.path().join("clean.jpg");
+    convert_tuned(&src, &clean, &stripped()).unwrap();
+    assert!(!has_gps(&clean));
+    assert_eq!(identify_format(&clean, "%[icc:description]"), "Display P3");
+    assert_eq!(imagemagick_dimensions(&clean), (4032, 3024));
+}
+
+/// Whether this ImageMagick can read the EXIF of a HEIC photo, which the
+/// location note depends on. ImageMagick 6 (what Debian and Ubuntu ship)
+/// stores a HEIC's EXIF without the `Exif\0\0` marker its own EXIF parser
+/// looks for, so it reads none: the profile is still attached, written out
+/// and removed by `--strip-metadata`, but the note cannot see it.
+fn reads_heic_exif() -> bool {
+    identify_format(&fixture("photo.heic"), "[%[EXIF:GPSLatitude]]") != "[]"
+}
+
+/// Runs the resolved ffmpeg, quietly, failing the test with its stderr.
+fn run_ffmpeg(args: &[&str]) {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let out = Command::new(resolver.resolve(Backend::Ffmpeg).unwrap().path)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        out.status.success(),
+        "ffmpeg {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Two phone-style clips, both turned a quarter by a display matrix, as a
+/// portrait phone video is: `apple.mov` with Apple's mdta location key, as
+/// iPhones write it, and `classic.mp4` with the classic `location` tag
+/// (written as `loci`), a title and an artist. The tags and the rotation
+/// are added by a stream copy, which carries the matrix as it is.
+fn located_clips(dir: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+    let plain = dir.path().join("plain.mp4");
+    run_ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=64x48:rate=10:duration=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=duration=2",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-shortest",
+        &plain.to_string_lossy(),
+    ]);
+    let apple = dir.path().join("apple.mov");
+    run_ffmpeg(&[
+        "-display_rotation",
+        "90",
+        "-i",
+        &plain.to_string_lossy(),
+        "-c",
+        "copy",
+        "-movflags",
+        "use_metadata_tags",
+        "-metadata",
+        "com.apple.quicktime.location.ISO6709=+51.5007-000.1246+010.000/",
+        "-metadata",
+        "com.apple.quicktime.make=Apple",
+        &apple.to_string_lossy(),
+    ]);
+    let classic = dir.path().join("classic.mp4");
+    run_ffmpeg(&[
+        "-display_rotation",
+        "90",
+        "-i",
+        &plain.to_string_lossy(),
+        "-c",
+        "copy",
+        "-metadata",
+        "location=+51.5007-000.1246/",
+        "-metadata",
+        "title=Clip",
+        "-metadata",
+        "artist=Band",
+        &classic.to_string_lossy(),
+    ]);
+    (apple, classic)
+}
+
+/// Whether a video or audio file still records the fixtures' location: as
+/// ISO 6709 text (mdta keys, `©xyz`, Matroska and ID3 tags) or as the
+/// binary `loci` box an mp4 writes.
+fn carries_location(path: &Path) -> bool {
+    let bytes = std::fs::read(path).unwrap();
+    let needles: [&[u8]; 3] = [b"+51.5007", b"loci", b"\xa9xyz"];
+    needles
+        .iter()
+        .any(|n| bytes.windows(n.len()).any(|w| w == *n))
+}
+
+/// The container's tags, as ffprobe reads them.
+fn format_tags(path: &Path) -> serde_json::Map<String, serde_json::Value> {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffprobe);
+    let out = Command::new(resolver.resolve(Backend::Ffprobe).unwrap().path)
+        .args(["-v", "quiet", "-print_format", "json", "-show_format"])
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffprobe: {e}"));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["format"]["tags"].as_object().cloned().unwrap_or_default()
+}
+
+fn tag<'a>(tags: &'a serde_json::Map<String, serde_json::Value>, key: &str) -> Option<&'a str> {
+    tags.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .and_then(|(_, v)| v.as_str())
+}
+
+/// Each clip into each video container: without the flag the location
+/// survives exactly where the note says (Apple's key is dropped by mp4,
+/// kept by mkv and webm); with it, none is left, the title and artist are,
+/// a copy is still a copy, and a copied clip is still turned.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn stripped_video_loses_its_location_and_keeps_title_rotation_and_the_copy() {
+    let dir = tmp();
+    let (apple, classic) = located_clips(&dir);
+    for (src, ext) in [
+        (&apple, "mp4"),
+        (&apple, "mkv"),
+        (&apple, "webm"),
+        (&classic, "mov"),
+        (&classic, "mkv"),
+        (&classic, "webm"),
+    ] {
+        let from = src.file_name().unwrap().to_string_lossy();
+        let name = format!("{from} -> {ext}");
+        let kept = dir.path().join(format!("kept-{from}.{ext}"));
+        let outcome = convert_tuned(src, &kept, &Tuning::default()).unwrap();
+        assert_eq!(
+            carries_location(&kept),
+            says_location(&outcome),
+            "{name}: the note must say exactly when the location survives: {:?}",
+            outcome.warnings
+        );
+        assert_eq!(
+            carries_location(&kept),
+            !(src == &apple && ext == "mp4"),
+            "{name}"
+        );
+
+        let clean = dir.path().join(format!("clean-{from}.{ext}"));
+        let outcome = convert_tuned(src, &clean, &stripped()).unwrap();
+        assert!(!carries_location(&clean), "{name} still records it");
+        assert!(!says_location(&outcome), "{name}: {:?}", outcome.warnings);
+        if src == &classic {
+            let tags = format_tags(&clean);
+            assert_eq!(tag(&tags, "title"), Some("Clip"), "{name}: {tags:?}");
+            assert_eq!(tag(&tags, "artist"), Some("Band"), "{name}: {tags:?}");
+        }
+        if ext != "webm" {
+            assert!(outcome.remuxed, "{name} was re-encoded");
+            assert_eq!(
+                probe_media(&clean).rotation.map(i32::abs),
+                Some(90),
+                "{name}"
+            );
+        }
+    }
+    // The re-encode path clears them too.
+    let crf = dir.path().join("crf.mov");
+    let tuning = Tuning {
+        crf: Some(30),
+        ..stripped()
+    };
+    convert_tuned(&classic, &crf, &tuning).unwrap();
+    assert!(!carries_location(&crf));
+    assert_eq!(tag(&format_tags(&crf), "title"), Some("Clip"));
+}
+
+/// A clip stripped into its own container is a stream copy of every
+/// stream, rotation included, with the location gone.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_video_stripped_in_place_is_copied_not_re_encoded() {
+    let dir = tmp();
+    let (apple, _) = located_clips(&dir);
+    let clean = dir.path().join("apple-stripped.mov");
+    convert_tuned(&apple, &clean, &stripped()).unwrap();
+    assert!(!carries_location(&clean));
+    let (before, after) = (probe_media(&apple), probe_media(&clean));
+    assert_eq!(after.video_codec, before.video_codec);
+    assert_eq!(after.audio_codecs, before.audio_codecs);
+    assert_eq!(after.rotation.map(i32::abs), Some(90));
+}
+
+/// A compressed tiff stripped into a tiff stays compressed, losslessly;
+/// an uncompressed one stays uncompressed.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_tiff_stripped_in_place_keeps_its_compression() {
+    let dir = tmp();
+    for (compression, expected) in [("LZW", "Zip"), ("None", "None")] {
+        let src = dir.path().join(format!("scan-{compression}.tiff"));
+        run_magick(&[
+            "-size",
+            "256x256",
+            "gradient:red-blue",
+            "-compress",
+            compression,
+            &src.to_string_lossy(),
+        ]);
+        let out = dir.path().join(format!("scan-{compression}-stripped.tiff"));
+        convert_tuned(&src, &out, &stripped()).unwrap();
+        assert_eq!(identify_format(&out, "%C"), expected, "{compression}");
+        // `%#` hashes the pixels alone, so the same picture stored another
+        // way hashes the same.
+        assert_eq!(
+            identify_format(&out, "%#"),
+            identify_format(&src, "%#"),
+            "{compression}: the pixels changed"
+        );
+    }
+}
+
+/// An mkv carrying a font attachment, as subtitled anime does: Matroska
+/// refuses an attachment whose tags were cleared, so the strip has to give
+/// them back. The font stays, the location goes.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_mkv_with_a_font_attachment_can_be_stripped() {
+    let dir = tmp();
+    let font = dir.path().join("font.ttf");
+    std::fs::write(&font, b"not really a font").unwrap();
+    let anime = dir.path().join("anime.mkv");
+    run_ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=64x48:rate=10:duration=1",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-attach",
+        &font.to_string_lossy(),
+        "-metadata:s:t",
+        "mimetype=application/x-truetype-font",
+        "-metadata",
+        "location=+51.5007-000.1246/",
+        &anime.to_string_lossy(),
+    ]);
+    let clean = dir.path().join("anime-stripped.mkv");
+    convert_tuned(&anime, &clean, &stripped()).unwrap();
+    assert!(!carries_location(&clean));
+    assert_eq!(probe_media(&clean).attachment_streams, 1);
+}
+
+/// An m4a with a title, an artist and a location, into mp3: the note
+/// without the flag, and with it the location gone and the two tags kept.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn stripped_audio_keeps_its_title_and_artist() {
+    let dir = tmp();
+    let song = dir.path().join("song.m4a");
+    run_ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=duration=1",
+        "-c:a",
+        "aac",
+        "-metadata",
+        "title=Song",
+        "-metadata",
+        "artist=Band",
+        "-metadata",
+        "location=+51.5007-000.1246/",
+        &song.to_string_lossy(),
+    ]);
+    let kept = dir.path().join("kept.mp3");
+    let outcome = convert_tuned(&song, &kept, &Tuning::default()).unwrap();
+    assert!(carries_location(&kept));
+    assert!(says_location(&outcome), "{:?}", outcome.warnings);
+
+    let clean = dir.path().join("clean.mp3");
+    let outcome = convert_tuned(&song, &clean, &stripped()).unwrap();
+    assert!(!carries_location(&clean));
+    assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    let tags = format_tags(&clean);
+    assert_eq!(tag(&tags, "title"), Some("Song"), "{tags:?}");
+    assert_eq!(tag(&tags, "artist"), Some("Band"), "{tags:?}");
 }

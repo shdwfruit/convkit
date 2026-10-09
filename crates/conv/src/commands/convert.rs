@@ -319,20 +319,21 @@ fn failed_on_missing_backend(result: &Result<Outcome, ConvError>, backend: Backe
 /// can *only* be honoured with a probe (`registry::requires_probe`), that
 /// failure is the preview's real answer, as it is `exec::run`'s.
 ///
-/// A jpg/png/bmp target also has its source image read for the notes that
-/// depend on it, as `exec::run` does, so a preview and `--json` carry the
-/// same notes as the conversion.
+/// An image source is also read for the notes that depend on it (a
+/// jpg/png/bmp target's frame and alpha notes, and the location note), as
+/// `exec::run` does, so a preview and `--json` carry the same notes as the
+/// conversion.
 fn probed_for(
     resolver: &Resolver,
     job: &input::Job,
     tuning: &Tuning,
 ) -> Result<Option<MediaProbe>, ConvError> {
     let mut probed = media_probed_for(resolver, job, tuning)?;
-    if registry::notes_need_image(job.from, job.to) {
+    if registry::notes_need_image(job.from, job.to, tuning) {
         let traits = resolver
             .resolve(Backend::Magick)
             .ok()
-            .and_then(|m| probe::image_traits(&m.path, &job.inputs[0]).ok());
+            .and_then(|m| probe::image_traits(&m.path, &job.inputs).ok());
         if let Some(t) = traits {
             probed.get_or_insert_with(MediaProbe::default).image = Some(t);
         }
@@ -441,7 +442,7 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
         .map(|job| {
             let probed = probed_for(&resolver, job, &tuning)?;
             let available = available_for(&resolver, job);
-            plan::build_tuned(
+            let mut plan = plan::build_tuned(
                 job.from,
                 job.to,
                 &job.inputs,
@@ -449,7 +450,10 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
                 probed.as_ref(),
                 available.as_ref(),
                 &tuning,
-            )
+            )?;
+            // As `exec::run` does, so the preview names the same fix.
+            convkit_core::metadata::explain_missing_ffprobe(&mut plan, &resolver);
+            Ok(plan)
         })
         .collect();
 
@@ -821,8 +825,10 @@ mod tests {
     }
 
     /// A jpg target's preview reads the image for its notes, as the real
-    /// run does; a pair whose notes do not depend on it, or an input that
-    /// is not a file, is not read.
+    /// run does, and a webp target reads it for the location note; a pair
+    /// whose notes do not depend on it (a tiff target keeps no EXIF, and
+    /// --strip-metadata takes the location out), or an input that is not a
+    /// file, is not read.
     #[cfg(unix)]
     #[test]
     fn probed_for_reads_the_image_a_jpg_targets_notes_depend_on() {
@@ -853,7 +859,19 @@ mod tests {
             input,
             "out.webp",
         );
-        assert!(probed_for(&r, &webp, &Tuning::default()).unwrap().is_none());
+        assert!(probed_for(&r, &webp, &Tuning::default()).unwrap().is_some());
+        let stripped = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        assert!(probed_for(&r, &webp, &stripped).unwrap().is_none());
+        let tiff = job(
+            convkit_core::Format::Png,
+            convkit_core::Format::Tiff,
+            input,
+            "out.tiff",
+        );
+        assert!(probed_for(&r, &tiff, &Tuning::default()).unwrap().is_none());
         let missing = job(
             convkit_core::Format::Png,
             convkit_core::Format::Jpg,
