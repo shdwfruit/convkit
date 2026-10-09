@@ -2638,6 +2638,24 @@ mod tests {
         assert_eq!((r.start_ms, r.end_ms), (0, Some(30_000)));
     }
 
+    /// A clip is not a copy of the whole file, so a cut into its own format
+    /// that also strips takes the cut's path and clears the tags there,
+    /// copying or re-encoding as any cut would.
+    #[test]
+    fn a_cut_into_its_own_format_strips_as_it_cuts() {
+        for (start, copied) in [(None, true), (Some("1:02"), false)] {
+            let mut t = ranged(start, Some("1:10"));
+            t.strip_metadata = true;
+            let plan = cut_plan(Format::Mp4, Format::Mp4, &t, 600).unwrap();
+            let argv = &plan.steps[0].argv;
+            let has = |pair: [&str; 2]| argv.windows(2).any(|w| w == pair);
+            assert!(has(["-t", "8"]) || has(["-t", "70"]), "{argv:?}");
+            assert!(has(["-map_metadata", "-1"]), "{argv:?}");
+            assert_eq!(has(["-c:v", "copy"]), copied, "{argv:?}");
+            assert!(plan.range.is_some());
+        }
+    }
+
     #[test]
     fn a_cut_after_zero_re_encodes_to_start_exactly_and_says_why() {
         let plan = cut_plan(

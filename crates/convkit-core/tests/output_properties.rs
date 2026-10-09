@@ -3062,3 +3062,27 @@ fn the_gif_memory_note_follows_the_cut() {
         o.warnings
     );
 }
+
+/// A clip cut and stripped into its own format in one run loses the
+/// location and keeps the title and artist, whether the cut is copied
+/// (from the start) or re-encoded (from later on).
+#[test]
+#[ignore]
+fn a_clip_cut_and_stripped_into_its_own_format_loses_its_location() {
+    let dir = tmp();
+    let (_, classic) = located_clips(&dir);
+    for start in [None, Some("0.5")] {
+        let tuning = Tuning {
+            strip_metadata: true,
+            ..ranged(start, Some("1.5"))
+        };
+        let out = dir
+            .path()
+            .join(format!("clip-{}.mp4", start.unwrap_or("0")));
+        convert_tuned(&classic, &out, &tuning).unwrap();
+        assert!(!carries_location(&out), "{start:?} still records it");
+        let tags = format_tags(&out);
+        assert_eq!(tag(&tags, "title"), Some("Clip"), "{start:?}: {tags:?}");
+        assert_eq!(tag(&tags, "artist"), Some("Band"), "{start:?}: {tags:?}");
+    }
+}
