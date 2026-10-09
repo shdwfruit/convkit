@@ -283,45 +283,67 @@ fn is_image_merge(paths: &[PathBuf]) -> bool {
 }
 
 /// A run that can keep the input's own format: `--max-size`, which sizes a
-/// video into its own container, or `--strip-metadata`, which strips most
-/// image, video and audio files into their own format. A derived output
-/// that would land on its input is named NAME-SUFFIX.EXT. With both flags,
-/// `--max-size`'s rules and name apply: they are the narrower.
-struct OwnFormat<'a> {
+/// video into its own container; a range (`--start`, `--end`,
+/// `--duration`), which cuts video and audio into their own format; or
+/// `--strip-metadata`, which strips most image, video and audio files into
+/// their own format. A derived output that would land on its input is named
+/// NAME-SUFFIX.EXT. With a range or a size, their rules and name apply: they
+/// are the narrower, and each one given must keep the format.
+struct OwnFormat {
     sized: bool,
-    /// The flag, for messages.
+    cut: bool,
+    /// The flag, for messages: the range's first flag, else the size's.
     flag: &'static str,
     /// What it does to each file, and what the result is called.
     verb: &'static str,
     done: &'static str,
-    /// Added to a derived name: the size as typed, or `stripped`.
-    suffix: &'a str,
+    /// Added to a derived name: the range, then the size as typed
+    /// (`1m02s-1m10s-5mb`), or `stripped`.
+    suffix: String,
 }
 
-impl OwnFormat<'_> {
-    fn of(cli: &Cli) -> Option<OwnFormat<'_>> {
-        if let Some(max) = &cli.max_size {
+impl OwnFormat {
+    fn of(cli: &Cli) -> Option<OwnFormat> {
+        let size = cli.max_size.as_ref().map(|m| m.spelling.clone());
+        if let Some(range) = cli.range().ok().flatten() {
+            let cut = convkit_core::trim::name_suffix(&range);
+            return Some(OwnFormat {
+                sized: size.is_some(),
+                cut: true,
+                flag: range.flag(),
+                verb: "cut",
+                done: "cut",
+                suffix: match size {
+                    Some(size) => format!("{cut}-{size}"),
+                    None => cut,
+                },
+            });
+        }
+        if let Some(size) = size {
             return Some(OwnFormat {
                 sized: true,
+                cut: false,
                 flag: "--max-size",
                 verb: "size",
                 done: "sized",
-                suffix: &max.spelling,
+                suffix: size,
             });
         }
-        cli.strip_metadata.then_some(OwnFormat {
+        cli.strip_metadata.then(|| OwnFormat {
             sized: false,
+            cut: false,
             flag: "--strip-metadata",
             verb: "strip",
             done: "stripped",
-            suffix: "stripped",
+            suffix: "stripped".to_string(),
         })
     }
 
     /// Whether this run can keep `f` as `f`.
     fn keeps(&self, f: Format) -> bool {
-        if self.sized {
-            convkit_core::sized::is_video_target(f)
+        if self.sized || self.cut {
+            (!self.sized || convkit_core::sized::is_video_target(f))
+                && (!self.cut || convkit_core::registry::takes_range(f, f))
         } else {
             convkit_core::metadata::in_place(f).is_ok()
         }
@@ -334,7 +356,7 @@ impl OwnFormat<'_> {
     fn fix_ext(&self, f: Option<Format>) -> Result<&'static str, String> {
         match f {
             Some(f) if self.keeps(f) => Ok(f.ext()),
-            _ if self.sized => Ok("mp4"),
+            _ if self.sized || self.cut => Ok("mp4"),
             Some(f) => convkit_core::metadata::strip_target_for(f)
                 .map(|to| to.ext())
                 .ok_or_else(|| {
@@ -347,19 +369,16 @@ impl OwnFormat<'_> {
     }
 }
 
-/// `conv clip.mp4 --max-size 10mb` or `conv photo.jpg --strip-metadata`:
-/// the input's own format, beside the input (or in `-o`);
-/// `name_own_format_outputs` adds the suffix.
-fn own_format_job(
-    input: &Path,
-    outdir: Option<&Path>,
-    own: &OwnFormat<'_>,
-) -> Result<Job, ConvError> {
+/// `conv clip.mp4 --max-size 10mb`, `conv talk.mp4 --start 1:02` or
+/// `conv photo.jpg --strip-metadata`: the input's own format, beside the
+/// input (or in `-o`); `name_own_format_outputs` adds the suffix.
+fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Result<Job, ConvError> {
     let from = format_of(input)?;
-    if !own.sized {
+    if !own.sized && !own.cut {
         convkit_core::metadata::in_place(from)
             .map_err(|why| ConvError::new(ErrorCode::InvalidInvocation, why))?;
-    } else if !convkit_core::sized::is_video_target(from) {
+    }
+    if own.sized && !convkit_core::sized::is_video_target(from) {
         // `--to mp4` is only a fix where a conversion to mp4 exists (avi,
         // gif); for audio, other images and documents there is none, and
         // suggesting it would just move the refusal.
@@ -372,6 +391,26 @@ fn own_format_job(
         } else {
             format!(
                 "--max-size applies to video; {} is not a video file",
+                input.display()
+            )
+        };
+        return Err(ConvError::new(ErrorCode::InvalidInvocation, message));
+    }
+    if own.cut && !convkit_core::registry::takes_range(from, from) {
+        // gif and avi have a timeline but no recipe into themselves: a GIF
+        // would be re-paletted at 15 fps and 640 px, and avi is never a
+        // target. Both cut fine into mp4.
+        let flag = own.flag;
+        let message = if matches!(from.kind(), Kind::Video | Kind::Audio) || from == Format::Gif {
+            format!(
+                "{flag} keeps {}'s own format, and {} is not one it can cut into itself; \
+                 add --to mp4",
+                input.display(),
+                from.ext()
+            )
+        } else {
+            format!(
+                "{flag} cuts video and audio; {} is not a video or audio file",
                 input.display()
             )
         };
@@ -397,9 +436,10 @@ fn own_format_job(
     })
 }
 
-/// A sized or stripped conversion may target its own format, so an output
-/// can land on its input. A derived output gets the suffix in its name
-/// (`clip-10mb.mp4`, `photo-stripped.jpg`); an explicit one is refused.
+/// A sized, cut or stripped conversion may target its own format, so an
+/// output can land on its input. A derived output gets the suffix in its
+/// name (`clip-10mb.mp4`, `talk-1m02s-1m10s.mp4`, `photo-stripped.jpg`); an
+/// explicit one is refused.
 ///
 /// The renaming itself can make outputs collide: `clip.mp4` becomes
 /// `clip-10mb.mp4`, which `clip-10mb.mov --to mp4` already plans onto, or
@@ -615,7 +655,7 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
 
     // Without `--to`, the last positional is the output and must not be
     // globbed. See `expand_globs`.
-    // The exception is a lone path under `--max-size` or
+    // The exception is a lone path under `--max-size`, a range or
     // `--strip-metadata`: that form has no output positional at all, so the
     // one path is an input.
     let own = OwnFormat::of(cli);
@@ -729,10 +769,11 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
                     continue;
                 };
                 if Some(fmt) == target_format {
-                    // Under `--max-size` or `--strip-metadata` a file already
-                    // in the target format is what gets sized or stripped, so
-                    // it is kept, where the flag can keep that format; a
-                    // previous run's own result (`clip-10mb.mp4`,
+                    // Under `--max-size`, a range or `--strip-metadata` a
+                    // file already in the target format is what gets sized,
+                    // cut or stripped, so it is kept, where the flag can keep
+                    // that format; a previous run's own result
+                    // (`clip-10mb.mp4`, `talk-1m02s-1m10s.mp4`,
                     // `photo-stripped.jpg`) is left behind, and so is a file
                     // the flag cannot keep (a pdf among scans), as it is
                     // without the flag.
@@ -781,19 +822,19 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
         _ => jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?,
     };
     // A batch writes into a subfolder beside its inputs (`photos/stripped/`,
-    // `clips/10mb/`) unless `-o` says where. These runs take files already
-    // in the target format as inputs, so outputs written among them would
-    // be taken for new inputs by the next run, which would size or strip
-    // its own results again. A folder input never reads its subfolders, so
+    // `clips/10mb/`, `talks/1m02s-1m10s/`) unless `-o` says where. These runs
+    // take files already in the target format as inputs, so outputs written
+    // among them would be taken for new inputs by the next run, which would
+    // size, cut or strip its own results again. A folder input never reads its subfolders, so
     // a re-run converts only what is new; what is already in the subfolder
     // is an existing file, never overwritten without -y.
     let into_subfolder = cli.to.is_some() && cli.outdir.is_none();
     if into_subfolder {
         for job in &mut jobs {
-            job.output = in_subfolder(&job.output, own.suffix);
+            job.output = in_subfolder(&job.output, &own.suffix);
         }
     }
-    let jobs = name_own_format_outputs(jobs, own.suffix, explicit_output)?;
+    let jobs = name_own_format_outputs(jobs, &own.suffix, explicit_output)?;
     if into_subfolder && !cli.dry_run {
         let mut made: Vec<&Path> = Vec::new();
         for dir in jobs.iter().filter_map(|j| j.output.parent()) {
@@ -832,7 +873,7 @@ fn create_output_dir(dir: &Path) -> Result<(), ConvError> {
     })
 }
 
-/// Under `--max-size` or `--strip-metadata` with no `--to`, a glob
+/// Under `--max-size`, a range or `--strip-metadata` with no `--to`, a glob
 /// (`conv *.mp4 --max-size 8mb`, `conv *.jpg --strip-metadata`) reaches conv
 /// as a list of paths that the positional grammar reads as something else.
 /// Two paths are the `IN OUT` pair, so sizing them would replace the second
@@ -840,13 +881,13 @@ fn create_output_dir(dir: &Path) -> Result<(), ConvError> {
 /// merge form. Both are refused here with `--to` as the fix. A pair whose
 /// output already exists in the input's own format, one the flag can keep,
 /// is refused even with `-y`, since that is exactly what the glob produces;
-/// to write a sized or stripped copy over a file of the same format, remove
-/// it first. An output that is the input itself is left to
+/// to write a sized, cut or stripped copy over a file of the same format,
+/// remove it first. An output that is the input itself is left to
 /// `name_own_format_outputs`, which words that case.
 fn refuse_a_batch_without_to(
     paths: &[PathBuf],
     explicit_output: bool,
-    own: &OwnFormat<'_>,
+    own: &OwnFormat,
 ) -> Result<(), ConvError> {
     match paths {
         [input, output] if explicit_output && output.exists() => {
@@ -1387,6 +1428,9 @@ mod tests {
             crf: None,
             max_size: None,
             strip_metadata: false,
+            start: None,
+            end: None,
+            duration: None,
             yes: false,
             no_install: false,
             outdir,
@@ -1525,6 +1569,93 @@ mod tests {
 
     fn sized(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
         sized_to("10mb", paths, to, outdir)
+    }
+
+    fn cut(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+        let mut c = cli_for(paths, to, outdir);
+        c.start = Some(convkit_core::trim::parse_time("1:02").unwrap());
+        c.end = Some(convkit_core::trim::parse_time("1:10").unwrap());
+        c
+    }
+
+    #[test]
+    fn a_single_path_with_a_range_keeps_its_format_and_names_the_range() {
+        let jobs = plan_jobs(&cut(v(&["talk.mp4"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("talk-1m02s-1m10s.mp4"));
+        assert_eq!((jobs[0].from, jobs[0].to), (Format::Mp4, Format::Mp4));
+        let jobs = plan_jobs(&cut(v(&["memo.m4a"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("memo-1m02s-1m10s.m4a"));
+    }
+
+    #[test]
+    fn a_range_and_a_size_both_go_in_the_name() {
+        let mut c = cut(v(&["talk.mp4"]), None, None);
+        c.max_size = Some(convkit_core::size::parse("5mb").unwrap());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("talk-1m02s-1m10s-5mb.mp4")
+        );
+    }
+
+    #[test]
+    fn a_cross_format_cut_keeps_its_ordinary_name() {
+        let jobs = plan_jobs(&cut(v(&["talk.mp4", "clip.gif"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("clip.gif"));
+        let jobs = plan_jobs(&cut(v(&["memo.m4a", ".mp3"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("memo.mp3"));
+    }
+
+    /// A batch writes into a folder named after the range, under plain
+    /// names, as a sized or stripped batch does, so a re-run never takes
+    /// its own clips for new inputs.
+    #[test]
+    fn a_cut_batch_writes_into_a_folder_named_after_the_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.mp4"), dir.path().join("b.mov"));
+        let jobs = plan_jobs(&cut(vec![a, b], Some("mp4"), None)).unwrap();
+        assert_eq!(
+            under(dir.path(), &jobs),
+            ["1m02s-1m10s/a.mp4", "1m02s-1m10s/b.mp4"]
+        );
+        assert!(dir.path().join("1m02s-1m10s").is_dir());
+    }
+
+    #[test]
+    fn a_lone_gif_or_avi_cannot_be_cut_into_itself_and_says_what_to_do() {
+        for (input, want) in [
+            (
+                "anim.gif",
+                "--start keeps anim.gif's own format, and gif is not one it can cut into \
+                 itself; add --to mp4",
+            ),
+            (
+                "old.avi",
+                "--start keeps old.avi's own format, and avi is not one it can cut into \
+                 itself; add --to mp4",
+            ),
+            (
+                "photo.png",
+                "--start cuts video and audio; photo.png is not a video or audio file",
+            ),
+        ] {
+            let e = plan_jobs(&cut(v(&[input]), None, None)).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation);
+            assert_eq!(e.message, want);
+        }
+    }
+
+    #[test]
+    fn two_clips_of_one_format_without_to_are_refused_with_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.mp4"), dir.path().join("b.mp4"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+        let e = plan_jobs(&cut(vec![a, b], None, None)).unwrap_err();
+        assert!(
+            e.message.contains("add --to mp4 to cut each one"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
