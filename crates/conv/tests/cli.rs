@@ -2876,13 +2876,16 @@ fn a_malformed_time_names_the_forms_that_work() {
 
 /// One range applies to every file in a batch; a file too short for it
 /// fails on its own, with its length, and the rest still convert (exit 4).
-/// Needs a real ffmpeg: the one `CONVKIT_FFMPEG` names, else `ffmpeg` on
-/// PATH, which is also what conv resolves.
+/// Needs a real ffmpeg, found the way conv finds it: on the Windows job it
+/// is the managed one `conv install` put in place, which isn't on PATH.
 #[test]
 #[ignore]
 fn a_batch_cut_fails_only_the_file_too_short_for_it() {
     let dir = tempfile::tempdir().unwrap();
-    let ffmpeg = std::env::var_os("CONVKIT_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+    let ffmpeg = convkit_core::Resolver::new()
+        .resolve(convkit_core::Backend::Ffmpeg)
+        .expect("this test needs ffmpeg")
+        .path;
     for (name, secs) in [("long.mp4", "20"), ("short.mp4", "5")] {
         let ok = std::process::Command::new(&ffmpeg)
             .args([
