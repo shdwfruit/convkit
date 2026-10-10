@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0 - 2026-10-09
+
+### New
+
+- **Cut a clip with `--start`, `--end` and `--duration`.** `conv talk.mp4
+  --start 1:02 --end 1:10` writes `talk-1m02s-1m10s.mp4`, and an output name
+  changes the format as well (`clip.gif`, `.mp3`). Times are seconds, `m:ss`
+  or `h:mm:ss`, and a leading `-` counts back from the end. The cut is exact
+  to the frame. A cut that starts after 0 re-encodes the video, and so does
+  one from 0 of video with B-frames, with a note that says why; any other
+  cut from 0 is a stream copy. `--max-size` sizes the clip rather than the
+  whole file, and `--strip-metadata`, `--fps`, `--resize` and `--crf` work
+  as usual. A `--to` batch writes into a folder named after the range
+  (`1m02s-1m10s/`), and `--json` gets a `range` object.
+- **`conv trim FILE` cuts clips in the terminal.** The frame under the
+  slider is drawn at the top, with a bar of the video's colours and a bar of
+  its loudness below. The arrow keys move the slider, `c` marks a clip's
+  start and then its end, and `w` writes every clip the way the flags would.
+  A clip can keep the picture alone or the sound alone. The picture uses
+  kitty's or iTerm2's graphics where the terminal has them and text
+  characters elsewhere; `--graphics` overrides the choice.
+
 ## 0.4.0 - 2026-10-09
 
 ### New

@@ -23,7 +23,7 @@ name = "conv"
 path = "src/main.rs"
 
 [dependencies]
-convkit-core = { path = "../convkit-core", version = "0.4.0" }
+convkit-core = { path = "../convkit-core", version = "0.5.0" }
 clap = { version = "4", features = ["derive"] }
 wild = "2"
 # The second pass over positionals that `wild` deliberately leaves alone: a
