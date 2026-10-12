@@ -444,11 +444,11 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             .and_then(|p| probe::run(&p.path, &req.inputs[0]).ok())
     } else if let (Some(read), Some(geometry)) = (
         registry::image_read(req.from, req.to, &req.tuning),
-        req.tuning.resize.as_deref(),
+        registry::image_read_geometry(req.to, &req.tuning),
     ) {
         // A size that cannot be read leaves `--upscale` its general
         // warning, and nothing to ask about: the conversion reports a real
-        // fault itself.
+        // fault itself. An icon falls back to a square that needs no size.
         resolver
             .resolve(Backend::Magick)
             .ok()
@@ -477,6 +477,17 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     };
     if let Some(t) = office {
         probed.get_or_insert_with(MediaProbe::default).office = Some(t);
+    }
+    // Which of an .ico's frames is largest. A read that fails reads the
+    // first, and keeps the note.
+    if registry::reads_frames(req.from, req.to) {
+        let frames = resolver
+            .resolve(Backend::Magick)
+            .ok()
+            .and_then(|m| probe::frame_sizes(&m.path, &req.inputs[0]).ok());
+        if let Some(f) = frames {
+            probed.get_or_insert_with(MediaProbe::default).frames = f;
+        }
     }
 
     // Likewise: only check backend availability when this pair actually has

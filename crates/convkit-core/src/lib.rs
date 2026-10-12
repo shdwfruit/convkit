@@ -5,6 +5,7 @@ pub mod error;
 pub mod exec;
 pub mod format;
 pub mod frames;
+mod icon;
 pub mod install;
 pub mod manifest;
 mod media;

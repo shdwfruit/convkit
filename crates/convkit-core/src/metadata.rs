@@ -87,6 +87,12 @@ pub fn in_place(f: Format) -> Result<(), String> {
             "conv cannot write {}; add --to jpg to strip it into a jpg",
             f.ext()
         )),
+        // ico -> ico is no pair, and no other target is the same icon.
+        Format::Ico => Err(
+            "conv cannot write an ico into an ico; an icon conv makes from \
+             a picture holds no metadata, so make it again from the picture"
+                .to_string(),
+        ),
         _ => Err(match strip_target_for(f) {
             Some(to) => format!(
                 "conv cannot keep {0} files as {0}; add --to {1} to strip them",
@@ -363,6 +369,9 @@ mod tests {
             }
         }
         assert!(in_place(Format::Opus).is_ok() && in_place(Format::Ogg).is_ok());
+        assert!(in_place(Format::Ico)
+            .unwrap_err()
+            .contains("ico into an ico"));
         assert_eq!(strip_target_for(Format::Gif), Some(Format::Mp4));
         assert_eq!(strip_target_for(Format::Heic), Some(Format::Jpg));
         assert_eq!(strip_target_for(Format::Svg), Some(Format::Png));
