@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.1 - 2026-10-12
+
+### New
+
+- **Opus and Ogg.** `.opus` and `.ogg` files, such as WhatsApp and Telegram
+  voice notes, convert to mp3, m4a, wav and flac, and any audio or video
+  file converts to them. An `.ogg` target gets Opus, always at 48 kHz.
+  Opus, and Vorbis going to `.ogg`, is stream-copied, so `.opus` and `.ogg`
+  convert into each other without re-encoding. Ogg cannot hold cover art,
+  so it is dropped, with a note when there was some. They can be cut and
+  stripped like the other audio formats, and their tags carry over into
+  the others.
+- **Word, Excel and PowerPoint 97-2003.** `.doc`, `.xls` and `.ppt` convert
+  to docx, xlsx and pptx, and to PDF, through LibreOffice. An old `.doc`
+  that is really RTF or a saved web page converts too. A password-protected
+  file fails with an error that says so, under its own code,
+  `password_protected`, and a note says when macros are dropped.
+- **Icons.** png, jpg, webp and svg convert to `.ico` with every size from
+  16 to 256 px, and an `.ico` converts to png from its largest size. A
+  source smaller than 256 px is enlarged for the sizes above it, with a
+  warning that names them. A picture that is not square is centered on a
+  transparent square rather than stretched.
+- **CSV.** CSV converts to xlsx and ods, and xlsx and ods convert to CSV.
+  conv reads the CSV first for its encoding, separator and decimal commas,
+  and keeps a column with leading zeros or long numbers as text, so a zip
+  code like `02134` and a card number keep every digit, and a cell starting
+  with `=` is not run. A workbook writes its first sheet, as values, in
+  UTF-8, with a note when it has more than one.
+
 ## 0.5.0 - 2026-10-09
 
 ### New
