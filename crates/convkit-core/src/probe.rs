@@ -85,6 +85,9 @@ pub struct MediaProbe {
     /// shown later (B-frames: ffprobe's `has_b_frames` above 0), which a
     /// stream copy cannot stop exactly at a cut's end.
     pub video_reorders: bool,
+    /// Whether an Office source is encrypted or carries macros, read by
+    /// `office::traits`. `None` when the source was not read.
+    pub office: Option<crate::office::OfficeTraits>,
 }
 
 /// The two ways a video or audio file records where it was made. Outputs

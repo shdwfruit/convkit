@@ -52,6 +52,10 @@ pub enum Format {
     Pptx,
     Odt,
     Ods,
+    // Office 97-2003, as sources only
+    Doc,
+    Xls,
+    Ppt,
     Html,
     Md,
 }
@@ -96,6 +100,9 @@ const TABLE: &[(Format, Kind, &[&str], &[&str])] = &[
     (Format::Pptx, Kind::Document, &["pptx"], &[]),
     (Format::Odt, Kind::Document, &["odt"], &[]),
     (Format::Ods, Kind::Document, &["ods"], &[]),
+    (Format::Doc, Kind::Document, &["doc"], &[]),
+    (Format::Xls, Kind::Document, &["xls"], &[]),
+    (Format::Ppt, Kind::Document, &["ppt"], &[]),
     (Format::Html, Kind::Document, &["html", "htm"], &[]),
     (Format::Md, Kind::Document, &["md", "markdown"], &[]),
 ];
