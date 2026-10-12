@@ -32,6 +32,8 @@ pub enum Format {
     M4a,
     Wav,
     Flac,
+    Opus,
+    Ogg,
     // Images (Gif is an image; gif<->video routing is the registry's business)
     Gif,
     Heic,
@@ -76,6 +78,8 @@ const TABLE: &[(Format, Kind, &[&str], &[&str])] = &[
     (Format::M4a, Kind::Audio, &["m4a", "aac"], &[]),
     (Format::Wav, Kind::Audio, &["wav", "wave"], &[]),
     (Format::Flac, Kind::Audio, &["flac"], &[]),
+    (Format::Opus, Kind::Audio, &["opus"], &[]),
+    (Format::Ogg, Kind::Audio, &["ogg", "oga"], &[]),
     (Format::Gif, Kind::Image, &["gif"], &[]),
     (Format::Heic, Kind::Image, &["heic"], &[]),
     (Format::Heif, Kind::Image, &["heif"], &[]),
