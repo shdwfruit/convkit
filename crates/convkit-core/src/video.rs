@@ -117,6 +117,10 @@ pub struct ResolvedVideo {
     /// The frame `Arg::InputChosenFrame` reads, chosen from the source: an
     /// .ico's largest. `None` reads the first.
     pub frame: Option<usize>,
+    /// The `--infilter` value a CSV is imported with, built from what was
+    /// read of it (`table::import_filter`). `None` renders the default
+    /// shape's.
+    pub csv_import: Option<String>,
 }
 
 /// Parses a user frame rate (`24`, `29.97`, `30000/1001`) into a float for

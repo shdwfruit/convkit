@@ -25,6 +25,8 @@ bmp -> pdf: magick in.bmp -auto-orient -compress jpeg -quality 92 out.pdf
 bmp -> png: magick in.bmp[0] -auto-orient out.png
 bmp -> tiff: magick in.bmp -auto-orient out.tiff
 bmp -> webp: magick in.bmp -auto-orient -quality 92 out.webp
+csv -> ods: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=Text - txt - csv (StarCalc):44,34,76,1,,1033,false,false,false,false,false,,false,,false --convert-to ods:calc8 --outdir . in.csv
+csv -> xlsx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=Text - txt - csv (StarCalc):44,34,76,1,,1033,false,false,false,false,false,,false,,false --convert-to xlsx:Calc MS Excel 2007 XML --outdir . in.csv
 doc -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to docx:MS Word 2007 XML --outdir . in.doc
 doc -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.doc
 docx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.docx
@@ -100,6 +102,7 @@ mp4 -> ogg: ffmpeg -i in.mp4 -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=ch
 mp4 -> opus: ffmpeg -i in.mp4 -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 mp4 -> wav: ffmpeg -i in.mp4 -vn -c:a pcm_s16le -y out.wav
 mp4 -> webm: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+ods -> csv: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to csv:Text - txt - csv (StarCalc):44,34,76,1,,1033,false,true,false,false,false,0 --outdir . in.ods
 ods -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.ods
 odt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.odt
 ogg -> flac: ffmpeg -i in.ogg -map 0:a -map 0:v? -c:v copy -c:a flac -map_metadata 0:s:a:0 -y out.flac
@@ -156,4 +159,5 @@ webp -> png: magick in.webp[0] -auto-orient out.png
 webp -> tiff: magick in.webp -auto-orient out.tiff
 xls -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.xls
 xls -> xlsx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to xlsx:Calc MS Excel 2007 XML --outdir . in.xls
+xlsx -> csv: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to csv:Text - txt - csv (StarCalc):44,34,76,1,,1033,false,true,false,false,false,0 --outdir . in.xlsx
 xlsx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.xlsx
