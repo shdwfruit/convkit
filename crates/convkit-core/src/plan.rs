@@ -230,22 +230,30 @@ pub fn build_tuned(
             // cut where it was asked. Asked of the copy path itself, so the
             // note is only said where a copy was otherwise on offer.
             let not_copied = cut.and_then(|c| c.why_not_copied(p)).filter(|_| {
-                media::stream_mapped_invocation(to, p, strip, &resolved, &inputs[0], output)
+                media::stream_mapped_invocation(from, to, p, strip, &resolved, &inputs[0], output)
                     .is_some()
             });
-            let dynamic = if wants_video || not_copied.is_some() {
+            // A video the target holds but its players don't is re-encoded
+            // here rather than by the static recipe, which would drop the
+            // tracks the copy path keeps.
+            let unplayable = p
+                .video_codec
+                .as_deref()
+                .and_then(|v| registry::why_not_remuxed(from, to, v));
+            let dynamic = if wants_video || not_copied.is_some() || unplayable.is_some() {
                 media::transcoded_invocation(
                     to, p, &resolved, tuning.crf, strip, &inputs[0], output,
                 )
                 .map(|mut m| {
-                    m.warnings.push(match not_copied.filter(|_| !wants_video) {
+                    let why = not_copied.or_else(|| unplayable.map(str::to_string));
+                    m.warnings.push(match why.filter(|_| !wants_video) {
                         Some(why) => format!("Re-encoded rather than stream-copied, because {why}"),
                         None => REENCODED_FOR_KNOB_NOTE.to_string(),
                     });
                     m
                 })
             } else {
-                media::stream_mapped_invocation(to, p, strip, &resolved, &inputs[0], output)
+                media::stream_mapped_invocation(from, to, p, strip, &resolved, &inputs[0], output)
                     .or_else(|| {
                         media::audio_copy_invocation(
                             from,
@@ -1007,6 +1015,81 @@ mod tests {
             "{:?}",
             plan.steps[0].argv
         );
+    }
+
+    /// MPEG-4 Part 2 muxes into mp4 and mov, but a copy of it there plays
+    /// in no browser and, as Xvid and DivX write it, not in QuickTime: a
+    /// container change re-encodes it, keeping every track the copy would
+    /// have kept, and says why. Nobody expects an mkv to play in a browser,
+    /// so into mkv it still copies.
+    #[test]
+    fn mpeg4_part_2_video_is_re_encoded_into_mp4_and_mov_and_says_why() {
+        let probe = MediaProbe {
+            video_codec: Some("mpeg4".into()),
+            video_streams: 1,
+            audio_codecs: vec!["mp3".into(), "mp3".into()],
+            ..MediaProbe::default()
+        };
+        for (from, to) in [
+            (Format::Avi, Format::Mp4),
+            (Format::Avi, Format::Mov),
+            (Format::Mkv, Format::Mp4),
+        ] {
+            let input = p(&format!("in.{}", from.ext()));
+            let output = format!("out.{}", to.ext());
+            let plan = build(from, to, &[input], Path::new(&output), Some(&probe), None).unwrap();
+            let argv = &plan.steps[0].argv;
+            assert!(
+                argv.windows(2).any(|w| w == ["-c:v", "libx264"]),
+                "{from:?} -> {to:?}: {argv:?}"
+            );
+            assert!(
+                argv.windows(2).any(|w| w == ["-map", "0:a?"]),
+                "{from:?} -> {to:?} keeps every audio track: {argv:?}"
+            );
+            assert_eq!(
+                plan.warnings,
+                [
+                    "Re-encoded rather than stream-copied, because browsers and QuickTime \
+                     don't play MPEG-4 Part 2 video (Xvid, DivX)."
+                ],
+                "{from:?} -> {to:?}"
+            );
+        }
+        let mkv = build(
+            Format::Avi,
+            Format::Mkv,
+            &[p("in.avi")],
+            Path::new("out.mkv"),
+            Some(&probe),
+            None,
+        )
+        .unwrap();
+        let argv = &mkv.steps[0].argv;
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "copy"]), "{argv:?}");
+    }
+
+    /// A file already in mp4 plays no worse cut than whole, so a cut of
+    /// one into itself still copies its MPEG-4 Part 2 video.
+    #[test]
+    fn a_cut_into_its_own_format_keeps_copying_mpeg4_part_2() {
+        let probe = MediaProbe {
+            video_codec: Some("mpeg4".into()),
+            ..clip_probe(600)
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Mp4,
+            &[p("in.mp4")],
+            Path::new("out.mp4"),
+            Some(&probe),
+            None,
+            &ranged(None, Some("30")),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "copy"]), "{argv:?}");
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
     }
 
     #[test]
