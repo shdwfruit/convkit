@@ -180,6 +180,7 @@ jobs:
       # exercises the folder install (bin/ and lib/ with library symlinks).
       - name: Install qpdf via conv itself
         run: ./target/debug/conv install qpdf --yes
+
       # Typst comes from convkit's own managed installer, as in the Windows
       # job below: the pinned build a user gets from `conv install`. Photos
       # merge into a PDF on it. It lands in the managed dir
