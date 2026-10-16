@@ -1296,8 +1296,26 @@ macro_rules! soffice_step {
     };
 }
 
-const OFFICE_TO_PDF: Recipe = Recipe {
+pub(crate) const OFFICE_TO_PDF: Recipe = Recipe {
     steps: &[soffice_step!("pdf")],
+    warnings: &[],
+};
+
+/// A workbook to PDF: LibreOffice runs the macro that widens the columns
+/// whose numbers would print as ###, scales a sheet wider than its page to
+/// the page width, and writes the PDF where it is told. Its notes come from
+/// what it reports doing (see `sheet_pdf`).
+const SHEET_TO_PDF: Recipe = Recipe {
+    steps: &[Step {
+        backend: Backend::Soffice,
+        args: &[
+            Arg::Lit("--headless"),
+            Arg::Lit("--norestore"),
+            Arg::SheetPdf,
+        ],
+        output: OutputMode::Path,
+        intermediate_ext: None,
+    }],
     warnings: &[],
 };
 
@@ -1526,6 +1544,9 @@ const PANDOC_TYPST_TO_PDF: Recipe = Recipe {
 fn insert_document_family(t: &mut Table) {
     for &from in OFFICE_SOURCES {
         t.insert((from, Format::Pdf), OFFICE_TO_PDF);
+    }
+    for from in [Format::Xlsx, Format::Ods, Format::Xls] {
+        t.insert((from, Format::Pdf), SHEET_TO_PDF);
     }
     t.insert((Format::Doc, Format::Docx), DOC_TO_DOCX);
     t.insert((Format::Xls, Format::Xlsx), XLS_TO_XLSX);
@@ -3070,8 +3091,9 @@ mod tests {
     ];
 
     /// Each Office 97-2003 format goes to its current format through the
-    /// export filter LibreOffice's own Save As uses, and to PDF. pandoc
-    /// reads none of them, so there is no fallback.
+    /// export filter LibreOffice's own Save As uses, and to PDF, a workbook
+    /// fitted to the page. pandoc reads none of them, so there is no
+    /// fallback.
     #[test]
     fn legacy_office_names_its_export_filter() {
         for (from, to, filter) in LEGACY {
@@ -3081,7 +3103,12 @@ mod tests {
                 argv.windows(2).any(|w| w == ["--convert-to", filter]),
                 "{argv:?}"
             );
-            assert_eq!(lookup(from, Format::Pdf), Some(OFFICE_TO_PDF));
+            let pdf = if from == Format::Xls {
+                SHEET_TO_PDF
+            } else {
+                OFFICE_TO_PDF
+            };
+            assert_eq!(lookup(from, Format::Pdf), Some(pdf));
             assert!(!has_fallback(from, Format::Pdf), "{from:?}");
         }
     }
@@ -3251,6 +3278,39 @@ mod tests {
             "{argv:?}"
         );
         assert!(argv.windows(2).any(|w| w == ["--outdir", "b"]), "{argv:?}");
+    }
+
+    /// A workbook goes to PDF through the macro that fits it to the page,
+    /// which writes exactly the path it is given.
+    #[test]
+    fn a_workbook_to_pdf_runs_the_sheet_macro() {
+        for from in [Format::Xlsx, Format::Ods, Format::Xls] {
+            let r = lookup(from, Format::Pdf).unwrap();
+            assert_eq!(backends_for(from, Format::Pdf), vec![Backend::Soffice]);
+            assert_eq!(r.steps[0].output, OutputMode::Path, "{from:?}");
+            let input = format!("a/in.{}", from.ext());
+            let argv = r.steps[0].render(&[Path::new(&input)], Path::new("b/out.pdf"));
+            assert_eq!(
+                argv,
+                [
+                    "--headless",
+                    "--norestore",
+                    &crate::sheet_pdf::call(&input, "b/out.pdf")
+                ],
+                "{from:?}"
+            );
+        }
+        // The other documents print as they are laid out.
+        for from in [
+            Format::Docx,
+            Format::Odt,
+            Format::Doc,
+            Format::Pptx,
+            Format::Ppt,
+        ] {
+            let r = lookup(from, Format::Pdf).unwrap();
+            assert_eq!(r.steps[0].output, OutputMode::OutDir, "{from:?}");
+        }
     }
 
     #[test]

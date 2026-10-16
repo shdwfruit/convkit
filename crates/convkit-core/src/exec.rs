@@ -9,7 +9,7 @@ use crate::plan::{ConversionPlan, PlannedStep};
 use crate::probe::MediaProbe;
 use crate::procutil::backend_command;
 use crate::sized::{self, SizingPlan, Strategy};
-use crate::{plan, probe, registry, winpath, Backend, Format, OutputMode, Resolver};
+use crate::{plan, probe, registry, sheet_pdf, winpath, Backend, Format, OutputMode, Resolver};
 
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -544,7 +544,9 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             .file_stem()
             .map(|s| s.to_os_string())
             .unwrap_or_default(),
+        input: req.inputs[0].clone(),
         notes: Vec::new(),
+        sheet_notes: Vec::new(),
         backend_output: Vec::new(),
         backends: Vec::new(),
     };
@@ -603,6 +605,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let remuxed = ran.steps.first().is_some_and(|s| is_remux(&s.argv));
     let StepRunner {
         mut notes,
+        sheet_notes,
         backend_output,
         backends,
         ..
@@ -619,6 +622,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let enlarged = ran.enlarged.clone();
     let range = ran.range.clone();
     let mut warnings = ran.warnings;
+    warnings.extend(sheet_notes);
     let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());
         let report = sized::report(&sz, bytes, attempts, tracks);
@@ -671,7 +675,13 @@ struct StepRunner<'a> {
     /// request's first input for step 0, the previous step's located output
     /// for every step after. `soffice` names its OutDir result after this.
     current_input_stem: OsString,
+    /// The request's first input: what a workbook is exported from when the
+    /// macro fitting it to the page cannot run.
+    input: PathBuf,
     notes: Vec<String>,
+    /// What laying a workbook out for PDF changed. Notes, unlike `notes`:
+    /// they say what conv did, not what went wrong.
+    sheet_notes: Vec<String>,
     backend_output: Vec<BackendOutput>,
     backends: Vec<(Backend, String)>,
 }
@@ -682,6 +692,15 @@ impl StepRunner<'_> {
         for (index, step) in plan.steps.iter().enumerate() {
             self.run(step, index, total)?;
         }
+        Ok(())
+    }
+
+    /// Exports a workbook as it is set, with `--convert-to`, in place of the
+    /// sheet macro `step` runs, and says so.
+    fn run_unfitted(&mut self, step: &PlannedStep, index: usize, total: usize) -> Result<()> {
+        let plain = plan::unfitted_sheet_step(&self.input, &step.output);
+        self.run(&plain, index, total)?;
+        self.sheet_notes.push(sheet_pdf::UNFITTED_NOTE.to_string());
         Ok(())
     }
 
@@ -708,9 +727,21 @@ impl StepRunner<'_> {
         // right away, before the process that will populate it is even
         // spawned, so it is cleaned up on every exit path exactly like
         // `scratch` itself.
+        // The profile of a step running the sheet macro, where the macro
+        // writes down what it did.
+        let mut sheet_profile = None;
         if step.backend == Backend::Soffice {
             let profile = make_lo_profile_dir();
             self.guard.track_profile(profile.clone());
+            if sheet_pdf::is_call(&step.argv) {
+                // The macro is handed its paths inside one argument, where
+                // they cannot be put in extended form.
+                if verbatim_paths || winpath::is_long(&self.input.to_string_lossy()) {
+                    return self.run_unfitted(step, index, total);
+                }
+                sheet_pdf::seed(&profile).map_err(io_err)?;
+                sheet_profile = Some(profile.clone());
+            }
             let url = user_installation_url(&profile)?;
             // `plan::build` already inserted `plan::USER_INSTALLATION_
             // PLACEHOLDER` as this step's first argv element specifically
@@ -744,8 +775,13 @@ impl StepRunner<'_> {
                 .iter()
                 .filter_map(|i| i.checked_sub(1))
                 .collect();
-            let rest =
-                substitute_backend_paths(&step.argv[1..], &shifted, verbatim_paths, self.resolver)?;
+            let argv = if sheet_profile.is_some() {
+                sheet_pdf::with_absolute_paths(&step.argv[1..], &self.input, &step.output)
+                    .map_err(io_err)?
+            } else {
+                step.argv[1..].to_vec()
+            };
+            let rest = substitute_backend_paths(&argv, &shifted, verbatim_paths, self.resolver)?;
             cmd.args(&rest);
         } else {
             let argv = substitute_backend_paths(
@@ -822,6 +858,15 @@ impl StepRunner<'_> {
         // A Discard step (ffmpeg's first pass) keeps nothing, so only its
         // exit status can fail it.
         let wrote = step.output_mode == OutputMode::Discard || is_non_empty(&produced);
+        if let Some(profile) = &sheet_profile {
+            match sheet_pdf::Report::read(profile) {
+                Some(report) => self.sheet_notes.extend(report.notes()),
+                // The macro never ran. One that could not open the file says
+                // so, and fails below as `--convert-to` would have.
+                None if !wrote => return self.run_unfitted(step, index, total),
+                None => {}
+            }
+        }
         if !out.status.success() || !wrote {
             // Prefer the lines the classifier would keep — the actual
             // `width not divisible by 2`, not ffmpeg's trailing progress
@@ -4290,5 +4335,127 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert_eq!(calls(dir.path()).len(), 3, "remux, pass 1, pass 2");
         assert!(!req.output.exists());
         assert!(!scratch_left(dir.path()));
+    }
+
+    // --- a workbook to PDF: stub soffice running the sheet macro ------------
+
+    /// soffice stand-in. Logs every call but the version probe to `calls`.
+    /// Given the sheet macro,
+    /// it does what `report` says: `ran` writes the PDF and a report of two
+    /// widened columns and one scaled sheet, but only when the profile was
+    /// seeded with the macro; `unloaded` reports a file it could not open
+    /// and writes nothing; `never` writes nothing at all, as a LibreOffice
+    /// that does not run the macro would. Given `--convert-to`, it writes
+    /// `<outdir>/<stem>.pdf`.
+    #[cfg(unix)]
+    fn soffice_sheet_stub(dir: &Path, report: &str) -> PathBuf {
+        let p = dir.join("soffice_sheet_stub.sh");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\n\
+                 case \" $* \" in *\" --version \"*) exit 0;; esac\n\
+                 d=\"$(dirname \"$0\")\"\n\
+                 echo \"$*\" >> \"$d/calls\"\n\
+                 user=\"${{1#-env:UserInstallation=file://}}/user\"\n\
+                 outdir=\"\"; prev=\"\"\n\
+                 for a in \"$@\"; do\n\
+                 \x20   if [ \"$prev\" = \"--outdir\" ]; then outdir=\"$a\"; fi\n\
+                 \x20   last=\"$a\"; prev=\"$a\"\n\
+                 done\n\
+                 case \"$last\" in\n\
+                 macro:*)\n\
+                 \x20   out=$(printf '%s' \"$last\" | sed 's/.*\",\"\\(.*\\)\")$/\\1/')\n\
+                 \x20   case {report} in\n\
+                 \x20   ran) [ -f \"$user/basic/Convkit/Sheets.xba\" ] || exit 0\n\
+                 \x20       printf x > \"$out\"\n\
+                 \x20       printf 'status=exported\\nwidened=2\\nscaled=1\\nsmallest=52\\n' > \"$user/convkit-sheets.txt\";;\n\
+                 \x20   unloaded) printf 'status=unloaded\\n' > \"$user/convkit-sheets.txt\";;\n\
+                 \x20   esac;;\n\
+                 *)\n\
+                 \x20   stem=$(basename \"$last\"); printf x > \"$outdir/${{stem%.*}}.pdf\";;\n\
+                 esac\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// `book.xlsx` into `out/book.pdf`, with the stub in `bin/` as
+    /// `calls` and `scratch_left` expect.
+    #[cfg(unix)]
+    fn workbook_request(dir: &Path, report: &str) -> (Resolver, Request) {
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        let mut r = Resolver::new();
+        r.with_override(Backend::Soffice, soffice_sheet_stub(&bin, report));
+        let input = dir.join("book.xlsx");
+        std::fs::write(&input, b"xlsx-bytes").unwrap();
+        let req = Request {
+            from: Format::Xlsx,
+            to: Format::Pdf,
+            inputs: vec![input],
+            output: dir.join("out").join("book.pdf"),
+            overwrite: false,
+            tuning: Default::default(),
+            allow_extreme: false,
+        };
+        (r, req)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workbook_to_pdf_seeds_the_macro_and_notes_what_it_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, req) = workbook_request(dir.path(), "ran");
+        let outcome = run(&req, &r, &mut |_| {}).unwrap();
+        assert!(req.output.is_file());
+        assert_eq!(
+            outcome.warnings,
+            [
+                "Widened 2 columns whose numbers would otherwise print as ###.",
+                "Scaled 1 sheet down to fit the page width, to 52%."
+            ]
+        );
+        assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
+        let calls = calls(dir.path());
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(
+            calls[0].contains("macro:///Convkit.Sheets.ToPdf("),
+            "{calls:?}"
+        );
+        assert!(!scratch_left(dir.path()));
+    }
+
+    /// A LibreOffice that never runs the macro still makes the PDF, the way
+    /// `--convert-to` always has, and the note says it is not fitted.
+    #[cfg(unix)]
+    #[test]
+    fn a_workbook_whose_macro_never_runs_is_exported_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, req) = workbook_request(dir.path(), "never");
+        let outcome = run(&req, &r, &mut |_| {}).unwrap();
+        assert!(req.output.is_file());
+        assert_eq!(outcome.warnings, [crate::sheet_pdf::UNFITTED_NOTE]);
+        let calls = calls(dir.path());
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(calls[1].contains("--convert-to pdf --outdir"), "{calls:?}");
+        assert!(!scratch_left(dir.path()));
+    }
+
+    /// One the macro could not open, `--convert-to` could not either: it
+    /// fails as it always has, without a second try.
+    #[cfg(unix)]
+    #[test]
+    fn a_workbook_the_macro_cannot_open_fails_without_a_second_try() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, req) = workbook_request(dir.path(), "unloaded");
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert!(e.message.contains("produced no output"), "{}", e.message);
+        assert_eq!(calls(dir.path()).len(), 1);
+        assert!(!req.output.exists());
     }
 }

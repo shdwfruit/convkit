@@ -1353,3 +1353,48 @@ Export writes values, not the text cells display: `1234.5` formatted
 Dates and percentages keep their format either way. Token 12 `0` writes
 the first sheet in tab order even when the workbook was saved with another
 sheet active, as `<name>.csv`.
+
+## Workbooks to PDF (`sheet_pdf.rs`, `sheet_pdf.bas`)
+
+Measured 2026-10-16 with LibreOffice 26.8.1 on macOS.
+
+A number, date or error that does not fit its column prints as `###`;
+text spills into the next cell or is cut off, and never does. General is
+the exception among numbers: it drops decimals, then digits (`9.9E+10`),
+and prints `###` only when even `1E+11` does not fit. So the macro measures
+General by its shortest form and every other format by its full text.
+
+Where `###` starts was found by exporting six sheets, each one value in 60
+columns 0.25 mm apart in width, and reading which printed `###`:
+
+| Value, format, font | Widest `###` | Narrowest in full | Macro's width |
+|---|---|---|---|
+| `$34,834.10`, Calibri 11 | 18.26 mm | 18.50 mm | 18.38 mm |
+| `1,234,567`, Arial 10 | 16.25 mm | 16.49 mm | 16.41 mm |
+| `2026-12-31`, Liberation Sans 10 bold | 18.75 mm | 19.00 mm | 18.76 mm |
+| `12.34%`, Calibri 11 | 12.24 mm | 12.51 mm | 12.32 mm |
+| `98765432109` General, Calibri 11 | 10.25 mm | 10.50 mm | 10.43 mm |
+| `-1,234.50`, DejaVu Sans 12 | 21.01 mm | 21.25 mm | 21.06 mm |
+
+The macro's width is the value measured on the document's reference
+device (`ReferenceDevice`), the device LibreOffice lays the printed page
+out with, plus the cell's left and right margins. It fell between the two
+for all six, and of the 360 columns the macro widened exactly those that
+printed `###`.
+
+LibreOffice's own optimal width does not do: it measures at screen
+resolution, rounding each glyph up to a whole pixel. On a column of
+`99,999.99` it asked for 20.5 mm where 17 mm printed in full; measured with
+the text set ten times larger, it still came out 0.2–0.8 mm wide,
+depending on the font, which is enough to widen columns that print fine.
+
+A widened column gets the width of its longest value in full plus the 2 mm
+LibreOffice's optimal width adds, capped at the page's printable width. A
+column's values are measured for its largest and smallest number and for
+up to 200 evenly spaced cells of each run of cells sharing a format, so a
+20,000-row sheet costs about a second more than `--convert-to` (8.3 s plain,
+9.7 s fitted, 12 numeric columns).
+
+A sheet wider than its page gets the page style's "fit width to 1 page"
+(`ScaleToPagesX = 1`, `ScaleToPagesY = 0`). LibreOffice never enlarges for
+it: a narrow sheet sharing that page style printed pixel-identical.

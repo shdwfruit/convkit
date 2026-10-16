@@ -217,6 +217,11 @@ pub enum Arg {
     /// of the CSV, or for the default shape (comma, UTF-8, no text
     /// columns) when it was not read. See `table::import_filter`.
     CsvImport,
+    /// The URL that has LibreOffice run the macro fitting a workbook to the
+    /// page and exporting it, the input and output paths inside it. See
+    /// `sheet_pdf`. Not a path to the executor: a long Windows path cannot
+    /// be rewritten inside it, so `exec` exports such a workbook as it is.
+    SheetPdf,
     /// The directory containing the first input path (`.` for a bare
     /// filename). For backends like `pandoc` that resolve a document's
     /// relative resources (images) against a search path rather than
@@ -439,6 +444,10 @@ impl Step {
                     video.csv_import.clone().unwrap_or_else(|| {
                         crate::table::import_filter(&crate::table::CsvShape::default())
                     })
+                )),
+                Arg::SheetPdf => argv.push(crate::sheet_pdf::call(
+                    &inputs[0].to_string_lossy(),
+                    &output.to_string_lossy(),
                 )),
                 Arg::InputDir => {
                     let dir = inputs[0].parent().filter(|p| !p.as_os_str().is_empty());
