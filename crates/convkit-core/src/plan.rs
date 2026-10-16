@@ -959,6 +959,44 @@ mod tests {
         assert!(step.prepare.is_empty());
     }
 
+    /// An animated picture gives its first frame on either route, so the
+    /// flag that moves a merge to ImageMagick never changes its page count.
+    /// A TIFF keeps every page, as a scan does.
+    #[test]
+    fn a_magick_merge_takes_the_first_frame_of_a_gif_or_webp() {
+        let plan = build_tuned(
+            Format::Jpg,
+            Format::Pdf,
+            &[p("a.jpg"), p("b.gif"), p("c.webp"), p("d.tiff")],
+            Path::new("out.pdf"),
+            None,
+            None,
+            &Tuning {
+                quality: Some(80),
+                ..Tuning::default()
+            },
+        )
+        .unwrap();
+        let step = &plan.steps[0];
+        assert_eq!(step.backend, Backend::Magick);
+        assert_eq!(
+            step.argv,
+            [
+                "a.jpg",
+                "b.gif[0]",
+                "c.webp[0]",
+                "d.tiff",
+                "-auto-orient",
+                "-compress",
+                "jpeg",
+                "-quality",
+                "80",
+                "out.pdf"
+            ]
+        );
+        assert_eq!(step.path_args, [0, 1, 2, 3, 9], "each input and the output");
+    }
+
     #[test]
     fn strip_metadata_is_accepted_on_the_typst_route() {
         let plain = merge(&Tuning::default()).unwrap();

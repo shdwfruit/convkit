@@ -205,8 +205,10 @@ const IMG_TO_PDF: Recipe = Recipe {
     warnings: &[],
 };
 
-/// The formats Typst places on a page. It reads no HEIC, HEIF, AVIF, TIFF,
-/// BMP or SVG ("unknown image format"), so those stay with ImageMagick.
+/// The formats the Typst merge takes. Typst reads no HEIC, HEIF, AVIF,
+/// TIFF or BMP ("unknown image format"), so those stay with ImageMagick. It
+/// does read SVG, but an SVG in a merge stays with ImageMagick too, so it is
+/// rasterised as it always was.
 pub(crate) const TYPST_READS: &[Format] = &[Format::Jpg, Format::Png, Format::Webp, Format::Gif];
 
 /// jpg/png/webp/gif -> pdf on the managed Typst, so photos merge with
@@ -243,7 +245,7 @@ pub(crate) const TYPST_IMG_TO_PDF: Recipe = Recipe {
 
 /// The recipe a run of `recipe` takes on these inputs and this tuning:
 /// `IMG_TO_PDF` in place of `TYPST_IMG_TO_PDF` when a knob re-encodes the
-/// pixels or an input is one Typst cannot read, `recipe` otherwise. A
+/// pixels or an input is of no format in `TYPST_READS`, `recipe` otherwise. A
 /// merge's pair is named by its first input alone (`conv a.jpg b.heic
 /// out.pdf` is `jpg -> pdf`), so every input is checked. By extension, as
 /// everywhere in convkit; a name with none is left to ImageMagick, which

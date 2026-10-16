@@ -251,7 +251,11 @@ pub enum Arg {
     /// <this>`, `conv docs/readme.md out.docx` run from anywhere but
     /// `docs/` silently dropped every image.
     InputDir,
-    /// Every input path, in order. Used by the image→PDF merge recipe.
+    /// Every input path, in order, for ImageMagick's image→PDF merge. A GIF
+    /// or WebP gets the `[0]` frame selector (`first_frame_only`), so an
+    /// animated one is one page, its first frame, as on the Typst route; any
+    /// other input is taken whole, so a multi-page TIFF keeps every page. A
+    /// path position with its selector, for `InputFirstFrame`'s reason.
     Inputs,
     /// The output path this step writes.
     Output,
@@ -491,7 +495,11 @@ impl Step {
                 Arg::Inputs => {
                     for input in inputs {
                         path_args.push(argv.len());
-                        argv.push(input.to_string_lossy().into_owned());
+                        argv.push(if first_frame_only(input) {
+                            format!("{}[0]", input.to_string_lossy())
+                        } else {
+                            input.to_string_lossy().into_owned()
+                        });
                     }
                 }
                 Arg::Output => {
@@ -528,6 +536,18 @@ impl Step {
         }
         Rendered { argv, path_args }
     }
+}
+
+/// Whether `Arg::Inputs` takes only the first frame of `input`: a GIF or a
+/// WebP, either of which may be animated. Read whole, an optimized GIF's
+/// later frames, which hold only what changed, each became a page a few
+/// pixels across, and the page count hung on whether a flag took the merge
+/// to ImageMagick. By extension, as the route is decided.
+pub(crate) fn first_frame_only(input: &Path) -> bool {
+    matches!(
+        crate::Format::from_path(input),
+        Some(crate::Format::Gif | crate::Format::Webp)
+    )
 }
 
 /// One step's rendered command line, plus the positions in it that hold

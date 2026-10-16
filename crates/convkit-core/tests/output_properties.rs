@@ -3030,6 +3030,64 @@ fn several_images_into_one_pdf_are_decided_by_the_one_enlarged_most() {
     assert!(w.contains("enlarges tiny.png (50x50) to 400x400"), "{w}");
 }
 
+/// An optimized GIF stores each later frame as only the part that
+/// changed. `--quality` takes a merge to ImageMagick, which made each of
+/// those a page of its own, a few pixels of picture each; it takes the
+/// first frame, as Typst does, so the GIF is one page on either route.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_animated_gif_is_one_page_when_imagemagick_merges_it() {
+    let dir = tmp();
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Magick);
+    let gif = dir.path().join("anim.gif");
+    run_magick(&[
+        "-size",
+        "64x64",
+        "xc:red",
+        "(",
+        "-clone",
+        "0",
+        "-fill",
+        "blue",
+        "-draw",
+        "rectangle 10,10 30,30",
+        ")",
+        "(",
+        "-clone",
+        "1",
+        "-fill",
+        "green",
+        "-draw",
+        "rectangle 40,40 50,50",
+        ")",
+        "-layers",
+        "Optimize",
+        &gif.to_string_lossy(),
+    ]);
+    let frames = run_identify(&magick(), &["-format", "%wx%h ", &gif.to_string_lossy()]);
+    assert_eq!(frames.split_whitespace().count(), 3, "{frames}");
+    assert!(
+        frames.starts_with("64x64 ") && frames != "64x64 64x64 64x64 ",
+        "{frames}"
+    );
+    let out = dir.path().join("anim.pdf");
+    let req = exec::Request {
+        from: Format::Gif,
+        to: Format::Pdf,
+        inputs: vec![gif],
+        output: out.clone(),
+        overwrite: false,
+        tuning: Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        },
+        allow_extreme: false,
+    };
+    exec::run(&req, &resolver, &mut |_| {}).unwrap();
+    assert_eq!(pdf_pages(&out), 1);
+}
+
 // --- Metadata: the location note and --strip-metadata ----------------------
 
 fn stripped() -> Tuning {

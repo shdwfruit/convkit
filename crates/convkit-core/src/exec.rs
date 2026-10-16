@@ -4040,6 +4040,41 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         );
     }
 
+    /// A merge takes a GIF's first frame alone, so that is the frame sized:
+    /// an optimized GIF's later frames are fragments a few pixels wide,
+    /// which would otherwise be named as the picture enlarged most.
+    #[cfg(unix)]
+    #[test]
+    fn a_merge_sizes_only_the_first_frame_of_a_gif() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "");
+        answer_ping(dir.path(), "big.png", "3000 2000 TopLeft 72\n");
+        answer_ping(dir.path(), "anim.gif", "3000 2000 TopLeft 72\n");
+        let req = image_request(
+            dir.path(),
+            (Format::Png, Format::Pdf),
+            &["big.png", "anim.gif"],
+            "2000x",
+        );
+        run(&req, &r, &mut |_| {}).unwrap();
+        let log = |name| std::fs::read_to_string(dir.path().join("bin").join(name)).unwrap();
+        let pinged: Vec<String> = log("pings")
+            .lines()
+            .filter(|l| l.contains("%w %h"))
+            .map(|l| l.split(' ').nth(1).unwrap().to_string())
+            .collect();
+        let gif = dir.path().join("anim.gif");
+        let png = dir.path().join("big.png");
+        assert_eq!(
+            pinged,
+            [png.display().to_string(), format!("{}[0]", gif.display())]
+        );
+        assert!(
+            log("calls").contains(&format!("{}[0] ", gif.display())),
+            "the run takes the same frame"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn every_page_an_input_brings_is_sized() {

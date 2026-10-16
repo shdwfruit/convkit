@@ -552,7 +552,11 @@ fn image_pages(magick: &Path, input: &Path, read: ImageRead) -> Result<Vec<(u32,
         ));
     }
     let mut target = input.as_os_str().to_owned();
-    if !read.every_page && !read.largest_frame {
+    // A merge takes a GIF's or WebP's first frame alone (`Arg::Inputs`, the
+    // slot `every_input` is read from), so that is the frame sized.
+    let first_frame =
+        !read.every_page || (read.every_input && crate::recipe::first_frame_only(input));
+    if first_frame && !read.largest_frame {
         target.push("[0]");
     }
     let out = backend_command(magick)
