@@ -49,6 +49,27 @@ pub struct PlannedStep {
     /// contract that must not gain a key for it.
     #[serde(skip)]
     pub path_args: Vec<usize>,
+    /// What exec does just before this step runs. Empty for every recipe
+    /// that reads its inputs where they are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepare: Vec<Prepare>,
+}
+
+/// Something exec does just before running a step, so the step finds
+/// what it reads. Computed by the pure planner; performed by `exec`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Prepare {
+    /// A file convkit writes.
+    Write { path: PathBuf, contents: String },
+    /// An input placed where the step reads it: a hard link to the input's
+    /// resolved path, else a copy; with `strip`, a copy without its
+    /// metadata (`jpeg::strip`).
+    Stage {
+        from: PathBuf,
+        to: PathBuf,
+        strip: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -318,6 +339,7 @@ pub fn build_tuned(
                         output: output.to_path_buf(),
                         intermediate_ext: None,
                         path_args,
+                        prepare: Vec::new(),
                     }],
                     warnings: m.warnings,
                     sizing: None,
@@ -433,6 +455,7 @@ fn render_steps(
             output: step_outputs[i].clone(),
             intermediate_ext: step.intermediate_ext.map(str::to_owned),
             path_args,
+            prepare: Vec::new(),
         });
     }
     steps
@@ -498,6 +521,7 @@ fn in_place(
                 output: output.to_path_buf(),
                 intermediate_ext: None,
                 path_args,
+                prepare: Vec::new(),
             };
             (vec![step], m.warnings, None)
         }

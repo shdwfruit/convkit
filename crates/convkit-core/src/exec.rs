@@ -699,6 +699,17 @@ impl StepRunner<'_> {
         });
         let resolved = self.resolver.resolve(step.backend)?;
 
+        for prepare in &step.prepare {
+            match prepare {
+                plan::Prepare::Write { path, contents } => {
+                    std::fs::write(path, contents).map_err(io_err)?;
+                }
+                plan::Prepare::Stage { from, to, strip } => {
+                    stage_file(from, to, *strip, hard_link)?;
+                }
+            }
+        }
+
         // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
         // inside `backend_command`, not repeated here -- see its docs.
         let mut cmd = backend_command(&resolved.path);
@@ -1185,6 +1196,40 @@ fn locate_outdir_result(input_stem: &OsStr, want_ext: &str, dir: &Path) -> Resul
 
 fn io_err(e: std::io::Error) -> ConvError {
     ConvError::new(ErrorCode::ConversionFailed, e.to_string())
+}
+
+fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(from, to)
+}
+
+/// Places `from` at `to` for a step to read: a hard link to the input's
+/// resolved path (so a relative symlink never dangles in scratch), else a
+/// copy. With `strip`, a JPEG is written without its metadata instead.
+/// `link` is a parameter so the copy fallback is testable.
+fn stage_file(
+    from: &Path,
+    to: &Path,
+    strip: bool,
+    link: fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let source = std::fs::canonicalize(from).map_err(io_err)?;
+    if strip {
+        let bytes = std::fs::read(&source).map_err(io_err)?;
+        let clean = crate::jpeg::strip(&bytes).map_err(|reason| {
+            ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!(
+                    "could not remove the metadata from {}: {reason}",
+                    from.display()
+                ),
+            )
+        })?;
+        return std::fs::write(to, clean).map_err(io_err);
+    }
+    if link(&source, to).is_err() {
+        std::fs::copy(&source, to).map_err(io_err)?;
+    }
+    Ok(())
 }
 
 /// Uniquifies the LibreOffice profile directory across however many soffice
@@ -2531,6 +2576,162 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert_eq!(e.backend, Some(Backend::Typst));
     }
 
+    // --- prepare steps ---------------------------------------------------------
+
+    fn staged_from_hard_link(from: &Path, to: &Path) -> Result<()> {
+        stage_file(from, to, false, hard_link)
+    }
+
+    /// A magick-shaped step whose argv is the three files the stub looks at.
+    fn prepared_step(
+        written: &Path,
+        staged: &Path,
+        out: &Path,
+        prepare: Vec<plan::Prepare>,
+    ) -> plan::PlannedStep {
+        plan::PlannedStep {
+            backend: Backend::Magick,
+            program: "magick".to_string(),
+            argv: [written, staged, out]
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            output_mode: OutputMode::Path,
+            output: out.to_path_buf(),
+            intermediate_ext: None,
+            path_args: Vec::new(),
+            prepare,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_writes_and_stages_before_the_step_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("check.sh");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n\
+             if [ \"$#\" = \"1\" ]; then exit 0; fi\n\
+             [ -f \"$1\" ] && [ -f \"$2\" ] || exit 1\n\
+             printf x > \"$3\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub);
+
+        let input = dir.path().join("in.png");
+        std::fs::write(&input, b"pixels").unwrap();
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let (written, staged, out) = (
+            scratch.join("layout.typ"),
+            scratch.join("0.png"),
+            scratch.join("out.pdf"),
+        );
+        let step = prepared_step(
+            &written,
+            &staged,
+            &out,
+            vec![
+                plan::Prepare::Write {
+                    path: written.clone(),
+                    contents: "#image(\"0.png\")".to_string(),
+                },
+                plan::Prepare::Stage {
+                    from: input,
+                    to: staged.clone(),
+                    strip: false,
+                },
+            ],
+        );
+
+        {
+            let mut guard = ScratchGuard::new(scratch.clone());
+            let mut on_event = |_: Event| {};
+            let mut runner = StepRunner {
+                resolver: &r,
+                guard: &mut guard,
+                on_event: &mut on_event,
+                current_input_stem: OsString::new(),
+                notes: Vec::new(),
+                backend_output: Vec::new(),
+                backends: Vec::new(),
+            };
+            runner.run(&step, 0, 1).unwrap();
+            assert_eq!(std::fs::read(&written).unwrap(), b"#image(\"0.png\")");
+            assert_eq!(std::fs::read(&staged).unwrap(), b"pixels");
+            assert!(out.is_file());
+        }
+        assert!(!scratch.exists(), "scratch is removed afterwards");
+    }
+
+    #[test]
+    fn staging_falls_back_to_a_copy_when_linking_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.png");
+        let to = dir.path().join("b.png");
+        std::fs::write(&from, b"pixels").unwrap();
+        stage_file(&from, &to, false, |_, _| {
+            Err(std::io::Error::other("cross-device"))
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"pixels");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_a_relative_symlink_stages_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(src.join("photo.jpg"), b"pixels").unwrap();
+        std::os::unix::fs::symlink("photo.jpg", src.join("alias.jpg")).unwrap();
+        let to = scratch.join("0.jpg");
+        staged_from_hard_link(&src.join("alias.jpg"), &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"pixels");
+    }
+
+    #[test]
+    fn staging_with_strip_writes_the_stripped_jpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        // SOI, a comment, a start-of-scan header, entropy data, EOI.
+        let jpeg: Vec<u8> = [
+            &[0xFF, 0xD8][..],
+            &[0xFF, 0xFE, 0x00, 0x07, b'h', b'e', b'l', b'l', b'o'],
+            &[0xFF, 0xDA, 0x00, 0x02, 0x12, 0x34, 0xFF, 0xD9],
+        ]
+        .concat();
+        let from = dir.path().join("a.jpg");
+        let to = dir.path().join("b.jpg");
+        std::fs::write(&from, &jpeg).unwrap();
+        stage_file(&from, &to, true, hard_link).unwrap();
+        let staged = std::fs::read(&to).unwrap();
+        assert_eq!(staged, crate::jpeg::strip(&jpeg).unwrap());
+        assert_ne!(staged, jpeg, "the comment is gone");
+    }
+
+    #[test]
+    fn a_jpeg_that_cannot_be_stripped_fails_naming_the_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.jpg");
+        let to = dir.path().join("b.jpg");
+        std::fs::write(&from, b"not a jpeg").unwrap();
+        let e = stage_file(&from, &to, true, hard_link).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConversionFailed);
+        assert!(
+            e.message.starts_with("could not remove the metadata from"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("a.jpg"), "{}", e.message);
+        assert!(!to.exists());
+    }
+
     // --- extended-length path rewriting (F193) -------------------------------
 
     fn step_with(argv: &[&str], path_args: Vec<usize>, output: &str) -> plan::PlannedStep {
@@ -2542,6 +2743,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: PathBuf::from(output),
             intermediate_ext: None,
             path_args,
+            prepare: Vec::new(),
         }
     }
 
