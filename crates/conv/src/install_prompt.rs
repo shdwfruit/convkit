@@ -123,6 +123,7 @@ mod tests {
             pandoc_path: None,
             soffice_path: None,
             typst_path: None,
+            qpdf_path: None,
             command: None,
         }
     }

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::error::{ConvError, Result};
-use crate::Backend;
+use crate::{Backend, ManagedLayout};
 
 /// Which of a small set of backends this process could actually resolve, as
 /// of the moment `Resolver::check_availability` computed it. Exists solely
@@ -312,18 +312,23 @@ impl Resolver {
         Self::managed_dir()
     }
 
-    /// The platform-specific filename `Source::Managed` looks for —
-    /// `<exe>.exe` on Windows, bare `<exe>` elsewhere. Factored out so
+    /// The path under the managed dir that `Source::Managed` looks for:
+    /// `<exe>` (`<exe>.exe` on Windows), nested as `qpdf/bin/qpdf` for
+    /// folder backends. Factored out so
     /// `managed_path` and `candidates` share one spelling of this rule
     /// rather than each independently writing `if cfg!(windows) { ... }`
     /// (two independent copies are exactly the kind of thing that silently
     /// drifts).
-    fn managed_filename(backend: Backend) -> String {
+    fn managed_filename(backend: Backend) -> PathBuf {
         let exe = backend.exe_name();
-        if cfg!(windows) {
+        let file = if cfg!(windows) {
             format!("{exe}.exe")
         } else {
             exe.to_string()
+        };
+        match backend.managed_layout() {
+            ManagedLayout::File => PathBuf::from(file),
+            ManagedLayout::Folder => Path::new(exe).join("bin").join(file),
         }
     }
 
@@ -693,10 +698,28 @@ impl Resolver {
     fn version_of(backend: Backend, path: &Path, timeout: Duration) -> Option<String> {
         let flag = match backend {
             Backend::Ffmpeg | Backend::Ffprobe | Backend::Magick => "-version",
-            Backend::Pandoc | Backend::Soffice | Backend::Typst => "--version",
+            Backend::Pandoc | Backend::Soffice | Backend::Typst | Backend::Qpdf => "--version",
         };
         let first_line = Self::probe_first_line(backend, path, flag, timeout)?;
         extract_version_token(&first_line).map(str::to_string)
+    }
+
+    /// A strict `--version` check for `install`, used on a freshly unpacked
+    /// folder backend before it is swapped into place. Unlike `version_of`,
+    /// it requires the program to exit successfully and reads the version
+    /// only from stdout, so a loader failure (which prints to stderr and
+    /// exits non-zero) is never mistaken for a version banner. It shares
+    /// `run_with_timeout`, so a hung program is still killed.
+    pub(crate) fn probe_version_strict(path: &Path, timeout: Duration) -> Option<String> {
+        let mut cmd = crate::procutil::backend_command(path);
+        cmd.arg("--version");
+        let out = Self::run_with_timeout(cmd, timeout)?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let line = stdout.lines().next()?;
+        extract_version_token(line).map(str::to_string)
     }
 
     /// Runs `path` with `flag` and returns the first line of its version
@@ -811,7 +834,35 @@ fn extract_version_token(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_folder_backend_resolves_to_the_program_inside_its_folder() {
+        let exe = if cfg!(windows) { "qpdf.exe" } else { "qpdf" };
+        let p = Resolver::managed_path(Backend::Qpdf);
+        assert!(
+            p.ends_with(Path::new("qpdf").join("bin").join(exe)),
+            "{}",
+            p.display()
+        );
+        assert_eq!(
+            p.parent().and_then(Path::parent).and_then(Path::parent),
+            Some(Resolver::managed_dir().as_path())
+        );
+    }
+
+    #[test]
+    fn a_folder_backend_is_found_in_its_managed_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = if cfg!(windows) { "qpdf.exe" } else { "qpdf" };
+        let program = dir.path().join("qpdf").join("bin").join(exe);
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, b"not really qpdf").unwrap();
+        let mut r = Resolver::new();
+        r.with_managed_dir(dir.path().to_path_buf());
+        let found = r.resolve_managed_only(Backend::Qpdf).expect("found");
+        assert_eq!(found.path, program);
+    }
 
     #[test]
     fn an_override_wins_over_everything_else() {
@@ -838,6 +889,7 @@ mod tests {
             Backend::Pandoc,
             Backend::Soffice,
             Backend::Typst,
+            Backend::Qpdf,
         ] {
             let managed_candidate = r
                 .candidates(backend)
