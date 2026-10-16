@@ -250,9 +250,10 @@ fn place_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pdf::parse_range;
-    use crate::pdf::plan::{merge_plan, split_plan};
+    use crate::pdf::plan::merge_plan;
     use crate::pdf::PdfInfo;
+    #[cfg(unix)]
+    use crate::pdf::{parse_range, plan::split_plan};
     use crate::Source;
 
     fn info(path: &Path, pages: u32) -> PdfInfo {
