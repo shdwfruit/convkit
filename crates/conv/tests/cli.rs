@@ -1176,6 +1176,29 @@ fn the_conversion_path_still_accepts_every_conversion_only_flag() {
         .stdout(contains("magick"));
 }
 
+/// `-o` with a named output used to be dropped: `conv a.jpg b.png -o out`
+/// made out/ and wrote b.png beside the input.
+#[test]
+fn outdir_holds_a_named_output_and_refuses_a_second_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.jpg"), b"not a real jpg").unwrap();
+    for out in [".png", "b.png"] {
+        let expected = std::path::Path::new("out").join(if out == ".png" { "a.png" } else { out });
+        conv()
+            .current_dir(dir.path())
+            .args(["a.jpg", out, "--dry-run", "-o", "out"])
+            .assert()
+            .success()
+            .stdout(contains(expected.display().to_string()));
+    }
+    conv()
+        .current_dir(dir.path())
+        .args(["a.jpg", "sub/b.png", "--dry-run", "-o", "out"])
+        .assert()
+        .code(2)
+        .stderr(contains("drop -o out"));
+}
+
 /// F197: `conv photo.heic aux.jpg` used to hang indefinitely -- magick
 /// blocked on the AUX device, and killing conv left an orphaned `magick.exe`
 /// and an uncleaned scratch directory behind because `ScratchGuard`'s `Drop`
