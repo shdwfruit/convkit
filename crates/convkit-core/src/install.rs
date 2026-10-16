@@ -1176,8 +1176,7 @@ mod tests {
     }
 
     fn program_dest(managed: &Path) -> PathBuf {
-        let exe = if cfg!(windows) { "qpdf.exe" } else { "qpdf" };
-        managed.join("qpdf").join("bin").join(exe)
+        managed.join("qpdf").join("bin").join("qpdf")
     }
 
     fn no_check(_: crate::Backend, _: &Path) -> Result<()> {
