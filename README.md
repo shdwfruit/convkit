@@ -13,7 +13,7 @@
 
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
-ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 158
+ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 159
 conversion pairs across 34 formats (`conv capabilities` is the source of
 truth). Files never leave your machine; only `conv install`/`conv update`
 ever touch the network.
@@ -151,6 +151,13 @@ page per input, in argument order; formats can mix. A directory there
 expands to its images in natural order (`p2` before `p10`). Two positionals
 are always an ordinary pair: `conv a.png out.pdf` converts one file.
 
+JPG, PNG, WebP and GIF go into a PDF through Typst, which conv can install
+for you. Each picture gets a page of its own size, upright as its EXIF says,
+and a JPEG goes in as it is, without being re-encoded. An animated GIF or
+WebP contributes its first frame. HEIC, HEIF, AVIF, TIFF, BMP and SVG need
+ImageMagick, and so do `--quality` and `--resize`, which re-encode the
+pictures. Any one of them sends the whole merge through ImageMagick.
+
 A failure never looks like a success, and carries its own fix — `try` names
 whichever package manager is on `PATH` (winget/scoop/choco, brew,
 apt-get/dnf/pacman):
@@ -173,8 +180,9 @@ Three flags override named defaults on image conversions:
 - `--resize <GEOMETRY>` — fit within the geometry, aspect preserved:
   `1600x900`, `1600x` (width only), `x900` (height only), or `50%`.
   It never enlarges; see `--upscale` below.
-- `--quality <1-100>` — lossy image targets (jpg/webp/avif) and image → pdf;
-  the default is 92.
+- `--quality <1-100>` — lossy image targets (jpg/webp/avif); the default is
+  92. It also applies to image → pdf, where it re-encodes the pictures with
+  ImageMagick.
 - `--colors <2-256>` — palette reduction on raster targets.
 
 A flag that doesn't apply to the requested pair is refused with the reason,
@@ -328,9 +336,12 @@ OK IMG_0042.jpg - 2.5 MB - 0.4s
 `--strip-metadata` removes it, and the rest of the metadata with it: the
 camera, its serial number, the owner's name, the capture time. An image
 keeps only its colour profile, and is turned upright first, so it comes out
-neither sideways nor with shifted colours. Video and audio keep their title,
-artist, album, album artist, composer, genre and track and disc numbers, as
-well as cover art and rotation, and a stream copy stays a stream copy:
+neither sideways nor with shifted colours. When Typst makes a PDF, a JPEG is
+not re-encoded for this: conv removes the metadata from the file itself and
+keeps the orientation and resolution, so the page comes out the same size
+and the same way up. Video and audio keep their title, artist, album, album
+artist, composer, genre and track and disc numbers, as well as cover art and
+rotation, and a stream copy stays a stream copy:
 
 ```console
 $ conv IMG_0042.heic IMG_0042.jpg --strip-metadata
@@ -716,9 +727,9 @@ convkit dispatches to six binaries, each invoked as a subprocess:
 | Backend | Used for | `conv install` | Pinned version |
 |---|---|---|---|
 | `ffmpeg` / `ffprobe` | video, audio, GIF, remux | Yes | 9.0.1 |
-| `magick` (ImageMagick) | images, HEIC/HEIF read, images → PDF | No — use your package manager | — |
+| `magick` (ImageMagick) | images, HEIC/HEIF read, HEIC/HEIF/AVIF/TIFF/BMP → PDF | No — use your package manager | — |
 | `pandoc` | Markdown → HTML/DOCX; parses docx/odt for the PDF fallback | Yes | 3.11 |
-| `typst` | PDF engine for the docx/odt → pdf fallback | Yes | 0.15.1 |
+| `typst` | JPG/PNG/WebP/GIF → PDF; PDF engine for the docx/odt → pdf fallback | Yes | 0.15.1 |
 | `soffice` (LibreOffice) | Office documents ⇄ PDF | No — manual install, always | — |
 
 Managed versions are pinned per convkit build

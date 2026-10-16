@@ -180,11 +180,14 @@ const SVG_TO_LOSSLESS: Recipe = Recipe {
     warnings: &[],
 };
 
-/// `-compress jpeg` matters: magick's PDF default embeds pixels
-/// losslessly (Zip/Flate over raw RGB), which turned a 1.6 MB phone photo
-/// into a 35 MB PDF — 14× what JPEG-in-PDF at the same visual quality
-/// produces. Photographic sources are the overwhelmingly common case for
-/// image→PDF; the registry-wide quality anchor applies.
+/// image -> pdf on ImageMagick, for what `TYPST_IMG_TO_PDF` does not take:
+/// an input outside `TYPST_READS` (HEIC, HEIF, AVIF, TIFF, BMP, or an SVG
+/// or ICO later in a merge), or `--quality` or `--resize`, which re-encode
+/// the pixels (`image_pdf_variant`). `-compress jpeg` matters: magick's PDF
+/// default embeds pixels losslessly (Zip/Flate over raw RGB), which turned
+/// a 1.6 MB phone photo into a 35 MB PDF — 14× what JPEG-in-PDF at the same
+/// visual quality produces. Photographic sources are the overwhelmingly
+/// common case for image→PDF; the registry-wide quality anchor applies.
 const IMG_TO_PDF: Recipe = Recipe {
     steps: &[step!(
         Backend::Magick,

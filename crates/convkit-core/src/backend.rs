@@ -9,9 +9,10 @@ pub enum Backend {
     Magick,
     Soffice,
     Pandoc,
-    /// Typst, invoked as pandoc's `--pdf-engine`. Has a relocatable binary
-    /// on every platform this manifest covers, so — unlike `Soffice` — it is
-    /// managed.
+    /// Typst: places JPG/PNG/WebP/GIF images on PDF pages itself, and is
+    /// pandoc's `--pdf-engine` for the docx/odt -> pdf fallback. Has a
+    /// relocatable binary on every platform this manifest covers, so —
+    /// unlike `Soffice` — it is managed.
     Typst,
 }
 
