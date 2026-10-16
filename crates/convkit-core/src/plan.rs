@@ -78,6 +78,11 @@ pub struct ConversionPlan {
     /// `sizing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<crate::speed::SpeedReport>,
+    /// The turn a `--rotate` conversion makes, and how. One made `By::Tag`
+    /// is the executor's to make, after any steps: it resets the output's
+    /// tag. Skipped when absent, like `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<crate::rotate::RotationReport>,
 }
 
 /// Why a probe-aware media pair re-encoded instead of copying: a video knob.
@@ -139,18 +144,34 @@ pub fn build_tuned(
         return Err(ConvError::password_protected(&inputs[0], from));
     }
 
+    // A turn needs a picture: a video file the probe found none in is
+    // refused, rather than re-encoded with nothing turned.
+    if tuning.rotate.is_some()
+        && from.kind() == crate::Kind::Video
+        && probe.is_some_and(|p| p.video_streams == 0 && p.video_codec.is_none())
+    {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--rotate turns a picture, and {} has no video stream",
+                inputs[0].display()
+            ),
+        ));
+    }
+
     // A size target is a policy, not a knob: it chooses the knob values
     // itself, so it takes the whole conversion (sized.rs).
     if let Some(max) = &tuning.max_size {
         return crate::sized::plan(from, to, inputs, output, probe, tuning, max);
     }
 
-    // A file stripped into its own format: no registry pair covers it, so
-    // it is planned here, as `--max-size` plans its own (above). A clip is
-    // not a copy of the whole file, so a range takes the cut's path below,
-    // which strips as it cuts, and so does a speed change.
+    // A file stripped or turned into its own format: no registry pair covers
+    // it, so it is planned here, as `--max-size` plans its own (above). A
+    // clip is not a copy of the whole file, so a range takes the cut's path
+    // below, which strips as it cuts, and so does a speed change. So does a
+    // video whose pixels turn, which is re-encoded there.
     let timed = tuning.range.is_some() || tuning.speed.is_some();
-    if from == to && tuning.strip_metadata && !timed {
+    if from == to && !timed && rewrites_in_place(from, probe, tuning) {
         return in_place(from, inputs, output, probe, tuning);
     }
 
@@ -193,6 +214,12 @@ pub fn build_tuned(
     let probe = retimed.as_ref().map(|r| &r.probe).or(probe);
     let speed = retimed.as_ref().map(|r| r.report.clone());
     clip_notes.extend(retimed.iter().flat_map(|r| r.notes.iter().cloned()));
+    // Everything after a turn plans against the turned picture.
+    let turned = tuning
+        .rotate
+        .zip(probe)
+        .map(|(t, p)| crate::rotate::turned_probe(t, p));
+    let probe = turned.as_ref().or(probe);
     if tuning.mute && !crate::sized::is_video_target(to) {
         let why = if to == Format::Gif {
             "gif has no sound to drop".to_string()
@@ -207,6 +234,7 @@ pub fn build_tuned(
     let mut resolved = crate::video::resolve(tuning, probe, target_for(to));
     resolved.cut = cut;
     resolved.speed = retimed.as_ref().map(|r| r.retime.clone());
+    resolved.turn = tuning.rotate;
     resolved.mute = tuning.mute;
     resolved.ogg_tags = media::is_ogg(from) && !media::is_ogg(to);
     // An icon pair adds what it read of the source (`icon::resolve`); with
@@ -229,9 +257,9 @@ pub fn build_tuned(
     // supported at all); these only change *how* an already-supported pair
     // runs when a probe is in hand.
     if let Some(p) = probe {
-        // A format cut or retimed into itself is no registered pair, so it
-        // reaches the probe-aware paths by its range or speed instead.
-        let same_format = from == to && timed;
+        // A format cut, retimed or turned into itself is no registered pair,
+        // so it reaches the probe-aware paths by its range, speed or turn.
+        let same_format = from == to && (timed || tuning.rotate.is_some());
         if same_format || (registry::lookup(from, to).is_some() && registry::needs_probe(from, to))
         {
             // A video knob changes the picture, and ffmpeg refuses a filter
@@ -253,16 +281,32 @@ pub fn build_tuned(
             // here falls through to its static recipe, which filters. It is
             // never a copy, so its re-encode goes unexplained.
             let knob = resolved.fps.is_some() || resolved.scale.is_some() || tuning.crf.is_some();
-            let wants_video = knob || resolved.speed.is_some();
+            // A turn is copied only into mp4 or mov, and only where it brings
+            // the picture back to the way it is stored: the executor then
+            // resets the copy's display matrix. Any other turn is of the
+            // pixels, which a copy cannot make.
+            let retag = tuning
+                .rotate
+                .is_some_and(|t| crate::rotate::undoes_note(t, probe))
+                && matches!(to, Format::Mp4 | Format::Mov);
+            let turns_pixels = tuning.rotate.is_some() && !retag;
+            let wants_video = knob || resolved.speed.is_some() || turns_pixels;
             let strip = tuning.strip_metadata;
             // A copy can only make some cuts exactly (see
             // `trim::Cut::why_not_copied`); any other re-encodes the video to
             // cut where it was asked. Asked of the copy path itself, so the
             // note is only said where a copy was otherwise on offer.
-            let not_copied = cut.and_then(|c| c.why_not_copied(p)).filter(|_| {
+            let copyable =
                 media::stream_mapped_invocation(to, p, strip, &resolved, &inputs[0], output)
-                    .is_some()
-            });
+                    .is_some();
+            let not_copied = cut.and_then(|c| c.why_not_copied(p)).filter(|_| copyable);
+            // The turn is why the video is re-encoded only where nothing
+            // else would have re-encoded it.
+            let turn_alone = turns_pixels
+                && copyable
+                && !knob
+                && resolved.speed.is_none()
+                && not_copied.is_none();
             let dynamic = if wants_video || not_copied.is_some() {
                 media::transcoded_invocation(
                     to, p, &resolved, tuning.crf, strip, &inputs[0], output,
@@ -276,10 +320,11 @@ pub fn build_tuned(
                         }),
                     };
                     m.warnings.extend(why);
-                    m
+                    (m, false)
                 })
             } else {
                 media::stream_mapped_invocation(to, p, strip, &resolved, &inputs[0], output)
+                    .map(|m| (m, true))
                     .or_else(|| {
                         media::audio_copy_invocation(
                             from,
@@ -290,9 +335,10 @@ pub fn build_tuned(
                             &inputs[0],
                             output,
                         )
+                        .map(|m| (m, false))
                     })
             };
-            if let Some(mut m) = dynamic {
+            if let Some((mut m, video_copied)) = dynamic {
                 validate_tuning_for_dynamic_media(from, to, tuning)?;
                 m.warnings.extend(resolved.notes.iter().cloned());
                 m.warnings.extend(clip_notes.iter().cloned());
@@ -300,6 +346,8 @@ pub fn build_tuned(
                     .extend(crate::metadata::location_note(from, to, probe, tuning));
                 m.warnings
                     .extend(crate::metadata::labels_note(to, tuning, probe));
+                let rotation = rotation_for(tuning, to, video_copied);
+                m.warnings.extend(rotation_note(rotation, turn_alone));
                 // Every invocation `media.rs` builds opens with `-i <input>`,
                 // after a cut's `-ss`/`-t` when there is one, and closes with
                 // the output path: those are the path positions the Windows
@@ -324,6 +372,7 @@ pub fn build_tuned(
                     enlarged: resolved.enlarged.clone(),
                     range,
                     speed,
+                    rotation,
                 });
             }
         }
@@ -331,7 +380,7 @@ pub fn build_tuned(
 
     let recipe = select(from, to, probe, available)
         .or_else(|| {
-            (from == to && timed)
+            (from == to && (timed || tuning.rotate.is_some()))
                 .then(|| registry::same_format_recipe(to))
                 .flatten()
         })
@@ -357,6 +406,16 @@ pub fn build_tuned(
     warnings.extend(crate::metadata::tags_unread_note(from, to, tuning, probe));
     warnings.extend(crate::metadata::location_note(from, to, probe, tuning));
     warnings.extend(crate::metadata::labels_note(to, tuning, probe));
+    // Here the turn is why a video is re-encoded only when it is turned
+    // into its own format and nothing else is asked of it.
+    let rest = Tuning {
+        rotate: None,
+        strip_metadata: false,
+        ..tuning.clone()
+    };
+    let rotation = rotation_for(tuning, to, false);
+    let turn_alone = from == to && crate::sized::is_video_target(to) && rest.is_empty();
+    warnings.extend(rotation_note(rotation, turn_alone));
 
     Ok(ConversionPlan {
         from,
@@ -369,7 +428,61 @@ pub fn build_tuned(
         enlarged: resolved.enlarged.clone(),
         range,
         speed,
+        rotation,
     })
+}
+
+/// A turn made by copying the video and resetting its note, or by the
+/// pixels.
+fn rotation_for(
+    tuning: &Tuning,
+    to: Format,
+    video_copied: bool,
+) -> Option<crate::rotate::RotationReport> {
+    use crate::rotate::{By, RotationReport};
+    tuning.rotate.map(|turn| RotationReport {
+        turn,
+        by: if video_copied && matches!(to, Format::Mp4 | Format::Mov) {
+            By::Tag
+        } else {
+            By::Pixels
+        },
+    })
+}
+
+/// What a turn says about how it was made: a note reset, or a video
+/// re-encoded where the turn alone is why (`turn_alone`). A picture turned
+/// in a conversion that re-encodes it anyway says nothing more.
+fn rotation_note(
+    rotation: Option<crate::rotate::RotationReport>,
+    turn_alone: bool,
+) -> Option<String> {
+    use crate::rotate::By;
+    match rotation?.by {
+        By::Tag => Some(crate::rotate::TAG_NOTE.to_string()),
+        By::Pixels if turn_alone => Some(crate::rotate::VIDEO_NOTE.to_string()),
+        By::Pixels => None,
+    }
+}
+
+/// Whether `in_place` makes this file stripped or turned into its own
+/// format. A video is, turned, only by resetting its note: one whose pixels
+/// turn, or that another knob re-encodes, takes the media paths instead.
+fn rewrites_in_place(format: Format, probe: Option<&MediaProbe>, tuning: &Tuning) -> bool {
+    let Some(turn) = tuning.rotate else {
+        return tuning.strip_metadata;
+    };
+    if format.kind() != crate::Kind::Video {
+        return true;
+    }
+    let others = Tuning {
+        strip_metadata: false,
+        rotate: None,
+        ..tuning.clone()
+    };
+    matches!(format, Format::Mp4 | Format::Mov)
+        && others.is_empty()
+        && crate::rotate::undoes_note(turn, probe)
 }
 
 /// Renders a static recipe's steps: each step's output (the final output, or
@@ -439,9 +552,12 @@ fn render_steps(
 }
 
 /// `photo.jpg --strip-metadata` -> `photo-stripped.jpg`, and the same for
-/// video and audio. An image runs the recipe any raster takes to its format
-/// (through the TIFF for png), which re-encodes a lossy one, so that is
-/// said. Video and audio are stream-copied with their tags cleared.
+/// video and audio; `photo.jpg --rotate right` -> `photo-rotated.jpg`. An
+/// image runs the recipe any raster takes to its format (through the TIFF
+/// for png), which re-encodes a lossy one, so that is said. Video and audio
+/// are stream-copied with their tags cleared. A JPEG, mp4 or mov that a turn
+/// brings back to its stored picture is copied as it is, and the executor
+/// resets its note.
 fn in_place(
     format: Format,
     inputs: &[PathBuf],
@@ -449,12 +565,49 @@ fn in_place(
     probe: Option<&MediaProbe>,
     tuning: &Tuning,
 ) -> Result<ConversionPlan> {
-    crate::metadata::in_place(format)
-        .map_err(|why| ConvError::new(ErrorCode::InvalidInvocation, why))?;
+    let invalid = |why| ConvError::new(ErrorCode::InvalidInvocation, why);
+    if tuning.strip_metadata {
+        crate::metadata::in_place(format).map_err(invalid)?;
+    }
+    if tuning.rotate.is_some() {
+        crate::rotate::in_place(format).map_err(invalid)?;
+    }
+    let others = Tuning {
+        strip_metadata: false,
+        rotate: None,
+        ..tuning.clone()
+    };
+    // A turn back to the stored picture is made by the note, where nothing
+    // else re-encodes the file: a JPEG with no other change, or a video,
+    // which `rewrites_in_place` sends here only then.
+    let by_tag = tuning
+        .rotate
+        .is_some_and(|t| crate::rotate::undoes_note(t, probe))
+        && match format {
+            Format::Jpg => !tuning.strip_metadata && others.is_empty(),
+            Format::Mp4 | Format::Mov => true,
+            _ => false,
+        };
+    if format == Format::Gif && !others.is_empty() {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            "--rotate on a gif kept as gif turns its frames and changes nothing else; \
+             add --to mp4 to change it as well",
+        ));
+    }
+    let recipe = match tuning.rotate {
+        _ if by_tag => None,
+        Some(_) => registry::turn_recipe_for(format),
+        None => registry::image_recipe_for(format),
+    };
     let kept = probe.map_or(&[][..], |p| p.kept_tags.as_slice());
-    let (steps, mut warnings, enlarged) = match registry::image_recipe_for(format) {
+    let (steps, mut warnings, enlarged) = match recipe {
         Some(recipe) => {
-            let recipe = registry::strip_variant(format, recipe);
+            let recipe = if tuning.strip_metadata {
+                registry::strip_variant(format, recipe)
+            } else {
+                recipe
+            };
             // A compressed tiff stays compressed; only the read can tell.
             let compressed = probe.and_then(|p| p.image).is_some_and(|i| i.compressed);
             let recipe = if format == Format::Tiff && compressed {
@@ -462,7 +615,13 @@ fn in_place(
             } else {
                 recipe
             };
-            let resolved = crate::video::resolve(tuning, probe, target_for(format));
+            let turned = tuning
+                .rotate
+                .zip(probe)
+                .map(|(t, p)| crate::rotate::turned_probe(t, p));
+            let mut resolved =
+                crate::video::resolve(tuning, turned.as_ref().or(probe), target_for(format));
+            resolved.turn = tuning.rotate;
             validate_tuning(&recipe, format, format, tuning, &resolved)?;
             let steps = render_steps(&recipe, inputs, output, tuning, &resolved, kept);
             let mut warnings = registry::notes_for(&recipe, probe);
@@ -470,17 +629,19 @@ fn in_place(
                 format,
                 Format::Jpg | Format::Webp | Format::Avif | Format::Heic
             ) {
-                warnings.push(crate::metadata::reencode_note(format, tuning));
+                warnings.push(if tuning.strip_metadata {
+                    crate::metadata::reencode_note(format, tuning)
+                } else {
+                    crate::rotate::image_note(format, tuning)
+                });
             }
             (steps, warnings, resolved.enlarged)
         }
+        // Copied as it is: the executor resets the note.
+        None if by_tag && !tuning.strip_metadata => (Vec::new(), Vec::new(), None),
         None => {
             // A stream copy cannot filter or re-encode, so a video knob
             // would be silently ignored here; refuse it instead.
-            let others = Tuning {
-                strip_metadata: false,
-                ..tuning.clone()
-            };
             if !others.is_empty() {
                 return Err(ConvError::new(
                     ErrorCode::InvalidInvocation,
@@ -505,6 +666,20 @@ fn in_place(
             (vec![step], m.warnings, None)
         }
     };
+    let rotation = tuning.rotate.map(|turn| crate::rotate::RotationReport {
+        turn,
+        by: if by_tag {
+            crate::rotate::By::Tag
+        } else {
+            crate::rotate::By::Pixels
+        },
+    });
+    if by_tag {
+        warnings.push(crate::rotate::TAG_NOTE.to_string());
+    }
+    warnings.extend(crate::metadata::location_note(
+        format, format, probe, tuning,
+    ));
     warnings.extend(crate::metadata::tags_unread_note(
         format, format, tuning, probe,
     ));
@@ -520,6 +695,7 @@ fn in_place(
         enlarged,
         range: None,
         speed: None,
+        rotation,
     })
 }
 
@@ -749,6 +925,20 @@ fn validate_tuning(
                 to.ext(),
             ),
         ));
+    }
+    if tuning.rotate.is_some() && !has_slot(|a| matches!(a, Arg::Rotate | Arg::VideoChain(_))) {
+        // webm turns only in the probe-aware transcode, as `--fps` does.
+        if to == Format::Webm {
+            return Err(ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!(
+                    "--rotate on {} -> webm needs ffprobe to read the source, and it could \
+                     not; check that ffprobe is installed and the input is a readable video",
+                    from.ext()
+                ),
+            ));
+        }
+        return Err(crate::rotate::not_applicable(from, to));
     }
     if tuning.strip_metadata && !has_slot(|a| matches!(a, Arg::StripMetadata)) {
         return Err(ConvError::new(
@@ -1992,6 +2182,7 @@ mod tests {
             mute: false,
             speed: None,
             shift_pitch: false,
+            rotate: None,
         }
     }
 
@@ -3627,6 +3818,573 @@ mod tests {
                 .starts_with("--speed does not apply to png -> jpg"),
             "{}",
             e.message
+        );
+    }
+
+    // --- Rotate: --rotate -------------------------------------------------
+
+    fn turned(turn: crate::rotate::Turn) -> Tuning {
+        Tuning {
+            rotate: Some(turn),
+            ..Tuning::default()
+        }
+    }
+
+    /// A probe of a source shown with EXIF orientation `tag`.
+    fn shown(tag: u16, probe: MediaProbe) -> MediaProbe {
+        MediaProbe {
+            orientation: crate::rotate::Orientation::from_exif(tag),
+            ..probe
+        }
+    }
+
+    fn turned_plan(
+        from: Format,
+        to: Format,
+        t: &Tuning,
+        probe: Option<&MediaProbe>,
+    ) -> Result<ConversionPlan> {
+        let input = p(&format!("in.{}", from.ext()));
+        let output = format!("out.{}", to.ext());
+        build_tuned(from, to, &[input], Path::new(&output), probe, None, t)
+    }
+
+    fn by(plan: &ConversionPlan) -> serde_json::Value {
+        serde_json::to_value(plan.rotation.as_ref().expect("a rotation report")).unwrap()
+    }
+
+    /// `-rotate N` comes straight after `-auto-orient`: the turn is of the
+    /// picture as it is shown, and every knob after it sees the turned one.
+    fn turns_after_orienting(argv: &[String], degrees: &str) {
+        let at = argv
+            .iter()
+            .position(|a| a == "-auto-orient")
+            .unwrap_or_else(|| panic!("no -auto-orient in {argv:?}"));
+        assert_eq!(argv[at + 1..at + 3], ["-rotate", degrees], "{argv:?}");
+    }
+
+    /// A phone tagged a landscape shot to show a quarter turn right; turned
+    /// left, it is the picture as stored, so only the tag is reset.
+    #[test]
+    fn a_photo_whose_tag_the_turn_undoes_is_retagged_with_no_steps() {
+        use crate::rotate::Turn;
+        let probe = shown(6, MediaProbe::default());
+        let plan =
+            turned_plan(Format::Jpg, Format::Jpg, &turned(Turn::Left), Some(&probe)).unwrap();
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(by(&plan), serde_json::json!({"turn": "left", "by": "tag"}));
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.contains("nothing was re-encoded")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_photo_turned_off_the_way_it_is_stored_is_reencoded_turned() {
+        use crate::rotate::Turn;
+        for probe in [Some(shown(1, MediaProbe::default())), None] {
+            let plan = turned_plan(
+                Format::Jpg,
+                Format::Jpg,
+                &turned(Turn::Right),
+                probe.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(plan.steps.len(), 1);
+            assert_eq!(plan.steps[0].backend, Backend::Magick);
+            turns_after_orienting(&plan.steps[0].argv, "90");
+            assert_eq!(
+                by(&plan),
+                serde_json::json!({"turn": "right", "by": "pixels"})
+            );
+            assert!(
+                plan.warnings
+                    .iter()
+                    .any(|w| w == "The jpg is re-encoded at quality 92 to turn it."),
+                "{:?}",
+                plan.warnings
+            );
+        }
+    }
+
+    /// Any other change to the photo re-encodes it anyway, so the turn goes
+    /// into that run even where the tag alone could have made it.
+    #[test]
+    fn a_photo_with_another_change_is_turned_in_the_same_run() {
+        use crate::rotate::Turn;
+        let probe = shown(6, MediaProbe::default());
+        let t = Tuning {
+            quality: Some(80),
+            ..turned(Turn::Left)
+        };
+        let plan = turned_plan(Format::Jpg, Format::Jpg, &t, Some(&probe)).unwrap();
+        turns_after_orienting(&plan.steps[0].argv, "270");
+        assert_eq!(by(&plan)["by"], "pixels");
+    }
+
+    #[test]
+    fn a_lossless_image_is_turned_with_no_note_on_quality() {
+        use crate::rotate::Turn;
+        let plan = turned_plan(Format::Png, Format::Png, &turned(Turn::Half), None).unwrap();
+        turns_after_orienting(&plan.steps[0].argv, "180");
+        assert!(
+            !plan.warnings.iter().any(|w| w.contains("re-encoded")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn an_image_conversion_turns_the_picture_before_resizing_it() {
+        use crate::rotate::Turn;
+        let t = Tuning {
+            resize: Some("800x".into()),
+            ..turned(Turn::Left)
+        };
+        let plan = turned_plan(Format::Heic, Format::Jpg, &t, None).unwrap();
+        let argv = &plan.steps[0].argv;
+        turns_after_orienting(argv, "270");
+        let rotate = argv.iter().position(|a| a == "-rotate").unwrap();
+        let resize = argv.iter().position(|a| a == "-resize").unwrap();
+        assert!(rotate < resize, "{argv:?}");
+        let pdf = turned_plan(Format::Png, Format::Pdf, &turned(Turn::Right), None).unwrap();
+        turns_after_orienting(&pdf.steps[0].argv, "90");
+    }
+
+    #[test]
+    fn a_gif_is_turned_into_itself_frame_by_frame() {
+        use crate::rotate::Turn;
+        let plan = turned_plan(Format::Gif, Format::Gif, &turned(Turn::Right), None).unwrap();
+        assert_eq!(plan.steps[0].backend, Backend::Magick);
+        assert_eq!(
+            plan.steps[0].argv,
+            [
+                "in.gif",
+                "-coalesce",
+                "-rotate",
+                "90",
+                "-layers",
+                "optimize",
+                "out.gif"
+            ]
+        );
+        let e = turned_plan(
+            Format::Gif,
+            Format::Gif,
+            &Tuning {
+                resize: Some("320x".into()),
+                ..turned(Turn::Right)
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+    }
+
+    /// The common sideways phone video: filmed with the rotation locked, so
+    /// the picture is stored the right way up and the note turns it.
+    #[test]
+    fn a_video_whose_note_the_turn_undoes_is_retagged_without_reencoding() {
+        use crate::rotate::Turn;
+        let probe = shown(6, clip_probe(60));
+        for from in [Format::Mp4, Format::Mov] {
+            let plan = turned_plan(from, from, &turned(Turn::Left), Some(&probe)).unwrap();
+            assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+            assert_eq!(by(&plan), serde_json::json!({"turn": "left", "by": "tag"}));
+        }
+        // Stripped as well, it is copied with its tags cleared, then reset.
+        let t = Tuning {
+            strip_metadata: true,
+            ..turned(Turn::Left)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&probe)).unwrap();
+        assert!(has(&plan.steps[0].argv, ["-c", "copy"]), "{:?}", plan.steps);
+        assert_eq!(by(&plan)["by"], "tag");
+    }
+
+    #[test]
+    fn a_video_turned_off_the_way_it_is_stored_is_reencoded_turned() {
+        use crate::rotate::Turn;
+        for (turn, filter) in [
+            (Turn::Right, "transpose=clock"),
+            (Turn::Left, "transpose=cclock"),
+            (Turn::Half, "hflip,vflip"),
+        ] {
+            let probe = shown(1, clip_probe(60));
+            let plan = turned_plan(Format::Mp4, Format::Mp4, &turned(turn), Some(&probe)).unwrap();
+            let argv = &plan.steps[0].argv;
+            assert!(value(argv, "-vf").starts_with(filter), "{argv:?}");
+            assert!(has(argv, ["-c:v", "libx264"]), "{argv:?}");
+            assert_eq!(by(&plan)["by"], "pixels");
+            assert!(
+                plan.warnings
+                    .iter()
+                    .any(|w| w == "The video is re-encoded to turn it."),
+                "{:?}",
+                plan.warnings
+            );
+            assert!(
+                !plan
+                    .warnings
+                    .iter()
+                    .any(|w| w.starts_with("Re-encoded rather than stream-copied")),
+                "{:?}",
+                plan.warnings
+            );
+        }
+        // Without a probe there is no note to read, so the pixels turn.
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &turned(Turn::Left), None).unwrap();
+        assert!(value(&plan.steps[0].argv, "-vf").starts_with("transpose=cclock"));
+    }
+
+    #[test]
+    fn a_container_change_that_undoes_the_note_copies_and_retags() {
+        use crate::rotate::Turn;
+        let probe = shown(8, clip_probe(60));
+        let plan =
+            turned_plan(Format::Mov, Format::Mp4, &turned(Turn::Right), Some(&probe)).unwrap();
+        assert!(
+            has(&plan.steps[0].argv, ["-c:v", "copy"]),
+            "{:?}",
+            plan.steps
+        );
+        assert_eq!(by(&plan)["by"], "tag");
+        // mkv and webm hold no note conv resets, so their pixels turn.
+        let plan =
+            turned_plan(Format::Mov, Format::Mkv, &turned(Turn::Right), Some(&probe)).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            value(argv, "-filter:v:0").starts_with("transpose=clock"),
+            "{argv:?}"
+        );
+        assert_eq!(by(&plan)["by"], "pixels");
+    }
+
+    #[test]
+    fn mkv_and_webm_are_turned_by_their_pixels() {
+        use crate::rotate::Turn;
+        let plan = turned_plan(
+            Format::Mkv,
+            Format::Mkv,
+            &turned(Turn::Right),
+            Some(&clip_probe(60)),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            value(argv, "-filter:v:0").starts_with("transpose=clock"),
+            "{argv:?}"
+        );
+        let plan = turned_plan(
+            Format::Webm,
+            Format::Webm,
+            &turned(Turn::Left),
+            Some(&clip_probe(60)),
+        )
+        .unwrap();
+        assert!(value(&plan.steps[0].argv, "-vf").starts_with("transpose=cclock"));
+    }
+
+    #[test]
+    fn a_gif_target_turns_ahead_of_its_frame_rate_and_size() {
+        use crate::rotate::Turn;
+        let plan = turned_plan(
+            Format::Mp4,
+            Format::Gif,
+            &turned(Turn::Half),
+            Some(&clip_probe(5)),
+        )
+        .unwrap();
+        let vf = value(&plan.steps[0].argv, "-vf");
+        assert!(vf.starts_with("hflip,vflip,fps=15,"), "{vf}");
+        let sped = Tuning {
+            speed: Some(crate::speed::parse("2").unwrap()),
+            ..turned(Turn::Right)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Gif, &sped, Some(&clip_probe(5))).unwrap();
+        let vf = value(&plan.steps[0].argv, "-vf");
+        assert!(
+            vf.starts_with("setpts=PTS/2,transpose=clock,fps=15,"),
+            "{vf}"
+        );
+    }
+
+    /// `--resize` fits the turned picture: a 1280x720 clip turned a quarter
+    /// is 720 wide, so 720x leaves it as it is.
+    #[test]
+    fn a_quarter_turn_is_sized_as_the_turned_picture() {
+        use crate::rotate::Turn;
+        let t = Tuning {
+            resize: Some("720x".into()),
+            ..turned(Turn::Right)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&clip_probe(60))).unwrap();
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.starts_with("Source is 720x1280; --resize 720x left it unchanged")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn rotate_is_refused_where_there_is_no_picture() {
+        use crate::rotate::Turn;
+        for (from, to) in [
+            (Format::Mp4, Format::M4a),
+            (Format::Mp3, Format::Mp3),
+            (Format::Docx, Format::Pdf),
+        ] {
+            let e = turned_plan(from, to, &turned(Turn::Right), Some(&clip_probe(60))).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation, "{from:?} -> {to:?}");
+            assert!(
+                e.message.starts_with(&format!(
+                    "--rotate does not apply to {} -> {}",
+                    from.ext(),
+                    to.ext()
+                )),
+                "{}",
+                e.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_sized_video_is_copied_and_retagged_or_encoded_turned() {
+        use crate::rotate::Turn;
+        let small = Tuning {
+            max_size: Some(crate::size::parse("100mb").unwrap()),
+            ..turned(Turn::Left)
+        };
+        let probe = shown(6, clip_probe(60));
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &small, Some(&probe)).unwrap();
+        assert_eq!(
+            plan.sizing.as_ref().unwrap().strategy,
+            crate::sized::Strategy::Copy
+        );
+        assert_eq!(by(&plan)["by"], "tag");
+        let plan = turned_plan(Format::Mov, Format::Mp4, &small, Some(&probe)).unwrap();
+        assert_eq!(
+            plan.sizing.as_ref().unwrap().strategy,
+            crate::sized::Strategy::Remux
+        );
+        assert_eq!(by(&plan)["by"], "tag");
+        // Turned off the way it is stored, it is encoded turned.
+        let right = Tuning {
+            rotate: Some(Turn::Right),
+            ..small
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &right, Some(&probe)).unwrap();
+        assert_eq!(
+            plan.sizing.as_ref().unwrap().strategy,
+            crate::sized::Strategy::Encode
+        );
+        let pass2 = &plan.steps.last().unwrap().argv;
+        assert!(
+            value(pass2, "-vf").starts_with("transpose=clock"),
+            "{pass2:?}"
+        );
+        assert_eq!(by(&plan)["by"], "pixels");
+    }
+
+    /// A turn keeps the rest of the file, the location among it, and says
+    /// so as a conversion does; stripped as well, it does not.
+    #[test]
+    fn a_turned_photo_says_it_keeps_its_location() {
+        use crate::rotate::Turn;
+        let located = |orientation| MediaProbe {
+            image: Some(crate::probe::ImageTraits {
+                alpha: Some(false),
+                multi_frame: false,
+                location: true,
+                compressed: false,
+            }),
+            orientation,
+            ..MediaProbe::default()
+        };
+        let says = |plan: &ConversionPlan| {
+            plan.warnings
+                .iter()
+                .any(|w| w.starts_with("The source records a GPS location"))
+        };
+        for (from, turn, probe) in [
+            (Format::Heic, Turn::Right, located(None)),
+            (Format::Jpg, Turn::Right, located(None)),
+            (
+                Format::Jpg,
+                Turn::Left,
+                located(crate::rotate::Orientation::from_exif(6)),
+            ),
+        ] {
+            let plan = turned_plan(from, from, &turned(turn), Some(&probe)).unwrap();
+            assert!(says(&plan), "{from:?} {turn:?}: {:?}", plan.warnings);
+        }
+        let t = Tuning {
+            strip_metadata: true,
+            ..turned(Turn::Right)
+        };
+        let plan = turned_plan(Format::Jpg, Format::Jpg, &t, Some(&located(None))).unwrap();
+        assert!(!says(&plan), "{:?}", plan.warnings);
+    }
+
+    /// The TIFF detour is `--strip-metadata`'s, to keep ImageMagick from
+    /// writing text chunks; a turn alone keeps the PNG's own and runs once.
+    #[test]
+    fn a_png_turned_into_a_png_runs_once_and_keeps_its_text() {
+        use crate::rotate::Turn;
+        let plan = turned_plan(Format::Png, Format::Png, &turned(Turn::Right), None).unwrap();
+        assert_eq!(plan.steps.len(), 1, "{:?}", plan.steps);
+        let t = Tuning {
+            strip_metadata: true,
+            ..turned(Turn::Right)
+        };
+        let plan = turned_plan(Format::Png, Format::Png, &t, None).unwrap();
+        assert_eq!(plan.steps.len(), 2, "{:?}", plan.steps);
+    }
+
+    /// "Re-encoded to turn it" only where the turn is why: a cut that
+    /// cannot be copied, a speed change or a knob says its own reason, and
+    /// a turn the tag alone could make takes no blame for it.
+    #[test]
+    fn a_turn_is_named_as_the_reason_for_a_reencode_only_when_it_is() {
+        use crate::rotate::Turn;
+        let says =
+            |plan: &ConversionPlan, what: &str| plan.warnings.iter().any(|w| w.starts_with(what));
+        let sideways = shown(6, clip_probe(60));
+        // A cut starting after 0 is re-encoded for its own reason.
+        let t = Tuning {
+            rotate: Some(Turn::Left),
+            ..ranged(Some("5"), None)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&sideways)).unwrap();
+        assert!(
+            says(
+                &plan,
+                "Re-encoded rather than stream-copied, because a copied cut"
+            ),
+            "{:?}",
+            plan.warnings
+        );
+        assert!(
+            !says(&plan, crate::rotate::VIDEO_NOTE),
+            "{:?}",
+            plan.warnings
+        );
+        assert_eq!(by(&plan)["by"], "pixels");
+        // A speed change is never a copy, and says nothing.
+        let t = Tuning {
+            speed: Some(crate::speed::parse("2").unwrap()),
+            ..turned(Turn::Left)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&sideways)).unwrap();
+        assert!(
+            !says(&plan, crate::rotate::VIDEO_NOTE),
+            "{:?}",
+            plan.warnings
+        );
+        // A knob says it re-encodes; the turn adds nothing to that.
+        let t = Tuning {
+            crf: Some(28),
+            ..turned(Turn::Right)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&clip_probe(60))).unwrap();
+        assert!(says(
+            &plan,
+            "Re-encoded rather than stream-copied, because a video knob"
+        ));
+        assert!(
+            !says(&plan, crate::rotate::VIDEO_NOTE),
+            "{:?}",
+            plan.warnings
+        );
+        // A sized encode of a turn the tag could make is the size's doing.
+        let big = Tuning {
+            max_size: Some(crate::size::parse("1mb").unwrap()),
+            ..turned(Turn::Left)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &big, Some(&sideways)).unwrap();
+        assert_eq!(
+            plan.sizing.as_ref().unwrap().strategy,
+            crate::sized::Strategy::Encode
+        );
+        assert!(
+            !says(&plan, crate::rotate::VIDEO_NOTE),
+            "{:?}",
+            plan.warnings
+        );
+        let plan = turned_plan(
+            Format::Mp4,
+            Format::Mp4,
+            &Tuning {
+                rotate: Some(Turn::Right),
+                ..big
+            },
+            Some(&sideways),
+        )
+        .unwrap();
+        assert!(
+            says(&plan, crate::rotate::VIDEO_NOTE),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// webm's static recipe has no filter of its own; a turn into it needs
+    /// the probe-aware transcode, as `--fps` and `--resize` do.
+    #[test]
+    fn a_turn_into_webm_without_a_probe_says_it_needs_ffprobe() {
+        use crate::rotate::Turn;
+        for from in [Format::Mp4, Format::Webm] {
+            let e = turned_plan(from, Format::Webm, &turned(Turn::Right), None).unwrap_err();
+            assert!(
+                e.message
+                    .starts_with(&format!("--rotate on {} -> webm needs ffprobe", from.ext())),
+                "{}",
+                e.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_turn_of_a_file_with_no_picture_is_refused() {
+        use crate::rotate::Turn;
+        let sound = MediaProbe {
+            audio_codecs: vec!["aac".into()],
+            duration_ms: Some(60_000),
+            ..MediaProbe::default()
+        };
+        for to in [Format::Mp4, Format::Mkv] {
+            let e = turned_plan(Format::Mp4, to, &turned(Turn::Right), Some(&sound)).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation);
+            assert_eq!(
+                e.message,
+                "--rotate turns a picture, and in.mp4 has no video stream"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gif_turned_into_itself_takes_no_other_flag() {
+        use crate::rotate::Turn;
+        let e = turned_plan(
+            Format::Gif,
+            Format::Gif,
+            &Tuning {
+                resize: Some("320x".into()),
+                ..turned(Turn::Right)
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert_eq!(
+            e.message,
+            "--rotate on a gif kept as gif turns its frames and changes nothing else; \
+             add --to mp4 to change it as well"
         );
     }
 }

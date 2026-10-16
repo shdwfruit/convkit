@@ -4365,3 +4365,410 @@ fn a_cut_mkv_with_subtitles_and_chapters_starts_at_the_cut() {
     convert_tuned(&src, &m4a, &ranged(Some("7"), Some("10"))).unwrap();
     assert_eq!(chapters(&m4a), 0);
 }
+
+// --- --rotate -------------------------------------------------------------
+
+fn turned(turn: convkit_core::rotate::Turn) -> Tuning {
+    Tuning {
+        rotate: Some(turn),
+        ..Tuning::default()
+    }
+}
+
+fn by(outcome: &exec::Outcome) -> convkit_core::rotate::By {
+    outcome.rotation.expect("a rotation report").by
+}
+
+/// A 160x90 picture, red on the left half and blue on the right, so a turn
+/// can be read off where the red went.
+fn halves(dir: &tempfile::TempDir, out: &str) -> PathBuf {
+    synth_image(
+        dir,
+        &[
+            "-size", "80x90", "xc:red", "-size", "80x90", "xc:blue", "+append",
+        ],
+        out,
+    )
+}
+
+/// Which side of a picture, as it is shown, is red: `top`, `bottom`,
+/// `left` or `right`.
+fn red_side(path: &Path) -> &'static str {
+    let probe = "%[fx:p{w/2,h/8}.r>0.5],%[fx:p{w/2,h*7/8}.r>0.5],\
+                 %[fx:p{w/8,h/2}.r>0.5],%[fx:p{w*7/8,h/2}.r>0.5]";
+    // `magick ... info:` rather than identify, which applies no operator.
+    let shown = format!("{}[0]", path.display());
+    let out = Command::new(magick())
+        .args([shown.as_str(), "-auto-orient", "-format", probe, "info:"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ImageMagick: {e}"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let answer = String::from_utf8_lossy(&out.stdout);
+    match answer.trim() {
+        "1,0,1,1" | "1,0,0,0" => "top",
+        "0,1,1,1" | "0,1,0,0" => "bottom",
+        "1,1,1,0" | "0,0,1,0" => "left",
+        "1,1,0,1" | "0,0,0,1" => "right",
+        other => panic!("no one red side in {}: {other}", path.display()),
+    }
+}
+
+/// The JPEG at `path` with an EXIF segment saying to show it as `tag`
+/// spliced in after its start marker. ImageMagick writes no EXIF of its
+/// own, and a phone's is what this stands for.
+fn tag_jpeg(path: &Path, tag: u8) {
+    let mut tiff = b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+    tiff.extend([tag, 0, 0, 0, 0, 0, 0, 0]);
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend(tiff);
+    splice_app1(path, &exif);
+}
+
+/// An XMP packet holding the orientation, as an editor that writes one keeps
+/// it beside the EXIF tag.
+fn xmp_jpeg(path: &Path, tag: u8) {
+    let mut xmp = b"http://ns.adobe.com/xap/1.0/\0".to_vec();
+    xmp.extend(
+        format!(
+            "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?><x:xmpmeta \
+             xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/\
+             22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\" xmlns:tiff=\"http://ns.\
+             adobe.com/tiff/1.0/\" tiff:Orientation=\"{tag}\"/></rdf:RDF></x:xmpmeta>\
+             <?xpacket end=\"w\"?>"
+        )
+        .as_bytes(),
+    );
+    splice_app1(path, &xmp);
+}
+
+fn splice_app1(path: &Path, data: &[u8]) {
+    let jpeg = std::fs::read(path).unwrap();
+    let mut out = jpeg[..2].to_vec();
+    out.extend([0xFF, 0xE1]);
+    out.extend(u16::try_from(data.len() + 2).unwrap().to_be_bytes());
+    out.extend(data);
+    out.extend(&jpeg[2..]);
+    std::fs::write(path, out).unwrap();
+}
+
+/// The orientation every XMP packet in a file gives, decoding ImageMagick's
+/// compressed PNG text chunk, read with ImageMagick itself.
+fn xmp_orientations(path: &Path) -> Vec<String> {
+    let out = Command::new(magick())
+        .arg(format!("{}[0]", path.display()))
+        .arg("xmp:-")
+        .output()
+        .unwrap();
+    let xml = String::from_utf8_lossy(&out.stdout).into_owned();
+    xml.match_indices("tiff:Orientation")
+        .filter_map(|(i, _)| xml[i..].chars().find(|c| c.is_ascii_digit()))
+        .map(String::from)
+        .collect()
+}
+
+/// Writes a display matrix into the first track header of an mp4 or mov,
+/// as a phone does for a portrait video: `right` shows the stored picture a
+/// quarter turn right. Done here rather than with ffmpeg's
+/// `-display_rotation`, which ffmpeg 6.1 does not have.
+fn turn_note(path: &Path) {
+    const ONE: i32 = 0x10000;
+    let mut bytes = std::fs::read(path).unwrap();
+    let at = bytes.windows(4).position(|w| w == b"tkhd").unwrap() + 4;
+    let times = if bytes[at] == 1 { 32 } else { 20 };
+    let m = at + 4 + times + 16;
+    let right = [0, ONE, 0, -ONE, 0, 0, 0, 0, 1 << 30];
+    for (i, v) in right.iter().enumerate() {
+        bytes[m + i * 4..m + i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// Two seconds of the `halves` picture as video, at 30 fps.
+fn halves_video(dir: &tempfile::TempDir, out: &str) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let path = dir.path().join(out);
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:size=80x90:rate=30:duration=2",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "color=blue:size=80x90:rate=30:duration=2",
+        ])
+        .args(["-f", "lavfi", "-i", "sine=duration=2"])
+        .args([
+            "-filter_complex",
+            "[0][1]hstack[v]",
+            "-map",
+            "[v]",
+            "-map",
+            "2",
+        ])
+        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+        .arg(&path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "building {out} failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    path
+}
+
+/// The first frame of a video, as shown, saved as a PNG beside it.
+fn first_frame(video: &Path) -> PathBuf {
+    let resolver = Resolver::new();
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let png = video.with_extension("frame.png");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(video)
+        .args(["-frames:v", "1"])
+        .arg(&png)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    png
+}
+
+/// The positions at which two files differ.
+fn differing(a: &Path, b: &Path) -> usize {
+    let (a, b) = (std::fs::read(a).unwrap(), std::fs::read(b).unwrap());
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(&b).filter(|(x, y)| x != y).count()
+}
+
+/// A phone that thought it was held upright tagged a landscape shot to be
+/// shown a quarter turn right. Turned left, it is the picture as stored, so
+/// only the tag changes: one byte.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_photo_sideways_by_its_tag_is_fixed_by_the_tag_alone() {
+    use convkit_core::rotate::{By, Turn};
+    let dir = tmp();
+    let photo = halves(&dir, "IMG_1.jpg");
+    tag_jpeg(&photo, 6);
+    assert_eq!(red_side(&photo), "top");
+    let out = dir.path().join("IMG_1-rotated.jpg");
+    let outcome = convert_tuned(&photo, &out, &turned(Turn::Left)).unwrap();
+    assert_eq!(by(&outcome), By::Tag);
+    assert!(outcome.backends.is_empty(), "{:?}", outcome.backends);
+    assert_eq!(differing(&photo, &out), 1);
+    assert_eq!(identify_format(&out, "%[orientation]"), "TopLeft");
+    assert_eq!(red_side(&out), "left");
+}
+
+/// Any other turn turns the pixels, and the tag then says the picture is
+/// shown as stored.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_photo_is_otherwise_turned_by_its_pixels_and_tagged_upright() {
+    use convkit_core::rotate::{By, Turn};
+    let dir = tmp();
+    for (tag, turn, side) in [
+        (None, Turn::Right, "top"),
+        (None, Turn::Left, "bottom"),
+        (None, Turn::Half, "right"),
+        // Shown a quarter right already, red is on top; a quarter more puts
+        // it on the right.
+        (Some(6), Turn::Right, "right"),
+    ] {
+        let photo = halves(&dir, "photo.jpg");
+        if let Some(tag) = tag {
+            tag_jpeg(&photo, tag);
+        }
+        let out = dir.path().join(format!("{turn:?}-{tag:?}.jpg"));
+        let outcome = convert_tuned(&photo, &out, &turned(turn)).unwrap();
+        assert_eq!(by(&outcome), By::Pixels);
+        assert_eq!(red_side(&out), side, "{tag:?} {turn:?}");
+        assert!(
+            matches!(
+                identify_format(&out, "%[orientation]").as_str(),
+                "TopLeft" | "Undefined"
+            ),
+            "{tag:?} {turn:?}"
+        );
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| w == "The jpg is re-encoded at quality 92 to turn it."),
+            "{:?}",
+            outcome.warnings
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn png_gif_and_converted_pictures_are_turned_by_their_pixels() {
+    use convkit_core::rotate::Turn;
+    let dir = tmp();
+    let png = halves(&dir, "scan.png");
+    let out = dir.path().join("scan-rotated.png");
+    convert_tuned(&png, &out, &turned(Turn::Half)).unwrap();
+    assert_eq!(red_side(&out), "right");
+    assert_eq!(imagemagick_dimensions(&out), (160, 90));
+
+    let webp = dir.path().join("scan.webp");
+    convert_tuned(&png, &webp, &turned(Turn::Right)).unwrap();
+    assert_eq!(red_side(&webp), "top");
+    assert_eq!(imagemagick_dimensions(&webp), (90, 160));
+
+    let gif = synth_image(
+        &dir,
+        &[
+            "-delay",
+            "10",
+            "(",
+            &png.to_string_lossy(),
+            ")",
+            "(",
+            &png.to_string_lossy(),
+            ")",
+            "-loop",
+            "0",
+        ],
+        "anim.gif",
+    );
+    let out = dir.path().join("anim-rotated.gif");
+    convert_tuned(&gif, &out, &turned(Turn::Left)).unwrap();
+    // The canvas, which an optimised frame that changes nothing is smaller
+    // than.
+    let frames = run_identify(
+        &magick(),
+        &["-format", "%W %H %T\n", &out.to_string_lossy()],
+    );
+    assert_eq!(
+        frames.lines().collect::<Vec<_>>(),
+        ["90 160 10", "90 160 10"]
+    );
+    assert_eq!(red_side(&out), "bottom");
+}
+
+/// The common sideways phone video: filmed with the rotation locked, so it
+/// is stored the right way up and its note turns it. Turned back, the note
+/// is reset and every other byte is the source's; into mp4 the streams are
+/// copied and the note reset the same way.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_video_sideways_by_its_note_is_fixed_without_reencoding() {
+    use convkit_core::rotate::{By, Turn};
+    let dir = tmp();
+    let mov = halves_video(&dir, "IMG_2.mov");
+    turn_note(&mov);
+    assert_eq!(probe_media(&mov).display_dimensions(), Some((90, 160)));
+
+    let out = dir.path().join("IMG_2-rotated.mov");
+    let outcome = convert_tuned(&mov, &out, &turned(Turn::Left)).unwrap();
+    assert_eq!(by(&outcome), By::Tag);
+    assert!(outcome.backends.is_empty(), "{:?}", outcome.backends);
+    assert!(differing(&mov, &out) <= 36);
+    let p = probe_media(&out);
+    assert_eq!(p.rotation, None);
+    assert_eq!(p.display_dimensions(), Some((160, 90)));
+
+    let mp4 = dir.path().join("IMG_2.mp4");
+    let outcome = convert_tuned(&mov, &mp4, &turned(Turn::Left)).unwrap();
+    assert_eq!(by(&outcome), By::Tag);
+    assert!(outcome.remuxed, "{outcome:?}");
+    let p = probe_media(&mp4);
+    assert_eq!(p.rotation, None);
+    assert_eq!(p.display_dimensions(), Some((160, 90)));
+    assert_eq!(red_side(&first_frame(&mp4)), "left");
+}
+
+/// Any other turn re-encodes the video turned, and leaves no note.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_video_is_otherwise_reencoded_turned_with_no_note() {
+    use convkit_core::rotate::{By, Turn};
+    let dir = tmp();
+    let mov = halves_video(&dir, "clip.mov");
+    for (to, turn, side) in [
+        ("mp4", Turn::Right, "top"),
+        ("mkv", Turn::Left, "bottom"),
+        ("webm", Turn::Half, "right"),
+        ("gif", Turn::Right, "top"),
+    ] {
+        let out = dir.path().join(format!("clip.{to}"));
+        let outcome = convert_tuned(&mov, &out, &turned(turn)).unwrap();
+        assert_eq!(by(&outcome), By::Pixels, "{to}");
+        let shown = if to == "gif" {
+            out.clone()
+        } else {
+            first_frame(&out)
+        };
+        assert_eq!(red_side(&shown), side, "{to}");
+        if to != "gif" {
+            assert_eq!(probe_media(&out).rotation, None, "{to}");
+        }
+    }
+    // Shown a quarter right, a quarter more is upside down from the stored
+    // picture: the note is applied, the turn made, and the note gone.
+    turn_note(&mov);
+    let out = dir.path().join("clip-rotated.mov");
+    convert_tuned(&mov, &out, &turned(Turn::Right)).unwrap();
+    let p = probe_media(&out);
+    assert_eq!(p.rotation, None);
+    assert_eq!((p.width, p.height), (Some(160), Some(90)));
+    assert_eq!(red_side(&first_frame(&out)), "right");
+}
+
+/// An XMP copy of the old orientation does not outlive the turn: every
+/// copy says the picture is shown as stored, in every format that keeps it.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_turned_picture_keeps_no_xmp_copy_of_its_old_orientation() {
+    use convkit_core::rotate::Turn;
+    let dir = tmp();
+    let photo = halves(&dir, "IMG_3.jpg");
+    tag_jpeg(&photo, 6);
+    xmp_jpeg(&photo, 6);
+    assert_eq!(xmp_orientations(&photo), ["6"]);
+    for ext in ["jpg", "png", "webp", "tiff"] {
+        let out = dir.path().join(format!("turned.{ext}"));
+        convert_tuned(&photo, &out, &turned(Turn::Right)).unwrap();
+        assert_eq!(red_side(&out), "right", "{ext}");
+        let left = xmp_orientations(&out);
+        assert!(left.iter().all(|o| o == "1"), "{ext}: {left:?}");
+    }
+}
+
+/// An iPhone photo stays a HEIC, turned, where this ImageMagick can write
+/// one.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_heic_is_turned_into_a_heic() {
+    use convkit_core::rotate::{By, Turn};
+    if !magick_writes("HEIC") {
+        eprintln!("this ImageMagick cannot write HEIC; not checked");
+        return;
+    }
+    let dir = tmp();
+    let src = fixture("photo.heic");
+    let (w, h) = imagemagick_dimensions(&src);
+    let out = dir.path().join("photo-rotated.heic");
+    let outcome = convert_tuned(&src, &out, &turned(Turn::Right)).unwrap();
+    assert_eq!(by(&outcome), By::Pixels);
+    assert_eq!(imagemagick_dimensions(&out), (h, w));
+    assert_eq!(identify_format(&out, "%[orientation]"), "TopLeft");
+    assert_eq!(&std::fs::read(&out).unwrap()[4..12], b"ftypheic");
+}

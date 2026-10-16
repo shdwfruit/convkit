@@ -285,23 +285,28 @@ fn is_image_merge(paths: &[PathBuf]) -> bool {
 /// A run that can keep the input's own format: `--max-size`, which sizes a
 /// video into its own container; a range (`--start`, `--end`,
 /// `--duration`) or `--speed`, which cut or retime video and audio into
-/// their own format; or `--strip-metadata`, which strips most image, video
-/// and audio files into their own format. A derived output that would land
-/// on its input is named NAME-SUFFIX.EXT. With a range, a speed or a size,
-/// their rules and name apply: they are the narrower, and each one given
-/// must keep the format.
+/// their own format; `--rotate`, which turns most image and video files
+/// into their own format; or `--strip-metadata`, which strips most image,
+/// video and audio files into their own format. A derived output that would
+/// land on its input is named NAME-SUFFIX.EXT. With a range, a speed or a
+/// size, their rules and name apply: they are the narrower, and each one
+/// given must keep the format. A turn adds its name to theirs, and each
+/// format kept must also be one it can turn.
 struct OwnFormat {
     sized: bool,
     /// Cut or retimed: either needs a timeline.
     timed: bool,
+    turned: bool,
+    stripped: bool,
     /// The flag, for messages: the range's first flag, else `--speed`, else
-    /// the size's.
+    /// the size's, else `--rotate`.
     flag: &'static str,
     /// What it does to each file, and what the result is called.
     verb: &'static str,
     done: &'static str,
-    /// Added to a derived name: the range, the speed and the size, in the
-    /// order they happen (`1m02s-1m10s-2x-5mb`), or `stripped`.
+    /// Added to a derived name: the range, the speed, the turn and the size,
+    /// in the order they happen (`1m02s-1m10s-2x-rotated-5mb`), or
+    /// `stripped`.
     suffix: String,
 }
 
@@ -315,6 +320,8 @@ impl OwnFormat {
             true => format!("{}-pitched", s.suffix()),
             false => s.suffix(),
         });
+        let turned = cli.rotate.is_some();
+        let turn = turned.then(|| "rotated".to_string());
         if range.is_some() || speed.is_some() {
             let (flag, verb, done) = match (&range, cli.speed) {
                 (Some(r), _) => (r.flag(), "cut", "cut"),
@@ -322,10 +329,15 @@ impl OwnFormat {
                 (None, _) => ("--speed", "speed up", "sped-up"),
             };
             let cut = range.as_ref().map(convkit_core::trim::name_suffix);
-            let parts: Vec<String> = [cut, speed, size.clone()].into_iter().flatten().collect();
+            let parts: Vec<String> = [cut, speed, turn, size.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
             return Some(OwnFormat {
                 sized: size.is_some(),
                 timed: true,
+                turned,
+                stripped: cli.strip_metadata,
                 flag,
                 verb,
                 done,
@@ -333,18 +345,35 @@ impl OwnFormat {
             });
         }
         if let Some(size) = size {
+            let parts: Vec<String> = [turn, Some(size)].into_iter().flatten().collect();
             return Some(OwnFormat {
                 sized: true,
                 timed: false,
+                turned,
+                stripped: cli.strip_metadata,
                 flag: "--max-size",
                 verb: "size",
                 done: "sized",
-                suffix: size,
+                suffix: parts.join("-"),
+            });
+        }
+        if turned {
+            return Some(OwnFormat {
+                sized: false,
+                timed: false,
+                turned,
+                stripped: cli.strip_metadata,
+                flag: "--rotate",
+                verb: "rotate",
+                done: "rotated",
+                suffix: "rotated".to_string(),
             });
         }
         cli.strip_metadata.then(|| OwnFormat {
             sized: false,
             timed: false,
+            turned: false,
+            stripped: true,
             flag: "--strip-metadata",
             verb: "strip",
             done: "stripped",
@@ -354,11 +383,13 @@ impl OwnFormat {
 
     /// Whether this run can keep `f` as `f`.
     fn keeps(&self, f: Format) -> bool {
+        let turnable = !self.turned || convkit_core::rotate::in_place(f).is_ok();
         if self.sized || self.timed {
             (!self.sized || convkit_core::sized::is_video_target(f))
                 && (!self.timed || convkit_core::registry::takes_range(f, f))
+                && turnable
         } else {
-            convkit_core::metadata::in_place(f).is_ok()
+            turnable && (!self.stripped || convkit_core::metadata::in_place(f).is_ok())
         }
     }
 
@@ -370,6 +401,13 @@ impl OwnFormat {
         match f {
             Some(f) if self.keeps(f) => Ok(f.ext()),
             _ if self.sized || self.timed => Ok("mp4"),
+            // A format the turn cannot keep says the turn's fix; one it can,
+            // the strip's, which is what refused it.
+            Some(f) if self.turned && convkit_core::rotate::in_place(f).is_err() => {
+                convkit_core::rotate::target_for(f)
+                    .map(|to| to.ext())
+                    .ok_or_else(|| convkit_core::rotate::in_place(f).err().unwrap_or_default())
+            }
             Some(f) => convkit_core::metadata::strip_target_for(f)
                 .map(|to| to.ext())
                 .ok_or_else(|| {
@@ -387,9 +425,14 @@ impl OwnFormat {
 /// input (or in `-o`); `name_own_format_outputs` adds the suffix.
 fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Result<Job, ConvError> {
     let from = format_of(input)?;
+    let invalid = |why| ConvError::new(ErrorCode::InvalidInvocation, why);
     if !own.sized && !own.timed {
-        convkit_core::metadata::in_place(from)
-            .map_err(|why| ConvError::new(ErrorCode::InvalidInvocation, why))?;
+        if own.turned {
+            convkit_core::rotate::in_place(from).map_err(invalid)?;
+        }
+        if own.stripped {
+            convkit_core::metadata::in_place(from).map_err(invalid)?;
+        }
     }
     if own.sized && !convkit_core::sized::is_video_target(from) {
         // `--to mp4` is only a fix where a conversion to mp4 exists (avi,
@@ -1466,6 +1509,7 @@ mod tests {
             duration: None,
             speed: None,
             shift_pitch: false,
+            rotate: None,
             yes: false,
             no_install: false,
             outdir,
@@ -2334,5 +2378,115 @@ mod tests {
         cli.strip_metadata = true;
         let jobs = plan_jobs(&cli).unwrap();
         assert_eq!(jobs[0].output, dir.path().join("clip-10mb.mp4"));
+    }
+
+    // --- --rotate ------------------------------------------------------------
+
+    fn rotated(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+        let mut c = cli_for(paths, to, outdir);
+        c.rotate = Some(convkit_core::rotate::Turn::Right);
+        c
+    }
+
+    #[test]
+    fn a_lone_path_turned_keeps_its_format_and_gains_a_suffix() {
+        for (name, out, format) in [
+            ("IMG_0042.jpg", "IMG_0042-rotated.jpg", Format::Jpg),
+            ("IMG_0043.HEIC", "IMG_0043-rotated.HEIC", Format::Heic),
+            ("clip.MOV", "clip-rotated.MOV", Format::Mov),
+            ("screen.mkv", "screen-rotated.mkv", Format::Mkv),
+            ("anim.gif", "anim-rotated.gif", Format::Gif),
+            ("scan.png", "scan-rotated.png", Format::Png),
+        ] {
+            let jobs = plan_jobs(&rotated(v(&[name]), None, None)).unwrap();
+            assert_eq!(jobs[0].output, p(out), "{name}");
+            assert_eq!((jobs[0].from, jobs[0].to), (format, format), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_turn_goes_in_the_name_after_a_cut_and_a_speed_and_before_a_size() {
+        let mut c = cut(v(&["talk.mp4"]), None, None);
+        c.speed = Some(convkit_core::speed::parse("2").unwrap());
+        c.rotate = Some(convkit_core::rotate::Turn::Left);
+        c.max_size = Some(convkit_core::size::parse("5mb").unwrap());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("talk-1m02s-1m10s-2x-rotated-5mb.mp4")
+        );
+        let mut c = rotated(v(&["clip.mp4"]), None, None);
+        c.max_size = Some(convkit_core::size::parse("10mb").unwrap());
+        assert_eq!(plan_jobs(&c).unwrap()[0].output, p("clip-rotated-10mb.mp4"));
+        // Stripped as well, it takes the turn's name, as a cut's does.
+        let mut c = rotated(v(&["photo.jpg"]), None, None);
+        c.strip_metadata = true;
+        assert_eq!(plan_jobs(&c).unwrap()[0].output, p("photo-rotated.jpg"));
+    }
+
+    #[test]
+    fn a_turned_batch_writes_into_a_rotated_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.jpg"), dir.path().join("b.heic"));
+        let jobs = plan_jobs(&rotated(vec![a, b], Some("jpg"), None)).unwrap();
+        assert_eq!(under(dir.path(), &jobs), ["rotated/a.jpg", "rotated/b.jpg"]);
+        assert!(dir.path().join("rotated").is_dir());
+    }
+
+    #[test]
+    fn a_turn_into_another_format_keeps_the_name_it_was_given() {
+        let jobs = plan_jobs(&rotated(v(&["IMG_1.heic", "IMG_1.jpg"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("IMG_1.jpg"));
+        assert_eq!((jobs[0].from, jobs[0].to), (Format::Heic, Format::Jpg));
+    }
+
+    #[test]
+    fn a_lone_file_that_cannot_be_turned_into_itself_says_what_to_do() {
+        for (input, want) in [
+            (
+                "clip.avi",
+                "conv cannot keep avi files as avi; add --to mp4 to turn them",
+            ),
+            (
+                "logo.svg",
+                "conv cannot keep svg files as svg; add --to png to turn them",
+            ),
+            (
+                "song.mp3",
+                "--rotate does not apply to mp3 -> mp3: it turns images, video and GIFs",
+            ),
+        ] {
+            let e = plan_jobs(&rotated(v(&[input]), None, None)).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation, "{input}");
+            assert_eq!(e.message, want, "{input}");
+        }
+    }
+
+    #[test]
+    fn two_files_turned_without_to_are_refused_with_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.jpg"), dir.path().join("b.jpg"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+        let e = plan_jobs(&rotated(vec![a, b], None, None)).unwrap_err();
+        assert!(
+            e.message.contains("add --to jpg to rotate each one"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.contains("to write a rotated copy there"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// A turn alone keeps a gif; stripped as well, it cannot, and the
+    /// refusal says what to do rather than nothing.
+    #[test]
+    fn gifs_turned_and_stripped_without_to_are_told_what_to_do() {
+        let mut c = rotated(v(&["a.gif", "b.gif", "c.gif"]), None, None);
+        c.strip_metadata = true;
+        let e = plan_jobs(&c).unwrap_err();
+        assert!(e.message.contains("add --to mp4"), "{:?}", e.message);
     }
 }

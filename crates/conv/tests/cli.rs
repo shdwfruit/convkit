@@ -1351,6 +1351,65 @@ fn capabilities_lists_strip_metadata_where_it_applies() {
     assert!(!stdout.contains("--strip-metadata"), "{stdout}");
 }
 
+/// `--rotate` is listed on pairs with a picture to turn, and not on sound.
+#[test]
+fn capabilities_lists_rotate_where_there_is_a_picture() {
+    let assert = conv().args(["capabilities", "mp4"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for pair in ["mp4 -> gif", "mp4 -> webm", "mp4 -> mkv"] {
+        let line = stdout.lines().find(|l| l.contains(pair)).unwrap();
+        assert!(line.contains("--rotate"), "{pair}: {stdout}");
+    }
+    let m4a = stdout.lines().find(|l| l.contains("mp4 -> m4a")).unwrap();
+    assert!(!m4a.contains("--rotate"), "{stdout}");
+
+    let assert = conv().args(["capabilities", "heic"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let jpg = stdout.lines().find(|l| l.contains("heic -> jpg")).unwrap();
+    assert!(jpg.contains("--rotate"), "{stdout}");
+}
+
+/// A dry run of a turn the tag makes shows no command, and says why.
+#[test]
+fn dry_run_of_a_photo_whose_tag_the_turn_undoes_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let photo = dir.path().join("IMG_1.jpg");
+    std::fs::write(&photo, tagged_jpeg(6)).unwrap();
+    let assert = conv()
+        .args(["--dry-run", "--rotate", "left"])
+        .arg(&photo)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("only its orientation tag changed"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("magick"), "{stdout}");
+
+    let assert = conv()
+        .args(["--dry-run", "--rotate", "right"])
+        .arg(&photo)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("-auto-orient -rotate 90"), "{stdout}");
+}
+
+/// The headers of a JPEG whose EXIF tag shows it as `tag`, then the start of
+/// a scan: enough for conv to read the tag, not a picture.
+fn tagged_jpeg(tag: u8) -> Vec<u8> {
+    let mut tiff = b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+    tiff.extend([tag, 0, 0, 0, 0, 0, 0, 0]);
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend(tiff);
+    let mut j = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    j.extend(u16::try_from(exif.len() + 2).unwrap().to_be_bytes());
+    j.extend(exif);
+    j.extend([0xFF, 0xDA, 0, 2, 0xFF, 0xD9]);
+    j
+}
+
 /// `conv scan` answers the one question the tool could not: what is in front
 /// of me, and what could it become. `capabilities` answers it globally and
 /// per-format; the only contextual alternative was `conv <dir> --to jpg

@@ -161,6 +161,12 @@ struct Prepared<'a> {
     /// The speed change, carried into every pass. Never copied.
     retime: Option<crate::speed::Retime>,
     speed: Option<crate::speed::SpeedReport>,
+    /// The turn (`--rotate`), carried into every pass.
+    turn: Option<crate::rotate::Turn>,
+    /// Whether the turn brings the picture back to the way it is stored, so
+    /// that a copy into mp4 or mov makes it with its note reset. Any other
+    /// turn is of the pixels, and never copied.
+    retag: bool,
     /// The range's notes, then the speed change's.
     clip_notes: Vec<String>,
 }
@@ -187,7 +193,14 @@ pub(crate) fn plan(
         });
     // A copy can only make some cuts exactly (see `trim::Cut::why_not_copied`),
     // and any other is never copied; nor is a speed change, which filters.
-    let copy_ok = p.retime.is_none() && p.cut.is_none_or(|c| c.why_not_copied(&p.probe).is_none());
+    let copy_ok = p.retime.is_none()
+        && (p.turn.is_none() || p.retag)
+        && p.cut.is_none_or(|c| c.why_not_copied(&p.probe).is_none());
+    let copied_rotation = p.turn.map(|turn| crate::rotate::RotationReport {
+        turn,
+        by: crate::rotate::By::Tag,
+    });
+    let tag_note = p.turn.map(|_| crate::rotate::TAG_NOTE.to_string());
     if !caps_bind && copy_ok && p.probe.size_bytes.is_some_and(|b| b <= max.bytes) {
         // A byte copy carries every tag along, so a stripped file is
         // remuxed instead, which clears them.
@@ -204,11 +217,13 @@ pub(crate) fn plan(
                     .iter()
                     .cloned()
                     .chain(p.location_note.clone())
+                    .chain(tag_note)
                     .collect(),
                 sizing: Some(sizing),
                 enlarged: None,
                 range: p.range.clone(),
                 speed: p.speed.clone(),
+                rotation: copied_rotation,
             });
         }
         if let Some(m) =
@@ -219,6 +234,7 @@ pub(crate) fn plan(
             warnings.extend(p.clip_notes.iter().cloned());
             warnings.extend(p.location_note.clone());
             warnings.extend(p.labels_note.clone());
+            warnings.extend(tag_note);
             return Ok(ConversionPlan {
                 from,
                 to,
@@ -230,6 +246,7 @@ pub(crate) fn plan(
                 enlarged: None,
                 range: p.range.clone(),
                 speed: p.speed.clone(),
+                rotation: copied_rotation,
             });
         }
     }
@@ -406,6 +423,16 @@ fn prepare<'a>(
         }
         None => (probe, None, None),
     };
+    // A turn back to the stored picture is copied into mp4 or mov with its
+    // note reset; any other is planned against the turned picture.
+    let retag = tuning
+        .rotate
+        .is_some_and(|t| crate::rotate::undoes_note(t, Some(&probe)))
+        && matches!(to, Format::Mp4 | Format::Mov);
+    let probe = match tuning.rotate {
+        Some(t) => crate::rotate::turned_probe(t, &probe),
+        None => probe,
+    };
     let src = Source::from_probe(&probe).map_err(|gap| gap_error(gap, input))?;
     // A rate that cannot be held exactly is refused: dropping it would leave
     // the conversion with no ceiling the user asked for.
@@ -448,6 +475,8 @@ fn prepare<'a>(
         range,
         retime,
         speed,
+        turn: tuning.rotate,
+        retag,
         clip_notes,
     })
 }
@@ -495,6 +524,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         enlarged: None,
         cut: p.cut,
         speed: p.retime.clone(),
+        turn: p.turn,
         mute: false,
         ..ResolvedVideo::default()
     };
@@ -530,6 +560,10 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         }
     }
     warnings.extend(p.clip_notes.iter().cloned());
+    // A turn the tag alone could make is encoded here for the size's sake.
+    if p.turn.is_some() && !p.retag {
+        warnings.push(crate::rotate::VIDEO_NOTE.to_string());
+    }
     if choice.extreme {
         sizing.warning = Some(extreme_sentence(&p.src, &sizing, &choice));
         // The suggestion was found against this attempt's budget; the user
@@ -556,6 +590,10 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         enlarged: None,
         range: p.range.clone(),
         speed: p.speed.clone(),
+        rotation: p.turn.map(|turn| crate::rotate::RotationReport {
+            turn,
+            by: crate::rotate::By::Pixels,
+        }),
     })
 }
 

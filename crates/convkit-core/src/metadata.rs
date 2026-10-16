@@ -124,18 +124,24 @@ pub fn strip_target_for(f: Format) -> Option<Format> {
 /// The note on a lossy image stripped into its own format: ImageMagick
 /// decodes and encodes again, so the picture pays a generation.
 pub(crate) fn reencode_note(to: Format, tuning: &Tuning) -> String {
-    let anchor = match to {
-        Format::Heic => crate::registry::HEIC_QUALITY,
-        _ => crate::registry::IMAGE_QUALITY,
-    };
-    let quality = tuning
-        .quality
-        .map_or_else(|| anchor.to_string(), |q| q.to_string());
+    let quality = quality_for(to, tuning);
     format!(
         "The {0} is re-encoded at quality {quality} to remove its metadata; ImageMagick \
          cannot take it out of a {0} without re-encoding.",
         to.ext()
     )
+}
+
+/// The quality a lossy image target is written at: `--quality`, or the
+/// target's own anchor.
+pub(crate) fn quality_for(to: Format, tuning: &Tuning) -> String {
+    let anchor = match to {
+        Format::Heic => crate::registry::HEIC_QUALITY,
+        _ => crate::registry::IMAGE_QUALITY,
+    };
+    tuning
+        .quality
+        .map_or_else(|| anchor.to_string(), |q| q.to_string())
 }
 
 /// Whether ImageMagick carries an EXIF GPS from `from` into `to`, as

@@ -362,6 +362,8 @@ fn probed_for(
             probed.get_or_insert_with(MediaProbe::default).table = Some(t);
         }
     }
+    // As `exec::run` does, so the preview shows a turn the tag makes as one.
+    convkit_core::rotate::attach(job.from, &job.inputs[0], tuning, &mut probed);
     Ok(probed)
 }
 
@@ -1009,6 +1011,7 @@ mod tests {
                 enlarged: None,
                 range: None,
                 speed: None,
+                rotation: None,
             }),
         }
     }

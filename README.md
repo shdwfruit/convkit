@@ -102,6 +102,7 @@ conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 conv clip.mp4 --speed 2          # play twice as fast
+conv IMG_0042.mov --rotate left  # turn a sideways video or photo
 conv trim talk.mp4               # find clips in the terminal and cut them
 ```
 
@@ -582,6 +583,41 @@ conv memo.m4a .mp3 --speed 1.25
 conv screen.mov --speed 4 --max-size 10mb
 ```
 
+## Rotating
+
+`--rotate` turns a photo or video as it is shown: `right` is a quarter turn
+clockwise, `left` the other way, and `180` turns it upside down. `90` and
+`270` work too.
+
+```console
+$ conv IMG_0042.mov --rotate left
+OK IMG_0042-rotated.mov - 48.1 MB - 0.1s
+  /home/user/Videos/IMG_0042-rotated.mov
+  note  The picture was already stored this way up, so only its orientation tag changed; nothing was re-encoded.
+```
+
+Phones store a photo or video the way the sensor saw it, plus a tag that
+says how to turn it for display. An app that ignores the tag shows the file
+sideways, so conv turns the picture itself and sets the tag to match, and
+the file looks the same everywhere. When the tag was the problem in a JPEG,
+MP4 or MOV, as with a video filmed with the rotation lock on, turning it back
+only takes resetting the tag, so nothing is re-encoded and it takes no time.
+Otherwise a video is
+re-encoded, and a JPEG, WebP, AVIF or HEIC is re-encoded at its usual
+quality, which a note says. PNG, TIFF and BMP lose nothing. An animated GIF
+is turned frame by frame.
+
+Naming works as it does for `--strip-metadata`: one file keeps its format
+and gets `-rotated` in its name, and a batch writes into a `rotated` folder.
+Name an output to convert it as well. The turn comes before `--resize`, so
+the size fits the turned picture:
+
+```console
+conv IMG_0042.heic .jpg --rotate right
+conv ./scans --to png --rotate 180
+conv screen.mov clip.gif --rotate left --resize 480x
+```
+
 ## Discovering formats and capabilities
 
 `conv capabilities` lists every registered pair and the backend(s) behind it:
@@ -803,7 +839,9 @@ the notes the human output prints under the path, the same ones a
 always holds each step's raw output, tail-capped at 16 KiB; `notes` is the
 small distilled subset worth a person's attention, usually empty on a clean
 run. A cut adds `range`: where the cut was made, in milliseconds, and the
-times as typed. For the full shapes of every command, run it with `--json`
+times as typed. A turn adds `rotation`: the turn, and `by`, which is `tag`
+when only the orientation tag changed and `pixels` when the picture itself
+was turned. For the full shapes of every command, run it with `--json`
 — the binary is the reference.
 
 ## Troubleshooting

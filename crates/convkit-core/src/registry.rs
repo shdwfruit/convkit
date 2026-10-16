@@ -47,6 +47,7 @@ const IMG_LOSSY: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -86,6 +87,7 @@ const IMG_TO_JPG: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::Lit("-background"),
             Arg::Lit("white"),
@@ -114,6 +116,7 @@ const IMG_TO_HEIC: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -133,6 +136,7 @@ const IMG_LOSSLESS: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -152,6 +156,7 @@ const IMG_LOSSLESS_SINGLE_FRAME: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -181,6 +186,7 @@ const SVG_TO_LOSSY: Recipe = Recipe {
             Arg::Lit("-alpha"),
             Arg::Lit("off"),
             Arg::Lit("-flatten"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -201,6 +207,7 @@ const SVG_TO_LOSSLESS: Recipe = Recipe {
             Arg::Lit("-background"),
             Arg::Lit("none"),
             Arg::Input,
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -221,6 +228,7 @@ const IMG_TO_PDF: Recipe = Recipe {
         [
             Arg::Inputs,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::Lit("-compress"),
@@ -251,6 +259,7 @@ const IMG_TO_PNG_STRIPPED: Recipe = Recipe {
             args: &[
                 Arg::InputFirstFrame,
                 Arg::Lit("-auto-orient"),
+                Arg::Rotate,
                 Arg::StripMetadata,
                 Arg::TuneResize,
                 Arg::Lit("-compress"),
@@ -278,6 +287,7 @@ const SVG_TO_PNG_STRIPPED: Recipe = Recipe {
                 Arg::Lit("-background"),
                 Arg::Lit("none"),
                 Arg::Input,
+                Arg::Rotate,
                 Arg::StripMetadata,
                 Arg::TuneResize,
                 Arg::Lit("-compress"),
@@ -304,6 +314,7 @@ pub(crate) const IMG_TO_TIFF_ZIP: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -360,6 +371,7 @@ const RASTER_TO_ICO: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::Lit("-background"),
             Arg::Lit("none"),
@@ -388,6 +400,7 @@ const SVG_TO_ICO: Recipe = Recipe {
             Arg::Lit("-background"),
             Arg::Lit("none"),
             Arg::Input,
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::Lit("-gravity"),
             Arg::Lit("center"),
@@ -408,6 +421,7 @@ const ICO_TO_PNG: Recipe = Recipe {
         Backend::Magick,
         [
             Arg::InputChosenFrame,
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -416,6 +430,35 @@ const ICO_TO_PNG: Recipe = Recipe {
     )],
     warnings: &[ICO_LARGEST_NOTE],
 };
+
+/// A GIF turned into a GIF (`--rotate`), frame by frame. `-coalesce` draws
+/// every frame whole first: a frame that covers only part of the picture
+/// would otherwise turn about its own corner. The frames are optimised
+/// again after. The palette, timing and loop are left as they were.
+const GIF_TURN: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::Input,
+            Arg::Lit("-coalesce"),
+            Arg::Rotate,
+            Arg::Lit("-layers"),
+            Arg::Lit("optimize"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+/// What a picture turned into its own format runs: the recipe any raster
+/// takes to that format, or a GIF's own. `None` for a format conv does not
+/// write.
+pub(crate) fn turn_recipe_for(f: Format) -> Option<Recipe> {
+    match f {
+        Format::Gif => Some(GIF_TURN),
+        _ => image_recipe_for(f),
+    }
+}
 
 /// Raster image formats that participate in the all-directions image family.
 const RASTER: &[Format] = &[
@@ -1708,6 +1751,11 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
             return true;
         }
     }
+    // A video turned into its own format is mapped stream by stream, as one
+    // converted to another container is.
+    if tuning.rotate.is_some() && from == to && from.kind() == Kind::Video {
+        return true;
+    }
     if tuning.fps.is_none() && tuning.resize.is_none() {
         return false;
     }
@@ -1722,12 +1770,12 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
 }
 
 /// The recipe whose reads (a size, the notes' traits) a conversion makes:
-/// the pair's own, or for a file stripped into its own format, which has no
-/// pair, the recipe any raster takes to that format.
+/// the pair's own, or for a file stripped or turned into its own format,
+/// which has no pair, the recipe that rewrites it.
 fn recipe_read_for(from: Format, to: Format, tuning: &Tuning) -> Option<Recipe> {
     lookup(from, to).or_else(|| {
-        (from == to && tuning.strip_metadata)
-            .then(|| image_recipe_for(to))
+        (from == to && (tuning.strip_metadata || tuning.rotate.is_some()))
+            .then(|| turn_recipe_for(to))
             .flatten()
     })
 }
@@ -2293,6 +2341,28 @@ mod tests {
                 let orient = s.args.iter().position(|a| *a == Arg::Lit("-auto-orient"));
                 if let (Some(o), Some(st)) = (orient, strip) {
                     assert!(o < st, "{from:?} -> {to:?}");
+                }
+            }
+        }
+    }
+
+    /// A turn is of the picture as it is shown, so every recipe that
+    /// orients the picture turns it straight after, before any knob.
+    #[test]
+    fn every_recipe_that_orients_a_picture_turns_it_next() {
+        let mut recipes: Vec<(String, Recipe)> = all_pairs()
+            .into_iter()
+            .map(|(from, to)| (format!("{from:?} -> {to:?}"), lookup(from, to).unwrap()))
+            .collect();
+        recipes.push(("IMG_TO_TIFF_ZIP".into(), IMG_TO_TIFF_ZIP));
+        recipes.push(("IMG_TO_PNG_STRIPPED".into(), IMG_TO_PNG_STRIPPED));
+        for (name, recipe) in recipes {
+            for s in recipe.steps {
+                if let Some(o) = s.args.iter().position(|a| *a == Arg::Lit("-auto-orient")) {
+                    assert_eq!(s.args.get(o + 1), Some(&Arg::Rotate), "{name}");
+                }
+                if s.args.contains(&Arg::Rotate) {
+                    assert_eq!(s.backend, Backend::Magick, "{name}");
                 }
             }
         }

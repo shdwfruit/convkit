@@ -136,6 +136,10 @@ pub struct Outcome {
     /// for every other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<crate::speed::SpeedReport>,
+    /// The turn a `--rotate` conversion made, and how. Omitted from
+    /// `--json` for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<crate::rotate::RotationReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -514,6 +518,10 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         }
     }
 
+    // How a JPEG, mp4 or mov shows its stored picture, for a turn that may
+    // only need its note reset. A plain file read, no backend.
+    crate::rotate::attach(req.from, &req.inputs[0], &req.tuning, &mut probed);
+
     // Likewise: only check backend availability when this pair actually has
     // more than one recipe to choose between (today: docx/odt -> pdf). An
     // ordinary conversion never pays for the extra resolve() calls this
@@ -577,6 +585,12 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         return Err(crate::video::confirmation_error(&req.inputs));
     }
     let (ran, sizing) = match built.sizing.clone() {
+        // A turn made by the tag alone: the file is copied, and its note
+        // reset below.
+        None if built.steps.is_empty() && retags(&built) => {
+            copy_fresh(&req.inputs[0], &temp_final)?;
+            (built, None)
+        }
         None => {
             if built.steps.is_empty() {
                 return Err(ConvError::new(
@@ -619,6 +633,24 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             )
         }
     };
+    // A turn by the tag resets it; one by the pixels resets any XMP copy of
+    // the old orientation, which ImageMagick carries over as it was.
+    let reset = match ran.rotation.map(|r| r.by) {
+        Some(crate::rotate::By::Tag) => crate::rotate::set_upright(ran.to, &temp_final),
+        Some(crate::rotate::By::Pixels) if ran.to.kind() == crate::Kind::Image => {
+            crate::xmp::set_upright(&temp_final, ran.to)
+        }
+        _ => Ok(()),
+    };
+    reset.map_err(|e| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!(
+                "could not reset the orientation of {}: {e}",
+                req.inputs[0].display()
+            ),
+        )
+    })?;
     let remuxed = ran.steps.first().is_some_and(|s| is_remux(&s.argv));
     let StepRunner {
         mut notes,
@@ -638,6 +670,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let enlarged = ran.enlarged.clone();
     let range = ran.range.clone();
     let speed = ran.speed.clone();
+    let rotation = ran.rotation;
     let mut warnings = ran.warnings;
     let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());
@@ -678,7 +711,15 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         enlarged,
         range,
         speed,
+        rotation,
     })
+}
+
+/// Whether a plan's turn is the executor's to make, by resetting the
+/// output's note.
+fn retags(plan: &ConversionPlan) -> bool {
+    plan.rotation
+        .is_some_and(|r| r.by == crate::rotate::By::Tag)
 }
 
 /// Runs plan steps for one conversion and accumulates what they report.
