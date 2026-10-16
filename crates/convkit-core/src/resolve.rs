@@ -591,7 +591,7 @@ impl Resolver {
     /// `plan::build` can be handed the answer instead of resolving anything
     /// itself. Never probes a backend outside `candidates` — callers pass
     /// only the small set relevant to the pair being converted (see
-    /// `registry::FALLBACK_BACKENDS`), gated on `registry::has_fallback` so
+    /// `registry::fallback_backends`), gated on `registry::has_fallback` so
     /// an ordinary conversion with only one possible recipe never pays for
     /// a version probe it has no use for. Resolutions are cached the same
     /// way `resolve` always caches them, so a backend checked here and later

@@ -3148,7 +3148,7 @@ fn typst() -> PathBuf {
 fn merge(inputs: &[PathBuf], output: &Path, tuning: Tuning) -> exec::Outcome {
     let from = Format::from_path(&inputs[0]).unwrap();
     let resolver = Resolver::new();
-    if registry::typst_merge(from, Format::Pdf, inputs, &tuning) {
+    if registry::typst_merge(from, Format::Pdf, inputs, &tuning, None) {
         require_backend(&resolver, Backend::Typst);
     } else {
         require_backend(&resolver, Backend::Magick);

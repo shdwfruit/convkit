@@ -160,7 +160,9 @@ stores them as JPEG instead. An animated GIF or WebP contributes its first
 frame. HEIC, HEIF, AVIF, TIFF and BMP need ImageMagick, and so do
 `--quality` and `--resize`, which re-encode the pictures. Any one of them
 sends the whole merge through ImageMagick. An SVG or ICO can't start a
-merge, but later in the list it goes in through ImageMagick too.
+merge, but later in the list it goes in through ImageMagick too. Without
+Typst, ImageMagick merges JPG, PNG, WebP and GIF as well, re-encoding them,
+and conv says so.
 
 A failure never looks like a success, and carries its own fix — `try` names
 whichever package manager is on `PATH` (winget/scoop/choco, brew,

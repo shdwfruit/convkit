@@ -460,9 +460,22 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     } else {
         None
     };
+    // Likewise: only check backend availability when this pair actually has
+    // more than one recipe to choose between (today: docx/odt -> pdf, and a
+    // photos merge). An ordinary conversion never pays for the extra
+    // resolve() calls this would otherwise cost.
+    let backends = registry::fallback_backends(req.from, req.to);
+    let available = (!backends.is_empty()).then(|| resolver.check_availability(backends));
     // Whether a jpg/png/bmp target's notes apply, and whether the source
     // records a location the output would keep.
-    if let Some(t) = probe::traits_for_notes(resolver, req.from, req.to, &req.inputs, &req.tuning) {
+    if let Some(t) = probe::traits_for_notes(
+        resolver,
+        req.from,
+        req.to,
+        &req.inputs,
+        &req.tuning,
+        available.as_ref(),
+    ) {
         probed.get_or_insert_with(MediaProbe::default).image = Some(t);
     }
     // Whether an Office source is encrypted or carries macros. A plain
@@ -493,16 +506,6 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             probed.get_or_insert_with(MediaProbe::default).table = Some(t);
         }
     }
-
-    // Likewise: only check backend availability when this pair actually has
-    // more than one recipe to choose between (today: docx/odt -> pdf). An
-    // ordinary conversion never pays for the extra resolve() calls this
-    // would otherwise cost.
-    let available = if registry::has_fallback(req.from, req.to) {
-        Some(resolver.check_availability(registry::FALLBACK_BACKENDS))
-    } else {
-        None
-    };
 
     let dest_dir = req
         .output
@@ -619,7 +622,13 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let mut warnings = ran.warnings;
     // Only the written PDF says what Typst's lossless pages cost, so it is
     // measured against the images, and said with the other notes.
-    if registry::typst_merge(req.from, req.to, &req.inputs, &req.tuning) {
+    if registry::typst_merge(
+        req.from,
+        req.to,
+        &req.inputs,
+        &req.tuning,
+        available.as_ref(),
+    ) {
         let images = req
             .inputs
             .iter()
@@ -2960,13 +2969,16 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert_eq!(e.message, "magick not found");
     }
 
-    /// Photos merged with ImageMagick before, so one who has it and no
-    /// Typst is told what Typst is for, and still offered to install it.
+    /// With neither Typst nor ImageMagick, which would take the merge in
+    /// its place, a user who never asked for Typst is told what it is for,
+    /// and still offered to install it.
     #[test]
     fn a_missing_typst_says_the_merge_needs_it() {
         let dir = tempfile::tempdir().unwrap();
+        let no_convert = tempfile::tempdir().unwrap();
         let mut r = Resolver::new();
         r.overrides_only();
+        r.with_convert_search_dir(no_convert.path().to_path_buf());
         let req = merge_request(dir.path(), &["a.jpg", "b.png"]);
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
         assert_eq!(e.code, ErrorCode::BackendMissing, "{}", e.message);

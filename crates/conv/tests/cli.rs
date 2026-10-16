@@ -119,8 +119,8 @@ fn a_merge_that_needs_imagemagick_says_why() {
     assert!(stderr.contains("try  "), "{stderr}");
 }
 
-/// Photos merged through ImageMagick before, so a missing Typst says what
-/// it is for, and the fix is still `conv install typst`.
+/// With neither Typst nor ImageMagick, a photos merge says what Typst is
+/// for, and the fix is `conv install typst`.
 #[test]
 fn a_merge_without_typst_says_why_and_offers_to_install_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -140,6 +140,39 @@ fn a_merge_without_typst_says_why_and_offers_to_install_it() {
         "{stderr}"
     );
     assert!(stderr.contains("try  conv install typst"), "{stderr}");
+}
+
+/// Photos merged on ImageMagick before Typst took them, so with only
+/// ImageMagick installed they still do, in the preview and the run, and the
+/// note says why and how to get Typst.
+#[test]
+fn a_merge_without_typst_runs_on_imagemagick_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.jpg", "b.png"] {
+        std::fs::write(dir.path().join(name), b"not really a photo").unwrap();
+    }
+    let stub = write_magick_stub(dir.path());
+    let note = "Typst is not installed, so ImageMagick made this PDF";
+    for dry_run in [true, false] {
+        let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+        cmd.current_dir(dir.path())
+            .env("CONVKIT_MAGICK", &stub)
+            .args(["a.jpg", "b.png", "out.pdf"]);
+        if dry_run {
+            cmd.arg("--dry-run");
+        }
+        let assert = cmd.timeout(Duration::from_secs(10)).assert().success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+        assert!(stdout.contains(note), "{stdout}");
+        assert!(stdout.contains("conv install typst"), "{stdout}");
+        if dry_run {
+            assert!(stdout.contains(" -compress jpeg "), "{stdout}");
+            assert!(!stdout.contains("typst compile"), "{stdout}");
+        } else {
+            assert!(stdout.starts_with("OK out.pdf"), "{stdout}");
+        }
+    }
+    assert_eq!(std::fs::read(dir.path().join("out.pdf")).unwrap(), b"x");
 }
 
 /// A lone photo under `--strip-metadata` keeps its format under a new name,

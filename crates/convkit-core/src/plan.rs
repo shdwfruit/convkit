@@ -364,8 +364,10 @@ pub fn build_tuned(
         recipe
     };
     // A merge's pair is named by its first input alone, so whether Typst can
-    // take it is decided here, over every input and the knobs.
-    let recipe = registry::image_pdf_variant(recipe, inputs, tuning);
+    // take it is decided here, over every input, the knobs and whether it is
+    // installed.
+    let typst_missing = registry::typst_missing_note(recipe, inputs, tuning, available);
+    let recipe = registry::image_pdf_variant(recipe, inputs, tuning, available);
     validate_tuning(&recipe, from, to, tuning, &resolved)?;
     // The tags `--strip-metadata` writes back on an ffmpeg step.
     let kept = probe.map_or(&[][..], |p| p.kept_tags.as_slice());
@@ -379,6 +381,7 @@ pub fn build_tuned(
 
     // Only the notes that apply to this source, as far as the probe knows.
     let mut warnings = registry::notes_for(&recipe, probe);
+    warnings.extend(typst_missing);
     warnings.extend(registry::gif_note(&recipe, inputs));
     // Mirrors the dynamic branch above (`m.warnings.extend(resolved.notes...)`)
     // -- a static recipe carrying an `Arg::VideoChain` slot gets the same
@@ -1079,7 +1082,7 @@ mod tests {
         std::fs::write(&jpg, crate::jpeg::located_for_tests()).unwrap();
         let inputs = [gif, jpg.clone()];
         let plain = Tuning::default();
-        let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &plain);
+        let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &plain, None);
         assert!(traits.is_some_and(|t| t.location), "{traits:?}");
         let probe = MediaProbe {
             image: traits,
@@ -1097,11 +1100,11 @@ mod tests {
             strip_metadata: true,
             ..Tuning::default()
         };
-        let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &strip);
+        let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &strip, None);
         assert!(traits.is_some_and(|t| !t.location), "{traits:?}");
 
         std::fs::write(&jpg, b"\xff\xd8\xff\xd9").unwrap();
-        let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &plain);
+        let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &plain, None);
         assert!(traits.is_some_and(|t| !t.location), "{traits:?}");
         // Off the Typst route ImageMagick reads the source, as before.
         let quality = Tuning {
@@ -1109,11 +1112,11 @@ mod tests {
             ..Tuning::default()
         };
         assert_eq!(
-            registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &quality),
+            registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &quality, None),
             None
         );
         assert_eq!(
-            registry::native_image_traits(Format::Jpg, Format::Png, &inputs[1..], &plain),
+            registry::native_image_traits(Format::Jpg, Format::Png, &inputs[1..], &plain, None),
             None
         );
     }
@@ -2121,6 +2124,33 @@ mod tests {
 
     fn avail(backends: &[Backend]) -> AvailableBackends {
         backends.iter().copied().collect()
+    }
+
+    /// With ImageMagick and no Typst, photos merge on ImageMagick as they
+    /// did before Typst took them, staging nothing, and the note says why.
+    /// With Typst there, Typst merges them and there is no note.
+    #[test]
+    fn a_photos_merge_runs_on_magick_when_typst_is_missing() {
+        let inputs = [p("a.jpg"), p("b.png")];
+        let plan = |backends: &[Backend]| {
+            build(
+                Format::Jpg,
+                Format::Pdf,
+                &inputs,
+                Path::new("out.pdf"),
+                None,
+                Some(&avail(backends)),
+            )
+            .unwrap()
+        };
+        let note = registry::TYPST_MISSING_NOTE.to_string();
+        let magick = plan(&[Backend::Magick]);
+        assert_eq!(magick.steps[0].backend, Backend::Magick);
+        assert!(magick.steps[0].prepare.is_empty());
+        assert!(magick.warnings.contains(&note), "{:?}", magick.warnings);
+        let typst = plan(&[Backend::Typst, Backend::Magick]);
+        assert_eq!(typst.steps[0].backend, Backend::Typst);
+        assert!(!typst.warnings.contains(&note), "{:?}", typst.warnings);
     }
 
     /// `None` — no availability hint at all — must always yield the
