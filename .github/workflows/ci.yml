@@ -83,10 +83,10 @@ jobs:
             exit 1
           fi
 
-  # Ubuntu only: installs every real backend via apt, then runs the
-  # `#[ignore]`-gated output-property suite that exercises them for real
-  # (§10.2). This is the job that actually shells out to ffmpeg, magick,
-  # soffice, and pandoc.
+  # Ubuntu only: installs every real backend (from apt, and Typst through
+  # `conv install`), then runs the `#[ignore]`-gated output-property suite
+  # that exercises them for real (§10.2). This is the job that actually
+  # shells out to ffmpeg, magick, soffice, pandoc and typst.
   integration:
     name: integration (ubuntu, real backends)
     runs-on: ubuntu-latest
@@ -173,6 +173,14 @@ jobs:
 
       - name: cargo build --workspace
         run: cargo build --workspace
+
+      # Typst comes from convkit's own managed installer, as in the Windows
+      # job below: the pinned build a user gets from `conv install`. Photos
+      # merge into a PDF on it. It lands in the managed dir
+      # (~/.local/share/convkit/bin), which the tests' `Resolver` checks
+      # before PATH, as conv's does.
+      - name: Install Typst via conv itself
+        run: ./target/debug/conv install typst --yes
 
       - name: cargo test --workspace -- --ignored (real backends)
         run: cargo test --workspace -- --ignored
