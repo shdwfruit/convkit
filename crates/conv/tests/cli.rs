@@ -119,6 +119,29 @@ fn a_merge_that_needs_imagemagick_says_why() {
     assert!(stderr.contains("try  "), "{stderr}");
 }
 
+/// Photos merged through ImageMagick before, so a missing Typst says what
+/// it is for, and the fix is still `conv install typst`.
+#[test]
+fn a_merge_without_typst_says_why_and_offers_to_install_it() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.jpg", "b.png"] {
+        std::fs::write(dir.path().join(name), b"not really a photo").unwrap();
+    }
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .current_dir(dir.path())
+        .args(["a.jpg", "b.png", "out.pdf"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("typst not found; images go into a PDF through Typst"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("try  conv install typst"), "{stderr}");
+}
+
 /// A lone photo under `--strip-metadata` keeps its format under a new name,
 /// and the command strips only after orienting.
 #[test]

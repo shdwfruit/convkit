@@ -295,6 +295,19 @@ pub(crate) fn magick_reason(to: Format, inputs: &[PathBuf], tuning: &Tuning) -> 
     Some(format!("{knob} re-encodes the images, which needs it"))
 }
 
+/// Why a conversion needs Typst, for the error that says it is missing:
+/// photos merged through ImageMagick until Typst took them, so a user who
+/// has ImageMagick is told what the new dependency is for. `None` off the
+/// Typst merge (the docx/odt -> pdf fallback needs it plainly).
+pub(crate) fn typst_reason(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+) -> Option<&'static str> {
+    typst_merge(from, to, inputs, tuning).then_some("images go into a PDF through Typst")
+}
+
 /// Said whenever a GIF is merged into a pdf: either route places its first
 /// frame only (Typst does, and `IMG_TO_PDF` reads a GIF's `[0]`). Not for a
 /// WebP, which is rarely animated: the note would sit on every still one.
@@ -2817,6 +2830,36 @@ mod tests {
             &[p("a.heic")],
             &plain
         ));
+    }
+
+    /// A missing Typst gets a reason on the Typst merge only: a merge that
+    /// goes to ImageMagick does not need it, and the docx -> pdf fallback
+    /// needs it plainly.
+    #[test]
+    fn typst_is_explained_only_where_it_merges() {
+        let p = |s: &str| PathBuf::from(s);
+        let plain = Tuning::default();
+        let quality = Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        };
+        let both = [p("a.jpg"), p("b.png")];
+        assert_eq!(
+            typst_reason(Format::Jpg, Format::Pdf, &both, &plain),
+            Some("images go into a PDF through Typst")
+        );
+        assert_eq!(
+            typst_reason(Format::Jpg, Format::Pdf, &both, &quality),
+            None
+        );
+        assert_eq!(
+            typst_reason(Format::Jpg, Format::Pdf, &[p("a.jpg"), p("b.heic")], &plain),
+            None
+        );
+        assert_eq!(
+            typst_reason(Format::Docx, Format::Pdf, &[p("a.docx")], &plain),
+            None
+        );
     }
 
     /// Transparent PNG/WebP/AVIF used to become JPEGs on solid black — the

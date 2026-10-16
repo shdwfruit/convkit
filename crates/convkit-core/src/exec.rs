@@ -577,7 +577,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                 {
                     ConvError::password_protected(&req.inputs[0], req.from)
                 } else {
-                    explain_missing_magick(e, req)
+                    explain_missing_backend(e, req)
                 }
             })?;
             (built, None)
@@ -659,13 +659,24 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     })
 }
 
-/// A missing ImageMagick says what needs it where a photos merge would
-/// otherwise run without it (`registry::magick_reason`).
-fn explain_missing_magick(mut e: ConvError, req: &Request) -> ConvError {
-    if e.code == ErrorCode::BackendMissing && e.backend == Some(Backend::Magick) {
-        if let Some(reason) = registry::magick_reason(req.to, &req.inputs, &req.tuning) {
-            e.message = format!("{}; {reason}", e.message);
+/// A missing ImageMagick or Typst says what needs it on a photos merge,
+/// where the user may never have asked for either: ImageMagick where the
+/// merge would otherwise run without it (`registry::magick_reason`), Typst
+/// where it runs on Typst (`registry::typst_reason`). The code, backend and
+/// fix stay as they are, so the install prompt still offers the fix.
+fn explain_missing_backend(mut e: ConvError, req: &Request) -> ConvError {
+    if e.code != ErrorCode::BackendMissing {
+        return e;
+    }
+    let reason = match e.backend {
+        Some(Backend::Magick) => registry::magick_reason(req.to, &req.inputs, &req.tuning),
+        Some(Backend::Typst) => {
+            registry::typst_reason(req.from, req.to, &req.inputs, &req.tuning).map(str::to_string)
         }
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        e.message = format!("{}; {reason}", e.message);
     }
     e
 }
@@ -2936,6 +2947,28 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         req.output = dir.path().join("c.jpg");
         let e = run(&req, &r, &mut |_| {}).unwrap_err();
         assert_eq!(e.message, "magick not found");
+    }
+
+    /// Photos merged with ImageMagick before, so one who has it and no
+    /// Typst is told what Typst is for, and still offered to install it.
+    #[test]
+    fn a_missing_typst_says_the_merge_needs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.overrides_only();
+        let req = merge_request(dir.path(), &["a.jpg", "b.png"]);
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, ErrorCode::BackendMissing, "{}", e.message);
+        assert_eq!(e.backend, Some(Backend::Typst));
+        assert_eq!(
+            e.message,
+            "typst not found; images go into a PDF through Typst"
+        );
+        assert_eq!(
+            e.remediation,
+            ConvError::backend_missing(Backend::Typst).remediation,
+            "the fix is untouched"
+        );
     }
 
     /// A JPEG anywhere in a Typst merge is read for its location with no
