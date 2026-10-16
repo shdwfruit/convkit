@@ -447,7 +447,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             .ok()
             .and_then(|p| probe::run(&p.path, &req.inputs[0]).ok())
     } else if let (Some(read), Some(geometry)) = (
-        registry::image_read(req.from, req.to, &req.tuning),
+        registry::image_read(req.from, req.to, &req.inputs, &req.tuning),
         registry::image_read_geometry(req.to, &req.tuning),
     ) {
         // A size that cannot be read leaves `--upscale` its general
@@ -463,7 +463,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     // Whether a jpg/png/bmp target's notes apply, and whether the source
     // records a location the output would keep. A read that fails keeps the
     // frame and alpha notes whole, and gives no location note.
-    if registry::notes_need_image(req.from, req.to, &req.tuning) {
+    if registry::notes_need_image(req.from, req.to, &req.inputs, &req.tuning) {
         let traits = resolver
             .resolve(Backend::Magick)
             .ok()

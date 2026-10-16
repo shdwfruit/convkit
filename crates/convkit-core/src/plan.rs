@@ -363,11 +363,19 @@ pub fn build_tuned(
     } else {
         recipe
     };
+    // A merge's pair is named by its first input alone, so whether Typst can
+    // take it is decided here, over every input and the knobs.
+    let recipe = registry::image_pdf_variant(recipe, inputs, tuning);
     validate_tuning(&recipe, from, to, tuning, &resolved)?;
     // The tags `--strip-metadata` writes back on an ffmpeg step.
     let kept = probe.map_or(&[][..], |p| p.kept_tags.as_slice());
 
-    let steps = render_steps(&recipe, inputs, output, tuning, &resolved, kept);
+    let mut steps = render_steps(&recipe, inputs, output, tuning, &resolved, kept);
+    // Typst reads only under its root: the inputs are staged beside the
+    // output, with the layout that places them.
+    if recipe == registry::TYPST_IMG_TO_PDF {
+        steps[0].prepare = crate::layout::image_pages(inputs, output, tuning.strip_metadata);
+    }
 
     // Only the notes that apply to this source, as far as the probe knows.
     let mut warnings = registry::notes_for(&recipe, probe);
@@ -878,6 +886,99 @@ mod tests {
         assert_eq!(plan.steps.len(), 2);
         assert_eq!(plan.steps[0].output, Path::new("a.convkit-step0.tiff"));
         assert_eq!(plan.steps[1].argv, ["a.convkit-step0.tiff", "a.png"]);
+    }
+
+    fn merge(tuning: &Tuning) -> Result<ConversionPlan> {
+        build_tuned(
+            Format::Jpg,
+            Format::Pdf,
+            &[p("x/a.jpg"), p("y/b.png")],
+            Path::new("d/out.pdf"),
+            None,
+            None,
+            tuning,
+        )
+    }
+
+    /// Typst reads only under its root, so the inputs are staged beside the
+    /// output (the scratch dir in a real run) with the layout naming them.
+    #[test]
+    fn an_image_merge_plans_one_typst_step() {
+        let plan = merge(&Tuning::default()).unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        let step = &plan.steps[0];
+        assert_eq!(step.backend, Backend::Typst);
+        assert_eq!(
+            step.argv,
+            [
+                "compile",
+                "--root",
+                "d",
+                "--ignore-system-fonts",
+                "--diagnostic-format",
+                "short",
+                "d/out.convkit-layout.typ",
+                "d/out.pdf"
+            ]
+        );
+        assert_eq!(step.path_args, [2, 6, 7], "the root, layout and output");
+        assert_eq!(
+            step.prepare,
+            crate::layout::image_pages(
+                &[p("x/a.jpg"), p("y/b.png")],
+                Path::new("d/out.pdf"),
+                false
+            )
+        );
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn a_merge_with_quality_plans_the_magick_recipe_as_before() {
+        let plan = merge(&Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        })
+        .unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        let step = &plan.steps[0];
+        assert_eq!(step.backend, Backend::Magick);
+        assert_eq!(
+            step.argv,
+            [
+                "x/a.jpg",
+                "y/b.png",
+                "-auto-orient",
+                "-compress",
+                "jpeg",
+                "-quality",
+                "80",
+                "d/out.pdf"
+            ]
+        );
+        assert!(step.prepare.is_empty());
+    }
+
+    #[test]
+    fn strip_metadata_is_accepted_on_the_typst_route() {
+        let plain = merge(&Tuning::default()).unwrap();
+        let plan = merge(&Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        })
+        .unwrap();
+        let step = &plan.steps[0];
+        assert_eq!(step.backend, Backend::Typst);
+        assert_eq!(step.argv, plain.steps[0].argv, "the slot renders nothing");
+        let strips: Vec<bool> = step
+            .prepare
+            .iter()
+            .filter_map(|prep| match prep {
+                Prepare::Stage { strip, .. } => Some(*strip),
+                Prepare::Write { .. } => None,
+            })
+            .collect();
+        assert_eq!(strips, [true, false], "the jpg is stripped, the png linked");
     }
 
     /// With no probe there is nothing to write back, so every tag goes and

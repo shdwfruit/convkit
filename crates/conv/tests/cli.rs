@@ -19,6 +19,33 @@ fn dry_run_prints_the_expert_ffmpeg_command() {
         .stdout(contains("palettegen=stats_mode=diff"));
 }
 
+/// Photos merge on Typst, an uppercase extension included, with nothing
+/// installed: the preview is the Typst command, its layout beside the
+/// output.
+#[test]
+fn an_image_merge_dry_run_shows_the_typst_command() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.jpg", "B.JPG"] {
+        std::fs::write(dir.path().join(name), b"not really a jpeg").unwrap();
+    }
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .current_dir(dir.path())
+        .args(["a.jpg", "B.JPG", "out.pdf", "--dry-run"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with("typst compile --root "))
+        .unwrap_or_else(|| panic!("no typst command: {stdout}"));
+    assert!(
+        line.contains(" out.convkit-layout.typ ") && line.ends_with(" out.pdf"),
+        "{line}"
+    );
+    assert!(!stdout.contains("magick"), "{stdout}");
+}
+
 /// A lone photo under `--strip-metadata` keeps its format under a new name,
 /// and the command strips only after orienting.
 #[test]
@@ -1338,6 +1365,34 @@ fn capabilities_lists_strip_metadata_where_it_applies() {
     let assert = conv().args(["capabilities", "docx"]).assert().success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(!stdout.contains("--strip-metadata"), "{stdout}");
+}
+
+/// Photos merge into a PDF on Typst, which embeds a JPEG as it is, and
+/// `--quality` and `--resize` still work there: they move the run to
+/// ImageMagick, so the pair lists both routes' flags. Its defaults are the
+/// Typst route's, which re-encodes nothing.
+#[test]
+fn capabilities_list_quality_and_resize_for_jpg_to_pdf() {
+    for format in ["jpg", "gif"] {
+        let out = conv()
+            .args(["capabilities", format, "--json"])
+            .assert()
+            .success();
+        let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+        let flags = tuning_row(&v, "pdf");
+        for f in ["--quality", "--resize", "--upscale", "--strip-metadata"] {
+            assert!(flags.iter().any(|x| x == f), "{format} -> pdf lacks {f}");
+        }
+        assert!(!flags.iter().any(|x| x == "--colors"), "{flags:?}");
+        let row = v["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["to"] == "pdf")
+            .unwrap();
+        assert_eq!(row["backends"], serde_json::json!(["typst"]), "{row}");
+        assert_eq!(row["defaults"], serde_json::json!({}), "{row}");
+    }
 }
 
 /// `conv scan` answers the one question the tool could not: what is in front

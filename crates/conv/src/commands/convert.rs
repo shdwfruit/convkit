@@ -329,7 +329,7 @@ fn probed_for(
     tuning: &Tuning,
 ) -> Result<Option<MediaProbe>, ConvError> {
     let mut probed = media_probed_for(resolver, job, tuning)?;
-    if registry::notes_need_image(job.from, job.to, tuning) {
+    if registry::notes_need_image(job.from, job.to, &job.inputs, tuning) {
         let traits = resolver
             .resolve(Backend::Magick)
             .ok()
@@ -386,7 +386,7 @@ fn media_probed_for(
         return probe::run(&ffprobe.path, &job.inputs[0]).map(Some);
     }
     if let (Some(read), Some(geometry)) = (
-        registry::image_read(job.from, job.to, tuning),
+        registry::image_read(job.from, job.to, &job.inputs, tuning),
         registry::image_read_geometry(job.to, tuning),
     ) {
         // As `exec::run` does: an unreadable size leaves `--upscale` its

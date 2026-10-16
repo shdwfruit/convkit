@@ -187,11 +187,14 @@ pub enum Arg {
     /// `--strip-metadata`'s arguments for this step's backend when the flag
     /// was given (`metadata::MAGICK_STRIP` or `metadata::ffmpeg_args`);
     /// renders nothing otherwise, keeping untuned argv byte-identical.
-    /// Authored only on ImageMagick and ffmpeg steps. Without the flag, an
-    /// Ogg source (`ResolvedVideo::ogg_tags`) gets `-map_metadata 0:s:a:0`:
-    /// Ogg keeps its tags in the audio stream's comment header, and every
-    /// other muxer writes only the file's own tags, so the title, artist
-    /// and the rest were lost (ffmpeg 6.1 and 9.0 alike).
+    /// Authored on ImageMagick and ffmpeg steps, and on the Typst merge,
+    /// where it renders nothing either way: that strips in the staging
+    /// (`layout::image_pages`), and the slot says the flag applies. Without
+    /// the flag, an Ogg source (`ResolvedVideo::ogg_tags`) gets
+    /// `-map_metadata 0:s:a:0`: Ogg keeps its tags in the audio stream's
+    /// comment header, and every other muxer writes only the file's own
+    /// tags, so the title, artist and the rest were lost (ffmpeg 6.1 and
+    /// 9.0 alike).
     StripMetadata,
     /// The cut, as ffmpeg input options (`-ss S -t D`), when a range was
     /// given; renders *nothing* otherwise, keeping untuned argv
@@ -255,6 +258,9 @@ pub enum Arg {
     /// The directory containing the output path. For backends like `soffice`
     /// that take `--outdir` and name the file themselves.
     OutDir,
+    /// The layout a Typst image merge compiles, beside the output
+    /// (`layout::layout_path`); exec writes it before the step runs.
+    TypstLayout,
     /// A resolved backend's absolute path, substituted in by `exec::run` at
     /// execution time. `render` (and therefore `plan::build`) can't know the
     /// real path — that requires filesystem access `plan::build` must never
@@ -392,6 +398,8 @@ impl Step {
                             .map(|s| (*s).to_string()),
                     ),
                     Backend::Ffmpeg => argv.extend(crate::metadata::ffmpeg_args(kept)),
+                    // Stripped in the staging (`layout::image_pages`).
+                    Backend::Typst => {}
                     other => unreachable!("--strip-metadata slot authored on a {other:?} step"),
                 },
                 Arg::StripMetadata if video.ogg_tags && self.backend == Backend::Ffmpeg => {
@@ -503,6 +511,14 @@ impl Step {
                         Some(d) => d.to_string_lossy().into_owned(),
                         None => ".".to_string(),
                     });
+                }
+                Arg::TypstLayout => {
+                    path_args.push(argv.len());
+                    argv.push(
+                        crate::layout::layout_path(output)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
                 }
                 // Not a filesystem path in the sense `path_args` means: it is
                 // a placeholder the executor swaps for a resolved executable,
