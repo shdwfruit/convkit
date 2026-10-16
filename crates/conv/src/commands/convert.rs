@@ -468,7 +468,8 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
         jobs.iter()
             .filter(runnable)
             .filter_map(|job| {
-                let probed = probed_for(&resolver, job, &tuning).ok().flatten();
+                // A resize takes a merge to ImageMagick whatever is installed.
+                let probed = probed_for(&resolver, job, &tuning, None).ok().flatten();
                 let plan = plan::build_tuned(
                     job.from,
                     job.to,
@@ -621,9 +622,12 @@ fn probed_for(
     resolver: &Resolver,
     job: &input::Job,
     tuning: &Tuning,
+    available: Option<&AvailableBackends>,
 ) -> Result<Option<MediaProbe>, ConvError> {
     let mut probed = media_probed_for(resolver, job, tuning)?;
-    if let Some(t) = probe::traits_for_notes(resolver, job.from, job.to, &job.inputs, tuning) {
+    let traits =
+        probe::traits_for_notes(resolver, job.from, job.to, &job.inputs, tuning, available);
+    if let Some(t) = traits {
         probed.get_or_insert_with(MediaProbe::default).image = Some(t);
     }
     // As `exec::run` does, so the preview refuses a password-protected
@@ -706,16 +710,14 @@ fn media_probed_for(
 }
 
 /// Checks backend availability when, and only when, this pair has more
-/// than one recipe to choose between (`registry::has_fallback`) — mirrors
-/// `probed_for`'s own gate exactly, so `--dry-run` and the real run it
-/// previews always agree on whether this check happens at all, and an
-/// ordinary conversion (every pair but docx/odt -> pdf, today) never pays
-/// for it.
+/// than one recipe to choose between (`registry::fallback_backends`) —
+/// mirrors `exec::run`'s own gate exactly, so `--dry-run` and the real run
+/// it previews always agree on whether this check happens at all, and an
+/// ordinary conversion (every pair but docx/odt -> pdf and a photos merge,
+/// today) never pays for it.
 fn available_for(resolver: &Resolver, job: &input::Job) -> Option<AvailableBackends> {
-    if !registry::has_fallback(job.from, job.to) {
-        return None;
-    }
-    Some(resolver.check_availability(registry::FALLBACK_BACKENDS))
+    let backends = registry::fallback_backends(job.from, job.to);
+    (!backends.is_empty()).then(|| resolver.check_availability(backends))
 }
 
 /// Builds a plan per job and reports every one of them, never aborting early
@@ -754,8 +756,8 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
     let results: Vec<_> = jobs
         .iter()
         .map(|job| {
-            let probed = probed_for(&resolver, job, &tuning)?;
             let available = available_for(&resolver, job);
+            let probed = probed_for(&resolver, job, &tuning, available.as_ref())?;
             let mut plan = plan::build_tuned(
                 job.from,
                 job.to,
@@ -1056,7 +1058,7 @@ mod tests {
             from: convkit_core::Format::Mkv,
             to: convkit_core::Format::Mp4,
         };
-        let probed = probed_for(&r, &j, &Tuning::default())
+        let probed = probed_for(&r, &j, &Tuning::default(), None)
             .unwrap()
             .expect("must probe a remuxable pair");
         assert_eq!(probed.video_codec.as_deref(), Some("h264"));
@@ -1082,7 +1084,9 @@ mod tests {
                 "out.mp4",
             );
             assert!(
-                probed_for(&r, &j, &Tuning::default()).unwrap().is_none(),
+                probed_for(&r, &j, &Tuning::default(), None)
+                    .unwrap()
+                    .is_none(),
                 "{input} must not be probed"
             );
         }
@@ -1100,7 +1104,9 @@ mod tests {
             "in.pdf",
             "out.docx",
         );
-        assert!(probed_for(&r, &j, &Tuning::default()).unwrap().is_none());
+        assert!(probed_for(&r, &j, &Tuning::default(), None)
+            .unwrap()
+            .is_none());
     }
 
     /// A webm video knob can only be honoured with a probe
@@ -1125,7 +1131,7 @@ mod tests {
             "definitely-missing.mp4",
             "out.webm",
         );
-        let e = probed_for(&with_stub, &j, &fps).unwrap_err();
+        let e = probed_for(&with_stub, &j, &fps, None).unwrap_err();
         assert_eq!(e.code, ErrorCode::InputNotFound, "{}", e.message);
 
         // Input present, ffprobe resolvable: probed.
@@ -1137,13 +1143,13 @@ mod tests {
             input.to_str().unwrap(),
             "out.webm",
         );
-        let probed = probed_for(&with_stub, &j, &fps).unwrap().unwrap();
+        let probed = probed_for(&with_stub, &j, &fps, None).unwrap().unwrap();
         assert_eq!(probed.video_codec.as_deref(), Some("h264"));
 
         // Input present, no ffprobe anywhere: backend_missing, naming it.
         let mut none = Resolver::new();
         none.overrides_only();
-        let e = probed_for(&none, &j, &fps).unwrap_err();
+        let e = probed_for(&none, &j, &fps, None).unwrap_err();
         assert_eq!(e.code, ErrorCode::BackendMissing, "{}", e.message);
         assert_eq!(e.backend, Some(Backend::Ffprobe));
 
@@ -1155,7 +1161,7 @@ mod tests {
             input.to_str().unwrap(),
             "out.mp4",
         );
-        assert!(probed_for(&none, &j, &fps).unwrap().is_none());
+        assert!(probed_for(&none, &j, &fps, None).unwrap().is_none());
     }
 
     /// A `magick` stand-in that answers `-ping` with `answer`. Unix only, as
@@ -1196,7 +1202,7 @@ mod tests {
             input,
             "out.jpg",
         );
-        let probed = probed_for(&r, &j, &Tuning::default())
+        let probed = probed_for(&r, &j, &Tuning::default(), None)
             .unwrap()
             .expect("a jpg target reads its source");
         let traits = probed.image.expect("the read's answer");
@@ -1209,26 +1215,30 @@ mod tests {
             input,
             "out.webp",
         );
-        assert!(probed_for(&r, &webp, &Tuning::default()).unwrap().is_some());
+        assert!(probed_for(&r, &webp, &Tuning::default(), None)
+            .unwrap()
+            .is_some());
         let stripped = Tuning {
             strip_metadata: true,
             ..Tuning::default()
         };
-        assert!(probed_for(&r, &webp, &stripped).unwrap().is_none());
+        assert!(probed_for(&r, &webp, &stripped, None).unwrap().is_none());
         let tiff = job(
             convkit_core::Format::Png,
             convkit_core::Format::Tiff,
             input,
             "out.tiff",
         );
-        assert!(probed_for(&r, &tiff, &Tuning::default()).unwrap().is_none());
+        assert!(probed_for(&r, &tiff, &Tuning::default(), None)
+            .unwrap()
+            .is_none());
         let missing = job(
             convkit_core::Format::Png,
             convkit_core::Format::Jpg,
             "definitely-missing.png",
             "out.jpg",
         );
-        assert!(probed_for(&r, &missing, &Tuning::default())
+        assert!(probed_for(&r, &missing, &Tuning::default(), None)
             .unwrap()
             .is_none());
     }
