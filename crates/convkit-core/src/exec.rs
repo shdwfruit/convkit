@@ -617,6 +617,17 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let range = ran.range.clone();
     let speed = ran.speed.clone();
     let mut warnings = ran.warnings;
+    // Only the written PDF says what Typst's lossless pages cost, so it is
+    // measured against the images, and said with the other notes.
+    if registry::typst_merge(req.from, req.to, &req.inputs, &req.tuning) {
+        let images = req
+            .inputs
+            .iter()
+            .filter_map(|i| std::fs::metadata(i).ok())
+            .map(|m| m.len())
+            .sum();
+        warnings.extend(registry::lossless_size_note(&req.inputs, images, bytes));
+    }
     let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());
         let report = sized::report(&sz, bytes, attempts, tracks);
@@ -2989,6 +3000,34 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
                  --strip-metadata to remove it."
             ]
         );
+    }
+
+    /// The PDF a Typst merge wrote is measured against its images, and a
+    /// note says when the lossless pages made it much larger, with the
+    /// sizes, among the notes a result line shows. A merge of JPEGs alone,
+    /// which go in as they are, is never told.
+    #[cfg(unix)]
+    #[test]
+    fn a_typst_merge_that_grows_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = typst_stub(dir.path(), "head -c 3000 /dev/zero > \"$out\"");
+        let photos = merge_request(dir.path(), &["a.jpg", "b.webp"]);
+        let o = run(&photos, &r, &mut |_| {}).unwrap();
+        assert_eq!(
+            o.warnings,
+            [registry::lossless_size_note(&photos.inputs, 14, 3000).unwrap()]
+        );
+        assert!(
+            o.warnings[0].contains("this PDF 3 KB against 14 B"),
+            "{:?}",
+            o.warnings
+        );
+        assert!(o.notes.is_empty(), "{:?}", o.notes);
+
+        let mut jpegs = merge_request(dir.path(), &["c.jpg", "d.jpeg"]);
+        jpegs.output = dir.path().join("jpegs.pdf");
+        let o = run(&jpegs, &r, &mut |_| {}).unwrap();
+        assert!(o.warnings.is_empty(), "{:?}", o.warnings);
     }
 
     /// On ImageMagick a merge that starts with a GIF still carries a

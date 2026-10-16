@@ -397,33 +397,13 @@ fn paint(text: &str, style: Style, enabled: bool) -> String {
     }
 }
 
-/// A file size in the same binary-but-labelled-decimal convention common
-/// file managers use (1024 B = "1 KB", not 1000) — kilobytes with no
-/// decimal place, megabytes and up with one. For example, 2161 KiB is
-/// 2.11 MiB, which this formula shows as "2.1 MB".
-fn human_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let b = bytes as f64;
-    if b < KB {
-        format!("{bytes} B")
-    } else if b < MB {
-        format!("{:.0} KB", b / KB)
-    } else if b < GB {
-        format!("{:.1} MB", b / MB)
-    } else {
-        format!("{:.1} GB", b / GB)
-    }
-}
-
 /// A result's size: in the `--max-size` flag's own unit family when sized
 /// (so `9,999,999` bytes under `10mb` reads `9.99 MB`, not `9.5 MB`),
 /// the file-manager convention otherwise.
 fn size_for(o: &Outcome) -> String {
     match &o.sizing {
         Some(s) => convkit_core::size::display(o.bytes, s.family),
-        None => human_size(o.bytes),
+        None => convkit_core::size::human(o.bytes),
     }
 }
 
@@ -908,21 +888,7 @@ mod tests {
         assert!(ansi_supported());
     }
 
-    // --- human_size / human_elapsed -----------------------------------------
-
-    /// 2161 KiB must come out "2.1 MB", not "2.2 MB" — proving this uses binary (1024-based) units labelled `MB`,
-    /// not decimal (1000-based) ones.
-    #[test]
-    fn human_size_matches_the_briefs_worked_example() {
-        let bytes = 2161 * 1024;
-        assert_eq!(human_size(bytes), "2.1 MB");
-    }
-
-    #[test]
-    fn human_size_uses_whole_kb_below_one_mb() {
-        assert_eq!(human_size(500), "500 B");
-        assert_eq!(human_size(2048), "2 KB");
-    }
+    // --- human_elapsed --------------------------------------------------------
 
     #[test]
     fn human_elapsed_shows_one_decimal_below_a_minute() {

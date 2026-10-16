@@ -3326,6 +3326,78 @@ fn a_merge_of_a_relative_symlink_works() {
     assert!(contains(&pdf, &std::fs::read(&real).unwrap()));
 }
 
+/// A screenshot-like PNG: a window of flat colour and sharp text, 1920x1200,
+/// drawn by Typst, since ImageMagick may have no font to draw text with.
+fn screenshot(dir: &tempfile::TempDir) -> PathBuf {
+    let layout = dir.path().join("screen.typ");
+    std::fs::write(
+        &layout,
+        "#set page(width: 960pt, height: 600pt, margin: 0pt, fill: white)\n\
+         #set text(size: 9pt)\n\
+         #block(width: 100%, height: 40pt, fill: rgb(\"#336699\"), inset: 10pt, \
+         text(fill: white, size: 16pt)[Settings])\n\
+         #grid(columns: (200pt, 1fr), \
+         block(width: 100%, height: 540pt, fill: rgb(\"#eeeeee\"), inset: 8pt)\
+         [#for i in range(12) [Item #i \\ ]], pad(20pt, lorem(250)))\n",
+    )
+    .unwrap();
+    let png = dir.path().join("screen.png");
+    let out = Command::new(typst())
+        .arg("compile")
+        .arg("--root")
+        .arg(dir.path())
+        .args(["--ignore-system-fonts", "--ppi", "144"])
+        .arg(&layout)
+        .arg(&png)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run typst: {e}"));
+    assert!(
+        out.status.success(),
+        "typst could not draw the screenshot: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    png
+}
+
+/// Typst keeps a PNG or WebP page without loss. A photo pays for that in
+/// size, a lossy WebP many times over, so the run says so and names
+/// `--quality`; a screenshot comes out near its own size and is not told.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_photo_merge_that_grows_says_so_and_a_screenshot_does_not() {
+    let dir = tmp();
+    let len = |p: &Path| std::fs::metadata(p).unwrap().len();
+    let note = |o: &exec::Outcome| {
+        o.warnings
+            .iter()
+            .find(|w| w.starts_with("The PNG and WebP pages are stored without loss"))
+            .cloned()
+    };
+
+    let photo = synth_image(
+        &dir,
+        &["-seed", "1", "-size", "600x400", "plasma:fractal"],
+        "photo.webp",
+    );
+    let out = dir.path().join("photo.pdf");
+    let outcome = merge(std::slice::from_ref(&photo), &out, Tuning::default());
+    assert_eq!(ran(&outcome), [Backend::Typst]);
+    assert!(
+        len(&out) > 3 * len(&photo),
+        "{} from {}",
+        len(&out),
+        len(&photo)
+    );
+    let said = note(&outcome).unwrap_or_else(|| panic!("no note: {:?}", outcome.warnings));
+    assert!(said.contains("--quality stores them as JPEG"), "{said}");
+
+    let screen = screenshot(&dir);
+    let out = dir.path().join("screen.pdf");
+    let outcome = merge(std::slice::from_ref(&screen), &out, Tuning::default());
+    assert_eq!(ran(&outcome), [Backend::Typst]);
+    assert_eq!(note(&outcome), None, "{} from {}", len(&out), len(&screen));
+}
+
 // --- Metadata: the location note and --strip-metadata ----------------------
 
 fn stripped() -> Tuning {

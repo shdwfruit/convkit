@@ -323,6 +323,28 @@ pub(crate) fn gif_note(recipe: &Recipe, inputs: &[PathBuf]) -> Option<String> {
     (merge && gif).then(|| GIF_FIRST_FRAME_NOTE.to_string())
 }
 
+/// What a Typst merge's size cost, said once the PDF is more than 1.5 times
+/// `images`, the inputs' total size in bytes, and an input is not a JPEG.
+/// Typst embeds a JPEG as it is but keeps every other picture without loss
+/// (Flate), which a photo pays for: a 945 KB WebP made a 13 MB PDF, where
+/// ImageMagick's JPEG pages at quality 92 made 2.3 MB. A screenshot comes
+/// out near its own size, so the default stays lossless and this is
+/// measured after the run rather than assumed.
+pub(crate) fn lossless_size_note(inputs: &[PathBuf], images: u64, pdf: u64) -> Option<String> {
+    let lossless = inputs
+        .iter()
+        .any(|i| Format::from_path(i) != Some(Format::Jpg));
+    let grew = u128::from(pdf) * 2 > u128::from(images) * 3;
+    (lossless && grew).then(|| {
+        format!(
+            "The PNG and WebP pages are stored without loss, which makes this PDF {} \
+             against {} of images; --quality stores them as JPEG instead (needs ImageMagick).",
+            crate::size::human(pdf),
+            crate::size::human(images)
+        )
+    })
+}
+
 /// The format a run's location note is judged from
 /// (`metadata::keeps_exif_location`). A merge is named by its first input,
 /// but a later one's EXIF reaches the pdf too: on Typst's merge only a
@@ -2830,6 +2852,36 @@ mod tests {
             &[p("a.heic")],
             &plain
         ));
+    }
+
+    /// Typst keeps a PNG, WebP or GIF page without loss, so a merge says
+    /// what that cost once the PDF is more than half again the size of its
+    /// images. A merge of JPEGs alone, embedded as they are, never does.
+    #[test]
+    fn a_merge_notes_its_size_once_it_is_half_again_its_images() {
+        let p = |s: &str| PathBuf::from(s);
+        let photos = [p("a.jpg"), p("b.webp")];
+        let mb = 1024 * 1024;
+        assert_eq!(
+            lossless_size_note(&photos, 945 * 1024, 13 * mb).as_deref(),
+            Some(
+                "The PNG and WebP pages are stored without loss, which makes this PDF \
+                 13.0 MB against 945 KB of images; --quality stores them as JPEG instead \
+                 (needs ImageMagick)."
+            )
+        );
+        // More than 1.5 times, not at it.
+        assert!(lossless_size_note(&photos, 1000, 1501).is_some());
+        assert_eq!(lossless_size_note(&photos, 1000, 1500), None);
+        assert_eq!(lossless_size_note(&photos, 1000, 900), None);
+        for other in ["c.png", "c.PNG", "c.gif"] {
+            assert!(
+                lossless_size_note(&[p("a.jpg"), p(other)], 1000, 1501).is_some(),
+                "{other}"
+            );
+        }
+        let jpegs = [p("a.jpg"), p("b.JPEG"), p("c.jfif")];
+        assert_eq!(lossless_size_note(&jpegs, 1000, 100_000), None);
     }
 
     /// A missing Typst gets a reason on the Typst merge only: a merge that
