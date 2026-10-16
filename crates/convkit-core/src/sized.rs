@@ -206,9 +206,15 @@ pub(crate) fn plan(
                 range: p.range.clone(),
             });
         }
-        if let Some(m) =
-            media::stream_mapped_invocation(to, &p.probe, p.strip, &p.copied(), &inputs[0], output)
-        {
+        if let Some(m) = media::stream_mapped_invocation(
+            from,
+            to,
+            &p.probe,
+            p.strip,
+            &p.copied(),
+            &inputs[0],
+            output,
+        ) {
             sizing.strategy = Strategy::Remux;
             let mut warnings = m.warnings;
             warnings.extend(p.clip_notes.iter().cloned());
@@ -1081,6 +1087,19 @@ mod tests {
         assert_eq!(plan.sizing.unwrap().strategy, Strategy::Remux);
         assert_eq!(plan.steps.len(), 1);
         assert!(has(&plan.steps[0].argv, ["-c:v", "copy"]));
+    }
+
+    /// A remux of MPEG-4 Part 2 into mp4 would not play, so a small one is
+    /// encoded like any other source that has to be.
+    #[test]
+    fn a_small_mpeg4_part_2_source_is_encoded_not_remuxed_into_mp4() {
+        let p = MediaProbe {
+            video_codec: Some("mpeg4".into()),
+            ..probe(60, 6_000_000)
+        };
+        let plan = build(Format::Avi, Format::Mp4, &p, &tuned("10mb")).unwrap();
+        assert_eq!(plan.sizing.unwrap().strategy, Strategy::Encode);
+        assert!(!has(&plan.steps[0].argv, ["-c:v", "copy"]));
     }
 
     /// The caps are a request, so a small file is encoded.

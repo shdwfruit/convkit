@@ -1227,6 +1227,53 @@ fn a_resize_that_does_not_bind_keeps_the_stream_copy() {
 
 #[test]
 #[ignore = "requires backends; run with --ignored"]
+fn an_xvid_avi_is_re_encoded_into_mp4_not_copied() {
+    // ffmpeg muxes MPEG-4 Part 2 into mp4 without complaint, but the copy
+    // plays in no browser, and QuickTime cannot decode the B-frames Xvid
+    // writes.
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffprobe);
+    let dir = tmp();
+    let avi = synth_media(
+        &dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x90:rate=25:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "mpeg4",
+            "-vtag",
+            "xvid",
+            "-bf",
+            "2",
+            "-c:a",
+            "libmp3lame",
+        ],
+        "old.avi",
+    );
+    assert_eq!(ffprobe_video_codec(&avi), "mpeg4");
+
+    let (mp4, outcome) = convert_path(&avi, "mp4");
+    assert!(!outcome.remuxed, "should have re-encoded");
+    assert_eq!(ffprobe_video_codec(&mp4), "h264");
+    assert_eq!(probe_pix_fmt(&mp4), "yuv420p");
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.contains("don't play MPEG-4 Part 2")),
+        "{:?}",
+        outcome.warnings
+    );
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
 fn a_gif_resize_past_the_source_keeps_the_source_size() {
     // Not the recipe's 640 default, and not enlarged.
     let dir = tmp();

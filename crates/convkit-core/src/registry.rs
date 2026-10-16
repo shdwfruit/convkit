@@ -1970,6 +1970,20 @@ pub(crate) fn compat_tables(
     }
 }
 
+/// Why a video the target's muxer takes is re-encoded rather than copied
+/// into it: the copy would write a file that doesn't play. MPEG-4 Part 2
+/// (`mpeg4`), the Xvid and DivX video of old AVI files, plays in no
+/// browser, and QuickTime decodes only its Simple Profile, not the Advanced
+/// Simple Profile with B-frames those files use (checked with AVFoundation
+/// on macOS 26: the copy reports "Cannot Decode" in mov and mp4 alike); the
+/// probe cannot tell the two apart. `None` for any other codec or target,
+/// and for a source already in the target's container: a cut of it plays
+/// no worse than the file it came from.
+pub(crate) fn why_not_remuxed(from: Format, to: Format, video: &str) -> Option<&'static str> {
+    (from != to && matches!(to, Format::Mp4 | Format::Mov) && video == "mpeg4")
+        .then_some("browsers and QuickTime don't play MPEG-4 Part 2 video (Xvid, DivX).")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
