@@ -247,6 +247,44 @@ replaces a file already there.")]
         )]
         graphics: Option<String>,
     },
+    /// Make a QR code: `conv qr "https://example.com"` writes qr.png.
+    #[command(long_about = "\
+Makes a QR code that holds TEXT, a link or any other text, exactly as \
+given. The text is in the code itself, with no redirect service behind \
+it, so the code never expires and nobody counts its scans.
+
+conv draws PNG and SVG itself. Any other image format (jpg, webp, pdf, \
+...) is drawn as a PNG and converted, which needs ImageMagick. Before \
+writing, conv reads the code back and checks it gives exactly TEXT.
+
+With --logo, the image sits in the middle on a white square about a \
+fifth of the code's width, and the code is made to survive losing 30% \
+of itself instead of 15%, so it still scans.")]
+    Qr {
+        /// What the code holds: a link or any text.
+        text: String,
+        /// The file to write, or a bare `.ext` for qr.EXT (`.svg`). Without
+        /// it, conv writes qr.png.
+        output: Option<PathBuf>,
+        /// Write the file into this directory (created if missing).
+        #[arg(short = 'o', long)]
+        outdir: Option<PathBuf>,
+        /// Put this image (svg, png, jpg, gif or webp) in the middle.
+        #[arg(long, value_name = "FILE")]
+        logo: Option<PathBuf>,
+        /// Width and height in pixels, rounded down to whole pixels a
+        /// module so the edges stay sharp. An SVG scales to any size; this
+        /// is only the size it opens at. [default: 1024]
+        #[arg(
+            long,
+            value_name = "PX",
+            value_parser = clap::value_parser!(u32).range(1..=convkit_core::qr::MAX_SIZE as i64)
+        )]
+        size: Option<u32>,
+        /// Overwrite the file if it exists.
+        #[arg(short = 'y', long)]
+        overwrite: bool,
+    },
     /// Download and verify a managed backend.
     Install { backend: String },
     /// List every supported conversion; with a FORMAT, show that format's

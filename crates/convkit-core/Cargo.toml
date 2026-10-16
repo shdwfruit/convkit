@@ -23,6 +23,16 @@ flate2 = "1"
 # `Packaging::TarXz` doesn't need `xz2`/`liblzma-sys`, which link C and would
 # make the Windows build fragile.
 lzma-rs = "0.3"
+# conv qr, all pure Rust: qrcode encodes the text, resvg draws the code and
+# its logo (no text or font support, which a QR code itself never needs),
+# rqrr reads the drawing back to prove it scans. png writes the file and
+# base64 embeds the logo in the SVG; both are already in the tree, through
+# resvg and ureq.
+qrcode = { version = "0.14", default-features = false }
+resvg = { version = "0.48", default-features = false, features = ["raster-images"] }
+rqrr = { version = "0.10", default-features = false }
+png = "0.18"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

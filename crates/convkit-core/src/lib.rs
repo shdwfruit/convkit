@@ -14,6 +14,7 @@ pub mod office;
 pub mod plan;
 pub mod probe;
 mod procutil;
+pub mod qr;
 pub mod recipe;
 pub mod registry;
 pub mod resolve;
