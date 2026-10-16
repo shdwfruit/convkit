@@ -307,6 +307,26 @@ pub(crate) fn gif_note(recipe: &Recipe, inputs: &[PathBuf]) -> Option<String> {
     (merge && gif).then(|| GIF_FIRST_FRAME_NOTE.to_string())
 }
 
+/// The format a run's location note is judged from
+/// (`metadata::keeps_exif_location`). A merge is named by its first input,
+/// but a later one's EXIF reaches the pdf too: on Typst's merge only a
+/// JPEG's does, and on `IMG_TO_PDF` every input's that ImageMagick keeps,
+/// so it is judged from the first of those whose location its read can see
+/// (not a WebP: `-ping` loads no WebP EXIF). `from` for any other recipe.
+pub(crate) fn location_source(recipe: &Recipe, from: Format, inputs: &[PathBuf]) -> Format {
+    if *recipe == TYPST_IMG_TO_PDF {
+        return Format::Jpg;
+    }
+    if *recipe != IMG_TO_PDF {
+        return from;
+    }
+    inputs
+        .iter()
+        .filter_map(|i| Format::from_path(i))
+        .find(|&f| f != Format::Webp && crate::metadata::keeps_exif_location(f, Format::Pdf))
+        .unwrap_or(from)
+}
+
 /// Whether this conversion runs on Typst's image merge.
 pub fn typst_merge(from: Format, to: Format, inputs: &[PathBuf], tuning: &Tuning) -> bool {
     lookup(from, to).is_some_and(|r| image_pdf_variant(r, inputs, tuning) == TYPST_IMG_TO_PDF)
@@ -1887,7 +1907,8 @@ pub fn reads_frames(from: Format, to: Format) -> bool {
 /// Whether a note on this pair depends on what the source image holds, so
 /// the caller should read it with `probe::image_traits` before planning:
 /// the frame and alpha notes, and the location note wherever the target
-/// keeps an EXIF GPS and the flag is not taking it out. Not for the
+/// keeps an EXIF GPS and the flag is not taking it out, judged for a merge
+/// from any input whose location it keeps (`location_source`). Not for the
 /// location note alone from a WebP: its GPS survives, but ImageMagick's
 /// `-ping` loads no WebP EXIF, so the read could never find it. Never on
 /// the Typst merge, which must not need ImageMagick for anything.
@@ -1896,6 +1917,7 @@ pub fn notes_need_image(from: Format, to: Format, inputs: &[PathBuf], tuning: &T
     if recipe == Some(TYPST_IMG_TO_PDF) {
         return false;
     }
+    let located = recipe.map_or(from, |r| location_source(&r, from, inputs));
     let frame_notes = recipe.is_some_and(|r| {
         r.warnings
             .iter()
@@ -1907,18 +1929,19 @@ pub fn notes_need_image(from: Format, to: Format, inputs: &[PathBuf], tuning: &T
     frame_notes
         || tiff_in_place
         || (!tuning.strip_metadata
-            && from != Format::Webp
+            && located != Format::Webp
             && lookup(from, to).is_some()
-            && crate::metadata::keeps_exif_location(from, to))
+            && crate::metadata::keeps_exif_location(located, to))
 }
 
 /// What the notes need to know of a Typst merge's inputs, read without
 /// ImageMagick, which the merge must not need: whether a JPEG records a
 /// location. Typst embeds a JPEG as it is, EXIF included, and decodes a
 /// PNG, WebP or GIF to pixels, so only a JPEG's reaches the PDF, wherever
-/// it is in the merge. A plain file read, like `office::traits`. `None` off
-/// the Typst route, where `probe::image_traits` reads the inputs.
-pub fn native_image_traits(
+/// it is in the merge. A plain file read of each JPEG's metadata, like
+/// `office::traits`, and none at all when the flag takes the location out.
+/// `None` off the Typst route, where `probe::image_traits` reads the inputs.
+pub(crate) fn native_image_traits(
     from: Format,
     to: Format,
     inputs: &[PathBuf],
@@ -1927,10 +1950,11 @@ pub fn native_image_traits(
     typst_merge(from, to, inputs, tuning).then(|| crate::probe::ImageTraits {
         alpha: None,
         multi_frame: false,
-        location: inputs
-            .iter()
-            .filter(|i| Format::from_path(i) == Some(Format::Jpg))
-            .any(|i| crate::jpeg::file_has_location(i)),
+        location: !tuning.strip_metadata
+            && inputs
+                .iter()
+                .filter(|i| Format::from_path(i) == Some(Format::Jpg))
+                .any(|i| crate::jpeg::file_has_location(i)),
         compressed: false,
     })
 }
@@ -2341,6 +2365,46 @@ mod tests {
         assert_eq!(
             notes(Format::Svg, Format::Jpg, Some(&opaque)),
             vec![FLATTEN_NOTE]
+        );
+    }
+
+    /// A merge is named by its first input, but ImageMagick carries every
+    /// input's EXIF into the pdf, so a later JPEG's location is read for
+    /// whatever comes first. Typst's merge is never read with ImageMagick.
+    #[test]
+    fn a_merge_is_read_for_the_location_of_any_input_imagemagick_keeps() {
+        let p = |names: &[&str]| -> Vec<PathBuf> { names.iter().map(PathBuf::from).collect() };
+        let quality = Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        };
+        let plain = Tuning::default();
+        let need =
+            |from, names: &[&str], t: &Tuning| notes_need_image(from, Format::Pdf, &p(names), t);
+        assert!(need(Format::Gif, &["a.gif", "gps.jpg"], &quality));
+        assert!(need(Format::Webp, &["a.webp", "gps.jpg"], &quality));
+        assert!(need(Format::Gif, &["a.gif", "gps.jpg", "x.heic"], &plain));
+        assert!(!need(Format::Gif, &["a.gif", "b.png"], &plain), "on Typst");
+        // Nothing in these keeps a location the read could see.
+        assert!(!need(Format::Gif, &["a.gif", "b.tiff"], &plain));
+        assert!(!need(Format::Webp, &["a.webp", "b.gif"], &quality));
+        let strip = Tuning {
+            strip_metadata: true,
+            ..quality
+        };
+        assert!(!need(Format::Gif, &["a.gif", "gps.jpg"], &strip));
+
+        let magick = |names: &[&str]| location_source(&IMG_TO_PDF, Format::Gif, &p(names));
+        assert_eq!(magick(&["a.gif", "b.webp", "c.JPG"]), Format::Jpg);
+        assert_eq!(magick(&["a.gif", "b.heic", "c.jpg"]), Format::Heic);
+        assert_eq!(magick(&["a.gif", "b.tiff"]), Format::Gif);
+        assert_eq!(
+            location_source(&TYPST_IMG_TO_PDF, Format::Png, &p(&["a.png"])),
+            Format::Jpg
+        );
+        assert_eq!(
+            location_source(&IMG_TO_JPG, Format::Heic, &p(&["a.heic"])),
+            Format::Heic
         );
     }
 

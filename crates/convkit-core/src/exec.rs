@@ -461,19 +461,9 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         None
     };
     // Whether a jpg/png/bmp target's notes apply, and whether the source
-    // records a location the output would keep. A read that fails keeps the
-    // frame and alpha notes whole, and gives no location note. Typst's merge
-    // reads its JPEGs itself, so it needs no ImageMagick for this either.
-    if let Some(t) = registry::native_image_traits(req.from, req.to, &req.inputs, &req.tuning) {
+    // records a location the output would keep.
+    if let Some(t) = probe::traits_for_notes(resolver, req.from, req.to, &req.inputs, &req.tuning) {
         probed.get_or_insert_with(MediaProbe::default).image = Some(t);
-    } else if registry::notes_need_image(req.from, req.to, &req.inputs, &req.tuning) {
-        let traits = resolver
-            .resolve(Backend::Magick)
-            .ok()
-            .and_then(|m| probe::image_traits(&m.path, &req.inputs).ok());
-        if let Some(t) = traits {
-            probed.get_or_insert_with(MediaProbe::default).image = Some(t);
-        }
     }
     // Whether an Office source is encrypted or carries macros. A plain
     // file read, no backend.
@@ -2923,6 +2913,27 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         let req = merge_request(dir.path(), &["a.gif", "b.jpg"]);
         std::fs::write(&req.inputs[1], crate::jpeg::located_for_tests()).unwrap();
         let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(
+            o.warnings,
+            [
+                registry::GIF_FIRST_FRAME_NOTE,
+                "The source records a GPS location, and the pdf keeps it; add \
+                 --strip-metadata to remove it."
+            ]
+        );
+    }
+
+    /// On ImageMagick a merge that starts with a GIF still carries a
+    /// JPEG's EXIF into the pdf, so the inputs are read and the note said.
+    #[cfg(unix)]
+    #[test]
+    fn an_imagemagick_merge_after_a_gif_reads_and_notes_a_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "GIF Undefined 1 [51/1,30/1,63/25]");
+        let mut req = merge_request(dir.path(), &["a.gif", "gps.jpg"]);
+        req.tuning.quality = Some(80);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(pings(dir.path()), 1);
         assert_eq!(
             o.warnings,
             [

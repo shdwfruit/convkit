@@ -386,13 +386,8 @@ pub fn build_tuned(
     warnings.extend(resolved.notes.iter().cloned());
     warnings.extend(clip_notes);
     warnings.extend(crate::metadata::tags_unread_note(from, to, tuning, probe));
-    // Typst's merge passes on a JPEG's EXIF and no other input's, wherever
-    // the JPEG is in the merge (`registry::native_image_traits`).
-    let located = if recipe == registry::TYPST_IMG_TO_PDF {
-        Format::Jpg
-    } else {
-        from
-    };
+    // A merge's later inputs carry their EXIF into the pdf too.
+    let located = registry::location_source(&recipe, from, inputs);
     warnings.extend(crate::metadata::location_note(located, to, probe, tuning));
     warnings.extend(crate::metadata::labels_note(to, tuning, probe));
 
@@ -1097,6 +1092,14 @@ mod tests {
             [registry::GIF_FIRST_FRAME_NOTE, PDF_LOCATION_NOTE]
         );
 
+        // The flag takes the location out, so there is nothing to read.
+        let strip = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &strip);
+        assert!(traits.is_some_and(|t| !t.location), "{traits:?}");
+
         std::fs::write(&jpg, b"\xff\xd8\xff\xd9").unwrap();
         let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &plain);
         assert!(traits.is_some_and(|t| !t.location), "{traits:?}");
@@ -1112,6 +1115,49 @@ mod tests {
         assert_eq!(
             registry::native_image_traits(Format::Jpg, Format::Png, &inputs[1..], &plain),
             None
+        );
+    }
+
+    /// ImageMagick carries every input's EXIF into the pdf, so a JPEG's
+    /// location is noted whatever input comes first, a GIF or a WebP
+    /// included.
+    #[test]
+    fn an_imagemagick_merge_notes_a_located_jpeg_after_a_gif_or_webp() {
+        let located = MediaProbe {
+            image: Some(crate::probe::ImageTraits {
+                alpha: None,
+                multi_frame: false,
+                location: true,
+                compressed: false,
+            }),
+            ..MediaProbe::default()
+        };
+        let quality = Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        };
+        let gif = pdf_of(Format::Gif, &["a.gif", "gps.jpg"], Some(&located), &quality);
+        assert_eq!(gif.steps[0].backend, Backend::Magick);
+        assert_eq!(
+            gif.warnings,
+            [registry::GIF_FIRST_FRAME_NOTE, PDF_LOCATION_NOTE]
+        );
+        let webp = pdf_of(
+            Format::Webp,
+            &["a.webp", "gps.jpg"],
+            Some(&located),
+            &quality,
+        );
+        assert_eq!(webp.warnings, [PDF_LOCATION_NOTE]);
+        let heic = pdf_of(
+            Format::Gif,
+            &["a.gif", "gps.jpg", "x.heic"],
+            Some(&located),
+            &Tuning::default(),
+        );
+        assert_eq!(
+            heic.warnings,
+            [registry::GIF_FIRST_FRAME_NOTE, PDF_LOCATION_NOTE]
         );
     }
 

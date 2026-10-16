@@ -329,17 +329,8 @@ fn probed_for(
     tuning: &Tuning,
 ) -> Result<Option<MediaProbe>, ConvError> {
     let mut probed = media_probed_for(resolver, job, tuning)?;
-    // As `exec::run` does, Typst's merge reads its JPEGs itself.
-    if let Some(t) = registry::native_image_traits(job.from, job.to, &job.inputs, tuning) {
+    if let Some(t) = probe::traits_for_notes(resolver, job.from, job.to, &job.inputs, tuning) {
         probed.get_or_insert_with(MediaProbe::default).image = Some(t);
-    } else if registry::notes_need_image(job.from, job.to, &job.inputs, tuning) {
-        let traits = resolver
-            .resolve(Backend::Magick)
-            .ok()
-            .and_then(|m| probe::image_traits(&m.path, &job.inputs).ok());
-        if let Some(t) = traits {
-            probed.get_or_insert_with(MediaProbe::default).image = Some(t);
-        }
     }
     // As `exec::run` does, so the preview refuses a password-protected
     // .docx and carries the same macro note.

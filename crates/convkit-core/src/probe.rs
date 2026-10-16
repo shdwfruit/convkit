@@ -615,6 +615,30 @@ fn parse_page(line: &str, density: Option<f64>) -> Option<(u32, u32)> {
     Some(if on_its_side { (h, w) } else { (w, h) })
 }
 
+/// What the notes need to know of an image source, read the way the run
+/// takes it: natively on Typst's merge, which must not need ImageMagick
+/// (`registry::native_image_traits`), else with `image_traits` where a note
+/// depends on it (`registry::notes_need_image`). `None` when nothing needs
+/// reading or the read fails, which keeps the frame and alpha notes whole
+/// and gives no location note. `exec::run` and the `--dry-run` preview both
+/// read through this, so they agree.
+pub fn traits_for_notes(
+    resolver: &crate::Resolver,
+    from: crate::Format,
+    to: crate::Format,
+    inputs: &[std::path::PathBuf],
+    tuning: &crate::Tuning,
+) -> Option<ImageTraits> {
+    if let Some(t) = crate::registry::native_image_traits(from, to, inputs, tuning) {
+        return Some(t);
+    }
+    if !crate::registry::notes_need_image(from, to, inputs, tuning) {
+        return None;
+    }
+    let magick = resolver.resolve(crate::Backend::Magick).ok()?;
+    image_traits(&magick.path, inputs).ok()
+}
+
 /// Reads an image's `ImageTraits` with `-ping`, which stops before the
 /// pixels, over the first two frames of each input only: enough to tell
 /// one frame from several, so a long animation costs what a still does.

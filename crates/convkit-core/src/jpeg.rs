@@ -7,6 +7,7 @@
 //! ICC profile, Adobe's colour flag, and a minimal EXIF holding only the
 //! orientation and resolution.
 
+use std::io::Read;
 use std::path::Path;
 
 const SOI: u8 = 0xD8;
@@ -40,6 +41,9 @@ struct Segment<'a> {
     payload: &'a [u8],
 }
 
+/// Why `walk` stopped when the bytes run out before it is done.
+const TRUNCATED: &str = "ends before the image data";
+
 /// The segments from SOI up to and including the first EOI.
 fn segments(bytes: &[u8]) -> Result<Vec<Segment<'_>>, String> {
     let mut out = Vec::new();
@@ -62,7 +66,7 @@ fn walk<'a>(bytes: &'a [u8], header_only: bool, out: &mut Vec<Segment<'a>>) -> R
     if !bytes.starts_with(&[0xFF, SOI]) {
         return Err("not a JPEG".into());
     }
-    let truncated = || "ends before the image data".to_string();
+    let truncated = || TRUNCATED.to_string();
     out.push(Segment {
         marker: SOI,
         raw: &bytes[..2],
@@ -251,7 +255,29 @@ pub(crate) fn has_location(bytes: &[u8]) -> bool {
 
 /// `has_location` for a file; false when it cannot be read.
 pub(crate) fn file_has_location(path: &Path) -> bool {
-    std::fs::read(path).is_ok_and(|b| has_location(&b))
+    std::fs::File::open(path).is_ok_and(reads_location)
+}
+
+/// `has_location` for what `r` reads, read only as far as the image data:
+/// the metadata is all in front of it, so a large photo costs a few
+/// kilobytes. Read in growing chunks, so metadata of any size is read whole.
+fn reads_location(mut r: impl Read) -> bool {
+    let mut head = Vec::new();
+    let mut want = 64 * 1024;
+    loop {
+        let missing = want - head.len();
+        match r.by_ref().take(missing as u64).read_to_end(&mut head) {
+            Err(_) => return false,
+            // The end of the file: all of it is in hand.
+            Ok(n) if n < missing => break,
+            Ok(_) => {}
+        }
+        if !matches!(walk(&head, true, &mut Vec::new()), Err(e) if e == TRUNCATED) {
+            break;
+        }
+        want *= 2;
+    }
+    has_location(&head)
 }
 
 /// The JPEG without its metadata, pixels untouched. Fails with a short
@@ -377,6 +403,32 @@ mod tests {
     #[test]
     fn the_shared_test_jpeg_records_a_location() {
         assert!(has_location(&located_for_tests()));
+    }
+
+    /// A photo's metadata is all in front of its image data, so that is all
+    /// that is read, however large the picture; metadata larger than the
+    /// first read is still read whole.
+    #[test]
+    fn a_large_photo_is_read_only_as_far_as_its_image_data() {
+        let e = exif(false, &[GPS_POINTER], Some(&[LATITUDE]));
+        let scan = vec![0x12; 4 << 20];
+        let photo = jpeg(&[segment(APP1, &e)], &scan, &[]);
+        let mut r = std::io::Cursor::new(&photo);
+        assert!(reads_location(&mut r));
+        assert!(r.position() <= 64 << 10, "read {} bytes", r.position());
+
+        let xmp = segment(APP1, &[b'x'; 60_000]);
+        let large = jpeg(
+            &[xmp.clone(), xmp.clone(), xmp, segment(APP1, &e)],
+            &scan,
+            &[],
+        );
+        let mut r = std::io::Cursor::new(&large);
+        assert!(reads_location(&mut r));
+        assert!(r.position() <= 256 << 10, "read {} bytes", r.position());
+
+        let plain = jpeg(&[], &scan, &[]);
+        assert!(!reads_location(std::io::Cursor::new(&plain)));
     }
 
     fn segment(marker: u8, payload: &[u8]) -> Vec<u8> {
