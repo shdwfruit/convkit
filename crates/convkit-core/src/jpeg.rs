@@ -43,15 +43,32 @@ struct Segment<'a> {
 
 /// The segments from SOI up to and including the first EOI.
 fn segments(bytes: &[u8]) -> Result<Vec<Segment<'_>>, String> {
+    let mut out = Vec::new();
+    walk(bytes, false, &mut out)?;
+    Ok(out)
+}
+
+/// The segments before the image data, as far as the file parses: whatever
+/// was read before damage is still returned. Metadata sits in front of the
+/// first scan, so damage after it does not change what the file records.
+fn header_segments(bytes: &[u8]) -> Vec<Segment<'_>> {
+    let mut out = Vec::new();
+    let _ = walk(bytes, true, &mut out);
+    out
+}
+
+/// Reads segments into `out` until the first EOI (or, with `header_only`,
+/// the first SOS), keeping what it read when it hits an error.
+fn walk<'a>(bytes: &'a [u8], header_only: bool, out: &mut Vec<Segment<'a>>) -> Result<(), String> {
     if !bytes.starts_with(&[0xFF, SOI]) {
         return Err("not a JPEG".into());
     }
     let truncated = || "ends before the image data".to_string();
-    let mut out = vec![Segment {
+    out.push(Segment {
         marker: SOI,
         raw: &bytes[..2],
         payload: &[],
-    }];
+    });
     let mut pos = 2;
     loop {
         // A marker is FF, any number of FF fill bytes, then its code.
@@ -73,7 +90,7 @@ fn segments(bytes: &[u8]) -> Result<Vec<Segment<'_>>, String> {
                 payload: &[],
             });
             if marker == EOI {
-                return Ok(out);
+                return Ok(());
             }
             pos = header_end;
             continue;
@@ -90,6 +107,9 @@ fn segments(bytes: &[u8]) -> Result<Vec<Segment<'_>>, String> {
             return Err(truncated());
         }
         let mut end = payload_end;
+        if marker == SOS && header_only {
+            return Ok(());
+        }
         if marker == SOS {
             end = scan_end(bytes, payload_end).ok_or_else(truncated)?;
         }
@@ -216,9 +236,7 @@ fn exif_tiff<'a>(segs: &[Segment<'a>]) -> Option<Tiff<'a>> {
 /// Whether the JPEG records where it was taken: an EXIF GPS block with a
 /// latitude.
 pub(crate) fn has_location(bytes: &[u8]) -> bool {
-    let Ok(segs) = segments(bytes) else {
-        return false;
-    };
+    let segs = header_segments(bytes);
     let Some(tiff) = exif_tiff(&segs) else {
         return false;
     };
@@ -466,6 +484,25 @@ mod tests {
         let mut bad = exif(true, &[GPS_POINTER], Some(&[LATITUDE]));
         bad[6 + 8 + 2 + 8..6 + 8 + 2 + 12].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
         assert!(!has_location(&jpeg(&[segment(APP1, &bad)], SCAN, &[])));
+    }
+
+    #[test]
+    fn location_survives_damage_after_the_exif() {
+        let e = exif(true, &[GPS_POINTER], Some(&[LATITUDE]));
+        let exif_seg = segment(APP1, &e);
+        let j = jpeg(std::slice::from_ref(&exif_seg), SCAN, &[]);
+        // No EOI, or cut anywhere inside the scan.
+        for cut in j.len() - SCAN.len() - 2..j.len() {
+            assert!(has_location(&j[..cut]), "cut at {cut}");
+        }
+        assert!(has_location(&j[..j.len() / 2 + exif_seg.len() / 2]));
+        // Junk between two header segments, after the Exif.
+        let junk = jpeg(
+            &[exif_seg, vec![0x00, 0x00], segment(0xDB, &[0; 65])],
+            SCAN,
+            &[],
+        );
+        assert!(has_location(&junk));
     }
 
     #[test]
