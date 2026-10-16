@@ -916,6 +916,42 @@ fn docx_to_pdf_succeeds_in_a_deep_destination_directory() {
     assert_eq!(&header, b"%PDF-", "output is not a real PDF");
 }
 
+/// The Typst merge's half of the long-path guarantee. Its `--root`, the
+/// layout and the output are recorded as paths, so on Windows they go to
+/// Typst in verbatim (`\\?\`) form once they are long, and the staged
+/// inputs sit in the scratch folder, deeper still. Here every input and
+/// the output are in a destination that approaches MAX_PATH.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn typst_merge_succeeds_in_a_deep_destination_directory() {
+    let dir = tmp();
+    let jpg = synth_image(&dir, &["-size", "64x48", "gradient:red-blue"], "a.jpg");
+    let png = synth_image(&dir, &["-size", "48x64", "xc:green"], "b.png");
+
+    let base = tempfile::tempdir().unwrap();
+    let deep_dir = make_deep_dir(base.path(), 240);
+    let inputs: Vec<PathBuf> = [&jpg, &png]
+        .iter()
+        .map(|from| {
+            let to = deep_dir.join(from.file_name().unwrap());
+            std::fs::copy(from, &to)
+                .unwrap_or_else(|e| panic!("failed to copy {} into deep dir: {e}", from.display()));
+            to
+        })
+        .collect();
+    let output = deep_dir.join("out.pdf");
+    assert!(
+        output.as_os_str().len() >= 248,
+        "test setup must exceed the verbatim threshold: {} ({} bytes)",
+        output.display(),
+        output.as_os_str().len()
+    );
+
+    let outcome = merge(&inputs, &output, Tuning::default());
+    assert_eq!(ran(&outcome), [Backend::Typst]);
+    assert_eq!(pdf_pages(&output), 2);
+}
+
 /// Override-authority fix verification (see the fix's own report). The
 /// coordinator's own attempt to prove this could never force ffprobe
 /// genuinely unavailable: a plain `--ffprobe-path <nonexistent>` used to
@@ -3255,7 +3291,8 @@ fn typst_merge_sizes_each_page_from_its_dpi() {
     let screen = at("400x300", "72", "screen.png");
     let scan = at("600x300", "300", "scan.jpg");
     let out = dir.path().join("pages.pdf");
-    merge(&[screen, scan], &out, Tuning::default());
+    let outcome = merge(&[screen, scan], &out, Tuning::default());
+    assert_eq!(ran(&outcome), [Backend::Typst]);
     assert_eq!(media_boxes(&out), [(400, 300), (144, 72)]);
 }
 
@@ -3280,7 +3317,8 @@ fn typst_merge_turns_an_orientation_6_jpeg_upright() {
     assert_eq!(imagemagick_dimensions(&photo), (400, 200));
 
     let out = dir.path().join("upright.pdf");
-    merge(&[photo], &out, Tuning::default());
+    let outcome = merge(&[photo], &out, Tuning::default());
+    assert_eq!(ran(&outcome), [Backend::Typst]);
     assert_eq!(media_boxes(&out), [(200, 400)]);
     let page = render_page(&out, 1);
     assert_eq!(imagemagick_dimensions(&page), (200, 400));
