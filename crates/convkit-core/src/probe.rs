@@ -45,6 +45,10 @@ pub struct MediaProbe {
     pub height: Option<u32>,
     /// Display-matrix rotation in degrees, when the source carries one.
     pub rotation: Option<i32>,
+    /// How a JPEG's EXIF tag or an mp4 or mov's display matrix shows the
+    /// stored picture, read by conv itself (`exif::read`, `mov::read`) for
+    /// `--rotate`. `None` when it was not read, or is not a plain turn.
+    pub orientation: Option<crate::rotate::Orientation>,
     /// Frame rate as a rational, never a float: `MediaProbe` derives `Eq`,
     /// which a float member would stop deriving, and ffprobe reports
     /// `30000/1001` as a rational already — the float would be the lossy

@@ -71,6 +71,7 @@ pub fn in_place(f: Format) -> Result<(), String> {
         | Format::Png
         | Format::Webp
         | Format::Avif
+        | Format::Heic
         | Format::Tiff
         | Format::Bmp
         | Format::Mp4
@@ -83,10 +84,9 @@ pub fn in_place(f: Format) -> Result<(), String> {
         | Format::Wav
         | Format::Opus
         | Format::Ogg => Ok(()),
-        Format::Heic | Format::Heif => Err(format!(
-            "conv cannot write {}; add --to jpg to strip it into a jpg",
-            f.ext()
-        )),
+        Format::Heif => {
+            Err("conv cannot write heif; add --to heic to strip it into a heic".to_string())
+        }
         // ico -> ico is no pair, and no other target is the same icon.
         Format::Ico => Err(
             "conv cannot write an ico into an ico; an icon conv makes from \
@@ -113,7 +113,7 @@ pub fn in_place(f: Format) -> Result<(), String> {
 /// document, which the flag does not cover.
 pub fn strip_target_for(f: Format) -> Option<Format> {
     match f {
-        Format::Heic | Format::Heif => Some(Format::Jpg),
+        Format::Heif => Some(Format::Heic),
         Format::Svg => Some(Format::Png),
         // gif -> mp4 is the only conversion conv has for a gif.
         Format::Gif | Format::Avi => Some(Format::Mp4),
@@ -124,10 +124,7 @@ pub fn strip_target_for(f: Format) -> Option<Format> {
 /// The note on a lossy image stripped into its own format: ImageMagick
 /// decodes and encodes again, so the picture pays a generation.
 pub(crate) fn reencode_note(to: Format, tuning: &Tuning) -> String {
-    let quality = tuning.quality.map_or_else(
-        || crate::registry::IMAGE_QUALITY.to_string(),
-        |q| q.to_string(),
-    );
+    let quality = quality_for(to, tuning);
     format!(
         "The {0} is re-encoded at quality {quality} to remove its metadata; ImageMagick \
          cannot take it out of a {0} without re-encoding.",
@@ -135,10 +132,22 @@ pub(crate) fn reencode_note(to: Format, tuning: &Tuning) -> String {
     )
 }
 
+/// The quality a lossy image target is written at: `--quality`, or the
+/// target's own anchor.
+pub(crate) fn quality_for(to: Format, tuning: &Tuning) -> String {
+    let anchor = match to {
+        Format::Heic => crate::registry::HEIC_QUALITY,
+        _ => crate::registry::IMAGE_QUALITY,
+    };
+    tuning
+        .quality
+        .map_or_else(|| anchor.to_string(), |q| q.to_string())
+}
+
 /// Whether ImageMagick carries an EXIF GPS from `from` into `to`, as
-/// measured: jpg, webp, avif and pdf keep the EXIF profile (a pdf inside its
-/// embedded JPEG), and png keeps it three times over (an eXIf chunk, a raw
-/// profile, and a text chunk per field). The tiff writer never writes EXIF
+/// measured: jpg, webp, avif, heic and pdf keep the EXIF profile (a pdf
+/// inside its embedded JPEG), and png keeps it three times over (an eXIf
+/// chunk, a raw profile, and a text chunk per field). The tiff writer never writes EXIF
 /// and bmp holds none. A TIFF source keeps its EXIF in IFDs, not a profile,
 /// which only the png writer turns into text.
 pub(crate) fn keeps_exif_location(from: Format, to: Format) -> bool {
@@ -155,7 +164,9 @@ pub(crate) fn keeps_exif_location(from: Format, to: Format) -> bool {
     has_exif
         && match to {
             Format::Png => true,
-            Format::Jpg | Format::Webp | Format::Avif | Format::Pdf => from != Format::Tiff,
+            Format::Jpg | Format::Webp | Format::Avif | Format::Heic | Format::Pdf => {
+                from != Format::Tiff
+            }
             _ => false,
         }
 }
@@ -336,6 +347,8 @@ mod tests {
         for to in [Format::Tiff, Format::Bmp] {
             assert!(note(Format::Heic, to, &photo(true)).is_none(), "{to:?}");
         }
+        assert!(note(Format::Jpg, Format::Heic, &photo(true)).is_some());
+        assert!(note(Format::Tiff, Format::Heic, &photo(true)).is_none());
         assert!(note(Format::Tiff, Format::Jpg, &photo(true)).is_none());
         assert!(note(Format::Tiff, Format::Png, &photo(true)).is_some());
         assert!(note(Format::Heic, Format::Jpg, &photo(false)).is_none());
@@ -373,7 +386,12 @@ mod tests {
             .unwrap_err()
             .contains("ico into an ico"));
         assert_eq!(strip_target_for(Format::Gif), Some(Format::Mp4));
-        assert_eq!(strip_target_for(Format::Heic), Some(Format::Jpg));
+        assert!(in_place(Format::Heic).is_ok());
+        assert_eq!(
+            in_place(Format::Heif).unwrap_err(),
+            "conv cannot write heif; add --to heic to strip it into a heic"
+        );
+        assert_eq!(strip_target_for(Format::Heif), Some(Format::Heic));
         assert_eq!(strip_target_for(Format::Svg), Some(Format::Png));
         assert_eq!(strip_target_for(Format::Docx), None);
         assert_eq!(

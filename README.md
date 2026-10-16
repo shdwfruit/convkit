@@ -13,7 +13,7 @@
 
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
-ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 158
+ImageMagick, LibreOffice, pandoc, or Typst — and runs it locally: 165
 conversion pairs across 34 formats (`conv capabilities` is the source of
 truth). Files never leave your machine; only `conv install`/`conv update`
 ever touch the network.
@@ -102,6 +102,7 @@ conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 conv clip.mp4 --speed 2          # play twice as fast
+conv IMG_0042.mov --rotate left  # turn a sideways video or photo
 conv trim talk.mp4               # find clips in the terminal and cut them
 ```
 
@@ -172,8 +173,9 @@ Three flags override named defaults on image conversions:
 - `--resize <GEOMETRY>` — fit within the geometry, aspect preserved:
   `1600x900`, `1600x` (width only), `x900` (height only), or `50%`.
   It never enlarges; see `--upscale` below.
-- `--quality <1-100>` — lossy image targets (jpg/webp/avif) and image → pdf;
-  the default is 92.
+- `--quality <1-100>` — lossy image targets (jpg/webp/avif/heic) and image →
+  pdf; the default is 92, and 60 for heic, whose encoder counts on its own
+  scale (60 makes a photo about the size a phone writes).
 - `--colors <2-256>` — palette reduction on raster targets.
 
 A flag that doesn't apply to the requested pair is refused with the reason,
@@ -182,7 +184,7 @@ never silently ignored:
 ```console
 $ conv in.jpg out.png --quality 80
 FAIL in.jpg -> png
-  png is lossless; --quality applies to jpg/webp/avif targets and image -> pdf
+  png is lossless; --quality applies to jpg/webp/avif/heic targets and image -> pdf
 ```
 
 `--fps` and `--crf` override two more named defaults on video and GIF
@@ -341,10 +343,10 @@ OK IMG_0043.mp4 - 24 KB - 0.1s - stream copy, no re-encode
 ```
 
 With one file and no output, conv keeps the format and adds `-stripped` to
-the name, by the same rules as `--max-size`. A jpg, webp or avif is
+the name, by the same rules as `--max-size`. A jpg, webp, avif or heic is
 re-encoded to do it, since ImageMagick cannot take metadata out any other
 way, and the note says so; video and audio are copied. conv cannot write
-HEIC, so a HEIC file needs `--to jpg`.
+`.heif`, so a HEIF file needs `--to heic`.
 
 ```console
 $ conv IMG_0042.jpg --strip-metadata
@@ -581,6 +583,41 @@ conv memo.m4a .mp3 --speed 1.25
 conv screen.mov --speed 4 --max-size 10mb
 ```
 
+## Rotating
+
+`--rotate` turns a photo or video as it is shown: `right` is a quarter turn
+clockwise, `left` the other way, and `180` turns it upside down. `90` and
+`270` work too.
+
+```console
+$ conv IMG_0042.mov --rotate left
+OK IMG_0042-rotated.mov - 48.1 MB - 0.1s
+  /home/user/Videos/IMG_0042-rotated.mov
+  note  The picture was already stored this way up, so only its orientation tag changed; nothing was re-encoded.
+```
+
+Phones store a photo or video the way the sensor saw it, plus a tag that
+says how to turn it for display. An app that ignores the tag shows the file
+sideways, so conv turns the picture itself and sets the tag to match, and
+the file looks the same everywhere. When the tag was the problem in a JPEG,
+MP4 or MOV, as with a video filmed with the rotation lock on, turning it back
+only takes resetting the tag, so nothing is re-encoded and it takes no time.
+Otherwise a video is
+re-encoded, and a JPEG, WebP, AVIF or HEIC is re-encoded at its usual
+quality, which a note says. PNG, TIFF and BMP lose nothing. An animated GIF
+is turned frame by frame.
+
+Naming works as it does for `--strip-metadata`: one file keeps its format
+and gets `-rotated` in its name, and a batch writes into a `rotated` folder.
+Name an output to convert it as well. The turn comes before `--resize`, so
+the size fits the turned picture:
+
+```console
+conv IMG_0042.heic .jpg --rotate right
+conv ./scans --to png --rotate 180
+conv screen.mov clip.gif --rotate left --resize 480x
+```
+
 ## Discovering formats and capabilities
 
 `conv capabilities` lists every registered pair and the backend(s) behind it:
@@ -622,7 +659,7 @@ each could be converted into.
 ```console
 $ conv scan
 README       --
-already.jpg  Image   -> png webp avif tiff bmp ico pdf
+already.jpg  Image   -> heic png webp avif tiff bmp ico pdf
 archive.zip  --
 clip.mp4     Video   -> mov mkv webm mp3 m4a wav flac opus ogg gif
 notes.md     Doc     -> pdf docx html
@@ -681,7 +718,7 @@ convkit dispatches to six binaries, each invoked as a subprocess:
 | Backend | Used for | `conv install` | Pinned version |
 |---|---|---|---|
 | `ffmpeg` / `ffprobe` | video, audio, GIF, remux | Yes | 9.0.1 |
-| `magick` (ImageMagick) | images, HEIC/HEIF read, images → PDF | No — use your package manager | — |
+| `magick` (ImageMagick) | images, HEIC (HEIF read-only), images → PDF | No — use your package manager | — |
 | `pandoc` | Markdown → HTML/DOCX; parses docx/odt for the PDF fallback | Yes | 3.11 |
 | `typst` | PDF engine for the docx/odt → pdf fallback | Yes | 0.15.1 |
 | `soffice` (LibreOffice) | Office documents ⇄ PDF | No — manual install, always | — |
@@ -802,7 +839,9 @@ the notes the human output prints under the path, the same ones a
 always holds each step's raw output, tail-capped at 16 KiB; `notes` is the
 small distilled subset worth a person's attention, usually empty on a clean
 run. A cut adds `range`: where the cut was made, in milliseconds, and the
-times as typed. For the full shapes of every command, run it with `--json`
+times as typed. A turn adds `rotation`: the turn, and `by`, which is `tag`
+when only the orientation tag changed and `pixels` when the picture itself
+was turned. For the full shapes of every command, run it with `--json`
 — the binary is the reference.
 
 ## Troubleshooting
@@ -811,6 +850,12 @@ times as typed. For the full shapes of every command, run it with `--json`
 imagemagick` ships without an HEVC decoder there; install
 `libheif-plugin-libde265` alongside it. Homebrew and Windows ImageMagick
 builds include it already.
+
+**Writing HEIC fails with "cannot write HEIC".** ImageMagick writes HEIC
+only when its libheif has an HEVC encoder. On Debian/Ubuntu install
+`libheif-plugin-x265`; on Fedora, `libheif-freeworld` from RPM Fusion.
+Homebrew's ImageMagick has one. ImageMagick's Windows build does not, so
+there convert to avif or jpg instead.
 
 **Windows: SmartScreen warns on first run.** The binaries aren't code-signed
 yet — see [Install](#install).

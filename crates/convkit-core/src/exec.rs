@@ -136,6 +136,10 @@ pub struct Outcome {
     /// for every other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<crate::speed::SpeedReport>,
+    /// The turn a `--rotate` conversion made, and how. Omitted from
+    /// `--json` for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<crate::rotate::RotationReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -372,6 +376,19 @@ fn tail_str(s: &str, max: usize) -> &str {
     &s[start..]
 }
 
+/// Whether `e` is ImageMagick refusing to write a HEIC for want of an HEVC
+/// encoder. ImageMagick 6 and 7 register a HEIC writer only when libheif
+/// has an encoder for it, so without one the write fails as it would for a
+/// format with no writer at all: "no encode delegate for this image format
+/// `HEIC'".
+fn lacks_heic_encoder(to: Format, e: &ConvError) -> bool {
+    to == Format::Heic
+        && e.code == ErrorCode::ConversionFailed
+        && e.backend == Some(Backend::Magick)
+        && e.message.contains("no encode delegate")
+        && e.message.contains("HEIC")
+}
+
 /// Runs a conversion plan end to end: resolves each step's backend, spawns
 /// it, verifies it actually produced output, and atomically renames the
 /// result into place.
@@ -501,6 +518,10 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         }
     }
 
+    // How a JPEG, mp4 or mov shows its stored picture, for a turn that may
+    // only need its note reset. A plain file read, no backend.
+    crate::rotate::attach(req.from, &req.inputs[0], &req.tuning, &mut probed);
+
     // Likewise: only check backend availability when this pair actually has
     // more than one recipe to choose between (today: docx/odt -> pdf). An
     // ordinary conversion never pays for the extra resolve() calls this
@@ -564,6 +585,12 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         return Err(crate::video::confirmation_error(&req.inputs));
     }
     let (ran, sizing) = match built.sizing.clone() {
+        // A turn made by the tag alone: the file is copied, and its note
+        // reset below.
+        None if built.steps.is_empty() && retags(&built) => {
+            copy_fresh(&req.inputs[0], &temp_final)?;
+            (built, None)
+        }
         None => {
             if built.steps.is_empty() {
                 return Err(ConvError::new(
@@ -583,6 +610,8 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                     && e.backend == Some(Backend::Soffice)
                 {
                     ConvError::password_protected(&req.inputs[0], req.from)
+                } else if lacks_heic_encoder(req.to, &e) {
+                    ConvError::heic_encoder_missing()
                 } else {
                     e
                 }
@@ -604,6 +633,24 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             )
         }
     };
+    // A turn by the tag resets it; one by the pixels resets any XMP copy of
+    // the old orientation, which ImageMagick carries over as it was.
+    let reset = match ran.rotation.map(|r| r.by) {
+        Some(crate::rotate::By::Tag) => crate::rotate::set_upright(ran.to, &temp_final),
+        Some(crate::rotate::By::Pixels) if ran.to.kind() == crate::Kind::Image => {
+            crate::xmp::set_upright(&temp_final, ran.to)
+        }
+        _ => Ok(()),
+    };
+    reset.map_err(|e| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!(
+                "could not reset the orientation of {}: {e}",
+                req.inputs[0].display()
+            ),
+        )
+    })?;
     let remuxed = ran.steps.first().is_some_and(|s| is_remux(&s.argv));
     let StepRunner {
         mut notes,
@@ -623,6 +670,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let enlarged = ran.enlarged.clone();
     let range = ran.range.clone();
     let speed = ran.speed.clone();
+    let rotation = ran.rotation;
     let mut warnings = ran.warnings;
     let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());
@@ -663,7 +711,15 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         enlarged,
         range,
         speed,
+        rotation,
     })
+}
+
+/// Whether a plan's turn is the executor's to make, by resetting the
+/// output's note.
+fn retags(plan: &ConversionPlan) -> bool {
+    plan.rotation
+        .is_some_and(|r| r.by == crate::rotate::By::Tag)
 }
 
 /// Runs plan steps for one conversion and accumulates what they report.
@@ -1618,6 +1674,63 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(".convkit-"))
             .collect()
+    }
+
+    /// An ImageMagick that reads HEIC but has no HEVC encoder registers no
+    /// writer for it and says only "no encode delegate". The error names
+    /// what is missing and how to get it; the same words for any other
+    /// target stay the ordinary failure.
+    #[test]
+    fn a_magick_without_an_hevc_encoder_says_what_to_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let (name, body) = if cfg!(windows) {
+            (
+                "no_heic.bat",
+                "@echo off\r\n\
+                 echo magick: no encode delegate for this image format `HEIC' @ error/constitute.c/WriteImage/1431. 1>&2\r\n\
+                 exit /b 1\r\n",
+            )
+        } else {
+            (
+                "no_heic.sh",
+                "#!/bin/sh\n\
+                 echo \"magick: no encode delegate for this image format \\`HEIC' @ error/constitute.c/WriteImage/1431.\" >&2\n\
+                 exit 1\n",
+            )
+        };
+        let stub = dir.path().join(name);
+        std::fs::write(&stub, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub);
+        let input = dir.path().join("a.jpg");
+        std::fs::write(&input, b"x").unwrap();
+        let req = |to: Format| Request {
+            from: Format::Jpg,
+            to,
+            inputs: vec![input.clone()],
+            output: dir.path().join(format!("out.{}", to.ext())),
+            overwrite: false,
+            tuning: Default::default(),
+            allow_extreme: false,
+        };
+
+        let e = run(&req(Format::Heic), &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::ConversionFailed, "{e:?}");
+        assert_eq!(e.backend, Some(Backend::Magick));
+        assert!(
+            e.message.contains("cannot write HEIC") && e.message.contains("HEVC encoder"),
+            "{}",
+            e.message
+        );
+        assert!(e.remediation.and_then(|r| r.manual).is_some());
+
+        let png = run(&req(Format::Png), &r, &mut |_| {}).unwrap_err();
+        assert!(!png.message.contains("HEVC"), "{}", png.message);
     }
 
     /// Minor fix: the stderr tail must read top-down (natural reading

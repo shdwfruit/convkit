@@ -10,13 +10,20 @@ use crate::{Arg, Backend, Format, Kind, OutputMode, Recipe, Step, Tuning};
 /// `pub` so `conv capabilities <format>` can state the default it is
 /// documenting; overridable per run via `Arg::Quality`'s tuning slot.
 pub const IMAGE_QUALITY: &str = "92";
+/// HEIC's own quality anchor, on libheif's scale rather than JPEG's: its
+/// x265 encoder runs at CRF `50 - quality/2`, so 92 is CRF 4, and an
+/// iPhone photo's 2.6 MB JPEG came back as a 4.3 MB HEIC. 60 is CRF 20:
+/// 1.59 MB, about what the phone itself wrote (1.62 MB), and closer to the
+/// JPEG than a JPEG at quality 85 is (DSSIM 0.0033 against 0.0062). `pub`
+/// for `IMAGE_QUALITY`'s reason.
+pub const HEIC_QUALITY: &str = "60";
 /// DPI used when rasterising vectors. 384 gives a crisp result at 4x a 96dpi
 /// nominal size without producing an absurd bitmap.
 pub(crate) const SVG_DENSITY: &str = "384";
 
 /// Lossy raster targets take a quality flag; lossless ones must not.
 fn is_lossy(f: Format) -> bool {
-    matches!(f, Format::Jpg | Format::Webp | Format::Avif)
+    matches!(f, Format::Jpg | Format::Webp | Format::Avif | Format::Heic)
 }
 
 macro_rules! step {
@@ -40,6 +47,7 @@ const IMG_LOSSY: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -79,6 +87,7 @@ const IMG_TO_JPG: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::Lit("-background"),
             Arg::Lit("white"),
@@ -96,6 +105,29 @@ const IMG_TO_JPG: Recipe = Recipe {
     warnings: &[FLATTEN_FIRST_FRAME_NOTE],
 };
 
+/// HEIC, through libheif's x265 encoder. One frame: ImageMagick writes
+/// every frame of a multi-frame source as a separate image in the file,
+/// and viewers show only the first. Alpha is kept, as HEIC can hold it.
+/// The writer also sets libheif's orientation from the image's, which
+/// `-auto-orient` has already turned upright, so no rotation is written.
+const IMG_TO_HEIC: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::InputFirstFrame,
+            Arg::Lit("-auto-orient"),
+            Arg::Rotate,
+            Arg::StripMetadata,
+            Arg::TuneResize,
+            Arg::TuneColors,
+            Arg::Lit("-quality"),
+            Arg::Quality(HEIC_QUALITY),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[FIRST_FRAME_NOTE],
+};
+
 /// Lossless targets that keep frames as-is (tiff holds multi-page sources
 /// faithfully).
 const IMG_LOSSLESS: Recipe = Recipe {
@@ -104,6 +136,7 @@ const IMG_LOSSLESS: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -123,6 +156,7 @@ const IMG_LOSSLESS_SINGLE_FRAME: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -152,6 +186,7 @@ const SVG_TO_LOSSY: Recipe = Recipe {
             Arg::Lit("-alpha"),
             Arg::Lit("off"),
             Arg::Lit("-flatten"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -172,6 +207,7 @@ const SVG_TO_LOSSLESS: Recipe = Recipe {
             Arg::Lit("-background"),
             Arg::Lit("none"),
             Arg::Input,
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -192,6 +228,7 @@ const IMG_TO_PDF: Recipe = Recipe {
         [
             Arg::Inputs,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::Lit("-compress"),
@@ -222,6 +259,7 @@ const IMG_TO_PNG_STRIPPED: Recipe = Recipe {
             args: &[
                 Arg::InputFirstFrame,
                 Arg::Lit("-auto-orient"),
+                Arg::Rotate,
                 Arg::StripMetadata,
                 Arg::TuneResize,
                 Arg::Lit("-compress"),
@@ -249,6 +287,7 @@ const SVG_TO_PNG_STRIPPED: Recipe = Recipe {
                 Arg::Lit("-background"),
                 Arg::Lit("none"),
                 Arg::Input,
+                Arg::Rotate,
                 Arg::StripMetadata,
                 Arg::TuneResize,
                 Arg::Lit("-compress"),
@@ -275,6 +314,7 @@ pub(crate) const IMG_TO_TIFF_ZIP: Recipe = Recipe {
         [
             Arg::Input,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -331,6 +371,7 @@ const RASTER_TO_ICO: Recipe = Recipe {
         [
             Arg::InputFirstFrame,
             Arg::Lit("-auto-orient"),
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::Lit("-background"),
             Arg::Lit("none"),
@@ -359,6 +400,7 @@ const SVG_TO_ICO: Recipe = Recipe {
             Arg::Lit("-background"),
             Arg::Lit("none"),
             Arg::Input,
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::Lit("-gravity"),
             Arg::Lit("center"),
@@ -379,6 +421,7 @@ const ICO_TO_PNG: Recipe = Recipe {
         Backend::Magick,
         [
             Arg::InputChosenFrame,
+            Arg::Rotate,
             Arg::StripMetadata,
             Arg::TuneResize,
             Arg::TuneColors,
@@ -387,6 +430,35 @@ const ICO_TO_PNG: Recipe = Recipe {
     )],
     warnings: &[ICO_LARGEST_NOTE],
 };
+
+/// A GIF turned into a GIF (`--rotate`), frame by frame. `-coalesce` draws
+/// every frame whole first: a frame that covers only part of the picture
+/// would otherwise turn about its own corner. The frames are optimised
+/// again after. The palette, timing and loop are left as they were.
+const GIF_TURN: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::Input,
+            Arg::Lit("-coalesce"),
+            Arg::Rotate,
+            Arg::Lit("-layers"),
+            Arg::Lit("optimize"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+/// What a picture turned into its own format runs: the recipe any raster
+/// takes to that format, or a GIF's own. `None` for a format conv does not
+/// write.
+pub(crate) fn turn_recipe_for(f: Format) -> Option<Recipe> {
+    match f {
+        Format::Gif => Some(GIF_TURN),
+        _ => image_recipe_for(f),
+    }
+}
 
 /// Raster image formats that participate in the all-directions image family.
 const RASTER: &[Format] = &[
@@ -400,13 +472,17 @@ const RASTER: &[Format] = &[
     Format::Bmp,
 ];
 
-/// Raster formats we are willing to *write*. HEIC/HEIF are read-only in v1:
-/// encoding them needs a patent-encumbered encoder most ImageMagick builds omit.
+/// Raster formats we are willing to *write*. HEIC needs an HEVC encoder in
+/// ImageMagick's libheif, which some builds leave out (Debian and Ubuntu
+/// ship it as a separate plugin, the Windows build has none); without one
+/// the conversion fails and says what to install. HEIF stays read-only: it
+/// is the same container under its generic name.
 const RASTER_WRITABLE: &[Format] = &[
     Format::Jpg,
     Format::Png,
     Format::Webp,
     Format::Avif,
+    Format::Heic,
     Format::Tiff,
     Format::Bmp,
 ];
@@ -414,13 +490,14 @@ const RASTER_WRITABLE: &[Format] = &[
 type Table = BTreeMap<(Format, Format), Recipe>;
 
 /// The recipe every raster source takes to `to`, by `to`'s frame policy:
-/// jpg/png/bmp hold one image, so they take the first frame explicitly (jpg
-/// additionally flattens alpha); webp/avif hold animation and alpha as-is;
-/// tiff holds multi-page sources faithfully. `None` for a format conv does
-/// not write. Also what a raster stripped into its own format runs.
+/// jpg/png/bmp/heic hold one image, so they take the first frame explicitly
+/// (jpg additionally flattens alpha); webp/avif hold animation and alpha
+/// as-is; tiff holds multi-page sources faithfully. `None` for a format conv
+/// does not write. Also what a raster stripped into its own format runs.
 pub(crate) fn image_recipe_for(to: Format) -> Option<Recipe> {
     Some(match to {
         Format::Jpg => IMG_TO_JPG,
+        Format::Heic => IMG_TO_HEIC,
         Format::Png | Format::Bmp => IMG_LOSSLESS_SINGLE_FRAME,
         _ if !RASTER_WRITABLE.contains(&to) => return None,
         _ if is_lossy(to) => IMG_LOSSY,
@@ -1674,6 +1751,11 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
             return true;
         }
     }
+    // A video turned into its own format is mapped stream by stream, as one
+    // converted to another container is.
+    if tuning.rotate.is_some() && from == to && from.kind() == Kind::Video {
+        return true;
+    }
     if tuning.fps.is_none() && tuning.resize.is_none() {
         return false;
     }
@@ -1688,12 +1770,12 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
 }
 
 /// The recipe whose reads (a size, the notes' traits) a conversion makes:
-/// the pair's own, or for a file stripped into its own format, which has no
-/// pair, the recipe any raster takes to that format.
+/// the pair's own, or for a file stripped or turned into its own format,
+/// which has no pair, the recipe that rewrites it.
 fn recipe_read_for(from: Format, to: Format, tuning: &Tuning) -> Option<Recipe> {
     lookup(from, to).or_else(|| {
-        (from == to && tuning.strip_metadata)
-            .then(|| image_recipe_for(to))
+        (from == to && (tuning.strip_metadata || tuning.rotate.is_some()))
+            .then(|| turn_recipe_for(to))
             .flatten()
     })
 }
@@ -2112,7 +2194,7 @@ mod tests {
             ..Tuning::default()
         };
         for &from in RASTER {
-            for to in [Format::Jpg, Format::Png, Format::Bmp] {
+            for to in [Format::Jpg, Format::Png, Format::Bmp, Format::Heic] {
                 if from != to {
                     assert!(notes_need_image(from, to, &off), "{from:?} -> {to:?}");
                     assert!(notes_need_image(from, to, &on), "{from:?} -> {to:?}");
@@ -2259,6 +2341,28 @@ mod tests {
                 let orient = s.args.iter().position(|a| *a == Arg::Lit("-auto-orient"));
                 if let (Some(o), Some(st)) = (orient, strip) {
                     assert!(o < st, "{from:?} -> {to:?}");
+                }
+            }
+        }
+    }
+
+    /// A turn is of the picture as it is shown, so every recipe that
+    /// orients the picture turns it straight after, before any knob.
+    #[test]
+    fn every_recipe_that_orients_a_picture_turns_it_next() {
+        let mut recipes: Vec<(String, Recipe)> = all_pairs()
+            .into_iter()
+            .map(|(from, to)| (format!("{from:?} -> {to:?}"), lookup(from, to).unwrap()))
+            .collect();
+        recipes.push(("IMG_TO_TIFF_ZIP".into(), IMG_TO_TIFF_ZIP));
+        recipes.push(("IMG_TO_PNG_STRIPPED".into(), IMG_TO_PNG_STRIPPED));
+        for (name, recipe) in recipes {
+            for s in recipe.steps {
+                if let Some(o) = s.args.iter().position(|a| *a == Arg::Lit("-auto-orient")) {
+                    assert_eq!(s.args.get(o + 1), Some(&Arg::Rotate), "{name}");
+                }
+                if s.args.contains(&Arg::Rotate) {
+                    assert_eq!(s.backend, Backend::Magick, "{name}");
                 }
             }
         }
@@ -2498,11 +2602,12 @@ mod tests {
 
     /// Multi-page TIFF / animated WebP into single-image targets used to
     /// fail with an empty "produced no output" (magick wrote stem-0.jpg,
-    /// stem-1.jpg, …). jpg/png/bmp select the first frame explicitly;
+    /// stem-1.jpg, …). jpg/png/bmp select the first frame explicitly, and
+    /// heic, which would hold the rest as images no viewer shows;
     /// webp/avif/tiff keep every frame.
     #[test]
     fn single_image_targets_select_the_first_frame_explicitly() {
-        for to in [Format::Jpg, Format::Png, Format::Bmp] {
+        for to in [Format::Jpg, Format::Png, Format::Bmp, Format::Heic] {
             let r = lookup(Format::Tiff, to).unwrap();
             let argv = r.steps[0].render(&[Path::new("scan.tiff")], Path::new("out"));
             assert!(argv.iter().any(|a| a == "scan.tiff[0]"), "{to:?}: {argv:?}");
@@ -3299,13 +3404,23 @@ mod tests {
         assert!(argv.contains(&"--standalone".to_string()), "{argv:?}");
     }
 
+    /// Every other raster is written to HEIC, one frame, at HEIC's own
+    /// quality anchor rather than JPEG's. HEIF, the same container under
+    /// its generic name, is still only read.
     #[test]
-    fn no_recipe_targets_heic_or_heif() {
+    fn every_raster_reaches_heic_and_none_reaches_heif() {
+        for &from in RASTER {
+            if from == Format::Heic {
+                continue;
+            }
+            let r = lookup(from, Format::Heic).unwrap_or_else(|| panic!("{from:?} -> heic"));
+            let argv = r.steps[0].render(&[Path::new("in.x")], Path::new("out.heic"));
+            assert!(argv.iter().any(|a| a == "in.x[0]"), "one frame: {argv:?}");
+            let q = argv.iter().position(|a| a == "-quality").unwrap();
+            assert_eq!(argv[q + 1], HEIC_QUALITY, "{from:?}");
+        }
         for (from, to) in all_pairs() {
-            assert!(
-                !matches!(to, Format::Heic | Format::Heif),
-                "{from:?}->{to:?} targets a read-only, encode-unsupported format"
-            );
+            assert_ne!(to, Format::Heif, "{from:?} -> heif");
         }
     }
 

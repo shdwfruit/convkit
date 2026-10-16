@@ -12,10 +12,10 @@ use convkit_core::{Resolver, Tuning};
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     /// Input paths, then optionally an output path or a bare `.ext`. With
-    /// `--max-size`, `--strip-metadata`, `--start`/`--end`/`--duration` or
-    /// `--speed`, a lone input keeps its format and is written as
-    /// NAME-SUFFIX.EXT (`clip.mp4` -> `clip-10mb.mp4`, `photo-stripped.jpg`,
-    /// `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`).
+    /// `--max-size`, `--strip-metadata`, `--start`/`--end`/`--duration`,
+    /// `--speed` or `--rotate`, a lone input keeps its format and is written
+    /// as NAME-SUFFIX.EXT (`clip.mp4` -> `clip-10mb.mp4`, `photo-stripped.jpg`,
+    /// `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`, `photo-rotated.jpg`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -68,8 +68,8 @@ pub struct Cli {
     #[arg(long, requires = "resize", conflicts_with = "max_size")]
     pub upscale: bool,
 
-    /// Quality 1-100 for lossy image targets (jpg/webp/avif) and
-    /// image -> pdf [default: 92].
+    /// Quality 1-100 for lossy image targets (jpg/webp/avif/heic) and
+    /// image -> pdf [default: 92; 60 for heic].
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
     pub quality: Option<u8>,
 
@@ -149,6 +149,23 @@ pub struct Cli {
     /// when sped up, lower when slowed down. Adds -pitched to the name.
     #[arg(long, requires = "speed")]
     pub shift_pitch: bool,
+
+    /// Turn the picture as it is shown: right (90 degrees clockwise), left
+    /// or 180. The picture itself is turned, so it shows the same way in
+    /// every app; a JPEG, MP4 or MOV that was sideways only because of its
+    /// orientation tag is fixed without re-encoding. Images, video and GIFs.
+    /// A lone input keeps its format: photo.jpg -> photo-rotated.jpg; a --to
+    /// batch writes into a rotated folder, e.g. rotated/photo.jpg, unless -o
+    /// is given.
+    // `allow_hyphen_values` so `--rotate -90` is a turn, not an unknown
+    // flag. Not `global` -- see `dry_run`'s comment.
+    #[arg(
+        long,
+        value_name = "TURN",
+        value_parser = parse_rotate,
+        allow_hyphen_values = true
+    )]
+    pub rotate: Option<convkit_core::rotate::Turn>,
 
     /// Assume yes to every prompt: installing a missing backend, or
     /// converting an extreme --max-size target or a large --upscale. For a script that wants
@@ -406,6 +423,10 @@ fn parse_speed(s: &str) -> Result<convkit_core::speed::Speed, String> {
     convkit_core::speed::parse(s)
 }
 
+fn parse_rotate(s: &str) -> Result<convkit_core::rotate::Turn, String> {
+    convkit_core::rotate::parse(s)
+}
+
 fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
     convkit_core::trim::parse_duration(s)
 }
@@ -413,7 +434,8 @@ fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
     /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
-    /// `--max-size`/`--start`/`--end`/`--duration`/`--speed` was passed.
+    /// `--max-size`/`--start`/`--end`/`--duration`/`--speed`/`--rotate` was
+    /// passed.
     pub fn tuning(&self) -> Tuning {
         Tuning {
             resize: self.resize.clone(),
@@ -431,6 +453,7 @@ impl Cli {
             mute: false,
             speed: self.speed,
             shift_pitch: self.shift_pitch,
+            rotate: self.rotate,
         }
     }
 
@@ -498,6 +521,7 @@ mod tests {
             duration: None,
             speed: None,
             shift_pitch: false,
+            rotate: None,
             yes: false,
             no_install: false,
             outdir: None,
@@ -615,5 +639,21 @@ mod tests {
     fn shift_pitch_needs_a_speed() {
         let e = Cli::try_parse_from(["conv", "a.mp4", "--shift-pitch"]).unwrap_err();
         assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn a_turn_parses_into_the_tuning() {
+        let c = Cli::try_parse_from(["conv", "a.jpg", "--rotate", "left"]).unwrap();
+        assert_eq!(c.tuning().rotate, Some(convkit_core::rotate::Turn::Left));
+        // A negative angle is a turn, not a flag.
+        let c = Cli::try_parse_from(["conv", "a.jpg", "--rotate", "-90"]).unwrap();
+        assert_eq!(c.tuning().rotate, Some(convkit_core::rotate::Turn::Left));
+    }
+
+    #[test]
+    fn a_turn_that_is_not_a_quarter_is_a_usage_error() {
+        let e = Cli::try_parse_from(["conv", "a.jpg", "--rotate", "45"]).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(e.to_string().contains("expected right, left or 180"), "{e}");
     }
 }

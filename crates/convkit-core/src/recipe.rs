@@ -59,6 +59,10 @@ pub struct Tuning {
     /// Let the pitch move with `speed`, as a tape played fast does, rather
     /// than keep it.
     pub shift_pitch: bool,
+    /// A turn of the picture as it is shown (`--rotate`). Decided against
+    /// the probe's orientation by `plan::build_tuned`; a turn of the pixels
+    /// reaches argv through `ResolvedVideo::turn`.
+    pub rotate: Option<crate::rotate::Turn>,
 }
 
 impl Tuning {
@@ -68,6 +72,7 @@ impl Tuning {
             && !self.mute
             && !self.shift_pitch
             && self.speed.is_none()
+            && self.rotate.is_none()
             && self.range.is_none()
             && self.resize.is_none()
             && self.quality.is_none()
@@ -123,6 +128,11 @@ impl VideoChainSpec {
             .speed
             .as_ref()
             .map_or_else(String::new, |r| format!("{},", r.speed.setpts()));
+        // A turn comes before any size: `--resize` fits the turned picture.
+        if let Some(turn) = resolved.turn {
+            out.push_str(turn.filter());
+            out.push(',');
+        }
         out.push_str(self.prefix);
         let authored = self.fps.filter(|_| !resolved.keep_source_rate);
         // A retimed stream with no rate of its own is held to the source's.
@@ -184,6 +194,11 @@ pub enum Arg {
     TuneResize,
     /// `-colors <n>` when `--colors` was given; renders nothing otherwise.
     TuneColors,
+    /// `-rotate <degrees>` for a turn of the pixels (`ResolvedVideo::turn`);
+    /// renders nothing otherwise. Authored on ImageMagick steps only, right
+    /// after `-auto-orient`, so the turn is of the picture as it is shown
+    /// and every knob after it sees the turned picture.
+    Rotate,
     /// `--strip-metadata`'s arguments for this step's backend when the flag
     /// was given (`metadata::MAGICK_STRIP` or `metadata::ffmpeg_args`);
     /// renders nothing otherwise, keeping untuned argv byte-identical.
@@ -383,6 +398,12 @@ impl Step {
                     if let Some(n) = tuning.colors {
                         argv.push("-colors".to_string());
                         argv.push(n.to_string());
+                    }
+                }
+                Arg::Rotate => {
+                    if let Some(turn) = video.turn {
+                        argv.push("-rotate".to_string());
+                        argv.push(turn.degrees().to_string());
                     }
                 }
                 Arg::StripMetadata if tuning.strip_metadata => match self.backend {
@@ -770,6 +791,7 @@ mod tests {
             mute: false,
             speed: None,
             shift_pitch: false,
+            rotate: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],

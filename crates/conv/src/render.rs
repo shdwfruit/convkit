@@ -282,6 +282,9 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     if let Some(s) = &o.speed {
         v["speed"] = json!(s);
     }
+    if let Some(r) = &o.rotation {
+        v["rotation"] = json!(r);
+    }
     v
 }
 
@@ -654,6 +657,7 @@ mod tests {
             enlarged: None,
             range: None,
             speed: None,
+            rotation: None,
         }
     }
 
@@ -703,6 +707,20 @@ mod tests {
             outcome_json(&o)["range"],
             serde_json::json!({"start_ms": 62000, "end_ms": 70000,
                                "requested": {"start": "1:02", "end": "1:10"}})
+        );
+    }
+
+    #[test]
+    fn a_turned_result_reports_its_turn_and_others_do_not() {
+        let mut o = sample_outcome(10, false, vec![]);
+        assert!(outcome_json(&o).get("rotation").is_none());
+        o.rotation = Some(convkit_core::rotate::RotationReport {
+            turn: convkit_core::rotate::Turn::Left,
+            by: convkit_core::rotate::By::Tag,
+        });
+        assert_eq!(
+            outcome_json(&o)["rotation"],
+            serde_json::json!({"turn": "left", "by": "tag"})
         );
     }
 
