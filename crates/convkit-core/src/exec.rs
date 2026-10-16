@@ -1213,6 +1213,13 @@ fn stage_file(
     link: fn(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<()> {
     let source = std::fs::canonicalize(from).map_err(io_err)?;
+    // A file already at `to` is replaced, never written into: it may be a
+    // hard link to this very input, and a copy or a stripped write onto a
+    // link empties or rewrites the user's own file.
+    match std::fs::remove_file(to) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io_err(e)),
+        _ => {}
+    }
     if strip {
         let bytes = std::fs::read(&source).map_err(io_err)?;
         let clean = crate::jpeg::strip(&bytes).map_err(|reason| {
@@ -2713,6 +2720,33 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         let staged = std::fs::read(&to).unwrap();
         assert_eq!(staged, crate::jpeg::strip(&jpeg).unwrap());
         assert_ne!(staged, jpeg, "the comment is gone");
+    }
+
+    /// A second stage to the same place replaces the first rather than
+    /// writing through it: the first is a hard link to the user's file, so
+    /// a copy or a stripped write onto it would empty or rewrite their photo.
+    #[test]
+    fn staging_twice_to_the_same_place_leaves_the_source_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg: Vec<u8> = [
+            &[0xFF, 0xD8][..],
+            &[0xFF, 0xFE, 0x00, 0x07, b'h', b'e', b'l', b'l', b'o'],
+            &[0xFF, 0xDA, 0x00, 0x02, 0x12, 0x34, 0xFF, 0xD9],
+        ]
+        .concat();
+        let from = dir.path().join("a.jpg");
+        let to = dir.path().join("b.jpg");
+        std::fs::write(&from, &jpeg).unwrap();
+        stage_file(&from, &to, false, hard_link).unwrap();
+        stage_file(&from, &to, false, hard_link).unwrap();
+        assert_eq!(std::fs::read(&from).unwrap(), jpeg, "copied onto itself");
+        assert_eq!(std::fs::read(&to).unwrap(), jpeg);
+        stage_file(&from, &to, true, hard_link).unwrap();
+        assert_eq!(std::fs::read(&from).unwrap(), jpeg, "stripped in place");
+        assert_eq!(
+            std::fs::read(&to).unwrap(),
+            crate::jpeg::strip(&jpeg).unwrap()
+        );
     }
 
     #[test]
