@@ -28,13 +28,14 @@ pub(crate) fn layout_path(output: &Path) -> PathBuf {
 }
 
 /// The name input `index` (from 0) is staged under: numbered from 1, with
-/// the canonical extension of the input's format. Typst picks its decoder
-/// by extension and knows `.jpg` but not `.jpeg`, `.jpe` or `.jfif`, so
-/// every spelling of a format stages as the one Typst reads.
+/// the canonical extension of the input's format, so each format has one
+/// predictable name however the user spelled it (`.JPG`, `.jpeg`, `.jfif`
+/// all stage as `.jpg`), and the known extension picks Typst's decoder
+/// directly.
 pub(crate) fn staged_name(index: usize, input: &Path) -> String {
     // Every input on the Typst route has a format
-    // (`registry::image_pdf_variant`); one without would meet Typst's own
-    // "unknown image format", still under a name of convkit's.
+    // (`registry::image_pdf_variant`); one without still gets a name of
+    // convkit's, never text from the user's.
     let ext = Format::from_path(input).map_or("unknown", |f| f.ext());
     format!("convkit-in-{:04}.{ext}", index + 1)
 }
@@ -122,8 +123,7 @@ mod tests {
         }
     }
 
-    /// Typst picks the decoder by extension and knows only the canonical
-    /// ones, so every spelling of a format stages under its canonical one.
+    /// Every spelling of a format stages under the one canonical name.
     #[test]
     fn every_spelling_of_a_format_stages_under_its_canonical_extension() {
         for (name, staged) in [
