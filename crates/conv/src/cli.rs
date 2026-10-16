@@ -378,7 +378,7 @@ refused before anything is written.")]
     Split(SplitArgs),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct MergeArgs {
     /// PDFs to join, then the output file: `a.pdf b.pdf out.pdf`. A folder
     /// adds every PDF in it.
@@ -398,7 +398,7 @@ pub struct MergeArgs {
     pub verbose: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct SplitArgs {
     /// The PDF to split.
     #[arg(value_name = "PDF")]
