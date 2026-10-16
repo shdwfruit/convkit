@@ -379,13 +379,21 @@ pub fn build_tuned(
 
     // Only the notes that apply to this source, as far as the probe knows.
     let mut warnings = registry::notes_for(&recipe, probe);
+    warnings.extend(registry::gif_note(&recipe, inputs));
     // Mirrors the dynamic branch above (`m.warnings.extend(resolved.notes...)`)
     // -- a static recipe carrying an `Arg::VideoChain` slot gets the same
     // honesty about a cap that did not bind or a probe that never ran.
     warnings.extend(resolved.notes.iter().cloned());
     warnings.extend(clip_notes);
     warnings.extend(crate::metadata::tags_unread_note(from, to, tuning, probe));
-    warnings.extend(crate::metadata::location_note(from, to, probe, tuning));
+    // Typst's merge passes on a JPEG's EXIF and no other input's, wherever
+    // the JPEG is in the merge (`registry::native_image_traits`).
+    let located = if recipe == registry::TYPST_IMG_TO_PDF {
+        Format::Jpg
+    } else {
+        from
+    };
+    warnings.extend(crate::metadata::location_note(located, to, probe, tuning));
     warnings.extend(crate::metadata::labels_note(to, tuning, probe));
 
     Ok(ConversionPlan {
@@ -1017,6 +1025,120 @@ mod tests {
             })
             .collect();
         assert_eq!(strips, [true, false], "the jpg is stripped, the png linked");
+    }
+
+    fn pdf_of(
+        from: Format,
+        inputs: &[&str],
+        probe: Option<&MediaProbe>,
+        t: &Tuning,
+    ) -> ConversionPlan {
+        let inputs: Vec<PathBuf> = inputs.iter().map(|s| p(s)).collect();
+        build_tuned(
+            from,
+            Format::Pdf,
+            &inputs,
+            Path::new("out.pdf"),
+            probe,
+            None,
+            t,
+        )
+        .unwrap()
+    }
+
+    /// A GIF gives a merge its first frame, on either route, and says so.
+    #[test]
+    fn a_gif_in_a_typst_merge_gets_the_first_frame_note() {
+        let plain = Tuning::default();
+        let note = [registry::GIF_FIRST_FRAME_NOTE];
+        assert_eq!(
+            pdf_of(Format::Jpg, &["a.jpg", "b.gif"], None, &plain).warnings,
+            note
+        );
+        assert_eq!(pdf_of(Format::Gif, &["a.GIF"], None, &plain).warnings, note);
+        let quality = Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        };
+        let magick = pdf_of(Format::Jpg, &["a.jpg", "b.gif"], None, &quality);
+        assert_eq!(magick.steps[0].backend, Backend::Magick);
+        assert_eq!(magick.warnings, note);
+        let heic = pdf_of(Format::Jpg, &["a.jpg", "b.gif", "c.heic"], None, &plain);
+        assert_eq!(heic.warnings, note);
+        // A WebP is not singled out: the note would sit on every still one.
+        let webp = pdf_of(Format::Jpg, &["a.jpg", "b.webp"], None, &plain);
+        assert!(webp.warnings.is_empty(), "{:?}", webp.warnings);
+    }
+
+    const PDF_LOCATION_NOTE: &str = "The source records a GPS location, and the pdf keeps \
+         it; add --strip-metadata to remove it.";
+
+    /// Typst embeds a JPEG as it is, so its EXIF reaches the PDF, while a
+    /// PNG, WebP or GIF is decoded to pixels. The location is read from the
+    /// JPEGs, wherever they are in the merge, without ImageMagick.
+    #[test]
+    fn the_location_note_comes_from_a_jpeg_anywhere_in_the_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gif, jpg) = (dir.path().join("a.gif"), dir.path().join("gps.jpg"));
+        std::fs::write(&gif, b"GIF89a").unwrap();
+        std::fs::write(&jpg, crate::jpeg::located_for_tests()).unwrap();
+        let inputs = [gif, jpg.clone()];
+        let plain = Tuning::default();
+        let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &plain);
+        assert!(traits.is_some_and(|t| t.location), "{traits:?}");
+        let probe = MediaProbe {
+            image: traits,
+            ..MediaProbe::default()
+        };
+        let names: Vec<&str> = inputs.iter().map(|i| i.to_str().unwrap()).collect();
+        let plan = pdf_of(Format::Gif, &names, Some(&probe), &plain);
+        assert_eq!(
+            plan.warnings,
+            [registry::GIF_FIRST_FRAME_NOTE, PDF_LOCATION_NOTE]
+        );
+
+        std::fs::write(&jpg, b"\xff\xd8\xff\xd9").unwrap();
+        let traits = registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &plain);
+        assert!(traits.is_some_and(|t| !t.location), "{traits:?}");
+        // Off the Typst route ImageMagick reads the source, as before.
+        let quality = Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        };
+        assert_eq!(
+            registry::native_image_traits(Format::Gif, Format::Pdf, &inputs, &quality),
+            None
+        );
+        assert_eq!(
+            registry::native_image_traits(Format::Jpg, Format::Png, &inputs[1..], &plain),
+            None
+        );
+    }
+
+    #[test]
+    fn no_location_note_with_strip_metadata() {
+        let located = MediaProbe {
+            image: Some(crate::probe::ImageTraits {
+                alpha: None,
+                multi_frame: false,
+                location: true,
+                compressed: false,
+            }),
+            ..MediaProbe::default()
+        };
+        let plain = pdf_of(
+            Format::Png,
+            &["a.png", "b.jpg"],
+            Some(&located),
+            &Tuning::default(),
+        );
+        assert_eq!(plain.warnings, [PDF_LOCATION_NOTE]);
+        let strip = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        let stripped = pdf_of(Format::Png, &["a.png", "b.jpg"], Some(&located), &strip);
+        assert!(stripped.warnings.is_empty(), "{:?}", stripped.warnings);
     }
 
     /// With no probe there is nothing to write back, so every tag goes and

@@ -46,6 +46,79 @@ fn an_image_merge_dry_run_shows_the_typst_command() {
     assert!(!stdout.contains("magick"), "{stdout}");
 }
 
+/// The start of a JPEG whose EXIF records a GPS latitude, which is all
+/// conv reads for the location note: IFD0's GPS pointer, to a GPS IFD
+/// holding a latitude.
+#[cfg(unix)]
+const LOCATED_JPEG: &[u8] = b"\xff\xd8\xff\xe1\x00\x34Exif\0\0MM\0\x2a\0\0\0\x08\
+    \0\x01\x88\x25\0\x04\0\0\0\x01\0\0\0\x1a\0\0\0\0\
+    \0\x01\0\x02\0\x05\0\0\0\x03\0\0\0\0\0\0\0\0";
+
+/// Photos merge on the managed Typst with no ImageMagick anywhere, and the
+/// preview and the run both note the JPEG's location, which conv reads
+/// itself.
+#[cfg(unix)]
+#[test]
+fn a_typst_merge_runs_without_imagemagick() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.jpg"), LOCATED_JPEG).unwrap();
+    std::fs::write(dir.path().join("b.png"), b"not really a png").unwrap();
+    let stub = dir.path().join("typst_stub.sh");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\n\
+         if [ \"$#\" = \"1\" ]; then exit 0; fi\n\
+         for a in \"$@\"; do last=\"$a\"; done\n\
+         printf pdf > \"$last\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let note = "The source records a GPS location, and the pdf keeps it";
+    for dry_run in [true, false] {
+        let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+        cmd.current_dir(dir.path())
+            .env("CONVKIT_TYPST", &stub)
+            .args(["a.jpg", "b.png", "out.pdf"]);
+        if dry_run {
+            cmd.arg("--dry-run");
+        }
+        let assert = cmd.timeout(Duration::from_secs(10)).assert().success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+        assert!(stdout.contains(note), "{stdout}");
+        assert!(!stdout.contains("magick"), "{stdout}");
+        if !dry_run {
+            assert!(stdout.starts_with("OK out.pdf"), "{stdout}");
+        }
+    }
+    assert_eq!(std::fs::read(dir.path().join("out.pdf")).unwrap(), b"pdf");
+}
+
+/// A merge that needs ImageMagick says why when it is missing: a photos
+/// merge otherwise needs nothing the user installs by hand.
+#[test]
+fn a_merge_that_needs_imagemagick_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.jpg", "b.heic"] {
+        std::fs::write(dir.path().join(name), b"not really a photo").unwrap();
+    }
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .current_dir(dir.path())
+        .args(["a.jpg", "b.heic", "out.pdf"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains(
+            "magick not found; b.heic needs it (the built-in route reads JPG, PNG, WebP and GIF only)"
+        ),
+        "{stderr}"
+    );
+    assert!(stderr.contains("try  "), "{stderr}");
+}
+
 /// A lone photo under `--strip-metadata` keeps its format under a new name,
 /// and the command strips only after orienting.
 #[test]

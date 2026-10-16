@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use crate::recipe::{ScaleStyle, VideoChainSpec};
@@ -252,14 +250,61 @@ pub(crate) const TYPST_IMG_TO_PDF: Recipe = Recipe {
 /// reads the content.
 pub(crate) fn image_pdf_variant(recipe: Recipe, inputs: &[PathBuf], tuning: &Tuning) -> Recipe {
     let reencodes = tuning.quality.is_some() || tuning.resize.is_some();
-    let foreign = inputs
-        .iter()
-        .any(|i| !Format::from_path(i).is_some_and(|f| TYPST_READS.contains(&f)));
+    let foreign = inputs.iter().any(|i| !typst_reads(i));
     if recipe == TYPST_IMG_TO_PDF && (reencodes || foreign) {
         IMG_TO_PDF
     } else {
         recipe
     }
+}
+
+/// Whether the Typst merge takes this input, by its extension.
+fn typst_reads(input: &Path) -> bool {
+    Format::from_path(input).is_some_and(|f| TYPST_READS.contains(&f))
+}
+
+/// Why a conversion into a pdf needs ImageMagick, for the error that says
+/// it is missing: a photos merge otherwise runs on the managed Typst, so a
+/// user who never asked for ImageMagick is told what does. The first input
+/// Typst cannot read, else the knob that re-encodes the pictures
+/// (`image_pdf_variant`). `None` for any other target, which needs it
+/// plainly.
+pub(crate) fn magick_reason(to: Format, inputs: &[PathBuf], tuning: &Tuning) -> Option<String> {
+    if to != Format::Pdf {
+        return None;
+    }
+    if let Some(input) = inputs.iter().find(|i| !typst_reads(i)) {
+        let name = input.file_name().map_or_else(
+            || input.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        return Some(format!(
+            "{name} needs it (the built-in route reads JPG, PNG, WebP and GIF only)"
+        ));
+    }
+    let knob = if tuning.quality.is_some() {
+        "--quality"
+    } else if tuning.resize.is_some() {
+        "--resize"
+    } else {
+        return None;
+    };
+    Some(format!("{knob} re-encodes the images, which needs it"))
+}
+
+/// Said whenever a GIF is merged into a pdf: either route places its first
+/// frame only (Typst does, and `IMG_TO_PDF` reads a GIF's `[0]`). Not for a
+/// WebP, which is rarely animated: the note would sit on every still one.
+pub(crate) const GIF_FIRST_FRAME_NOTE: &str = "An animated GIF contributes its first frame.";
+
+/// `GIF_FIRST_FRAME_NOTE` when `recipe` merges images into a pdf and one
+/// of `inputs` is a GIF.
+pub(crate) fn gif_note(recipe: &Recipe, inputs: &[PathBuf]) -> Option<String> {
+    let merge = *recipe == TYPST_IMG_TO_PDF || *recipe == IMG_TO_PDF;
+    let gif = inputs
+        .iter()
+        .any(|i| Format::from_path(i) == Some(Format::Gif));
+    (merge && gif).then(|| GIF_FIRST_FRAME_NOTE.to_string())
 }
 
 /// Whether this conversion runs on Typst's image merge.
@@ -1865,6 +1910,29 @@ pub fn notes_need_image(from: Format, to: Format, inputs: &[PathBuf], tuning: &T
             && from != Format::Webp
             && lookup(from, to).is_some()
             && crate::metadata::keeps_exif_location(from, to))
+}
+
+/// What the notes need to know of a Typst merge's inputs, read without
+/// ImageMagick, which the merge must not need: whether a JPEG records a
+/// location. Typst embeds a JPEG as it is, EXIF included, and decodes a
+/// PNG, WebP or GIF to pixels, so only a JPEG's reaches the PDF, wherever
+/// it is in the merge. A plain file read, like `office::traits`. `None` off
+/// the Typst route, where `probe::image_traits` reads the inputs.
+pub fn native_image_traits(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+) -> Option<crate::probe::ImageTraits> {
+    typst_merge(from, to, inputs, tuning).then(|| crate::probe::ImageTraits {
+        alpha: None,
+        multi_frame: false,
+        location: inputs
+            .iter()
+            .filter(|i| Format::from_path(i) == Some(Format::Jpg))
+            .any(|i| crate::jpeg::file_has_location(i)),
+        compressed: false,
+    })
 }
 
 /// Whether to read an Office source with `office::traits` before planning:

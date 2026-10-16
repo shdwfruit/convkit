@@ -462,8 +462,11 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     };
     // Whether a jpg/png/bmp target's notes apply, and whether the source
     // records a location the output would keep. A read that fails keeps the
-    // frame and alpha notes whole, and gives no location note.
-    if registry::notes_need_image(req.from, req.to, &req.inputs, &req.tuning) {
+    // frame and alpha notes whole, and gives no location note. Typst's merge
+    // reads its JPEGs itself, so it needs no ImageMagick for this either.
+    if let Some(t) = registry::native_image_traits(req.from, req.to, &req.inputs, &req.tuning) {
+        probed.get_or_insert_with(MediaProbe::default).image = Some(t);
+    } else if registry::notes_need_image(req.from, req.to, &req.inputs, &req.tuning) {
         let traits = resolver
             .resolve(Backend::Magick)
             .ok()
@@ -584,7 +587,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                 {
                     ConvError::password_protected(&req.inputs[0], req.from)
                 } else {
-                    e
+                    explain_missing_magick(e, req)
                 }
             })?;
             (built, None)
@@ -664,6 +667,17 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         range,
         speed,
     })
+}
+
+/// A missing ImageMagick says what needs it where a photos merge would
+/// otherwise run without it (`registry::magick_reason`).
+fn explain_missing_magick(mut e: ConvError, req: &Request) -> ConvError {
+    if e.code == ErrorCode::BackendMissing && e.backend == Some(Backend::Magick) {
+        if let Some(reason) = registry::magick_reason(req.to, &req.inputs, &req.tuning) {
+            e.message = format!("{}; {reason}", e.message);
+        }
+    }
+    e
 }
 
 /// Runs plan steps for one conversion and accumulates what they report.
@@ -827,6 +841,9 @@ impl StepRunner<'_> {
                 step_report.push_str(&stdout);
             }
         }
+        // Typst's merge reads copies under names convkit made up; the user
+        // knows only their own files.
+        let step_report = crate::layout::name_inputs(&step_report, step);
 
         if !step_report.trim().is_empty() {
             (self.on_event)(Event::StepReport {
@@ -2764,6 +2781,156 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         );
         assert!(e.message.contains("a.jpg"), "{}", e.message);
         assert!(!to.exists());
+    }
+
+    // --- the Typst merge -------------------------------------------------------
+
+    /// Typst stand-in: answers its version probe, and otherwise runs `body`
+    /// with `$layout` the layout it was given and `$out` its output.
+    #[cfg(unix)]
+    fn typst_stub(dir: &Path, body: &str) -> Resolver {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("typst_stub.sh");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$#\" = \"1\" ]; then exit 0; fi\n\
+                 for a in \"$@\"; do layout=\"$out\"; out=\"$a\"; done\n\
+                 {body}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = Resolver::new();
+        r.overrides_only();
+        r.with_override(Backend::Typst, p);
+        r
+    }
+
+    /// A merge of `names`, each written under `dir`, into `dir/out.pdf`.
+    fn merge_request(dir: &Path, names: &[&str]) -> Request {
+        let inputs: Vec<PathBuf> = names
+            .iter()
+            .map(|n| {
+                let p = dir.join(n);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"picture").unwrap();
+                p
+            })
+            .collect();
+        Request {
+            from: Format::from_path(&inputs[0]).unwrap(),
+            to: Format::Pdf,
+            inputs,
+            output: dir.join("out.pdf"),
+            overwrite: false,
+            tuning: Default::default(),
+            allow_extreme: false,
+        }
+    }
+
+    /// Typst reports a bad picture against the layout line that places it.
+    /// The error, and the transcript `--verbose` prints, name the user's
+    /// file instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_typst_step_reports_the_input_not_the_scratch_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = typst_stub(
+            dir.path(),
+            "echo \"$layout:4:6: error: failed to decode image (Invalid PNG signature.)\" >&2\n\
+             exit 1",
+        );
+        let req = merge_request(dir.path(), &["a.jpg", "b.png", "photos/c d.png"]);
+        let mut reports = Vec::new();
+        let e = run(&req, &r, &mut |event| {
+            if let Event::StepReport { report, .. } = event {
+                reports.push(report);
+            }
+        })
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConversionFailed);
+        let said = format!(
+            "{}: error: failed to decode image (Invalid PNG signature.)",
+            req.inputs[2].display()
+        );
+        // Typst writes nothing when it fails.
+        assert_eq!(
+            e.message,
+            format!("typst produced no output (exit status: 1). {said}")
+        );
+        assert_eq!(reports, [format!("{said}\n")]);
+    }
+
+    /// ImageMagick is needed only off the Typst merge, so a user who never
+    /// asked for it is told what needs it. Any other target needs it
+    /// plainly.
+    #[test]
+    fn a_missing_magick_says_why_the_merge_needs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_convert = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.overrides_only();
+        r.with_convert_search_dir(no_convert.path().to_path_buf());
+        let quality = crate::Tuning {
+            quality: Some(80),
+            ..Default::default()
+        };
+        let resize = crate::Tuning {
+            resize: Some("800x".into()),
+            ..Default::default()
+        };
+        for (names, tuning, reason) in [
+            (
+                &["a.jpg", "b.heic"][..],
+                crate::Tuning::default(),
+                "b.heic needs it (the built-in route reads JPG, PNG, WebP and GIF only)",
+            ),
+            (
+                &["a.jpg", "b.png"][..],
+                quality,
+                "--quality re-encodes the images, which needs it",
+            ),
+            (
+                &["a.jpg", "b.png"][..],
+                resize,
+                "--resize re-encodes the images, which needs it",
+            ),
+        ] {
+            let mut req = merge_request(dir.path(), names);
+            req.tuning = tuning;
+            let e = run(&req, &r, &mut |_| {}).unwrap_err();
+            assert_eq!(e.code, ErrorCode::BackendMissing, "{}", e.message);
+            assert_eq!(e.backend, Some(Backend::Magick));
+            assert_eq!(e.message, format!("magick not found; {reason}"));
+        }
+
+        let mut req = merge_request(dir.path(), &["c.heic"]);
+        req.to = Format::Jpg;
+        req.output = dir.path().join("c.jpg");
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.message, "magick not found");
+    }
+
+    /// A JPEG anywhere in a Typst merge is read for its location with no
+    /// ImageMagick to read it, and a GIF says it gives its first frame.
+    #[cfg(unix)]
+    #[test]
+    fn a_typst_merge_notes_a_located_jpeg_without_imagemagick() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = typst_stub(dir.path(), "printf pdf > \"$out\"");
+        let req = merge_request(dir.path(), &["a.gif", "b.jpg"]);
+        std::fs::write(&req.inputs[1], crate::jpeg::located_for_tests()).unwrap();
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(
+            o.warnings,
+            [
+                registry::GIF_FIRST_FRAME_NOTE,
+                "The source records a GPS location, and the pdf keeps it; add \
+                 --strip-metadata to remove it."
+            ]
+        );
     }
 
     // --- extended-length path rewriting (F193) -------------------------------
