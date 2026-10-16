@@ -1212,36 +1212,46 @@ fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Places `from` at `to` for a step to read: a hard link to the input's
 /// resolved path (so a relative symlink never dangles in scratch), else a
 /// copy. With `strip`, a JPEG is written without its metadata instead.
-/// `link` is a parameter so the copy fallback is testable.
+/// `link` is a parameter so the copy fallback is testable. Every failure
+/// names `from`, the user's file, never `to`, which is convkit's.
 fn stage_file(
     from: &Path,
     to: &Path,
     strip: bool,
     link: fn(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<()> {
-    let source = std::fs::canonicalize(from).map_err(io_err)?;
+    // A path that does not resolve (as on some Windows virtual drives) is
+    // used as given: only reading, linking or copying it can fail the run.
+    let source = std::fs::canonicalize(from).unwrap_or_else(|_| from.to_path_buf());
+    let failed = |what: &str, e: std::io::Error| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!("could not {what} {}: {e}", from.display()),
+        )
+    };
     // A file already at `to` is replaced, never written into: it may be a
     // hard link to this very input, and a copy or a stripped write onto a
     // link empties or rewrites the user's own file.
     match std::fs::remove_file(to) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io_err(e)),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed("copy", e)),
         _ => {}
     }
     if strip {
-        let bytes = std::fs::read(&source).map_err(io_err)?;
+        let bytes = std::fs::read(&source).map_err(|e| failed("read", e))?;
         let clean = crate::jpeg::strip(&bytes).map_err(|reason| {
             ConvError::new(
                 ErrorCode::ConversionFailed,
                 format!(
-                    "could not remove the metadata from {}: {reason}",
+                    "could not remove the metadata from {}: {reason}; add --quality to \
+                     re-encode it with ImageMagick instead",
                     from.display()
                 ),
             )
         })?;
-        return std::fs::write(to, clean).map_err(io_err);
+        return std::fs::write(to, clean).map_err(|e| failed("copy", e));
     }
     if link(&source, to).is_err() {
-        std::fs::copy(&source, to).map_err(io_err)?;
+        std::fs::copy(&source, to).map_err(|e| failed("copy", e))?;
     }
     Ok(())
 }
@@ -2756,6 +2766,8 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         );
     }
 
+    /// A JPEG the strip cannot read fails naming it, and says what does
+    /// take it: ImageMagick decodes it, and `--quality` sends it there.
     #[test]
     fn a_jpeg_that_cannot_be_stripped_fails_naming_the_input() {
         let dir = tempfile::tempdir().unwrap();
@@ -2764,13 +2776,36 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         std::fs::write(&from, b"not a jpeg").unwrap();
         let e = stage_file(&from, &to, true, hard_link).unwrap_err();
         assert_eq!(e.code, ErrorCode::ConversionFailed);
-        assert!(
-            e.message.starts_with("could not remove the metadata from"),
-            "{}",
-            e.message
+        assert_eq!(
+            e.message,
+            format!(
+                "could not remove the metadata from {}: not a JPEG; add --quality to \
+                 re-encode it with ImageMagick instead",
+                from.display()
+            )
         );
-        assert!(e.message.contains("a.jpg"), "{}", e.message);
         assert!(!to.exists());
+    }
+
+    /// A file that cannot be staged is named in the error, whether it
+    /// could not be read for the strip or copied: a bare "No such file or
+    /// directory" does not say which of the inputs it was. A path that does
+    /// not resolve is not refused for that alone; reading it is what fails.
+    #[test]
+    fn a_file_that_cannot_be_staged_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.jpg");
+        let folder = dir.path().join("folder.jpg");
+        std::fs::create_dir(&folder).unwrap();
+        let to = dir.path().join("b.jpg");
+        for from in [&missing, &folder] {
+            for (strip, verb) in [(false, "copy"), (true, "read")] {
+                let e = stage_file(from, &to, strip, hard_link).unwrap_err();
+                assert_eq!(e.code, ErrorCode::ConversionFailed);
+                let named = format!("could not {verb} {}: ", from.display());
+                assert!(e.message.starts_with(&named), "{}", e.message);
+            }
+        }
     }
 
     // --- the Typst merge -------------------------------------------------------
