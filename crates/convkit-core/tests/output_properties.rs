@@ -2911,23 +2911,27 @@ fn synth_jpeg_on_its_side(dir: &tempfile::TempDir) -> PathBuf {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let jpeg = std::fs::read(&plain).unwrap();
-    assert_eq!(&jpeg[..2], b"\xff\xd8", "a JPEG starts with SOI");
     // TIFF header, one IFD entry: Orientation (0x0112), SHORT, 1, value 6.
     let mut tiff = b"II*\0\x08\0\0\0\x01\0".to_vec();
     tiff.extend_from_slice(&[
         0x12, 0x01, 0x03, 0x00, 0x01, 0, 0, 0, 0x06, 0, 0, 0, 0, 0, 0, 0,
     ]);
+    let rotated = dir.path().join("rotated.jpg");
+    std::fs::write(&rotated, with_exif(&std::fs::read(&plain).unwrap(), &tiff)).unwrap();
+    rotated
+}
+
+/// `jpeg` with `tiff` spliced in as an APP1 Exif segment right after SOI.
+fn with_exif(jpeg: &[u8], tiff: &[u8]) -> Vec<u8> {
+    assert_eq!(&jpeg[..2], b"\xff\xd8", "a JPEG starts with SOI");
     let mut payload = b"Exif\0\0".to_vec();
-    payload.extend_from_slice(&tiff);
+    payload.extend_from_slice(tiff);
     let len = u16::try_from(payload.len() + 2).unwrap().to_be_bytes();
     let mut out = jpeg[..2].to_vec();
     out.extend_from_slice(&[0xff, 0xe1, len[0], len[1]]);
     out.extend_from_slice(&payload);
     out.extend_from_slice(&jpeg[2..]);
-    let rotated = dir.path().join("rotated.jpg");
-    std::fs::write(&rotated, out).unwrap();
-    rotated
+    out
 }
 
 #[test]
@@ -3033,10 +3037,11 @@ fn several_images_into_one_pdf_are_decided_by_the_one_enlarged_most() {
 /// An optimized GIF stores each later frame as only the part that
 /// changed. `--quality` takes a merge to ImageMagick, which made each of
 /// those a page of its own, a few pixels of picture each; it takes the
-/// first frame, as Typst does, so the GIF is one page on either route.
+/// first frame, as Typst does, so the GIF is one page on either route, and
+/// either says so.
 #[test]
 #[ignore = "requires backends; run with --ignored"]
-fn an_animated_gif_is_one_page_when_imagemagick_merges_it() {
+fn an_animated_gif_is_one_page_on_either_route() {
     let dir = tmp();
     let resolver = Resolver::new();
     require_backend(&resolver, Backend::Magick);
@@ -3071,21 +3076,254 @@ fn an_animated_gif_is_one_page_when_imagemagick_merges_it() {
         frames.starts_with("64x64 ") && frames != "64x64 64x64 64x64 ",
         "{frames}"
     );
-    let out = dir.path().join("anim.pdf");
+    let quality = Tuning {
+        quality: Some(80),
+        ..Tuning::default()
+    };
+    for (tuning, backend) in [
+        (Tuning::default(), Backend::Typst),
+        (quality, Backend::Magick),
+    ] {
+        let out = dir.path().join(format!("anim-{}.pdf", backend.exe_name()));
+        let outcome = merge(std::slice::from_ref(&gif), &out, tuning);
+        assert_eq!(ran(&outcome), [backend]);
+        assert_eq!(pdf_pages(&out), 1, "{backend:?}");
+        assert!(
+            outcome.warnings.iter().any(|w| w.contains("first frame")),
+            "{backend:?}: {:?}",
+            outcome.warnings
+        );
+    }
+}
+
+// --- Photos into one PDF on Typst --------------------------------------------
+
+/// The resolved Typst, for drawing a PDF back.
+fn typst() -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Typst);
+    resolver.resolve(Backend::Typst).unwrap().path
+}
+
+/// Merges `inputs` into one PDF through the real `exec::run`, as `conv
+/// a.jpg b.png out.pdf` does: the pair is named by the first input, and the
+/// run takes Typst or ImageMagick as `registry::typst_merge` says, which is
+/// the backend required here.
+fn merge(inputs: &[PathBuf], output: &Path, tuning: Tuning) -> exec::Outcome {
+    let from = Format::from_path(&inputs[0]).unwrap();
+    let resolver = Resolver::new();
+    if registry::typst_merge(from, Format::Pdf, inputs, &tuning) {
+        require_backend(&resolver, Backend::Typst);
+    } else {
+        require_backend(&resolver, Backend::Magick);
+    }
     let req = exec::Request {
-        from: Format::Gif,
+        from,
         to: Format::Pdf,
-        inputs: vec![gif],
-        output: out.clone(),
+        inputs: inputs.to_vec(),
+        output: output.to_path_buf(),
         overwrite: false,
-        tuning: Tuning {
-            quality: Some(80),
-            ..Tuning::default()
-        },
+        tuning,
         allow_extreme: false,
     };
-    exec::run(&req, &resolver, &mut |_| {}).unwrap();
-    assert_eq!(pdf_pages(&out), 1);
+    exec::run(&req, &resolver, &mut |_| {})
+        .unwrap_or_else(|e| panic!("merging into {} failed: {e}", output.display()))
+}
+
+/// The backends a run used, in order.
+fn ran(outcome: &exec::Outcome) -> Vec<Backend> {
+    outcome.backends.iter().map(|(b, _)| *b).collect()
+}
+
+/// Each page's MediaBox as width and height, rounded to whole points.
+fn media_boxes(pdf: &Path) -> Vec<(u32, u32)> {
+    let text = String::from_utf8_lossy(&std::fs::read(pdf).unwrap()).into_owned();
+    text.match_indices("/MediaBox")
+        .map(|(i, _)| {
+            let rest = &text[i..];
+            let numbers: Vec<f64> = rest[rest.find('[').unwrap() + 1..rest.find(']').unwrap()]
+                .split_whitespace()
+                .map(|n| n.parse().unwrap())
+                .collect();
+            let points = |from: f64, to: f64| (to - from).round() as u32;
+            (
+                points(numbers[0], numbers[2]),
+                points(numbers[1], numbers[3]),
+            )
+        })
+        .collect()
+}
+
+/// The first JPEG a PDF holds as it is: a `/DCTDecode` image's stream.
+fn embedded_jpeg(pdf: &Path) -> Vec<u8> {
+    let bytes = std::fs::read(pdf).unwrap();
+    let find = |from: usize, needle: &[u8]| {
+        bytes[from..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .map(|at| from + at)
+    };
+    let filter = find(0, b"/DCTDecode").expect("the pdf holds a JPEG");
+    let mut start = find(filter, b"stream").unwrap() + b"stream".len();
+    start += if bytes[start] == b'\r' { 2 } else { 1 };
+    let end = find(start, b"endstream").unwrap();
+    let mut jpeg = bytes[start..end].to_vec();
+    while jpeg.last().is_some_and(|b| matches!(b, b'\r' | b'\n')) {
+        jpeg.pop();
+    }
+    jpeg
+}
+
+/// Page `page` of `pdf`, drawn by Typst at 72 ppi so a pixel is a point:
+/// the PDF opens, and the picture is the way up a reader shows it.
+fn render_page(pdf: &Path, page: usize) -> PathBuf {
+    let dir = pdf.parent().unwrap();
+    let name = pdf.file_name().unwrap().to_str().unwrap();
+    let layout = dir.join(format!("render-{name}.typ"));
+    std::fs::write(
+        &layout,
+        format!(
+            "#set page(width: auto, height: auto, margin: 0pt)\n\
+             #image(\"{name}\", page: {page})\n"
+        ),
+    )
+    .unwrap();
+    let png = dir.join(format!("render-{name}-{page}.png"));
+    let out = Command::new(typst())
+        .arg("compile")
+        .arg("--root")
+        .arg(dir)
+        .args(["--ignore-system-fonts", "--ppi", "72"])
+        .arg(&layout)
+        .arg(&png)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run typst: {e}"));
+    assert!(
+        out.status.success(),
+        "typst could not draw {name}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    png
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Typst embeds a JPEG as it is, so a merge loses no quality and gains no
+/// size; ImageMagick re-encoded every photo at quality 92.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn typst_merge_embeds_the_jpeg_byte_for_byte() {
+    let dir = tmp();
+    let a = synth_image(&dir, &["-size", "64x48", "gradient:red-blue"], "a.jpg");
+    let b = synth_image(&dir, &["-size", "48x64", "gradient:green-yellow"], "b.jpg");
+    let out = dir.path().join("both.pdf");
+    let outcome = merge(&[a.clone(), b.clone()], &out, Tuning::default());
+    assert_eq!(ran(&outcome), [Backend::Typst]);
+    let pdf = std::fs::read(&out).unwrap();
+    for jpg in [&a, &b] {
+        assert!(
+            contains(&pdf, &std::fs::read(jpg).unwrap()),
+            "{} was re-encoded",
+            jpg.display()
+        );
+    }
+    assert_eq!(pdf_pages(&out), 2);
+}
+
+/// Each page is its picture's size at its DPI: 400x300 at 72 dpi is 400x300
+/// points, and 600x300 at 300 dpi is two inches by one. A PNG stores its
+/// DPI as pixels per metre, so its 72 is not exact and its page comes out a
+/// fraction of a point over, hence the rounding.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn typst_merge_sizes_each_page_from_its_dpi() {
+    let dir = tmp();
+    let at = |size, dpi, out| {
+        let args = [
+            "-size",
+            size,
+            "xc:red",
+            "-units",
+            "PixelsPerInch",
+            "-density",
+            dpi,
+        ];
+        synth_image(&dir, &args, out)
+    };
+    let screen = at("400x300", "72", "screen.png");
+    let scan = at("600x300", "300", "scan.jpg");
+    let out = dir.path().join("pages.pdf");
+    merge(&[screen, scan], &out, Tuning::default());
+    assert_eq!(media_boxes(&out), [(400, 300), (144, 72)]);
+}
+
+/// A photo stored on its side, EXIF orientation 6, gets an upright page:
+/// stored 400x200 with red on the left, it is turned a quarter clockwise
+/// to show, so the page is 200x400 with red at the top.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn typst_merge_turns_an_orientation_6_jpeg_upright() {
+    let dir = tmp();
+    let plain = synth_image(
+        &dir,
+        &[
+            "-size", "200x200", "xc:red", "-size", "200x200", "xc:blue", "+append",
+        ],
+        "plain.jpg",
+    );
+    let mut tiff = b"MM\0*\0\0\0\x08".to_vec();
+    tiff.extend(exif_ifd(&[(0x0112, 3, 1, 6u16.to_be_bytes().to_vec())], 8));
+    let photo = dir.path().join("sideways.jpg");
+    std::fs::write(&photo, with_exif(&std::fs::read(&plain).unwrap(), &tiff)).unwrap();
+    assert_eq!(imagemagick_dimensions(&photo), (400, 200));
+
+    let out = dir.path().join("upright.pdf");
+    merge(&[photo], &out, Tuning::default());
+    assert_eq!(media_boxes(&out), [(200, 400)]);
+    let page = render_page(&out, 1);
+    assert_eq!(imagemagick_dimensions(&page), (200, 400));
+    let red_top = identify_format(&page, "%[fx:p{100,50}.r > 0.8 && p{100,50}.b < 0.2]");
+    assert_eq!(red_top.trim(), "1", "the page is turned the wrong way");
+}
+
+/// Typst reads no HEIC, so one in the list takes the whole merge to
+/// ImageMagick, though a JPEG ahead of it names the pair.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_heic_in_the_merge_takes_imagemagick() {
+    let dir = tmp();
+    let jpg = synth_image(&dir, &["-size", "64x48", "xc:red"], "first.jpg");
+    let out = dir.path().join("mixed.pdf");
+    let outcome = merge(&[jpg, fixture("photo.heic")], &out, Tuning::default());
+    assert_eq!(ran(&outcome), [Backend::Magick]);
+    assert_eq!(pdf_pages(&out), 2);
+}
+
+/// An input that is a relative symlink is staged as the file it points
+/// to: the link itself, linked into the scratch folder beside the output,
+/// would point nowhere from there.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_merge_of_a_relative_symlink_works() {
+    let dir = tmp();
+    let real = synth_image(&dir, &["-size", "64x48", "gradient:red-blue"], "real.jpg");
+    let other = synth_image(&dir, &["-size", "48x64", "xc:green"], "other.png");
+    let links = dir.path().join("links");
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir(&links).unwrap();
+    std::fs::create_dir(&out_dir).unwrap();
+    let link = links.join("photo.jpg");
+    std::os::unix::fs::symlink("../real.jpg", &link).unwrap();
+
+    let out = out_dir.join("linked.pdf");
+    let outcome = merge(&[link, other], &out, Tuning::default());
+    assert_eq!(ran(&outcome), [Backend::Typst]);
+    assert_eq!(pdf_pages(&out), 2);
+    let pdf = std::fs::read(&out).unwrap();
+    assert!(contains(&pdf, &std::fs::read(&real).unwrap()));
 }
 
 // --- Metadata: the location note and --strip-metadata ----------------------
@@ -3237,17 +3475,12 @@ fn gps_photo(dir: &tempfile::TempDir) -> PathBuf {
         &icc.to_string_lossy(),
         &plain.to_string_lossy(),
     ]);
-    let jpeg = std::fs::read(&plain).unwrap();
-    assert_eq!(&jpeg[..2], b"\xff\xd8", "a JPEG starts with SOI");
-    let mut payload = b"Exif\0\0".to_vec();
-    payload.extend(gps_exif());
-    let len = u16::try_from(payload.len() + 2).unwrap().to_be_bytes();
-    let mut out = jpeg[..2].to_vec();
-    out.extend([0xff, 0xe1, len[0], len[1]]);
-    out.extend(payload);
-    out.extend(&jpeg[2..]);
     let photo = dir.path().join("IMG_0042.jpg");
-    std::fs::write(&photo, out).unwrap();
+    std::fs::write(
+        &photo,
+        with_exif(&std::fs::read(&plain).unwrap(), &gps_exif()),
+    )
+    .unwrap();
     assert_eq!(identify_format(&photo, "%[orientation]"), "RightTop");
     photo
 }
@@ -3330,6 +3563,37 @@ fn stripped_images_lose_their_location_and_keep_colour_and_orientation() {
         let red_left = identify_format(&clean, "%[fx:p{10,48}.r > 0.8 && p{10,48}.b < 0.2]");
         assert_eq!(red_left.trim(), "1", "{ext} is turned the wrong way");
     }
+}
+
+/// On the Typst route `--strip-metadata` strips each JPEG as it is staged,
+/// without re-encoding it: what the PDF holds has no GPS or anything else
+/// identifying, but keeps the orientation and the colour profile, so the
+/// page is the same size and the same way up as without the flag (shown
+/// 192x96, red on the left), and the PDF still opens.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn strip_metadata_on_typst_drops_gps_but_keeps_the_turn_and_size() {
+    let dir = tmp();
+    let photo = gps_photo(&dir);
+    let kept = dir.path().join("kept.pdf");
+    merge(std::slice::from_ref(&photo), &kept, Tuning::default());
+    let clean = dir.path().join("clean.pdf");
+    let outcome = merge(&[photo], &clean, stripped());
+    assert_eq!(ran(&outcome), [Backend::Typst]);
+    assert_eq!(media_boxes(&kept), [(192, 96)]);
+    assert_eq!(media_boxes(&clean), [(192, 96)]);
+
+    let jpeg = dir.path().join("embedded.jpg");
+    std::fs::write(&jpeg, embedded_jpeg(&clean)).unwrap();
+    assert!(!carries_identifying(&jpeg));
+    assert_eq!(imagemagick_dimensions(&jpeg), (96, 192), "stored as it was");
+    assert_eq!(identify_format(&jpeg, "%[orientation]"), "RightTop");
+    assert_eq!(identify_format(&jpeg, "%[icc:description]"), "Display P3");
+
+    let page = render_page(&clean, 1);
+    assert_eq!(imagemagick_dimensions(&page), (192, 96));
+    let red_left = identify_format(&page, "%[fx:p{10,48}.r > 0.8 && p{10,48}.b < 0.2]");
+    assert_eq!(red_left.trim(), "1", "the page is turned the wrong way");
 }
 
 /// The committed iPhone photo carries real GPS coordinates; stripped, the
