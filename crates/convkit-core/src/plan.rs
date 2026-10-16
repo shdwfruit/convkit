@@ -165,12 +165,15 @@ pub fn build_tuned(
         return crate::sized::plan(from, to, inputs, output, probe, tuning, max);
     }
 
-    // A file stripped or turned into its own format: no registry pair covers
-    // it, so it is planned here, as `--max-size` plans its own (above). A
-    // clip is not a copy of the whole file, so a range takes the cut's path
-    // below, which strips as it cuts, and so does a speed change. So does a
-    // video whose pixels turn, which is re-encoded there.
+    // A file stripped, turned or resized into its own format: no registry
+    // pair covers it, so it is planned here, as `--max-size` plans its own
+    // (above). A clip is not a copy of the whole file, so a range takes the
+    // cut's path below, which strips as it cuts, and so does a speed change.
+    // So does a video whose pixels turn or that is resized, which is
+    // re-encoded there.
     let timed = tuning.range.is_some() || tuning.speed.is_some();
+    let video_resized = tuning.resize.is_some() && crate::sized::is_video_target(to);
+    let reencoded = timed || video_resized;
     if from == to && !timed && rewrites_in_place(from, probe, tuning) {
         return in_place(from, inputs, output, probe, tuning);
     }
@@ -257,9 +260,10 @@ pub fn build_tuned(
     // supported at all); these only change *how* an already-supported pair
     // runs when a probe is in hand.
     if let Some(p) = probe {
-        // A format cut, retimed or turned into itself is no registered pair,
-        // so it reaches the probe-aware paths by its range, speed or turn.
-        let same_format = from == to && (timed || tuning.rotate.is_some());
+        // A format cut, retimed, turned or resized into itself is no
+        // registered pair, so it reaches the probe-aware paths by its range,
+        // speed, turn or size instead.
+        let same_format = from == to && (reencoded || tuning.rotate.is_some());
         if same_format || (registry::lookup(from, to).is_some() && registry::needs_probe(from, to))
         {
             // A video knob changes the picture, and ffmpeg refuses a filter
@@ -389,7 +393,7 @@ pub fn build_tuned(
 
     let recipe = select(from, to, probe, available)
         .or_else(|| {
-            (from == to && (timed || tuning.rotate.is_some()))
+            (from == to && (reencoded || tuning.rotate.is_some()))
                 .then(|| registry::same_format_recipe(to))
                 .flatten()
         })
@@ -474,12 +478,15 @@ fn rotation_note(
     }
 }
 
-/// Whether `in_place` makes this file stripped or turned into its own
-/// format. A video is, turned, only by resetting its note: one whose pixels
-/// turn, or that another knob re-encodes, takes the media paths instead.
+/// Whether `in_place` makes this file stripped, turned or resized into its
+/// own format. A video is, turned, only by resetting its note: one whose
+/// pixels turn, or that another knob re-encodes, takes the media paths
+/// instead, and so does one resized, since scaling it means re-encoding it.
 fn rewrites_in_place(format: Format, probe: Option<&MediaProbe>, tuning: &Tuning) -> bool {
     let Some(turn) = tuning.rotate else {
-        return tuning.strip_metadata;
+        let resized = tuning.resize.is_some();
+        let video_resized = resized && crate::sized::is_video_target(format);
+        return (tuning.strip_metadata || resized) && !video_resized;
     };
     if format.kind() != crate::Kind::Video {
         return true;
@@ -576,12 +583,15 @@ pub(crate) fn unfitted_sheet_step(input: &Path, output: &Path) -> PlannedStep {
 }
 
 /// `photo.jpg --strip-metadata` -> `photo-stripped.jpg`, and the same for
-/// video and audio; `photo.jpg --rotate right` -> `photo-rotated.jpg`. An
-/// image runs the recipe any raster takes to its format (through the TIFF
-/// for png), which re-encodes a lossy one, so that is said. Video and audio
-/// are stream-copied with their tags cleared. A JPEG, mp4 or mov that a turn
-/// brings back to its stored picture is copied as it is, and the executor
-/// resets its note.
+/// video and audio; `photo.jpg --rotate right` -> `photo-rotated.jpg`; and
+/// `photo.jpg --resize 50%` -> `photo-50pct.jpg`. An image runs the recipe
+/// any raster takes to its format (through the TIFF for png, when
+/// stripped), which re-encodes a lossy one; for a strip or a turn that is
+/// said. Video and audio are stream-copied with their tags cleared. A JPEG,
+/// mp4 or mov that a turn brings back to its stored picture is copied as it
+/// is, and the executor resets its note. A video resized into its own
+/// format never comes here: it is re-encoded on the media paths in
+/// `build_tuned`.
 fn in_place(
     format: Format,
     inputs: &[PathBuf],
@@ -589,12 +599,17 @@ fn in_place(
     probe: Option<&MediaProbe>,
     tuning: &Tuning,
 ) -> Result<ConversionPlan> {
+    // Refused by the flags that brought the file here, each with its own
+    // reason and fix: a strip, a turn, or else a resize.
     let invalid = |why| ConvError::new(ErrorCode::InvalidInvocation, why);
     if tuning.strip_metadata {
         crate::metadata::in_place(format).map_err(invalid)?;
     }
     if tuning.rotate.is_some() {
         crate::rotate::in_place(format).map_err(invalid)?;
+    }
+    if !tuning.strip_metadata && tuning.rotate.is_none() {
+        registry::resize_in_place(format).map_err(invalid)?;
     }
     let others = Tuning {
         strip_metadata: false,
@@ -627,6 +642,8 @@ fn in_place(
     let kept = probe.map_or(&[][..], |p| p.kept_tags.as_slice());
     let (steps, mut warnings, enlarged) = match recipe {
         Some(recipe) => {
+            // A resize alone keeps the metadata, as a conversion to the
+            // format does, so it takes the plain recipe.
             let recipe = if tuning.strip_metadata {
                 registry::strip_variant(format, recipe)
             } else {
@@ -649,15 +666,18 @@ fn in_place(
             validate_tuning(&recipe, format, format, tuning, &resolved)?;
             let steps = render_steps(&recipe, inputs, output, tuning, &resolved, kept);
             let mut warnings = registry::notes_for(&recipe, probe);
+            warnings.extend(resolved.notes.iter().cloned());
+            // A resize alone re-encodes as any conversion to the format
+            // does, which goes unsaid; a strip or a turn says it.
             if matches!(
                 format,
                 Format::Jpg | Format::Webp | Format::Avif | Format::Heic
             ) {
-                warnings.push(if tuning.strip_metadata {
-                    crate::metadata::reencode_note(format, tuning)
-                } else {
-                    crate::rotate::image_note(format, tuning)
-                });
+                if tuning.strip_metadata {
+                    warnings.push(crate::metadata::reencode_note(format, tuning));
+                } else if tuning.rotate.is_some() {
+                    warnings.push(crate::rotate::image_note(format, tuning));
+                }
             }
             (steps, warnings, resolved.enlarged)
         }
@@ -870,7 +890,11 @@ fn validate_tuning(
     //   1280x720 one): the flag is a no-op that `resolved.notes` already
     //   explains on the plan's warnings, so the checks below let it through
     //   rather than refusing it.
-    let probe_routed_webm = to == Format::Webm && registry::needs_probe(from, to);
+    //
+    // A webm cut, retimed or resized into a webm is probe-routed too: it is
+    // no pair, and only reaches the probe-aware path by its range, speed or
+    // size (`build_tuned`'s `same_format`).
+    let probe_routed_webm = to == Format::Webm && (registry::needs_probe(from, to) || from == to);
     if probe_routed_webm && (resolved.fps.is_some() || resolved.scale.is_some()) {
         let flag = if resolved.fps.is_some() {
             "--fps"
@@ -1697,6 +1721,180 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, ErrorCode::UnsupportedPair);
+    }
+
+    fn resized(geometry: &str) -> Tuning {
+        Tuning {
+            resize: Some(geometry.into()),
+            ..Tuning::default()
+        }
+    }
+
+    /// A picture resized into its own format runs the recipe any raster
+    /// takes to that format, and keeps its metadata as that does: no strip
+    /// arguments, no png TIFF detour, no note about re-encoding to strip.
+    #[test]
+    fn an_image_resized_in_place_runs_its_own_recipe() {
+        let plan = build_tuned(
+            Format::Jpg,
+            Format::Jpg,
+            &[p("photo.jpg")],
+            Path::new("photo-50pct.jpg"),
+            None,
+            None,
+            &resized("50%"),
+        )
+        .unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        let argv = &plan.steps[0].argv;
+        assert_eq!(plan.steps[0].program, "magick");
+        assert!(
+            argv.windows(2).any(|w| w == ["-resize", "50%>"]),
+            "{argv:?}"
+        );
+        assert!(argv.windows(2).any(|w| w == ["-quality", "92"]), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "+profile"), "{argv:?}");
+        assert_eq!(argv.last().unwrap(), "photo-50pct.jpg");
+        assert!(
+            plan.warnings.iter().all(|w| !w.contains("re-encoded")),
+            "{:?}",
+            plan.warnings
+        );
+        let png = build_tuned(
+            Format::Png,
+            Format::Png,
+            &[p("a.png")],
+            Path::new("a-640w.png"),
+            None,
+            None,
+            &resized("640"),
+        )
+        .unwrap();
+        assert_eq!(png.steps.len(), 1, "{:?}", png.steps);
+    }
+
+    /// The pair form reaches the planner without the command line's
+    /// refusal, so the planner says the same.
+    #[test]
+    fn a_format_conv_cannot_resize_into_itself_is_refused_by_name() {
+        for (f, why) in [
+            (Format::Mp3, "conv can't resize sound"),
+            (Format::Gif, "conv can't resize a gif into a gif"),
+            (Format::Heic, "conv can't write heic"),
+        ] {
+            let input = p(&format!("a.{}", f.ext()));
+            let output = format!("b.{}", f.ext());
+            let e = build_tuned(
+                f,
+                f,
+                &[input],
+                Path::new(&output),
+                None,
+                None,
+                &resized("50%"),
+            )
+            .unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation, "{f:?}");
+            assert!(e.message.contains(why), "{f:?}: {}", e.message);
+        }
+    }
+
+    /// A video resized into its own format takes a cut's route: transcoded
+    /// from the probe, every stream mapped as the timed path maps them. webm
+    /// too, whose static recipe has no filter slot.
+    #[test]
+    fn a_video_resized_in_place_is_transcoded_with_its_streams() {
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Mp4,
+            &[p("clip.mp4")],
+            Path::new("clip-640w.mp4"),
+            Some(&clip_probe(60)),
+            None,
+            &resized("640"),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert_eq!(plan.steps[0].program, "ffmpeg");
+        assert!(has(argv, ["-map", "0:v:0"]), "{argv:?}");
+        assert!(has(argv, ["-map", "0:a?"]), "{argv:?}");
+        assert!(has(argv, ["-c:v", "libx264"]), "{argv:?}");
+        assert!(argv.iter().any(|a| a.contains("scale=")), "{argv:?}");
+        assert_eq!(argv.last().unwrap(), "clip-640w.mp4");
+        assert!(
+            plan.warnings.iter().any(|w| w == REENCODED_FOR_KNOB_NOTE),
+            "{:?}",
+            plan.warnings
+        );
+        let webm = build_tuned(
+            Format::Webm,
+            Format::Webm,
+            &[p("clip.webm")],
+            Path::new("clip-640w.webm"),
+            Some(&clip_probe(60)),
+            None,
+            &resized("640"),
+        )
+        .unwrap();
+        let argv = &webm.steps[0].argv;
+        assert!(has(argv, ["-c:v", "libvpx-vp9"]), "{argv:?}");
+        assert!(argv.iter().any(|a| a.contains("scale=")), "{argv:?}");
+    }
+
+    /// Stripped and resized into its own format, a video is transcoded and
+    /// stripped as it goes, as a cut is, rather than refused by the stream
+    /// copy that a strip alone takes.
+    #[test]
+    fn a_video_stripped_and_resized_in_place_is_transcoded() {
+        let probe = MediaProbe {
+            kept_tags: vec![("title".into(), "Clip".into())],
+            ..clip_probe(60)
+        };
+        let t = Tuning {
+            strip_metadata: true,
+            ..resized("640")
+        };
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Mp4,
+            &[p("clip.mp4")],
+            Path::new("clip-stripped.mp4"),
+            Some(&probe),
+            None,
+            &t,
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(has(argv, ["-c:v", "libx264"]), "{argv:?}");
+        assert!(argv.iter().any(|a| a.contains("scale=")), "{argv:?}");
+        assert!(has(argv, ["-map_metadata", "-1"]), "{argv:?}");
+        assert!(has(argv, ["-metadata", "title=Clip"]), "{argv:?}");
+    }
+
+    /// A video already within the size is left as it is, and the note says
+    /// so, as it does for a conversion.
+    #[test]
+    fn a_resize_in_place_that_does_not_bind_says_so() {
+        let plan = build_tuned(
+            Format::Mp4,
+            Format::Mp4,
+            &[p("clip.mp4")],
+            Path::new("clip-1920w.mp4"),
+            Some(&clip_probe(60)),
+            None,
+            &resized("1920"),
+        )
+        .unwrap();
+        assert!(
+            plan.warnings.iter().any(|w| {
+                w
+                == "Source is 1280x720; --resize 1920 left it unchanged (add --upscale to enlarge)."
+            }),
+            "{:?}",
+            plan.warnings
+        );
+        let argv = &plan.steps[0].argv;
+        assert!(!argv.iter().any(|a| a.contains("scale=")), "{argv:?}");
     }
 
     /// The plan carries only the notes that apply to the source the probe
@@ -4485,5 +4683,71 @@ mod tests {
             "--rotate on a gif kept as gif turns its frames and changes nothing else; \
              add --to mp4 to change it as well"
         );
+    }
+
+    /// A photo turned and resized into its own format is turned, then
+    /// resized, in one run; the size it is fit to is the turned picture's,
+    /// and a resize that does not bind it says so.
+    #[test]
+    fn a_photo_turned_and_resized_in_place_is_turned_then_resized() {
+        use crate::rotate::Turn;
+        let t = Tuning {
+            resize: Some("50%".into()),
+            ..turned(Turn::Right)
+        };
+        let plan = turned_plan(Format::Jpg, Format::Jpg, &t, None).unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        let argv = &plan.steps[0].argv;
+        turns_after_orienting(argv, "90");
+        let rotate = argv.iter().position(|a| a == "-rotate").unwrap();
+        let resize = argv.iter().position(|a| a == "-resize").unwrap();
+        assert!(rotate < resize, "{argv:?}");
+        assert_eq!(argv[resize + 1], "50%>");
+        assert_eq!(by(&plan)["by"], "pixels");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "The jpg is re-encoded at quality 92 to turn it."),
+            "{:?}",
+            plan.warnings
+        );
+        // 1280x720 turned is 720x1280, which a 1000 px width does not bind.
+        let t = Tuning {
+            resize: Some("1000".into()),
+            ..turned(Turn::Right)
+        };
+        let plan = turned_plan(Format::Jpg, Format::Jpg, &t, Some(&clip_probe(60))).unwrap();
+        assert!(
+            plan.warnings.iter().any(|w| {
+                w == "Source is 720x1280; --resize 1000 left it unchanged (add --upscale to enlarge)."
+            }),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// A video turned and resized into its own format is transcoded once,
+    /// turned and then scaled, even where the turn alone would only have
+    /// reset its note.
+    #[test]
+    fn a_video_turned_and_resized_in_place_is_turned_then_scaled() {
+        use crate::rotate::Turn;
+        let t = Tuning {
+            resize: Some("360".into()),
+            ..turned(Turn::Left)
+        };
+        for probe in [shown(1, clip_probe(60)), shown(6, clip_probe(60))] {
+            let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&probe)).unwrap();
+            let argv = &plan.steps[0].argv;
+            let vf = value(argv, "-vf");
+            let turn = vf.find("transpose=cclock");
+            let scale = vf.find("scale=");
+            assert!(
+                turn.is_some() && scale.is_some() && turn < scale,
+                "{argv:?}"
+            );
+            assert!(has(argv, ["-c:v", "libx264"]), "{argv:?}");
+            assert_eq!(by(&plan)["by"], "pixels");
+        }
     }
 }

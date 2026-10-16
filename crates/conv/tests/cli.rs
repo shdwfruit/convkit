@@ -38,6 +38,34 @@ fn dry_run_strips_a_lone_photo_into_a_stripped_copy() {
         .stdout(contains("photo-stripped.jpg"));
 }
 
+/// A lone photo under `--resize` keeps its format under a name that says the
+/// size, and the command resizes without stripping.
+#[test]
+fn dry_run_resizes_a_lone_photo_into_a_sized_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("photo.jpg"), b"not really a jpeg").unwrap();
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["photo.jpg", "--resize", "50%", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("magick "))
+        .stdout(contains("-resize "))
+        .stdout(contains("50%>"))
+        .stdout(contains("+profile").not());
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    let command = stdout.lines().next().unwrap_or_default();
+    assert!(command.ends_with("photo-50pct.jpg"), "{stdout}");
+    conv()
+        .current_dir(dir.path())
+        .args(["IMG.heic", "--resize", "50%", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--resize keeps heic's own format, and conv can't write heic; add --to jpg",
+        ));
+}
+
 /// Where the flag cannot apply, it is refused with the reason and the fix.
 #[test]
 fn strip_metadata_is_refused_where_it_cannot_apply() {
