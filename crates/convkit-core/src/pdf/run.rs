@@ -72,6 +72,13 @@ pub fn run(
     let _guard = exec::ScratchGuard::new(scratch.clone());
 
     let commands = plan.commands_into(Some(&scratch));
+    // A relative --qpdf-path would resolve against the scratch folder once
+    // the command runs there.
+    let program = if plan.runs_in_scratch() {
+        std::path::absolute(&qpdf.path).unwrap_or_else(|_| qpdf.path.clone())
+    } else {
+        qpdf.path.clone()
+    };
     let total = commands.len();
     let mut backend_output = Vec::new();
     let mut qpdf_warned = false;
@@ -81,14 +88,14 @@ pub fn run(
             total,
             backend: Backend::Qpdf,
         });
-        let mut cmd = backend_command(&qpdf.path);
+        let mut cmd = backend_command(&program);
         cmd.args(argv);
         if plan.runs_in_scratch() {
             cmd.current_dir(&scratch);
         }
         on_event(Event::StepSpawned {
             index,
-            program: qpdf.path.clone(),
+            program: program.clone(),
             argv: argv.clone(),
         });
         let out = cmd.output().map_err(|e| {

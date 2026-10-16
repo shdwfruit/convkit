@@ -3735,3 +3735,24 @@ fn split_refused_range_does_not_create_the_outdir() {
         .stderr(contains("goes past the end"));
     assert!(!dir.path().join("pages").exists());
 }
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn split_page_by_page_works_with_a_relative_qpdf_path() {
+    let qpdf = convkit_core::Resolver::new()
+        .resolve(convkit_core::Backend::Qpdf)
+        .expect("qpdf")
+        .path;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("sample.pdf")).unwrap();
+    std::fs::create_dir(dir.path().join("tools")).unwrap();
+    std::os::unix::fs::symlink(&qpdf, dir.path().join("tools/qpdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["split", "sample.pdf", "--qpdf-path", "tools/qpdf"])
+        .assert()
+        .success();
+    assert!(dir.path().join("sample-1.pdf").is_file());
+    assert!(dir.path().join("sample-3.pdf").is_file());
+}
