@@ -14,12 +14,14 @@ avi -> opus: ffmpeg -i in.avi -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=c
 avi -> wav: ffmpeg -i in.avi -vn -c:a pcm_s16le -y out.wav
 avi -> webm: ffmpeg -i in.avi -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
 avif -> bmp: magick in.avif[0] -auto-orient out.bmp
+avif -> heic: magick in.avif[0] -auto-orient -quality 60 out.heic
 avif -> jpg: magick in.avif[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
 avif -> pdf: magick in.avif -auto-orient -compress jpeg -quality 92 out.pdf
 avif -> png: magick in.avif[0] -auto-orient out.png
 avif -> tiff: magick in.avif -auto-orient out.tiff
 avif -> webp: magick in.avif -auto-orient -quality 92 out.webp
 bmp -> avif: magick in.bmp -auto-orient -quality 92 out.avif
+bmp -> heic: magick in.bmp[0] -auto-orient -quality 60 out.heic
 bmp -> jpg: magick in.bmp[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
 bmp -> pdf: magick in.bmp -auto-orient -compress jpeg -quality 92 out.pdf
 bmp -> png: magick in.bmp[0] -auto-orient out.png
@@ -45,6 +47,7 @@ heic -> tiff: magick in.heic -auto-orient out.tiff
 heic -> webp: magick in.heic -auto-orient -quality 92 out.webp
 heif -> avif: magick in.heif -auto-orient -quality 92 out.avif
 heif -> bmp: magick in.heif[0] -auto-orient out.bmp
+heif -> heic: magick in.heif[0] -auto-orient -quality 60 out.heic
 heif -> jpg: magick in.heif[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
 heif -> pdf: magick in.heif -auto-orient -compress jpeg -quality 92 out.pdf
 heif -> png: magick in.heif[0] -auto-orient out.png
@@ -53,6 +56,7 @@ heif -> webp: magick in.heif -auto-orient -quality 92 out.webp
 ico -> png: magick in.ico[0] out.png
 jpg -> avif: magick in.jpg -auto-orient -quality 92 out.avif
 jpg -> bmp: magick in.jpg[0] -auto-orient out.bmp
+jpg -> heic: magick in.jpg[0] -auto-orient -quality 60 out.heic
 jpg -> ico: magick in.jpg[0] -auto-orient -background none -gravity center -resize 256x256 -extent 256x256 -define icon:png-compression-size=256 -define icon:auto-resize=256,128,64,48,32,24,16 out.ico
 jpg -> pdf: magick in.jpg -auto-orient -compress jpeg -quality 92 out.pdf
 jpg -> png: magick in.jpg[0] -auto-orient out.png
@@ -118,6 +122,7 @@ opus -> wav: ffmpeg -i in.opus -vn -c:a pcm_s16le -map_metadata 0:s:a:0 -y out.w
 pdf -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=writer_pdf_import --convert-to docx:MS Word 2007 XML --outdir . in.pdf
 png -> avif: magick in.png -auto-orient -quality 92 out.avif
 png -> bmp: magick in.png[0] -auto-orient out.bmp
+png -> heic: magick in.png[0] -auto-orient -quality 60 out.heic
 png -> ico: magick in.png[0] -auto-orient -background none -gravity center -resize 256x256 -extent 256x256 -define icon:png-compression-size=256 -define icon:auto-resize=256,128,64,48,32,24,16 out.ico
 png -> jpg: magick in.png[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
 png -> pdf: magick in.png -auto-orient -compress jpeg -quality 92 out.pdf
@@ -131,6 +136,7 @@ svg -> jpg: magick -density 384 -background white in.svg -alpha remove -alpha of
 svg -> png: magick -density 384 -background none in.svg out.png
 tiff -> avif: magick in.tiff -auto-orient -quality 92 out.avif
 tiff -> bmp: magick in.tiff[0] -auto-orient out.bmp
+tiff -> heic: magick in.tiff[0] -auto-orient -quality 60 out.heic
 tiff -> jpg: magick in.tiff[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
 tiff -> pdf: magick in.tiff -auto-orient -compress jpeg -quality 92 out.pdf
 tiff -> png: magick in.tiff[0] -auto-orient out.png
@@ -152,6 +158,7 @@ webm -> opus: ffmpeg -i in.webm -vn -c:a libopus -b:a 128k -ar 48000 -af aformat
 webm -> wav: ffmpeg -i in.webm -vn -c:a pcm_s16le -y out.wav
 webp -> avif: magick in.webp -auto-orient -quality 92 out.avif
 webp -> bmp: magick in.webp[0] -auto-orient out.bmp
+webp -> heic: magick in.webp[0] -auto-orient -quality 60 out.heic
 webp -> ico: magick in.webp[0] -auto-orient -background none -gravity center -resize 256x256 -extent 256x256 -define icon:png-compression-size=256 -define icon:auto-resize=256,128,64,48,32,24,16 out.ico
 webp -> jpg: magick in.webp[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
 webp -> pdf: magick in.webp -auto-orient -compress jpeg -quality 92 out.pdf

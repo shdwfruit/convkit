@@ -2156,6 +2156,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for (name, out, format) in [
             ("IMG_0042.jpg", "IMG_0042-stripped.jpg", Format::Jpg),
+            ("IMG_0043.HEIC", "IMG_0043-stripped.HEIC", Format::Heic),
             ("clip.MOV", "clip-stripped.MOV", Format::Mov),
             ("song.mp3", "song-stripped.mp3", Format::Mp3),
         ] {
@@ -2166,15 +2167,15 @@ mod tests {
         }
     }
 
-    /// conv cannot write heic, so the fix is a format it can.
+    /// conv cannot write heif, so the fix is a format it can.
     #[test]
     fn a_lone_path_that_cannot_be_stripped_in_place_names_the_fix() {
         let dir = tempfile::tempdir().unwrap();
-        let e = plan_jobs(&stripped(vec![dir.path().join("IMG.heic")], None, None)).unwrap_err();
+        let e = plan_jobs(&stripped(vec![dir.path().join("IMG.heif")], None, None)).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidInvocation);
         assert_eq!(
             e.message,
-            "conv cannot write heic; add --to jpg to strip it into a jpg"
+            "conv cannot write heif; add --to heic to strip it into a heic"
         );
         let e = plan_jobs(&stripped(vec![dir.path().join("anim.gif")], None, None)).unwrap_err();
         assert_eq!(
