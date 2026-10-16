@@ -284,45 +284,58 @@ fn is_image_merge(paths: &[PathBuf]) -> bool {
 
 /// A run that can keep the input's own format: `--max-size`, which sizes a
 /// video into its own container; a range (`--start`, `--end`,
-/// `--duration`), which cuts video and audio into their own format; or
-/// `--strip-metadata`, which strips most image, video and audio files into
-/// their own format. A derived output that would land on its input is named
-/// NAME-SUFFIX.EXT. With a range or a size, their rules and name apply: they
-/// are the narrower, and each one given must keep the format.
+/// `--duration`) or `--speed`, which cut or retime video and audio into
+/// their own format; or `--strip-metadata`, which strips most image, video
+/// and audio files into their own format. A derived output that would land
+/// on its input is named NAME-SUFFIX.EXT. With a range, a speed or a size,
+/// their rules and name apply: they are the narrower, and each one given
+/// must keep the format.
 struct OwnFormat {
     sized: bool,
-    cut: bool,
-    /// The flag, for messages: the range's first flag, else the size's.
+    /// Cut or retimed: either needs a timeline.
+    timed: bool,
+    /// The flag, for messages: the range's first flag, else `--speed`, else
+    /// the size's.
     flag: &'static str,
     /// What it does to each file, and what the result is called.
     verb: &'static str,
     done: &'static str,
-    /// Added to a derived name: the range, then the size as typed
-    /// (`1m02s-1m10s-5mb`), or `stripped`.
+    /// Added to a derived name: the range, the speed and the size, in the
+    /// order they happen (`1m02s-1m10s-2x-5mb`), or `stripped`.
     suffix: String,
 }
 
 impl OwnFormat {
     fn of(cli: &Cli) -> Option<OwnFormat> {
         let size = cli.max_size.as_ref().map(|m| m.spelling.clone());
-        if let Some(range) = cli.range().ok().flatten() {
-            let cut = convkit_core::trim::name_suffix(&range);
+        let range = cli.range().ok().flatten();
+        // A shifted pitch is named apart, so it never takes the name of the
+        // same speed with the pitch kept.
+        let speed = cli.speed.map(|s| match cli.shift_pitch {
+            true => format!("{}-pitched", s.suffix()),
+            false => s.suffix(),
+        });
+        if range.is_some() || speed.is_some() {
+            let (flag, verb, done) = match (&range, cli.speed) {
+                (Some(r), _) => (r.flag(), "cut", "cut"),
+                (None, Some(s)) if s.slows() => ("--speed", "slow down", "slowed-down"),
+                (None, _) => ("--speed", "speed up", "sped-up"),
+            };
+            let cut = range.as_ref().map(convkit_core::trim::name_suffix);
+            let parts: Vec<String> = [cut, speed, size.clone()].into_iter().flatten().collect();
             return Some(OwnFormat {
                 sized: size.is_some(),
-                cut: true,
-                flag: range.flag(),
-                verb: "cut",
-                done: "cut",
-                suffix: match size {
-                    Some(size) => format!("{cut}-{size}"),
-                    None => cut,
-                },
+                timed: true,
+                flag,
+                verb,
+                done,
+                suffix: parts.join("-"),
             });
         }
         if let Some(size) = size {
             return Some(OwnFormat {
                 sized: true,
-                cut: false,
+                timed: false,
                 flag: "--max-size",
                 verb: "size",
                 done: "sized",
@@ -331,7 +344,7 @@ impl OwnFormat {
         }
         cli.strip_metadata.then(|| OwnFormat {
             sized: false,
-            cut: false,
+            timed: false,
             flag: "--strip-metadata",
             verb: "strip",
             done: "stripped",
@@ -341,9 +354,9 @@ impl OwnFormat {
 
     /// Whether this run can keep `f` as `f`.
     fn keeps(&self, f: Format) -> bool {
-        if self.sized || self.cut {
+        if self.sized || self.timed {
             (!self.sized || convkit_core::sized::is_video_target(f))
-                && (!self.cut || convkit_core::registry::takes_range(f, f))
+                && (!self.timed || convkit_core::registry::takes_range(f, f))
         } else {
             convkit_core::metadata::in_place(f).is_ok()
         }
@@ -356,7 +369,7 @@ impl OwnFormat {
     fn fix_ext(&self, f: Option<Format>) -> Result<&'static str, String> {
         match f {
             Some(f) if self.keeps(f) => Ok(f.ext()),
-            _ if self.sized || self.cut => Ok("mp4"),
+            _ if self.sized || self.timed => Ok("mp4"),
             Some(f) => convkit_core::metadata::strip_target_for(f)
                 .map(|to| to.ext())
                 .ok_or_else(|| {
@@ -374,7 +387,7 @@ impl OwnFormat {
 /// input (or in `-o`); `name_own_format_outputs` adds the suffix.
 fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Result<Job, ConvError> {
     let from = format_of(input)?;
-    if !own.sized && !own.cut {
+    if !own.sized && !own.timed {
         convkit_core::metadata::in_place(from)
             .map_err(|why| ConvError::new(ErrorCode::InvalidInvocation, why))?;
     }
@@ -396,23 +409,33 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
         };
         return Err(ConvError::new(ErrorCode::InvalidInvocation, message));
     }
-    if own.cut && !convkit_core::registry::takes_range(from, from) {
+    if own.timed && !convkit_core::registry::takes_range(from, from) {
         // gif and avi have a timeline but no recipe into themselves: a GIF
         // would be re-paletted at 15 fps and 640 px, and avi is never a
-        // target. Both cut fine into mp4.
+        // target. Both cut and change speed fine into mp4.
         let flag = own.flag;
-        let message = if matches!(from.kind(), Kind::Video | Kind::Audio) || from == Format::Gif {
-            format!(
+        let media = matches!(from.kind(), Kind::Video | Kind::Audio) || from == Format::Gif;
+        let message = match (media, flag) {
+            (true, "--speed") => format!(
+                "--speed keeps {}'s own format, and conv cannot write {} into itself; \
+                 add --to mp4",
+                input.display(),
+                from.ext()
+            ),
+            (true, _) => format!(
                 "{flag} keeps {}'s own format, and {} is not one it can cut into itself; \
                  add --to mp4",
                 input.display(),
                 from.ext()
-            )
-        } else {
-            format!(
+            ),
+            (false, "--speed") => format!(
+                "--speed changes the speed of video and audio; {} is not a video or audio file",
+                input.display()
+            ),
+            (false, _) => format!(
                 "{flag} cuts video and audio; {} is not a video or audio file",
                 input.display()
-            )
+            ),
         };
         return Err(ConvError::new(ErrorCode::InvalidInvocation, message));
     }
@@ -448,16 +471,17 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
 /// may be one file, and no output may be any job's input, since that job
 /// would be read while another overwrites it.
 ///
-/// With `cut`, a cut is renamed even where it would not land on its input
-/// (`-o` to another folder): a clip is not the file it came from, and two
-/// clips of one file written to one folder must not share a name. A size or
-/// a strip alone keeps the name there, as it always has, and so does a cut
-/// in a batch's folder, whose name already says the range.
+/// With `timed`, a cut or a speed change is renamed even where it would not
+/// land on its input (`-o` to another folder): a clip is not the file it
+/// came from, and two clips of one file written to one folder must not
+/// share a name. A size or a strip alone keeps the name there, as it always
+/// has, and so does a cut in a batch's folder, whose name already says the
+/// range.
 fn name_own_format_outputs(
     mut jobs: Vec<Job>,
     suffix: &str,
     explicit_output: bool,
-    cut: bool,
+    timed: bool,
 ) -> Result<Vec<Job>, ConvError> {
     for job in &mut jobs {
         let output = collision_key(&job.output);
@@ -471,7 +495,7 @@ fn name_own_format_outputs(
                 ),
             ));
         }
-        if lands_on_input || (cut && !explicit_output && job.from == job.to) {
+        if lands_on_input || (timed && !explicit_output && job.from == job.to) {
             job.output = suffixed_name(&job.output, suffix);
         }
     }
@@ -842,8 +866,8 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
             job.output = in_subfolder(&job.output, &own.suffix);
         }
     }
-    let cut = own.cut && !into_subfolder;
-    let jobs = name_own_format_outputs(jobs, &own.suffix, explicit_output, cut)?;
+    let timed = own.timed && !into_subfolder;
+    let jobs = name_own_format_outputs(jobs, &own.suffix, explicit_output, timed)?;
     if into_subfolder && !cli.dry_run {
         let mut made: Vec<&Path> = Vec::new();
         for dir in jobs.iter().filter_map(|j| j.output.parent()) {
@@ -1440,6 +1464,8 @@ mod tests {
             start: None,
             end: None,
             duration: None,
+            speed: None,
+            shift_pitch: false,
             yes: false,
             no_install: false,
             outdir,
@@ -1685,6 +1711,116 @@ mod tests {
         let e = plan_jobs(&cut(vec![a, b], None, None)).unwrap_err();
         assert!(
             e.message.contains("add --to mp4 to cut each one"),
+            "{}",
+            e.message
+        );
+    }
+
+    fn sped(speed: &str, paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+        let mut c = cli_for(paths, to, outdir);
+        c.speed = Some(convkit_core::speed::parse(speed).unwrap());
+        c
+    }
+
+    #[test]
+    fn a_single_path_with_a_speed_keeps_its_format_and_names_the_speed() {
+        let jobs = plan_jobs(&sped("2", v(&["clip.mp4"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("clip-2x.mp4"));
+        assert_eq!((jobs[0].from, jobs[0].to), (Format::Mp4, Format::Mp4));
+        let jobs = plan_jobs(&sped("0.5x", v(&["memo.m4a"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("memo-0.5x.m4a"));
+    }
+
+    #[test]
+    fn a_shifted_pitch_is_named_so_it_does_not_take_the_kept_ones_name() {
+        let mut c = sped("2", v(&["clip.mp4"]), None, None);
+        c.shift_pitch = true;
+        assert_eq!(plan_jobs(&c).unwrap()[0].output, p("clip-2x-pitched.mp4"));
+    }
+
+    #[test]
+    fn a_range_a_speed_and_a_size_go_in_the_name_in_the_order_they_happen() {
+        let mut c = cut(v(&["talk.mp4"]), None, None);
+        c.speed = Some(convkit_core::speed::parse("2").unwrap());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("talk-1m02s-1m10s-2x.mp4")
+        );
+        c.max_size = Some(convkit_core::size::parse("5mb").unwrap());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("talk-1m02s-1m10s-2x-5mb.mp4")
+        );
+        let mut c = sped("2", v(&["clip.mp4"]), None, None);
+        c.max_size = Some(convkit_core::size::parse("10mb").unwrap());
+        assert_eq!(plan_jobs(&c).unwrap()[0].output, p("clip-2x-10mb.mp4"));
+    }
+
+    /// A sped-up file is not the file it came from, wherever it is written,
+    /// as a clip is not.
+    #[test]
+    fn a_speed_change_into_another_folder_still_names_its_speed() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("fast");
+        let jobs = plan_jobs(&sped(
+            "2",
+            vec![dir.path().join("clip.mp4")],
+            None,
+            Some(out.clone()),
+        ))
+        .unwrap();
+        assert_eq!(jobs[0].output, out.join("clip-2x.mp4"));
+    }
+
+    #[test]
+    fn a_speed_batch_writes_into_a_folder_named_after_the_speed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.mp4"), dir.path().join("b.mov"));
+        let jobs = plan_jobs(&sped("0.5", vec![a, b], Some("mp4"), None)).unwrap();
+        assert_eq!(under(dir.path(), &jobs), ["0.5x/a.mp4", "0.5x/b.mp4"]);
+        assert!(dir.path().join("0.5x").is_dir());
+    }
+
+    #[test]
+    fn a_lone_gif_or_still_cannot_be_sped_into_itself_and_says_what_to_do() {
+        for (input, want) in [
+            (
+                "anim.gif",
+                "--speed keeps anim.gif's own format, and conv cannot write gif into \
+                 itself; add --to mp4",
+            ),
+            (
+                "photo.png",
+                "--speed changes the speed of video and audio; photo.png is not a video or \
+                 audio file",
+            ),
+        ] {
+            let e = plan_jobs(&sped("2", v(&[input]), None, None)).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation);
+            assert_eq!(e.message, want);
+        }
+    }
+
+    #[test]
+    fn two_files_sped_without_to_are_refused_with_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.mp4"), dir.path().join("b.mp4"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+        let e = plan_jobs(&sped("2", vec![a.clone(), b.clone()], None, None)).unwrap_err();
+        assert!(
+            e.message.contains("add --to mp4 to speed up each one"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.contains("to write a sped-up copy there"),
+            "{}",
+            e.message
+        );
+        let e = plan_jobs(&sped("0.5", vec![a, b], None, None)).unwrap_err();
+        assert!(
+            e.message.contains("add --to mp4 to slow down each one"),
             "{}",
             e.message
         );

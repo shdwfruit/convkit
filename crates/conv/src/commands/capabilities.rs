@@ -105,10 +105,13 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     if has(|a| matches!(a, Arg::StripMetadata)) {
         push_flag(&mut flags, "--strip-metadata");
     }
+    // A speed change applies wherever a cut does: both need a timeline.
     if has(|a| matches!(a, Arg::Trim)) {
         push_flag(&mut flags, "--start");
         push_flag(&mut flags, "--end");
         push_flag(&mut flags, "--duration");
+        push_flag(&mut flags, "--speed");
+        push_flag(&mut flags, "--shift-pitch");
     }
     // --max-size is a policy over a whole video conversion rather than a
     // slot in one recipe, so it is keyed on the target, not scanned.

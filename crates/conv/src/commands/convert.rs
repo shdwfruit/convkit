@@ -1008,6 +1008,7 @@ mod tests {
                 sizing: None,
                 enlarged: None,
                 range: None,
+                speed: None,
             }),
         }
     }

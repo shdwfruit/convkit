@@ -64,6 +64,11 @@ pub struct MediaProbe {
     /// always the same length as `audio_codecs`, `None` where the container
     /// does not say (mkv usually does not) or reports zero.
     pub audio_bitrates: Vec<Option<u32>>,
+    /// The first audio stream's sample rate in Hz, which `--shift-pitch`
+    /// resamples back to. `None` where it is not reported, or reported as 0.
+    pub audio_sample_rate: Option<u32>,
+    /// How many chapters the file lists, which `--speed` leaves out.
+    pub chapters: usize,
     /// Bytes carried by attachment streams (fonts in mkv), which a remux
     /// or re-encode passes through untouched.
     pub attachment_bytes: u64,
@@ -336,6 +341,13 @@ pub fn parse(json: &str) -> MediaProbe {
                 }
             }
             "audio" => {
+                if p.audio_codecs.is_empty() {
+                    p.audio_sample_rate = s
+                        .get("sample_rate")
+                        .and_then(|r| r.as_str())
+                        .and_then(|r| r.parse::<u32>().ok())
+                        .filter(|&r| r > 0);
+                }
                 p.audio_codecs.push(name);
                 p.audio_bitrates.push(
                     s.get("bit_rate")
@@ -357,16 +369,15 @@ pub fn parse(json: &str) -> MediaProbe {
             _ => {}
         }
     }
-    p.chapter_titles = v
-        .get("chapters")
-        .and_then(|c| c.as_array())
-        .is_some_and(|chapters| {
-            chapters.iter().any(|c| {
-                c.pointer("/tags/title")
-                    .and_then(|t| t.as_str())
-                    .is_some_and(|t| !t.is_empty())
-            })
-        });
+    let chapters = v.get("chapters").and_then(|c| c.as_array());
+    p.chapters = chapters.map_or(0, Vec::len);
+    p.chapter_titles = chapters.is_some_and(|chapters| {
+        chapters.iter().any(|c| {
+            c.pointer("/tags/title")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| !t.is_empty())
+        })
+    });
     if let Some(format) = v.get("format") {
         p.duration_ms = format
             .get("duration")
@@ -759,6 +770,25 @@ mod tests {
                "chapters":[{"id":0}],"format":{}}"#,
         );
         assert!(!plain.track_languages && !plain.chapter_titles);
+    }
+
+    /// `--speed` leaves chapters out, and says so only for a file that has
+    /// some; `--shift-pitch` resamples at the first audio track's rate.
+    #[test]
+    fn chapters_are_counted_and_the_first_audio_rate_is_read() {
+        let p = parse(
+            r#"{"streams":[
+                {"codec_type":"video","codec_name":"h264"},
+                {"codec_type":"audio","codec_name":"aac","sample_rate":"44100"},
+                {"codec_type":"audio","codec_name":"ac3","sample_rate":"48000"}],
+               "chapters":[{"id":0},{"id":1}],"format":{}}"#,
+        );
+        assert_eq!((p.chapters, p.audio_sample_rate), (2, Some(44100)));
+        let none = parse(
+            r#"{"streams":[{"codec_type":"audio","codec_name":"aac","sample_rate":"0"}],
+               "format":{}}"#,
+        );
+        assert_eq!((none.chapters, none.audio_sample_rate), (0, None));
     }
 
     #[test]

@@ -208,7 +208,8 @@ fn push_video_args(argv: &mut Vec<String>, to: Format, video: &VideoDisposition<
     }
 }
 
-/// Emits the audio arguments for the chosen disposition.
+/// Emits the audio arguments for the chosen disposition. `filter` is a
+/// speed change's, which only a re-encode can run.
 fn push_audio_args(
     argv: &mut Vec<String>,
     warnings: &mut Vec<String>,
@@ -216,28 +217,55 @@ fn push_audio_args(
     audio_ok: &[&str],
     audios: &[&str],
     audio: AudioDisposition,
+    filter: Option<&str>,
 ) {
     match audio {
         AudioDisposition::Fit => audio_codec_args(argv, warnings, to, audio_ok, audios),
-        AudioDisposition::Reencode { kbps } => reencode_audio_args(argv, to, kbps, audios.len()),
+        AudioDisposition::Reencode { kbps } => {
+            reencode_audio_args(argv, to, kbps, audios.len(), filter)
+        }
         AudioDisposition::Copy => push(argv, &["-c:a", "copy"]),
         AudioDisposition::Drop => push(argv, &["-an"]),
     }
 }
 
-/// Every audio track at one known rate, so the audio's size is arithmetic. A
-/// source with no audio gets no audio arguments at all.
-fn reencode_audio_args(argv: &mut Vec<String>, to: Format, kbps: u32, tracks: usize) {
+/// Every audio track at one known rate, so the audio's size is arithmetic,
+/// through `filter` when a speed change gives one. A source with no audio
+/// gets no audio arguments at all.
+fn reencode_audio_args(
+    argv: &mut Vec<String>,
+    to: Format,
+    kbps: u32,
+    tracks: usize,
+    filter: Option<&str>,
+) {
     if tracks == 0 {
         return;
     }
     let rate = format!("{kbps}k");
+    let layouts = (to == Format::Webm).then_some(registry::OPUS_CHANNEL_LAYOUTS);
     if to == Format::Webm {
         push(argv, &["-c:a", "libopus", "-b:a", &rate]);
-        push(argv, &["-af", registry::OPUS_CHANNEL_LAYOUTS]);
     } else {
         push(argv, &["-c:a", "aac", "-b:a", &rate]);
     }
+    let chain: Vec<&str> = filter.into_iter().chain(layouts).collect();
+    if !chain.is_empty() {
+        push(argv, &["-af", &chain.join(",")]);
+    }
+}
+
+/// The rate a target's audio is encoded at when nothing else sets one: the
+/// static recipes' own, as a number.
+fn default_audio_kbps(to: Format) -> u32 {
+    let rate = if to == Format::Webm {
+        registry::WEBM_AUDIO_BITRATE
+    } else {
+        registry::AUDIO_BITRATE
+    };
+    rate.trim_end_matches('k')
+        .parse()
+        .expect("an authored bitrate is a number of kbps")
 }
 
 /// Builds the stream-mapped invocation for a container change, given a
@@ -248,6 +276,10 @@ fn reencode_audio_args(argv: &mut Vec<String>, to: Format, kbps: u32, tracks: us
 /// `transcoded_invocation` so the mapping -- which audio tracks survive,
 /// which subtitles the muxer can hold, which attachments ride along -- is
 /// decided exactly once.
+///
+/// `resolved` supplies the cut and the speed change. A speed change leaves
+/// every subtitle unmapped (`speed::output_args` drops them), so none is
+/// mapped, converted or reported here.
 #[allow(clippy::too_many_arguments)] // each is a distinct input to one argv
 fn mapped_invocation(
     to: Format,
@@ -255,14 +287,20 @@ fn mapped_invocation(
     video: VideoDisposition<'_>,
     audio: AudioDisposition,
     strip: bool,
-    cut: Option<&Cut>,
+    resolved: &ResolvedVideo,
     input: &Path,
     output: &Path,
 ) -> Option<MediaInvocation> {
     let (_, audio_ok) = registry::compat_tables(to)?;
+    let cut = resolved.cut.as_ref();
+    let retime = resolved.speed.as_ref();
+    let filter = retime.and_then(|r| r.audio.as_deref());
 
     let audios = probe.all_audio();
-    let subtitles = probe.all_subtitles();
+    let subtitles = match retime {
+        Some(_) => Vec::new(),
+        None => probe.all_subtitles(),
+    };
 
     let mut argv = input_args(cut, input);
     let mut warnings: Vec<String> = Vec::new();
@@ -288,7 +326,15 @@ fn mapped_invocation(
         }
 
         push_video_args(&mut argv, to, &video);
-        push_audio_args(&mut argv, &mut warnings, to, audio_ok, &audios, audio);
+        push_audio_args(
+            &mut argv,
+            &mut warnings,
+            to,
+            audio_ok,
+            &audios,
+            audio,
+            filter,
+        );
 
         if any_mov_text {
             // mov_text only ever comes from mp4/mov, which cannot hold the
@@ -355,7 +401,15 @@ fn mapped_invocation(
         }
 
         push_video_args(&mut argv, to, &video);
-        push_audio_args(&mut argv, &mut warnings, to, audio_ok, &audios, audio);
+        push_audio_args(
+            &mut argv,
+            &mut warnings,
+            to,
+            audio_ok,
+            &audios,
+            audio,
+            filter,
+        );
 
         if !kept_subs.is_empty() {
             let target_codec = if to == Format::Webm {
@@ -409,9 +463,7 @@ fn mapped_invocation(
     {
         push_cut_audio(&mut argv, cut);
     }
-    if let Some(cut) = cut {
-        argv.extend(cut.output_args());
-    }
+    argv.extend(crate::speed::output_args(cut, retime));
     if matches!(to, Format::Mp4 | Format::Mov) {
         push(&mut argv, &["-movflags", "+faststart"]);
     }
@@ -447,19 +499,24 @@ pub(crate) fn stream_mapped_invocation(
         to,
         probe,
         VideoDisposition::Copy,
-        audio_for(resolved),
+        audio_for(to, resolved),
         strip,
-        resolved.cut.as_ref(),
+        resolved,
         input,
         output,
     )
 }
 
-/// What the audio of an ordinary invocation does: fit the target, or go,
-/// for a silent clip.
-fn audio_for(resolved: &ResolvedVideo) -> AudioDisposition {
+/// What the audio of an ordinary invocation does: fit the target, go, for a
+/// silent clip, or be re-encoded at the target's own rate through a speed
+/// change's filter, which a copy cannot run.
+fn audio_for(to: Format, resolved: &ResolvedVideo) -> AudioDisposition {
     if resolved.mute {
         AudioDisposition::Drop
+    } else if resolved.speed.is_some() {
+        AudioDisposition::Reencode {
+            kbps: default_audio_kbps(to),
+        }
     } else {
         AudioDisposition::Fit
     }
@@ -509,9 +566,9 @@ pub(crate) fn transcoded_invocation(
                 .unwrap_or_else(|| anchor.to_string()),
             companions,
         },
-        audio_for(resolved),
+        audio_for(to, resolved),
         strip,
-        resolved.cut.as_ref(),
+        resolved,
         input,
         output,
     )
@@ -577,7 +634,7 @@ pub(crate) fn two_pass_invocations(
             video(1),
             AudioDisposition::Copy,
             false,
-            cut,
+            resolved,
             input,
             output,
         )?
@@ -606,7 +663,7 @@ pub(crate) fn two_pass_invocations(
         Some(kbps) => AudioDisposition::Reencode { kbps },
         None => AudioDisposition::Fit,
     };
-    let pass2 = mapped_invocation(to, probe, video(2), audio, strip, cut, input, output)?;
+    let pass2 = mapped_invocation(to, probe, video(2), audio, strip, resolved, input, output)?;
     Some(TwoPass { pass1, pass2 })
 }
 

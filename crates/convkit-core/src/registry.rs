@@ -480,7 +480,7 @@ pub(crate) const WEBM_AUDIO_BITRATE: &str = "128k";
 /// most one pixel per axis is imperceptible; failing the whole conversion
 /// with an opaque "produced no output" is not. `GIF_TO_MP4` carried this
 /// from day one; every libx264 recipe needs it.
-const EVEN_SCALE: &str = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
+pub(crate) const EVEN_SCALE: &str = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
 
 /// libopus rejects ffmpeg's default `5.1(side)` channel layout, which is
 /// exactly what AC-3/DTS surround rips decode to — so every `* -> webm`
@@ -599,6 +599,7 @@ const VIDEO_TO_MP4: Recipe = Recipe {
             Arg::Lit("aac"),
             Arg::Lit("-b:a"),
             Arg::Lit(AUDIO_BITRATE),
+            Arg::AudioFilter(None),
             Arg::Lit("-sn"),
             Arg::Lit("-movflags"),
             Arg::Lit("+faststart"),
@@ -675,6 +676,7 @@ macro_rules! video_to_mkv_recipe {
                 Arg::Lit("aac"),
                 Arg::Lit("-b:a"),
                 Arg::Lit(AUDIO_BITRATE),
+                Arg::AudioFilter(None),
                 Arg::Lit("-c:s"),
                 Arg::Lit($sub_codec),
                 Arg::StripMetadata,
@@ -776,8 +778,7 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
             Arg::Lit("libopus"),
             Arg::Lit("-b:a"),
             Arg::Lit(WEBM_AUDIO_BITRATE),
-            Arg::Lit("-af"),
-            Arg::Lit(OPUS_CHANNEL_LAYOUTS),
+            Arg::AudioFilter(Some(OPUS_CHANNEL_LAYOUTS)),
             Arg::StripMetadata,
             Arg::Mute,
             Arg::Lit("-y"),
@@ -921,8 +922,14 @@ const GIF_TO_MP4: Recipe = Recipe {
 /// common audio conversion — making our default strictly worse than the
 /// naive command. `-map 0:v?` is optional so a source with no picture stream
 /// doesn't fail.
+///
+/// A codec that needs an audio filter of its own names it last, for
+/// `Arg::AudioFilter`, which also carries a speed change's.
 macro_rules! audio_recipe {
-    (drop_video, [$($codec:expr),* $(,)?]) => {
+    ($art:ident, [$($codec:expr),* $(,)?]) => {
+        audio_recipe!($art, [$($codec),*], None)
+    };
+    (drop_video, [$($codec:expr),* $(,)?], $filter:expr) => {
         Recipe {
             steps: &[step!(
                 Backend::Ffmpeg,
@@ -930,6 +937,7 @@ macro_rules! audio_recipe {
                     Arg::Trim, Arg::Lit("-i"), Arg::Input,
                     Arg::Lit("-vn"),
                     $($codec,)*
+                    Arg::AudioFilter($filter),
                     Arg::StripMetadata,
                     Arg::Lit("-y"), Arg::Output,
                 ]
@@ -937,7 +945,7 @@ macro_rules! audio_recipe {
             warnings: &[],
         }
     };
-    (keep_art, [$($codec:expr),* $(,)?]) => {
+    (keep_art, [$($codec:expr),* $(,)?], $filter:expr) => {
         Recipe {
             steps: &[step!(
                 Backend::Ffmpeg,
@@ -947,6 +955,7 @@ macro_rules! audio_recipe {
                     Arg::Lit("-map"), Arg::Lit("0:v?"),
                     Arg::Lit("-c:v"), Arg::Lit("copy"),
                     $($codec,)*
+                    Arg::AudioFilter($filter),
                     Arg::StripMetadata,
                     Arg::Lit("-y"), Arg::Output,
                 ]
@@ -996,6 +1005,7 @@ const TO_WAV: Recipe = Recipe {
             Arg::Lit("-vn"),
             Arg::Lit("-c:a"),
             Arg::Lit("pcm_s16le"),
+            Arg::AudioFilter(None),
             Arg::StripMetadata,
             Arg::Lit("-y"),
             Arg::Output,
@@ -1041,9 +1051,8 @@ const TO_OPUS: Recipe = audio_recipe!(
         Arg::Lit(WEBM_AUDIO_BITRATE),
         Arg::Lit("-ar"),
         Arg::Lit("48000"),
-        Arg::Lit("-af"),
-        Arg::Lit(OPUS_CHANNEL_LAYOUTS),
-    ]
+    ],
+    Some(OPUS_CHANNEL_LAYOUTS)
 );
 const TO_OPUS_ART: Recipe = Recipe {
     warnings: &[COVER_ART_DROPPED_NOTE],
@@ -1918,7 +1927,11 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     // at the end, and to say so. Only on a pair it can cut, so a refusal is
     // not preceded by a wasted spawn.
     let cut = tuning.range.is_some() && takes_range(from, to);
-    sized || webm_knob || cut
+    // A speed change needs to know what the file holds: whether there is
+    // sound to filter, at what rate, and the subtitles and chapters it
+    // leaves out.
+    let retimed = tuning.speed.is_some() && takes_range(from, to);
+    sized || webm_knob || cut || retimed
 }
 
 /// What a format cut into itself runs (`conv talk.mp4 --start 1:02`): the
@@ -3509,5 +3522,60 @@ mod tests {
         assert!(requires_probe(Format::Mp3, Format::Flac, &t));
         assert!(requires_probe(Format::Mp4, Format::Mp4, &t));
         assert!(!requires_probe(Format::Png, Format::Jpg, &t));
+    }
+
+    #[test]
+    fn a_speed_change_needs_the_probe_only_where_it_applies() {
+        let t = Tuning {
+            speed: Some(crate::speed::parse("2").unwrap()),
+            ..Tuning::default()
+        };
+        assert!(requires_probe(Format::Mp3, Format::Flac, &t));
+        assert!(requires_probe(Format::Mp4, Format::Mp4, &t));
+        assert!(requires_probe(Format::Gif, Format::Mp4, &t));
+        assert!(!requires_probe(Format::Png, Format::Jpg, &t));
+    }
+
+    /// A speed change filters the sound through `Arg::AudioFilter`, so every
+    /// recipe that can carry sound needs exactly one, and no `-af` of its
+    /// own, which would replace the speed change's. Every recipe with a
+    /// picture needs a `-vf` chain for the same reason, but for webm, whose
+    /// chain only the probe-aware path composes.
+    #[test]
+    fn every_timed_recipe_can_take_a_speed_change() {
+        let same_format = [
+            Format::Mp4,
+            Format::Mov,
+            Format::Mkv,
+            Format::Webm,
+            Format::Mp3,
+            Format::M4a,
+            Format::Wav,
+            Format::Flac,
+            Format::Opus,
+            Format::Ogg,
+        ]
+        .map(|f| (f, f, same_format_recipe(f).unwrap()));
+        let pairs = all_pairs()
+            .into_iter()
+            .filter_map(|(from, to)| lookup(from, to).map(|r| (from, to, r)));
+        for (from, to, recipe) in pairs.chain(same_format) {
+            for step in recipe.steps.iter().filter(|s| s.args.contains(&Arg::Trim)) {
+                let slots = step
+                    .args
+                    .iter()
+                    .filter(|a| matches!(a, Arg::AudioFilter(_)))
+                    .count();
+                let sound = from != Format::Gif && to != Format::Gif;
+                assert_eq!(slots, usize::from(sound), "{from:?} -> {to:?}");
+                assert!(
+                    !step.args.contains(&Arg::Lit("-af")),
+                    "{from:?} -> {to:?} authors its own -af"
+                );
+                let picture = matches!(to, Format::Mp4 | Format::Mov | Format::Mkv | Format::Gif);
+                let chain = step.args.iter().any(|a| matches!(a, Arg::VideoChain(_)));
+                assert!(!picture || chain, "{from:?} -> {to:?} has no -vf chain");
+            }
+        }
     }
 }

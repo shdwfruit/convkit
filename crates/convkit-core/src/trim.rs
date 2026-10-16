@@ -392,24 +392,7 @@ pub fn clip(
     input: &Path,
 ) -> crate::Result<Clip> {
     let flag = range.flag();
-    if !registry::takes_range(from, to) {
-        let still = |f: Format| f.kind() == Kind::Image && f != Format::Gif;
-        let why = if still(to) {
-            format!("{} is a still image", to.ext())
-        } else if still(from) {
-            format!("{} is a still image", from.ext())
-        } else {
-            format!("{} -> {} has no timeline to cut", from.ext(), to.ext())
-        };
-        return Err(ConvError::new(
-            ErrorCode::InvalidInvocation,
-            format!(
-                "{flag} does not apply to {} -> {}: {why}; {flag} cuts video and audio",
-                from.ext(),
-                to.ext()
-            ),
-        ));
-    }
+    refuse_without_timeline(flag, "cuts video and audio", from, to)?;
     let probe = probe.ok_or_else(|| {
         ConvError::new(
             ErrorCode::ConversionFailed,
@@ -424,6 +407,36 @@ pub fn clip(
         Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm | Format::Gif
     );
     resolve(range, probe, input, keeps_video)
+}
+
+/// Refuses `flag` on a pair with no timeline, which a range and a speed
+/// change both need: the pair's recipe carries no `Arg::Trim`. `does` ends
+/// the refusal with what the flag works on.
+pub(crate) fn refuse_without_timeline(
+    flag: &str,
+    does: &str,
+    from: Format,
+    to: Format,
+) -> crate::Result<()> {
+    if registry::takes_range(from, to) {
+        return Ok(());
+    }
+    let still = |f: Format| f.kind() == Kind::Image && f != Format::Gif;
+    let why = if still(to) {
+        format!("{} is a still image", to.ext())
+    } else if still(from) {
+        format!("{} is a still image", from.ext())
+    } else {
+        format!("{} -> {} has no timeline to cut", from.ext(), to.ext())
+    };
+    Err(ConvError::new(
+        ErrorCode::InvalidInvocation,
+        format!(
+            "{flag} does not apply to {} -> {}: {why}; {flag} {does}",
+            from.ext(),
+            to.ext()
+        ),
+    ))
 }
 
 /// Resolves `range` against the probed source. `keeps_video` is whether

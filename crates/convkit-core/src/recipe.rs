@@ -52,6 +52,13 @@ pub struct Tuning {
     /// Drop every audio track: a silent clip, as `conv trim` writes for a
     /// cut made on its video bar alone. Video targets only.
     pub mute: bool,
+    /// The factor to play the source at (`--speed`). Resolved against the
+    /// probe by `speed::retime`; it reaches argv through
+    /// `ResolvedVideo::speed`.
+    pub speed: Option<crate::speed::Speed>,
+    /// Let the pitch move with `speed`, as a tape played fast does, rather
+    /// than keep it.
+    pub shift_pitch: bool,
 }
 
 impl Tuning {
@@ -59,6 +66,8 @@ impl Tuning {
         !self.upscale
             && !self.strip_metadata
             && !self.mute
+            && !self.shift_pitch
+            && self.speed.is_none()
             && self.range.is_none()
             && self.resize.is_none()
             && self.quality.is_none()
@@ -108,9 +117,17 @@ impl VideoChainSpec {
     /// checked afterwards but the reason the struct is shaped head + tail.
     /// It is what keeps `tests/recipes.rs`'s snapshot green.
     pub fn compose(&self, resolved: &ResolvedVideo) -> String {
-        let mut out = String::from(self.prefix);
+        // A speed change retimes the source before anything reads its
+        // frames: a rate cap then picks from the frames as they now play.
+        let mut out = resolved
+            .speed
+            .as_ref()
+            .map_or_else(String::new, |r| format!("{},", r.speed.setpts()));
+        out.push_str(self.prefix);
         let authored = self.fps.filter(|_| !resolved.keep_source_rate);
-        if let Some(f) = resolved.fps.as_deref().or(authored) {
+        // A retimed stream with no rate of its own is held to the source's.
+        let retimed = resolved.speed.as_ref().and_then(|r| r.rate.as_deref());
+        if let Some(f) = resolved.fps.as_deref().or(authored).or(retimed) {
             out.push_str("fps=");
             out.push_str(f);
             out.push(',');
@@ -183,6 +200,13 @@ pub enum Arg {
     /// `trim::Cut::input_args`. A step with this slot also gets the cut's
     /// output options just before its `Output` (`trim::Cut::output_args`).
     Trim,
+    /// `-af` and the audio filters: a speed change's (`speed::Retime`), then
+    /// the recipe's own, when it authors one (libopus's channel layouts).
+    /// Renders nothing when there is neither, keeping untuned argv
+    /// byte-identical to the static table. One slot rather than a filter
+    /// per knob for the reason `VideoChain` is one: a second `-af` replaces
+    /// the first.
+    AudioFilter(Option<&'static str>),
     /// `-an` for a silent clip; renders nothing otherwise. An output
     /// option, so authored just before the output in the video recipes. It
     /// drops audio even where a recipe maps it explicitly (`-map 0`),
@@ -379,6 +403,14 @@ impl Step {
                         argv.extend(cut.input_args());
                     }
                 }
+                Arg::AudioFilter(own) => {
+                    let speed = video.speed.as_ref().and_then(|r| r.audio.as_deref());
+                    let chain: Vec<&str> = speed.into_iter().chain(*own).collect();
+                    if !chain.is_empty() {
+                        argv.push("-af".to_string());
+                        argv.push(chain.join(","));
+                    }
+                }
                 Arg::Mute => {
                     if tuning.mute {
                         argv.push("-an".to_string());
@@ -455,12 +487,11 @@ impl Step {
                     }
                 }
                 Arg::Output => {
-                    if let Some(cut) = video
-                        .cut
-                        .as_ref()
-                        .filter(|_| self.args.contains(&Arg::Trim))
-                    {
-                        argv.extend(cut.output_args());
+                    if self.args.contains(&Arg::Trim) {
+                        argv.extend(crate::speed::output_args(
+                            video.cut.as_ref(),
+                            video.speed.as_ref(),
+                        ));
                     }
                     path_args.push(argv.len());
                     argv.push(output.to_string_lossy().into_owned());
@@ -737,6 +768,8 @@ mod tests {
             strip_metadata: false,
             range: None,
             mute: false,
+            speed: None,
+            shift_pitch: false,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],
@@ -851,6 +884,14 @@ mod tests {
                 mute: true,
                 ..Default::default()
             },
+            Tuning {
+                speed: Some(crate::speed::parse("2").unwrap()),
+                ..Default::default()
+            },
+            Tuning {
+                shift_pitch: true,
+                ..Default::default()
+            },
         ];
         assert!(Tuning::default().is_empty());
         for t in &each {
@@ -859,7 +900,7 @@ mod tests {
         // If a field is added without extending this list, this catches it.
         assert_eq!(
             each.len(),
-            7,
+            9,
             "Tuning gained a field; add it to `each` and to is_empty()"
         );
     }
@@ -887,6 +928,148 @@ mod tests {
         };
         assert_eq!(render(false), ["-i", "in.avi", "out.mp4"]);
         assert_eq!(render(true), ["-i", "in.avi", "-an", "out.mp4"]);
+    }
+
+    fn retimed(speed: &str, audio: Option<&str>) -> ResolvedVideo {
+        ResolvedVideo {
+            speed: Some(crate::speed::Retime {
+                speed: crate::speed::parse(speed).unwrap(),
+                audio: audio.map(str::to_owned),
+                rate: Some("30/1".into()),
+            }),
+            ..ResolvedVideo::default()
+        }
+    }
+
+    /// The speed change goes first, ahead of the GIF tonemap's prefix and
+    /// any rate cap: `fps=` then picks frames from the retimed stream.
+    #[test]
+    fn a_speed_change_leads_the_video_chain() {
+        let video = retimed("2", None);
+        assert_eq!(
+            crate::registry::TO_GIF_TONEMAP_CHAIN.compose(&video),
+            format!(
+                "setpts=PTS/2,{}",
+                crate::registry::TO_GIF_TONEMAP_CHAIN.compose(&ResolvedVideo::default())
+            )
+        );
+        let capped = ResolvedVideo {
+            fps: Some("24".into()),
+            ..video
+        };
+        assert!(crate::registry::TRANSCODE_CHAIN
+            .compose(&capped)
+            .starts_with("setpts=PTS/2,fps=24,"));
+    }
+
+    /// With no rate of its own, the chain holds the retimed stream to the
+    /// source's rate, so frames are dropped or repeated, never left to the
+    /// muxer.
+    #[test]
+    fn a_retimed_chain_without_a_rate_of_its_own_keeps_the_sources() {
+        let video = retimed("0.5", None);
+        assert_eq!(
+            crate::registry::TRANSCODE_CHAIN.compose(&video),
+            format!("setpts=PTS/0.5,fps=30/1,{}", crate::registry::EVEN_SCALE)
+        );
+        // GIF's authored 15 is a rate of its own; a --fps that does not bind
+        // leaves the source's.
+        assert!(crate::registry::TO_GIF_CHAIN
+            .compose(&video)
+            .starts_with("setpts=PTS/0.5,fps=15,"));
+        let unbound = ResolvedVideo {
+            keep_source_rate: true,
+            ..video.clone()
+        };
+        assert!(crate::registry::TO_GIF_CHAIN
+            .compose(&unbound)
+            .starts_with("setpts=PTS/0.5,fps=30/1,"));
+        let unread = ResolvedVideo {
+            speed: video
+                .speed
+                .map(|r| crate::speed::Retime { rate: None, ..r }),
+            ..ResolvedVideo::default()
+        };
+        assert_eq!(
+            crate::registry::TRANSCODE_CHAIN.compose(&unread),
+            format!("setpts=PTS/0.5,{}", crate::registry::EVEN_SCALE)
+        );
+    }
+
+    #[test]
+    fn an_audio_filter_slot_renders_the_speed_change_ahead_of_its_own_filter() {
+        const BARE: Step = Step {
+            backend: Backend::Ffmpeg,
+            args: &[
+                Arg::Lit("-i"),
+                Arg::Input,
+                Arg::AudioFilter(None),
+                Arg::Output,
+            ],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        const LAYOUT: Step = Step {
+            args: &[
+                Arg::Lit("-i"),
+                Arg::Input,
+                Arg::AudioFilter(Some("aformat=channel_layouts=stereo")),
+                Arg::Output,
+            ],
+            ..BARE
+        };
+        let render = |step: Step, video: &ResolvedVideo| {
+            step.render_full(
+                &[Path::new("in.mp4")],
+                Path::new("out.m4a"),
+                &Tuning::default(),
+                video,
+                &[],
+            )
+            .argv
+        };
+        let plain = ResolvedVideo::default();
+        let fast = retimed("2", Some("atempo=2"));
+        let silent = retimed("2", None);
+        assert_eq!(render(BARE, &plain), ["-i", "in.mp4", "out.m4a"]);
+        assert_eq!(
+            render(LAYOUT, &plain),
+            [
+                "-i",
+                "in.mp4",
+                "-af",
+                "aformat=channel_layouts=stereo",
+                "out.m4a"
+            ]
+        );
+        assert_eq!(render(BARE, &fast)[2..4], ["-af", "atempo=2"]);
+        assert_eq!(
+            render(LAYOUT, &fast)[2..4],
+            ["-af", "atempo=2,aformat=channel_layouts=stereo"]
+        );
+        assert_eq!(render(BARE, &silent), ["-i", "in.mp4", "out.m4a"]);
+    }
+
+    #[test]
+    fn a_trim_slot_step_drops_subtitles_and_chapters_for_a_speed_change() {
+        let step = Step {
+            backend: Backend::Ffmpeg,
+            args: &[Arg::Trim, Arg::Lit("-i"), Arg::Input, Arg::Output],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let r = step.render_full(
+            &[Path::new("in.mp4")],
+            Path::new("out.mp4"),
+            &Tuning::default(),
+            &retimed("2", Some("atempo=2")),
+            &[],
+        );
+        assert_eq!(
+            r.argv,
+            ["-i", "in.mp4", "-sn", "-map_chapters", "-1", "out.mp4"]
+        );
+        assert_eq!(r.path_args, [1, 5]);
     }
 
     #[test]

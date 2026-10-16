@@ -101,6 +101,7 @@ conv scan                        # list the files here and what each can become
 conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
+conv clip.mp4 --speed 2          # play twice as fast
 conv trim talk.mp4               # find clips in the terminal and cut them
 ```
 
@@ -290,19 +291,19 @@ $ conv capabilities mp4
 mp4 (Video)
 
   as source, converts to:
-    mp4 -> mov      [--resize --upscale --fps --crf --strip-metadata --start --end --duration --max-size]
-    mp4 -> mkv      [--resize --upscale --fps --crf --strip-metadata --start --end --duration --max-size]
-    mp4 -> webm     [--crf --resize --upscale --fps --strip-metadata --start --end --duration --max-size]
-    mp4 -> mp3      [--strip-metadata --start --end --duration]
-    mp4 -> m4a      [--strip-metadata --start --end --duration]
-    mp4 -> wav      [--strip-metadata --start --end --duration]
-    mp4 -> flac     [--strip-metadata --start --end --duration]
-    mp4 -> opus     [--strip-metadata --start --end --duration]
-    mp4 -> ogg      [--strip-metadata --start --end --duration]
-    mp4 -> gif      [--resize --upscale --fps --strip-metadata --start --end --duration]
+    mp4 -> mov      [--resize --upscale --fps --crf --strip-metadata --start --end --duration --speed --shift-pitch --max-size]
+    mp4 -> mkv      [--resize --upscale --fps --crf --strip-metadata --start --end --duration --speed --shift-pitch --max-size]
+    mp4 -> webm     [--crf --resize --upscale --fps --strip-metadata --start --end --duration --speed --shift-pitch --max-size]
+    mp4 -> mp3      [--strip-metadata --start --end --duration --speed --shift-pitch]
+    mp4 -> m4a      [--strip-metadata --start --end --duration --speed --shift-pitch]
+    mp4 -> wav      [--strip-metadata --start --end --duration --speed --shift-pitch]
+    mp4 -> flac     [--strip-metadata --start --end --duration --speed --shift-pitch]
+    mp4 -> opus     [--strip-metadata --start --end --duration --speed --shift-pitch]
+    mp4 -> ogg      [--strip-metadata --start --end --duration --speed --shift-pitch]
+    mp4 -> gif      [--resize --upscale --fps --strip-metadata --start --end --duration --speed --shift-pitch]
 
   as target, accepts: mov mkv webm avi gif
-  tuning flags when writing mp4: --resize --upscale --fps --crf --strip-metadata --start --end --duration --max-size
+  tuning flags when writing mp4: --resize --upscale --fps --crf --strip-metadata --start --end --duration --speed --shift-pitch --max-size
 
   defaults: crf 20 (override with --crf)
   note: Subtitle tracks and any audio tracks beyond the first are dropped (--max-size keeps every audio track and every text subtitle).
@@ -546,6 +547,39 @@ graphics, as sharp as the file. Elsewhere it is drawn in characters:
 sextants, six pixels to a character, or half blocks in Apple's Terminal,
 whose fonts lack sextants. `--graphics` picks one. Without a terminal,
 piped or under `--json`, it refuses and points at `--start` and `--end`.
+
+## Changing speed
+
+`--speed` plays a video or audio file faster or slower: `2` (or `2x`) is
+twice as fast, `0.5` half as fast, anywhere from 0.01 to 100.
+
+```console
+$ conv lecture.mp4 --speed 1.5
+OK lecture-1.5x.mp4 - 41.2 MB - 38.4s
+  /home/user/Videos/lecture-1.5x.mp4
+```
+
+The sound keeps its pitch, so voices sound normal, just quicker. Add
+`--shift-pitch` to let the pitch move with the speed, the way a tape does:
+higher when sped up, deeper when slowed down. That output is named
+`lecture-1.5x-pitched.mp4`, so it never takes the other's name.
+
+The frame rate stays the source's. Speeding up drops frames, and slowing
+down shows each frame for longer, so slow motion is only as smooth as the
+source was, and a note says so. Subtitles and chapters are left out, since
+their times would no longer match, and a note says that too.
+
+Naming works as it does for a cut: one file keeps its format and gets the
+speed in its name, and a batch writes into a folder named after it
+(`2x/lecture.mp4`). Name an output to change the format as well. `--start`
+and `--end` are times in the source, so they cut first and the clip is then
+sped up, and `--max-size` sizes the sped-up result:
+
+```console
+conv talk.mp4 clip.gif --start 1:02 --end 1:10 --speed 2
+conv memo.m4a .mp3 --speed 1.25
+conv screen.mov --speed 4 --max-size 10mb
+```
 
 ## Discovering formats and capabilities
 

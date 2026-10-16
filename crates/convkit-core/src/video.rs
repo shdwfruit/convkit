@@ -103,6 +103,9 @@ pub struct ResolvedVideo {
     /// A silent clip: every audio track dropped. Carried here for the same
     /// reason as `cut`.
     pub mute: bool,
+    /// The speed change resolved against the source, when one was given.
+    /// Carried here for the same reason as `cut`.
+    pub speed: Option<crate::speed::Retime>,
     /// An Ogg source going to a target that is not Ogg: its tags are on its
     /// audio stream, and are copied to the file's own (`Arg::StripMetadata`).
     pub ogg_tags: bool,

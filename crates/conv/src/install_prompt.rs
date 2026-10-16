@@ -111,6 +111,8 @@ mod tests {
             start: None,
             end: None,
             duration: None,
+            speed: None,
+            shift_pitch: false,
             yes,
             no_install,
             outdir: None,

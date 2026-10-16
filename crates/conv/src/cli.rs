@@ -12,10 +12,10 @@ use convkit_core::{Resolver, Tuning};
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     /// Input paths, then optionally an output path or a bare `.ext`. With
-    /// `--max-size`, `--strip-metadata` or `--start`/`--end`/`--duration`, a
-    /// lone input keeps its format and is written as NAME-SUFFIX.EXT
-    /// (`clip.mp4` -> `clip-10mb.mp4`, `photo-stripped.jpg`,
-    /// `clip-1m02s-1m10s.mp4`).
+    /// `--max-size`, `--strip-metadata`, `--start`/`--end`/`--duration` or
+    /// `--speed`, a lone input keeps its format and is written as
+    /// NAME-SUFFIX.EXT (`clip.mp4` -> `clip-10mb.mp4`, `photo-stripped.jpg`,
+    /// `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -134,6 +134,21 @@ pub struct Cli {
     /// Keep TIME's worth from --start (or from the beginning).
     #[arg(long, value_name = "TIME", value_parser = parse_duration)]
     pub duration: Option<convkit_core::trim::Time>,
+
+    /// Play the output at FACTOR times the source's speed: 2 (or 2x) is
+    /// twice as fast, 0.5 is half as fast, from 0.01 to 100. The sound keeps
+    /// its pitch. Video, GIF and audio targets. A lone input keeps its
+    /// format and is written as NAME-FACTORx.EXT, e.g. clip-2x.mp4; a --to
+    /// batch writes into a folder named after the speed, e.g. 2x/clip.mp4,
+    /// unless -o is given.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "FACTOR", value_parser = parse_speed)]
+    pub speed: Option<convkit_core::speed::Speed>,
+
+    /// Let the pitch move with --speed, as a tape played fast does: higher
+    /// when sped up, lower when slowed down. Adds -pitched to the name.
+    #[arg(long, requires = "speed")]
+    pub shift_pitch: bool,
 
     /// Assume yes to every prompt: installing a missing backend, or
     /// converting an extreme --max-size target or a large --upscale. For a script that wants
@@ -387,6 +402,10 @@ fn parse_time(s: &str) -> Result<convkit_core::trim::Time, String> {
     convkit_core::trim::parse_time(s)
 }
 
+fn parse_speed(s: &str) -> Result<convkit_core::speed::Speed, String> {
+    convkit_core::speed::parse(s)
+}
+
 fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
     convkit_core::trim::parse_duration(s)
 }
@@ -394,7 +413,7 @@ fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
     /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
-    /// `--max-size`/`--start`/`--end`/`--duration` was passed.
+    /// `--max-size`/`--start`/`--end`/`--duration`/`--speed` was passed.
     pub fn tuning(&self) -> Tuning {
         Tuning {
             resize: self.resize.clone(),
@@ -410,6 +429,8 @@ impl Cli {
             range: self.range().ok().flatten(),
             // No flag asks for a silent clip; conv trim sets it per clip.
             mute: false,
+            speed: self.speed,
+            shift_pitch: self.shift_pitch,
         }
     }
 
@@ -475,6 +496,8 @@ mod tests {
             start: None,
             end: None,
             duration: None,
+            speed: None,
+            shift_pitch: false,
             yes: false,
             no_install: false,
             outdir: None,
@@ -566,5 +589,31 @@ mod tests {
         let e = Cli::try_parse_from(["conv", "a.mp4", "--max-size", "10mb", "--crf", "20"])
             .unwrap_err();
         assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn a_speed_parses_into_the_tuning() {
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--speed", "2x"]).unwrap();
+        let t = c.tuning();
+        assert_eq!(t.speed, Some(convkit_core::speed::parse("2").unwrap()));
+        assert!(!t.shift_pitch);
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--speed", "0.5", "--shift-pitch"]).unwrap();
+        assert!(c.tuning().shift_pitch);
+    }
+
+    #[test]
+    fn a_speed_that_changes_nothing_is_a_usage_error() {
+        let e = Cli::try_parse_from(["conv", "a.mp4", "--speed", "1"]).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(
+            e.to_string().contains("1 is the speed it already plays at"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn shift_pitch_needs_a_speed() {
+        let e = Cli::try_parse_from(["conv", "a.mp4", "--shift-pitch"]).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 }
