@@ -22,7 +22,7 @@ pub struct Job {
 /// `out.gif` instead of misparsing the target as an unknown extension
 /// `"/out.gif"`. The one case this gives up is converting to a file
 /// literally named `.hidden`, where the user must write `./.hidden`.
-fn is_bare_extension_shorthand(rest: &str) -> bool {
+pub(crate) fn is_bare_extension_shorthand(rest: &str) -> bool {
     !rest.contains('/') && !rest.contains('\\') && !rest.contains('.')
 }
 
@@ -70,7 +70,7 @@ fn output_format_of_ext(ext: &str) -> Result<Format, ConvError> {
     Ok(fmt)
 }
 
-fn output_format_of(p: &Path) -> Result<Format, ConvError> {
+pub(crate) fn output_format_of(p: &Path) -> Result<Format, ConvError> {
     output_format_of_ext(p.extension().and_then(|e| e.to_str()).unwrap_or(""))
 }
 

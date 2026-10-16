@@ -103,6 +103,7 @@ conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 conv clip.mp4 --speed 2          # play twice as fast
 conv trim talk.mp4               # find clips in the terminal and cut them
+conv qr "https://example.com"    # make a QR code, written as qr.png
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -580,6 +581,40 @@ conv talk.mp4 clip.gif --start 1:02 --end 1:10 --speed 2
 conv memo.m4a .mp3 --speed 1.25
 conv screen.mov --speed 4 --max-size 10mb
 ```
+
+## QR codes
+
+`conv qr` makes a QR code for a link or any other text:
+
+```console
+$ conv qr "https://example.com/menu"
+OK qr.png - 3 KB - 0.1s
+  /home/user/qr.png
+```
+
+The text is in the code itself, with no redirect service in between, so
+the code never expires and nobody counts its scans. That is the catch with
+the "dynamic" codes many generator sites hand out.
+
+Paths work as in a conversion. Name the file, or give a bare extension for
+`qr.EXT`, and `-o` picks the folder. conv draws PNG and SVG itself. Other
+image formats are drawn as a PNG and converted, which needs ImageMagick:
+
+```console
+conv qr "https://example.com" menu.svg
+conv qr "https://example.com" .jpg -o print
+conv qr "WIFI:S:Home;T:WPA;P:secret;;" --size 2048
+```
+
+`--logo` puts an image (SVG, PNG, JPG, GIF or WebP) in the middle, on a
+white square about a fifth of the code's width. The code is then built to
+survive losing 30% of itself instead of 15%, so it still scans. `--size`
+sets the width in pixels (1024 by default), rounded down so every module is
+a whole number of pixels.
+
+Before writing anything, conv reads the code back and checks that it gives
+exactly your text. One code holds up to 2,331 characters, or 1,273 with a
+logo.
 
 ## Discovering formats and capabilities
 

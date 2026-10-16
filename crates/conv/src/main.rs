@@ -38,6 +38,7 @@ fn main() {
         Some(cli::Command::Install { backend }) => commands::install::run(&cli, backend),
         Some(cli::Command::Scan { paths }) => commands::scan::run(&cli, paths),
         Some(cli::Command::Update { check }) => commands::update::run(&cli, *check),
+        Some(cli::Command::Qr { .. }) => commands::qr::run(&cli),
     };
     std::process::exit(code);
 }
