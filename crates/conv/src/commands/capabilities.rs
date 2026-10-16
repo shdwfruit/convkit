@@ -105,6 +105,11 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     if has(|a| matches!(a, Arg::StripMetadata)) {
         push_flag(&mut flags, "--strip-metadata");
     }
+    // A picture turns wherever ImageMagick or a filter chain draws it, and
+    // in webm's transcode, as `--resize` does.
+    if has(|a| matches!(a, Arg::Rotate | Arg::VideoChain(_))) || to == Format::Webm {
+        push_flag(&mut flags, "--rotate");
+    }
     // A speed change applies wherever a cut does: both need a timeline.
     if has(|a| matches!(a, Arg::Trim)) {
         push_flag(&mut flags, "--start");

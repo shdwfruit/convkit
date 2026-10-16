@@ -132,6 +132,7 @@ mod tests {
             duration: None,
             speed: None,
             shift_pitch: false,
+            rotate: None,
             yes,
             no_install,
             outdir: None,
