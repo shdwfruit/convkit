@@ -9,6 +9,7 @@ pub mod format;
 pub mod frames;
 mod icon;
 pub mod install;
+mod jpeg;
 pub mod manifest;
 mod media;
 pub mod metadata;
