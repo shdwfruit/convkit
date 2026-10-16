@@ -3010,15 +3010,16 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     #[test]
     fn a_typst_merge_that_grows_says_so() {
         let dir = tempfile::tempdir().unwrap();
-        let r = typst_stub(dir.path(), "head -c 3000 /dev/zero > \"$out\"");
+        // Two 7-byte inputs; just over a megabyte more than them.
+        let r = typst_stub(dir.path(), "head -c 1100000 /dev/zero > \"$out\"");
         let photos = merge_request(dir.path(), &["a.jpg", "b.webp"]);
         let o = run(&photos, &r, &mut |_| {}).unwrap();
         assert_eq!(
             o.warnings,
-            [registry::lossless_size_note(&photos.inputs, 14, 3000).unwrap()]
+            [registry::lossless_size_note(&photos.inputs, 14, 1_100_000).unwrap()]
         );
         assert!(
-            o.warnings[0].contains("this PDF 3 KB against 14 B"),
+            o.warnings[0].contains("this PDF 1.0 MB against 14 B"),
             "{:?}",
             o.warnings
         );

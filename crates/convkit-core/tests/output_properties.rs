@@ -3398,8 +3398,9 @@ fn screenshot(dir: &tempfile::TempDir) -> PathBuf {
 }
 
 /// Typst keeps a PNG or WebP page without loss. A photo pays for that in
-/// size, a lossy WebP many times over, so the run says so and names
-/// `--quality`; a screenshot comes out near its own size and is not told.
+/// size, a lossy WebP many times over (here about 50 KB into a 2 MB PDF),
+/// so the run says so and names `--quality`; a screenshot comes out near
+/// its own size and is not told.
 #[test]
 #[ignore = "requires backends; run with --ignored"]
 fn a_photo_merge_that_grows_says_so_and_a_screenshot_does_not() {
@@ -3414,14 +3415,14 @@ fn a_photo_merge_that_grows_says_so_and_a_screenshot_does_not() {
 
     let photo = synth_image(
         &dir,
-        &["-seed", "1", "-size", "600x400", "plasma:fractal"],
+        &["-seed", "1", "-size", "1200x800", "plasma:fractal"],
         "photo.webp",
     );
     let out = dir.path().join("photo.pdf");
     let outcome = merge(std::slice::from_ref(&photo), &out, Tuning::default());
     assert_eq!(ran(&outcome), [Backend::Typst]);
     assert!(
-        len(&out) > 3 * len(&photo),
+        len(&out) > 3 * len(&photo) && len(&out) > len(&photo) + 1_500_000,
         "{} from {}",
         len(&out),
         len(&photo)

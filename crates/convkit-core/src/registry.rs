@@ -324,17 +324,21 @@ pub(crate) fn gif_note(recipe: &Recipe, inputs: &[PathBuf]) -> Option<String> {
 }
 
 /// What a Typst merge's size cost, said once the PDF is more than 1.5 times
-/// `images`, the inputs' total size in bytes, and an input is not a JPEG.
-/// Typst embeds a JPEG as it is but keeps every other picture without loss
-/// (Flate), which a photo pays for: a 945 KB WebP made a 13 MB PDF, where
-/// ImageMagick's JPEG pages at quality 92 made 2.3 MB. A screenshot comes
-/// out near its own size, so the default stays lossless and this is
-/// measured after the run rather than assumed.
+/// `images`, the inputs' total size in bytes, and more than 1,000,000 bytes
+/// over it, and an input is not a JPEG. Typst embeds a JPEG as it is but
+/// keeps every other picture without loss (Flate), which a photo pays for:
+/// a 945 KB WebP made a 13 MB PDF, where ImageMagick's JPEG pages at
+/// quality 92 made 2.3 MB. A screenshot comes out near its own size, so the
+/// default stays lossless and this is measured after the run rather than
+/// assumed. The megabyte keeps it off a tiny or flat picture, which Typst's
+/// few kilobytes of PDF make many times larger for nothing worth saying (a
+/// 515 B PNG made a 5 KB PDF).
 pub(crate) fn lossless_size_note(inputs: &[PathBuf], images: u64, pdf: u64) -> Option<String> {
     let lossless = inputs
         .iter()
         .any(|i| Format::from_path(i) != Some(Format::Jpg));
-    let grew = u128::from(pdf) * 2 > u128::from(images) * 3;
+    let grew =
+        u128::from(pdf) * 2 > u128::from(images) * 3 && pdf.saturating_sub(images) > 1_000_000;
     (lossless && grew).then(|| {
         format!(
             "The PNG and WebP pages are stored without loss, which makes this PDF {} \
@@ -2856,32 +2860,43 @@ mod tests {
 
     /// Typst keeps a PNG, WebP or GIF page without loss, so a merge says
     /// what that cost once the PDF is more than half again the size of its
-    /// images. A merge of JPEGs alone, embedded as they are, never does.
+    /// images and more than a megabyte over them. Below that, Typst's own
+    /// few kilobytes and a tiny flat picture would trip it for nothing. A
+    /// merge of JPEGs alone, embedded as they are, never does.
     #[test]
-    fn a_merge_notes_its_size_once_it_is_half_again_its_images() {
+    fn a_merge_notes_its_size_once_it_is_half_again_its_images_and_a_megabyte_over() {
         let p = |s: &str| PathBuf::from(s);
         let photos = [p("a.jpg"), p("b.webp")];
-        let mb = 1024 * 1024;
+        let kb = 1024;
+        let mb = 1024 * kb;
         assert_eq!(
-            lossless_size_note(&photos, 945 * 1024, 13 * mb).as_deref(),
+            lossless_size_note(&photos, 945 * kb, 13 * mb).as_deref(),
             Some(
                 "The PNG and WebP pages are stored without loss, which makes this PDF \
                  13.0 MB against 945 KB of images; --quality stores them as JPEG instead \
                  (needs ImageMagick)."
             )
         );
+        let photo_png = [p("photo.png")];
+        assert!(lossless_size_note(&photo_png, 10_200_000, 17_000_000).is_some());
+        // Many times larger, but by kilobytes: a flat PNG, a palette PNG.
+        assert_eq!(lossless_size_note(&[p("flat.png")], 515, 5 * kb), None);
+        assert_eq!(lossless_size_note(&[p("ui.png")], 12 * kb, 41 * kb), None);
         // More than 1.5 times, not at it.
-        assert!(lossless_size_note(&photos, 1000, 1501).is_some());
-        assert_eq!(lossless_size_note(&photos, 1000, 1500), None);
-        assert_eq!(lossless_size_note(&photos, 1000, 900), None);
+        assert!(lossless_size_note(&photos, 2_000_000, 3_000_001).is_some());
+        assert_eq!(lossless_size_note(&photos, 2_000_000, 3_000_000), None);
+        // More than a megabyte over, not exactly one.
+        assert!(lossless_size_note(&photos, 100_000, 1_100_001).is_some());
+        assert_eq!(lossless_size_note(&photos, 100_000, 1_100_000), None);
+        assert_eq!(lossless_size_note(&photos, 3_000_000, 2_000_000), None);
         for other in ["c.png", "c.PNG", "c.gif"] {
             assert!(
-                lossless_size_note(&[p("a.jpg"), p(other)], 1000, 1501).is_some(),
+                lossless_size_note(&[p("a.jpg"), p(other)], 100_000, 1_100_001).is_some(),
                 "{other}"
             );
         }
         let jpegs = [p("a.jpg"), p("b.JPEG"), p("c.jfif")];
-        assert_eq!(lossless_size_note(&jpegs, 1000, 100_000), None);
+        assert_eq!(lossless_size_note(&jpegs, 1000, 10_000_000), None);
     }
 
     /// A missing Typst gets a reason on the Typst merge only: a merge that
