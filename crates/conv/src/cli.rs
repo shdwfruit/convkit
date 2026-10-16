@@ -68,8 +68,8 @@ pub struct Cli {
     #[arg(long, requires = "resize", conflicts_with = "max_size")]
     pub upscale: bool,
 
-    /// Quality 1-100 for lossy image targets (jpg/webp/avif) and
-    /// image -> pdf [default: 92].
+    /// Quality 1-100 for lossy image targets (jpg/webp/avif/heic) and
+    /// image -> pdf [default: 92; 60 for heic].
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
     pub quality: Option<u8>,
 

@@ -48,10 +48,21 @@ fn strip_metadata_is_refused_where_it_cannot_apply() {
             "--strip-metadata does not apply to docx -> pdf: it covers image, video and audio conversions",
         ));
     conv()
-        .args(["IMG_0042.heic", "--strip-metadata", "--dry-run"])
+        .args(["IMG_0042.heif", "--strip-metadata", "--dry-run"])
         .assert()
         .code(2)
-        .stderr(contains("conv cannot write heic; add --to jpg"));
+        .stderr(contains("conv cannot write heif; add --to heic"));
+}
+
+/// A heic is stripped into a heic, re-encoded at heic's own quality.
+#[test]
+fn a_heic_is_stripped_into_a_heic() {
+    conv()
+        .args(["IMG_0042.heic", "--strip-metadata", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("IMG_0042-stripped.heic"))
+        .stdout(contains("-quality 60"));
 }
 
 #[test]

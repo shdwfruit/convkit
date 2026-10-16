@@ -682,17 +682,13 @@ fn heic_to_jpg_preserves_orientation_and_stays_reasonably_sized() {
         heic.is_file(),
         "missing fixture tests/fixtures/photo.heic -- a real one (1.58 MB) is \
          normally committed at this path, so if you're seeing this, it has been \
-         removed or you're on a shallow/sparse checkout. HEIC encoders are \
-         scarce -- this repo will not fabricate a fake one -- and no HEIC \
-         encoder is available in any toolchain used here either (ImageMagick's \
-         HEIC support is read-only, `magick -list format` reports `HEIC` as \
-         `r--`, and no ffmpeg build available has a HEIC muxer), which is why \
-         the committed fixture is a full-size 1.58 MB real photo rather than a \
-         shrunk one. Copy a real photo off a recent iPhone (Camera defaults to \
+         removed or you're on a shallow/sparse checkout. This repo will not \
+         fabricate one: the fixture stands for what a phone writes, which is \
+         why it is a full-size 1.58 MB real photo rather than one re-encoded \
+         by ImageMagick. Copy a real photo off a recent iPhone (Camera defaults to \
          HEIC under Settings > Camera > Formats > High Efficiency) onto this \
          machine, save it as tests/fixtures/photo.heic, commit it, and re-run \
-         with --ignored. Smaller is preferred if you can produce it with a \
-         real HEIC encoder, but 1.58 MB is the honest floor without one."
+         with --ignored."
     );
     let out = convert_fixture("photo.heic", "jpg");
     let (w, h) = imagemagick_dimensions(&out);
@@ -703,6 +699,85 @@ fn heic_to_jpg_preserves_orientation_and_stays_reasonably_sized() {
         "auto-orient must not transpose dimensions"
     );
     assert!(std::fs::metadata(&out).unwrap().len() > 1024);
+}
+
+/// The iPhone photo, made a JPEG and back: a real HEIC (the `heic` brand
+/// in its `ftyp` box), smaller than the JPEG, the same size and the same
+/// way up, still Display P3, and with the GPS note. ImageMagick registers a
+/// HEIC writer only when libheif has an HEVC encoder, which Debian and
+/// Ubuntu ship as a separate plugin.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_photo_written_as_heic_is_a_smaller_heic_the_same_way_up() {
+    if !magick_writes("HEIC") {
+        eprintln!("this ImageMagick cannot write HEIC; not checked");
+        return;
+    }
+    let dir = tmp();
+    let jpg = dir.path().join("photo.jpg");
+    convert_tuned(&fixture("photo.heic"), &jpg, &Tuning::default()).unwrap();
+    let heic = dir.path().join("photo.heic");
+    let outcome = convert_tuned(&jpg, &heic, &Tuning::default()).unwrap();
+
+    let bytes = std::fs::read(&heic).unwrap();
+    assert_eq!(&bytes[4..12], b"ftypheic", "{:?}", &bytes[..12]);
+    let (heic_len, jpg_len) = (bytes.len() as u64, std::fs::metadata(&jpg).unwrap().len());
+    assert!(heic_len < jpg_len, "heic {heic_len} B >= jpg {jpg_len} B");
+    assert_eq!(imagemagick_dimensions(&heic), imagemagick_dimensions(&jpg));
+    assert_eq!(identify_format(&heic, "%[orientation]"), "TopLeft");
+    assert_eq!(identify_format(&heic, "%[icc:description]"), "Display P3");
+    if reads_heic_exif() {
+        assert!(says_location(&outcome), "{:?}", outcome.warnings);
+    }
+}
+
+/// A transparent PNG keeps its alpha in a HEIC; an animated GIF's first
+/// frame is the one written, with the note saying so.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_heic_keeps_alpha_and_takes_one_frame() {
+    if !magick_writes("HEIC") {
+        eprintln!("this ImageMagick cannot write HEIC; not checked");
+        return;
+    }
+    let dir = tmp();
+    let png = dir.path().join("dot.png");
+    run_magick(&[
+        "-size",
+        "64x64",
+        "xc:none",
+        "-fill",
+        "red",
+        "-draw",
+        "circle 32,32 32,8",
+        &png.to_string_lossy(),
+    ]);
+    let heic = dir.path().join("dot.heic");
+    convert_tuned(&png, &heic, &Tuning::default()).unwrap();
+    assert_eq!(
+        identify_format(&heic, "%[fx:p{0,0}.a < 0.1 && p{32,32}.a > 0.9]").trim(),
+        "1",
+        "the corner is clear and the dot is not"
+    );
+
+    let tiff = dir.path().join("pages.tiff");
+    run_magick(&[
+        "-size",
+        "32x32",
+        "xc:red",
+        "xc:lime",
+        "xc:blue",
+        &tiff.to_string_lossy(),
+    ]);
+    let one = dir.path().join("pages.heic");
+    let outcome = convert_tuned(&tiff, &one, &Tuning::default()).unwrap();
+    let frames = run_identify(&magick(), &["-format", "%p\n", &one.to_string_lossy()]);
+    assert_eq!(frames.lines().count(), 1, "{frames:?}");
+    assert!(
+        outcome.warnings.iter().any(|w| w.contains("first frame")),
+        "{:?}",
+        outcome.warnings
+    );
 }
 
 #[test]
@@ -3232,6 +3307,11 @@ fn stripped_images_lose_their_location_and_keep_colour_and_orientation() {
         targets.push("avif");
     } else {
         eprintln!("this ImageMagick cannot write AVIF; the avif target is not checked");
+    }
+    if magick_writes("HEIC") {
+        targets.push("heic");
+    } else {
+        eprintln!("this ImageMagick cannot write HEIC; the heic target is not checked");
     }
     for ext in targets {
         // jpg -> jpg is no pair without the flag; heic -> jpg's note is

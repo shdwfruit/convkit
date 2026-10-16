@@ -125,7 +125,9 @@ jobs:
       # behind it -- it recognises a `.heic` file and then fails decoding
       # it with "Unsupported codec". Installing the plugin explicitly is
       # the fix; see README.md's Backends section for the user-facing
-      # version of this.
+      # version of this. The HEVC *encoder* is split out the same way, as
+      # `libheif-plugin-x265`; without it ImageMagick registers no HEIC
+      # writer and the heic-target tests skip themselves.
       #
       # A minute or two when healthy. A stalled mirror fails here, by name,
       # rather than using up the job's budget before any test runs.
@@ -136,7 +138,7 @@ jobs:
           find ~/apt-archives -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives/ {} +
           sudo apt-get update
           # expect drives conv trim in a pseudo-terminal for its end-to-end test.
-          sudo apt-get install -y -o Acquire::Retries=3 ffmpeg imagemagick libheif-plugin-libde265 libreoffice pandoc expect
+          sudo apt-get install -y -o Acquire::Retries=3 ffmpeg imagemagick libheif-plugin-libde265 libheif-plugin-x265 libreoffice pandoc expect
           # Drop versions an update has replaced, so the cache does not grow
           # by a week's worth of stale packages each week.
           sudo apt-get autoclean
