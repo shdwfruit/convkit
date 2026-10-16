@@ -7,19 +7,23 @@
 //! real run is the per-run scratch dir, under a name convkit makes up, and
 //! the layout names those files only. A user's file name never reaches the
 //! layout, so it needs no escaping: quotes, `#`, `$` and non-ASCII names
-//! cannot break it.
+//! cannot break it. What Typst reports about those files is put back in
+//! terms of the user's (`name_inputs`).
 //!
 //! Pure, like `plan::build`: this computes what `exec` will write and
 //! stage (`plan::Prepare`), and touches nothing.
 
 use std::path::{Path, PathBuf};
 
-use crate::plan::Prepare;
+use crate::plan::{PlannedStep, Prepare};
 use crate::Format;
 
 /// The first line of every layout: each page takes the size of the image
 /// on it, at the image's own DPI, with no margin.
 const PAGE_SETUP: &str = "#set page(width: auto, height: auto, margin: 0pt)";
+
+/// What every staged name starts with.
+const STAGED: &str = "convkit-in-";
 
 /// Where the layout for `output` is written: beside it, so inside the root
 /// Typst is given (`Arg::OutDir`).
@@ -37,7 +41,7 @@ pub(crate) fn staged_name(index: usize, input: &Path) -> String {
     // (`registry::image_pdf_variant`); one without still gets a name of
     // convkit's, never text from the user's.
     let ext = Format::from_path(input).map_or("unknown", |f| f.ext());
-    format!("convkit-in-{:04}.{ext}", index + 1)
+    format!("{STAGED}{:04}.{ext}", index + 1)
 }
 
 /// What exec does before Typst runs: stage each input, in order, beside
@@ -70,6 +74,89 @@ pub(crate) fn image_pages(inputs: &[PathBuf], output: &Path, strip: bool) -> Vec
         contents: layout,
     });
     prepare
+}
+
+/// A Typst merge's report as the user should read it. Typst names the
+/// files it was given, which are convkit's: a diagnostic's opening
+/// `<layout>:<line>:<col>: ` becomes the input on that line, and a staged
+/// copy's path or name becomes its input's. Any other step's report is
+/// returned as it is.
+pub(crate) fn name_inputs(report: &str, step: &PlannedStep) -> String {
+    let layout = match step.prepare.last() {
+        Some(Prepare::Write { path, .. }) if *path == layout_path(&step.output) => path,
+        _ => return report.to_string(),
+    };
+    let Some(layout_name) = layout.file_name().map(|n| n.to_string_lossy()) else {
+        return report.to_string();
+    };
+    let inputs: Vec<(String, &Path)> = step
+        .prepare
+        .iter()
+        .filter_map(|p| match p {
+            Prepare::Stage { from, to, .. } => Some((from.display().to_string(), to.as_path())),
+            Prepare::Write { .. } => None,
+        })
+        .collect();
+    let mut staged: Vec<(String, &str)> = Vec::with_capacity(inputs.len() * 2);
+    for (shown, to) in &inputs {
+        staged.push((to.display().to_string(), shown));
+        if let Some(name) = to.file_name() {
+            staged.push((name.to_string_lossy().into_owned(), shown));
+        }
+    }
+    // Longest first, so a staged path is replaced whole, not just its name.
+    staged.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    report
+        .split_inclusive('\n')
+        .map(|line| match diagnostic_at(line, &layout_name) {
+            // Line 1 sets the page up; input i is on line i + 2.
+            Some((row, rest)) => match row.checked_sub(2).and_then(|i| inputs.get(i)) {
+                Some((shown, _)) => format!("{shown}: {}", replace_staged(rest, &staged)),
+                None => replace_staged(rest, &staged),
+            },
+            None => replace_staged(line, &staged),
+        })
+        .collect()
+}
+
+/// The layout line a short-format diagnostic, `<path>:<line>:<col>: ...`,
+/// points at, and the text after its location.
+fn diagnostic_at<'a>(line: &'a str, layout_name: &str) -> Option<(usize, &'a str)> {
+    let (_, after) = line.split_once(layout_name)?;
+    let (row, after) = after.strip_prefix(':')?.split_once(':')?;
+    let (col, rest) = after.split_once(": ")?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !(digits(row) && digits(col)) {
+        return None;
+    }
+    Some((row.parse().ok()?, rest))
+}
+
+/// `text` with each staged path or name replaced by its input's, in one
+/// pass, so an input that is itself named like a staged file is not
+/// replaced again.
+fn replace_staged(text: &str, staged: &[(String, &str)]) -> String {
+    if !text.contains(STAGED) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        match staged
+            .iter()
+            .find(|(from, _)| rest.starts_with(from.as_str()))
+        {
+            Some((from, shown)) => {
+                out.push_str(shown);
+                rest = &rest[from.len()..];
+            }
+            None => {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -198,5 +285,101 @@ mod tests {
             layout_path(Path::new("scratch/out.pdf")),
             p("scratch/out.convkit-layout.typ")
         );
+    }
+
+    /// The Typst step that merges `inputs` into `scratch/out.pdf`.
+    fn typst_step(inputs: &[PathBuf]) -> PlannedStep {
+        let plan = crate::plan::build(
+            Format::Jpg,
+            Format::Pdf,
+            inputs,
+            Path::new("scratch/out.pdf"),
+            None,
+            None,
+        )
+        .unwrap();
+        plan.steps.into_iter().next().unwrap()
+    }
+
+    /// Typst names the layout and the staged copies, which are convkit's;
+    /// the user knows only their own files. However Typst spells the
+    /// layout's path (relative to where it runs, through `..`, or on
+    /// Windows), line 4 is the third input.
+    #[test]
+    fn typst_errors_name_the_users_file() {
+        let inputs = [
+            p("a.jpg"),
+            p("b.png"),
+            p("photos/c d.png"),
+            p("e.jpg"),
+            p("f.jpg"),
+        ];
+        let step = typst_step(&inputs);
+        for layout in [
+            "/private/var/folders/x/scratch/out.convkit-layout.typ",
+            "../../tmp/out dir/scratch/out.convkit-layout.typ",
+            "scratch/out.convkit-layout.typ",
+            "C:\\Users\\Rick Xie\\scratch\\out.convkit-layout.typ",
+        ] {
+            let report =
+                format!("{layout}:4:6: error: failed to decode image (Invalid PNG signature.)");
+            assert_eq!(
+                name_inputs(&report, &step),
+                "photos/c d.png: error: failed to decode image (Invalid PNG signature.)"
+            );
+        }
+
+        let Prepare::Stage { to: fifth, .. } = &step.prepare[4] else {
+            panic!("the fifth input is staged fifth: {:?}", step.prepare);
+        };
+        let report = format!(
+            "scratch/out.convkit-layout.typ:2:6: warning: a first\n\
+             scratch/out.convkit-layout.typ:6:6: error: file not found (searched at {})\n\
+             error: convkit-in-0002.png is not a picture\n\
+             scratch/out.convkit-layout.typ:1:2: error: on no input's line\n",
+            fifth.display()
+        );
+        let named = name_inputs(&report, &step);
+        assert_eq!(
+            named,
+            "a.jpg: warning: a first\n\
+             f.jpg: error: file not found (searched at f.jpg)\n\
+             error: b.png is not a picture\n\
+             error: on no input's line\n"
+        );
+        for scratch_name in ["convkit-in-", "convkit-layout"] {
+            assert!(!named.contains(scratch_name), "{named}");
+        }
+    }
+
+    /// A user's file named like a staged one is not taken for one once it
+    /// is in the report.
+    #[test]
+    fn an_input_named_like_a_staged_file_is_named_once() {
+        let step = typst_step(&[p("convkit-in-0002.png"), p("b.png")]);
+        assert_eq!(
+            name_inputs("convkit-in-0001.png and convkit-in-0002.png", &step),
+            "convkit-in-0002.png and b.png"
+        );
+    }
+
+    #[test]
+    fn other_reports_are_unchanged() {
+        let report = "scratch/out.convkit-layout.typ:4:6: error: convkit-in-0001.png";
+        let magick = crate::plan::build(
+            Format::Png,
+            Format::Jpg,
+            &[p("a.png")],
+            Path::new("scratch/out.jpg"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(name_inputs(report, &magick.steps[0]), report);
+
+        let typst = typst_step(&[p("a.jpg")]);
+        let plain = "warning: something general\nerror: and something else\n";
+        assert_eq!(name_inputs(plain, &typst), plain);
+        assert_eq!(name_inputs("", &typst), "");
     }
 }

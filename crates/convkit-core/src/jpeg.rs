@@ -232,7 +232,6 @@ fn exif_tiff<'a>(segs: &[Segment<'a>]) -> Option<Tiff<'a>> {
         .find_map(|s| Tiff::new(s.payload.strip_prefix(EXIF_HEADER)?))
 }
 
-#[allow(dead_code)]
 /// Whether the JPEG records where it was taken: an EXIF GPS block with a
 /// latitude.
 pub(crate) fn has_location(bytes: &[u8]) -> bool {
@@ -250,7 +249,6 @@ pub(crate) fn has_location(bytes: &[u8]) -> bool {
         .any(|gps| gps.iter().any(|e| e.tag == TAG_GPS_LATITUDE))
 }
 
-#[allow(dead_code)]
 /// `has_location` for a file; false when it cannot be read.
 pub(crate) fn file_has_location(path: &Path) -> bool {
     std::fs::read(path).is_ok_and(|b| has_location(&b))
@@ -356,9 +354,30 @@ fn minimal_exif(segs: &[Segment]) -> Option<Vec<u8>> {
     Some(seg)
 }
 
+/// The start of a JPEG whose EXIF records a GPS latitude, which is all
+/// `has_location` reads. For other modules' tests.
+#[cfg(test)]
+pub(crate) fn located_for_tests() -> Vec<u8> {
+    // Big-endian TIFF: IFD0 at 8 holds the GPS IFD pointer, to 26, and the
+    // GPS IFD there holds a latitude.
+    let mut payload = Vec::from(EXIF_HEADER);
+    payload.extend_from_slice(b"MM\0\x2a\0\0\0\x08");
+    payload.extend_from_slice(&[0, 1, 0x88, 0x25, 0, 4, 0, 0, 0, 1, 0, 0, 0, 26, 0, 0, 0, 0]);
+    payload.extend_from_slice(&[0, 1, 0, 2, 0, 5, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let mut jpeg = vec![0xFF, SOI, 0xFF, APP1];
+    jpeg.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+    jpeg.extend_from_slice(&payload);
+    jpeg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shared_test_jpeg_records_a_location() {
+        assert!(has_location(&located_for_tests()));
+    }
 
     fn segment(marker: u8, payload: &[u8]) -> Vec<u8> {
         let mut v = vec![0xFF, marker];
