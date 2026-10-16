@@ -185,7 +185,7 @@ fn session(
                                 tune.message = Some(format!(
                                     "wrote {} ({})",
                                     file_name(&path),
-                                    render::human_size(outcome.bytes)
+                                    convkit_core::size::human(outcome.bytes)
                                 ));
                                 // The last write of a file is what it holds.
                                 written.retain(|o: &Outcome| o.output != outcome.output);
