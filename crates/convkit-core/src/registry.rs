@@ -468,6 +468,11 @@ pub const CRF: &str = "20";
 /// to libx264's 0-51, so it is a separate number, not a conversion of the
 /// one above.
 pub const WEBM_CRF: &str = "32";
+/// libvpx-vp9's speed, passed as `-cpu-used` under `-deadline good`. One
+/// value for every VP9 encode (the static recipe, the probe-aware transcode
+/// and both passes of `--max-size`); see `VIDEO_TO_WEBM` for how it was
+/// picked.
+pub(crate) const VP9_CPU_USED: &str = "4";
 pub(crate) const AUDIO_BITRATE: &str = "160k";
 /// Opus bitrate for webm targets, shared with the probe-aware hybrid
 /// path in `media.rs` for the same drift-prevention reason as
@@ -755,6 +760,16 @@ fn video_to_mkv_recipe_for(from: Format) -> Recipe {
 /// lets it use every core. libvpx does not enable row multithreading by
 /// default and otherwise encodes single-threaded, so a 1080p VP9 encode runs
 /// at low single-digit fps without these.
+///
+/// `-deadline good -cpu-used 4` (`VP9_CPU_USED`) trades a little compression
+/// for a much faster encode. ffmpeg's own default is speed 1, whose extra
+/// searching barely shows: on four clips (motion graphics, a 1080p screen
+/// recording, a grainy 1080p photo pan and `testsrc2`; ffmpeg 9.0.1, libvpx
+/// 1.17, Apple M2), speed 4 took 28-66% of speed 1's CPU time and scored
+/// within 0.5 VMAF of it at this CRF, for files 8-15% larger on the clean
+/// clips and 9% smaller on the grainy one. Speed 3 used 0-12% more CPU time
+/// than 4 for files a few percent smaller; speed 5 saved no more and was
+/// slower in wall time.
 const VIDEO_TO_WEBM: Recipe = Recipe {
     steps: &[step!(
         Backend::Ffmpeg,
@@ -772,6 +787,10 @@ const VIDEO_TO_WEBM: Recipe = Recipe {
             Arg::Lit("1"),
             Arg::Lit("-threads"),
             Arg::Lit("0"),
+            Arg::Lit("-deadline"),
+            Arg::Lit("good"),
+            Arg::Lit("-cpu-used"),
+            Arg::Lit(VP9_CPU_USED),
             Arg::Lit("-c:a"),
             Arg::Lit("libopus"),
             Arg::Lit("-b:a"),
@@ -2654,6 +2673,17 @@ mod tests {
         let argv = r.steps[0].render(&[Path::new("in.mkv")], Path::new("out.webm"));
         assert!(argv.windows(2).any(|w| w == ["-row-mt", "1"]), "{argv:?}");
         assert!(argv.windows(2).any(|w| w == ["-threads", "0"]), "{argv:?}");
+    }
+
+    #[test]
+    fn video_to_webm_sets_the_vp9_speed() {
+        let r = lookup(Format::Mkv, Format::Webm).unwrap();
+        let argv = r.steps[0].render(&[Path::new("in.mkv")], Path::new("out.webm"));
+        assert!(
+            argv.windows(4)
+                .any(|w| w == ["-deadline", "good", "-cpu-used", VP9_CPU_USED]),
+            "{argv:?}"
+        );
     }
 
     #[test]
