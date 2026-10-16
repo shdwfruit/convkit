@@ -158,6 +158,10 @@ struct Prepared<'a> {
     /// The range's cut, carried into every pass.
     cut: Option<crate::trim::Cut>,
     range: Option<crate::trim::RangeReport>,
+    /// The speed change, carried into every pass. Never copied.
+    retime: Option<crate::speed::Retime>,
+    speed: Option<crate::speed::SpeedReport>,
+    /// The range's notes, then the speed change's.
     clip_notes: Vec<String>,
 }
 
@@ -182,8 +186,8 @@ pub(crate) fn plan(
             u64::from(r.0) * u64::from(src_rate.1) < u64::from(src_rate.0) * u64::from(r.1)
         });
     // A copy can only make some cuts exactly (see `trim::Cut::why_not_copied`),
-    // and any other is never copied.
-    let copy_ok = p.cut.is_none_or(|c| c.why_not_copied(&p.probe).is_none());
+    // and any other is never copied; nor is a speed change, which filters.
+    let copy_ok = p.retime.is_none() && p.cut.is_none_or(|c| c.why_not_copied(&p.probe).is_none());
     if !caps_bind && copy_ok && p.probe.size_bytes.is_some_and(|b| b <= max.bytes) {
         // A byte copy carries every tag along, so a stripped file is
         // remuxed instead, which clears them.
@@ -204,6 +208,7 @@ pub(crate) fn plan(
                 sizing: Some(sizing),
                 enlarged: None,
                 range: p.range.clone(),
+                speed: p.speed.clone(),
             });
         }
         if let Some(m) =
@@ -224,6 +229,7 @@ pub(crate) fn plan(
                 sizing: Some(sizing),
                 enlarged: None,
                 range: p.range.clone(),
+                speed: p.speed.clone(),
             });
         }
     }
@@ -383,9 +389,22 @@ fn prepare<'a>(
         .as_ref()
         .map(|r| crate::trim::clip(from, to, r, Some(probe), input))
         .transpose()?;
-    let (probe, cut, range, clip_notes) = match clip {
+    let (probe, cut, range, mut clip_notes) = match clip {
         Some(c) => (c.probe, c.cut, Some(c.report), c.notes),
         None => (probe.clone(), None, None, Vec::new()),
+    };
+    // A speed change plays the clip; the budget then sizes the output's
+    // length, as `plan::build_tuned` plans against it.
+    let retimed = tuning
+        .speed
+        .map(|s| crate::speed::retime(from, to, s, tuning.shift_pitch, false, Some(&probe), input))
+        .transpose()?;
+    let (probe, retime, speed) = match retimed {
+        Some(r) => {
+            clip_notes.extend(r.notes);
+            (r.probe, Some(r.retime), Some(r.report))
+        }
+        None => (probe, None, None),
     };
     let src = Source::from_probe(&probe).map_err(|gap| gap_error(gap, input))?;
     // A rate that cannot be held exactly is refused: dropping it would leave
@@ -427,6 +446,8 @@ fn prepare<'a>(
         labels_note,
         cut,
         range,
+        retime,
+        speed,
         clip_notes,
     })
 }
@@ -473,6 +494,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         keep_source_size: false,
         enlarged: None,
         cut: p.cut,
+        speed: p.retime.clone(),
         mute: false,
         ..ResolvedVideo::default()
     };
@@ -533,6 +555,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         sizing: Some(sizing),
         enlarged: None,
         range: p.range.clone(),
+        speed: p.speed.clone(),
     })
 }
 
@@ -2348,5 +2371,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.sizing.as_ref().unwrap().strategy, Strategy::Encode);
+    }
+
+    // --- A speed change under --max-size ------------------------------------
+
+    fn sized_speed(size: &str, speed: &str) -> Tuning {
+        Tuning {
+            speed: Some(crate::speed::parse(speed).unwrap()),
+            ..tuned(size)
+        }
+    }
+
+    #[test]
+    fn a_sized_speed_change_budgets_for_the_output_length() {
+        let p = probe(120, 300_000_000);
+        let video_bps = |t: &Tuning| {
+            let plan = build(Format::Mp4, Format::Mp4, &p, t).unwrap();
+            plan.sizing.unwrap().choice.unwrap().video_bps
+        };
+        let plain = video_bps(&tuned("20mb"));
+        let fast = video_bps(&sized_speed("20mb", "2"));
+        // Half as long in the same size: about twice the bits a second.
+        assert!(fast > plain * 3 / 2, "{fast} vs {plain}");
+    }
+
+    #[test]
+    fn a_sized_speed_change_is_never_copied() {
+        let p = probe(600, 60_000_000);
+        let copied = build(Format::Mp4, Format::Mp4, &p, &tuned("100mb")).unwrap();
+        assert_eq!(copied.sizing.unwrap().strategy, Strategy::Copy);
+        let plan = build(Format::Mkv, Format::Mp4, &p, &sized_speed("100mb", "2")).unwrap();
+        assert_eq!(plan.sizing.as_ref().unwrap().strategy, Strategy::Encode);
+        let same = build(Format::Mp4, Format::Mp4, &p, &sized_speed("100mb", "2")).unwrap();
+        assert_eq!(same.sizing.as_ref().unwrap().strategy, Strategy::Encode);
+    }
+
+    #[test]
+    fn both_passes_of_a_sized_speed_change_are_retimed() {
+        let p = probe(120, 300_000_000);
+        let plan = build(Format::Mp4, Format::Mp4, &p, &sized_speed("20mb", "2")).unwrap();
+        for step in &plan.steps {
+            let vf = step.argv.iter().position(|a| a == "-vf").unwrap();
+            assert!(
+                step.argv[vf + 1].starts_with("setpts=PTS/2,"),
+                "{:?}",
+                step.argv
+            );
+        }
+        let pass2 = &plan.steps[1].argv;
+        assert!(has(pass2, ["-af", "atempo=2"]), "{pass2:?}");
+        assert!(has(pass2, ["-sn", "-map_chapters"]), "{pass2:?}");
+        assert!(plan.speed.is_some());
     }
 }

@@ -132,6 +132,10 @@ pub struct Outcome {
     /// from `--json` for every other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<crate::trim::RangeReport>,
+    /// The speed a `--speed` conversion played at. Omitted from `--json`
+    /// for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<crate::speed::SpeedReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -618,6 +622,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     }
     let enlarged = ran.enlarged.clone();
     let range = ran.range.clone();
+    let speed = ran.speed.clone();
     let mut warnings = ran.warnings;
     let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());
@@ -657,6 +662,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         sizing,
         enlarged,
         range,
+        speed,
     })
 }
 

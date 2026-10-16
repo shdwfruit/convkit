@@ -287,6 +287,7 @@ mod tests {
             sizing: None,
             enlarged: None,
             range: None,
+            speed: None,
         })
     }
 
@@ -345,6 +346,8 @@ mod tests {
             start: None,
             end: None,
             duration: None,
+            speed: None,
+            shift_pitch: false,
             yes: false,
             no_install: false,
             outdir: None,

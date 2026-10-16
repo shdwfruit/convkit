@@ -74,6 +74,10 @@ pub struct ConversionPlan {
     /// when absent, like `sizing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<crate::trim::RangeReport>,
+    /// The speed a `--speed` conversion plays at. Skipped when absent, like
+    /// `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<crate::speed::SpeedReport>,
 }
 
 /// Why a probe-aware media pair re-encoded instead of copying: a video knob.
@@ -144,8 +148,9 @@ pub fn build_tuned(
     // A file stripped into its own format: no registry pair covers it, so
     // it is planned here, as `--max-size` plans its own (above). A clip is
     // not a copy of the whole file, so a range takes the cut's path below,
-    // which strips as it cuts.
-    if from == to && tuning.strip_metadata && tuning.range.is_none() {
+    // which strips as it cuts, and so does a speed change.
+    let timed = tuning.range.is_some() || tuning.speed.is_some();
+    if from == to && tuning.strip_metadata && !timed {
         return in_place(from, inputs, output, probe, tuning);
     }
 
@@ -168,7 +173,26 @@ pub fn build_tuned(
     let probe = clip.as_ref().map(|c| &c.probe).or(probe);
     let cut = clip.as_ref().and_then(|c| c.cut);
     let range = clip.as_ref().map(|c| c.report.clone());
-    let clip_notes = clip.as_ref().map(|c| c.notes.clone()).unwrap_or_default();
+    let mut clip_notes = clip.as_ref().map(|c| c.notes.clone()).unwrap_or_default();
+    // A speed change plays the clip, so it is resolved against the clip, and
+    // everything after it plans against the output's length.
+    let retimed = tuning
+        .speed
+        .map(|s| {
+            crate::speed::retime(
+                from,
+                to,
+                s,
+                tuning.shift_pitch,
+                tuning.mute,
+                probe,
+                &inputs[0],
+            )
+        })
+        .transpose()?;
+    let probe = retimed.as_ref().map(|r| &r.probe).or(probe);
+    let speed = retimed.as_ref().map(|r| r.report.clone());
+    clip_notes.extend(retimed.iter().flat_map(|r| r.notes.iter().cloned()));
     if tuning.mute && !crate::sized::is_video_target(to) {
         let why = if to == Format::Gif {
             "gif has no sound to drop".to_string()
@@ -182,6 +206,7 @@ pub fn build_tuned(
     }
     let mut resolved = crate::video::resolve(tuning, probe, target_for(to));
     resolved.cut = cut;
+    resolved.speed = retimed.as_ref().map(|r| r.retime.clone());
     resolved.mute = tuning.mute;
     resolved.ogg_tags = media::is_ogg(from) && !media::is_ogg(to);
     // An icon pair adds what it read of the source (`icon::resolve`); with
@@ -204,9 +229,9 @@ pub fn build_tuned(
     // supported at all); these only change *how* an already-supported pair
     // runs when a probe is in hand.
     if let Some(p) = probe {
-        // A format cut into itself is no registered pair, so it reaches the
-        // probe-aware paths by its range instead.
-        let same_format = from == to && tuning.range.is_some();
+        // A format cut or retimed into itself is no registered pair, so it
+        // reaches the probe-aware paths by its range or speed instead.
+        let same_format = from == to && timed;
         if same_format || (registry::lookup(from, to).is_some() && registry::needs_probe(from, to))
         {
             // A video knob changes the picture, and ffmpeg refuses a filter
@@ -222,8 +247,13 @@ pub fn build_tuned(
             // the filter chain, so `resolved` carries no signal for it, and
             // dropping this term would let `--crf` fall through to a copy
             // and silently discard the flag.
-            let wants_video =
-                resolved.fps.is_some() || resolved.scale.is_some() || tuning.crf.is_some();
+            //
+            // A speed change filters the picture and the sound alike, so it
+            // takes neither copy: an audio target that finds no transcode
+            // here falls through to its static recipe, which filters. It is
+            // never a copy, so its re-encode goes unexplained.
+            let knob = resolved.fps.is_some() || resolved.scale.is_some() || tuning.crf.is_some();
+            let wants_video = knob || resolved.speed.is_some();
             let strip = tuning.strip_metadata;
             // A copy can only make some cuts exactly (see
             // `trim::Cut::why_not_copied`); any other re-encodes the video to
@@ -238,10 +268,14 @@ pub fn build_tuned(
                     to, p, &resolved, tuning.crf, strip, &inputs[0], output,
                 )
                 .map(|mut m| {
-                    m.warnings.push(match not_copied.filter(|_| !wants_video) {
-                        Some(why) => format!("Re-encoded rather than stream-copied, because {why}"),
-                        None => REENCODED_FOR_KNOB_NOTE.to_string(),
-                    });
+                    let why = match (knob, resolved.speed.is_some(), not_copied) {
+                        (true, _, _) => Some(REENCODED_FOR_KNOB_NOTE.to_string()),
+                        (false, true, _) => None,
+                        (false, false, why) => why.map(|why| {
+                            format!("Re-encoded rather than stream-copied, because {why}")
+                        }),
+                    };
+                    m.warnings.extend(why);
                     m
                 })
             } else {
@@ -289,6 +323,7 @@ pub fn build_tuned(
                     sizing: None,
                     enlarged: resolved.enlarged.clone(),
                     range,
+                    speed,
                 });
             }
         }
@@ -296,7 +331,7 @@ pub fn build_tuned(
 
     let recipe = select(from, to, probe, available)
         .or_else(|| {
-            (from == to && tuning.range.is_some())
+            (from == to && timed)
                 .then(|| registry::same_format_recipe(to))
                 .flatten()
         })
@@ -333,6 +368,7 @@ pub fn build_tuned(
         sizing: None,
         enlarged: resolved.enlarged.clone(),
         range,
+        speed,
     })
 }
 
@@ -480,6 +516,7 @@ fn in_place(
         sizing: None,
         enlarged,
         range: None,
+        speed: None,
     })
 }
 
@@ -1931,6 +1968,8 @@ mod tests {
             strip_metadata: false,
             range: None,
             mute: false,
+            speed: None,
+            shift_pitch: false,
         }
     }
 
@@ -3328,5 +3367,244 @@ mod tests {
         let e = cut_plan(Format::Mkv, Format::Mp4, &t, 600).unwrap_err();
         assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
         assert!(e.message.contains("silent clip"), "{}", e.message);
+    }
+
+    // --- Speed: --speed and --shift-pitch -----------------------------------
+
+    fn sped(speed: &str) -> Tuning {
+        Tuning {
+            speed: Some(crate::speed::parse(speed).unwrap()),
+            ..Tuning::default()
+        }
+    }
+
+    fn sped_plan(from: Format, to: Format, t: &Tuning, probe: &MediaProbe) -> ConversionPlan {
+        let input = p(&format!("in.{}", from.ext()));
+        let output = format!("out.{}", to.ext());
+        build_tuned(from, to, &[input], Path::new(&output), Some(probe), None, t).unwrap()
+    }
+
+    fn value<'a>(argv: &'a [String], flag: &str) -> &'a str {
+        let i = argv.iter().position(|a| a == flag);
+        i.map(|i| argv[i + 1].as_str())
+            .unwrap_or_else(|| panic!("no {flag} in {argv:?}"))
+    }
+
+    /// The output options a speed change adds, once, after the input.
+    fn ends_retimed(argv: &[String]) {
+        let input = argv.iter().position(|a| a == "-i").expect("-i");
+        let at = argv
+            .windows(3)
+            .position(|w| w == ["-sn", "-map_chapters", "-1"])
+            .unwrap_or_else(|| panic!("no -sn -map_chapters -1 in {argv:?}"));
+        assert!(at > input, "{argv:?}");
+        assert_eq!(
+            argv.iter().filter(|a| *a == "-map_chapters").count(),
+            1,
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn a_video_sped_into_its_own_format_retimes_picture_and_sound() {
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &sped("2"), &clip_probe(600));
+        let argv = &plan.steps[0].argv;
+        assert!(value(argv, "-vf").starts_with("setpts=PTS/2,"), "{argv:?}");
+        assert_eq!(value(argv, "-af"), "atempo=2");
+        assert!(has(argv, ["-c:a", "aac"]), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "copy"), "{argv:?}");
+        ends_retimed(argv);
+        assert_eq!(
+            serde_json::to_value(plan.speed.as_ref().unwrap()).unwrap(),
+            serde_json::json!({"factor": 2.0, "shift_pitch": false})
+        );
+    }
+
+    /// A speed change can never be a stream copy, so saying it was not one
+    /// tells nobody anything; a knob alongside it still says so.
+    #[test]
+    fn a_speed_change_alone_does_not_explain_its_reencode() {
+        let reencoded = |t: &Tuning| {
+            sped_plan(Format::Mkv, Format::Mp4, t, &clip_probe(600))
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("Re-encoded rather than stream-copied"))
+        };
+        assert!(!reencoded(&sped("2")));
+        let cut = Tuning {
+            speed: Some(crate::speed::parse("2").unwrap()),
+            ..ranged(Some("1:00"), Some("1:10"))
+        };
+        assert!(!reencoded(&cut));
+        let resized = Tuning {
+            resize: Some("640x".into()),
+            ..sped("2")
+        };
+        assert!(reencoded(&resized));
+    }
+
+    #[test]
+    fn a_container_change_that_would_copy_is_reencoded_for_a_speed_change() {
+        let plan = sped_plan(Format::Mkv, Format::Mp4, &sped("1.5"), &clip_probe(600));
+        let argv = &plan.steps[0].argv;
+        assert!(has(argv, ["-c:v", "libx264"]), "{argv:?}");
+        assert!(
+            value(argv, "-vf").starts_with("setpts=PTS/1.5,"),
+            "{argv:?}"
+        );
+        assert_eq!(value(argv, "-af"), "atempo=1.5");
+    }
+
+    #[test]
+    fn a_speed_change_leaves_subtitles_unmapped_and_says_so() {
+        let probe = MediaProbe {
+            subtitle_codecs: vec!["subrip".into(), "mov_text".into()],
+            ..clip_probe(600)
+        };
+        for to in [Format::Mp4, Format::Mkv] {
+            let plan = sped_plan(Format::Mkv, to, &sped("2"), &probe);
+            let argv = &plan.steps[0].argv;
+            assert!(!argv.iter().any(|a| a.starts_with("0:s")), "{argv:?}");
+            assert!(!argv.iter().any(|a| a == "-c:s"), "{argv:?}");
+            ends_retimed(argv);
+            assert!(
+                plan.warnings
+                    .iter()
+                    .any(|w| w.starts_with("Subtitles are left out")),
+                "{:?}",
+                plan.warnings
+            );
+            assert!(
+                !plan.warnings.iter().any(|w| w.contains("mov_text")),
+                "{:?}",
+                plan.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn sound_that_would_be_copied_is_filtered_for_a_speed_change() {
+        let song = MediaProbe {
+            audio_codecs: vec!["mp3".into()],
+            audio_sample_rate: Some(44_100),
+            duration_ms: Some(180_000),
+            ..MediaProbe::default()
+        };
+        for (from, to, probe) in [
+            (Format::Mp4, Format::M4a, clip_probe(600)),
+            (Format::Mp3, Format::Mp3, song.clone()),
+            (Format::Mp3, Format::Flac, song),
+        ] {
+            let plan = sped_plan(from, to, &sped("2"), &probe);
+            let argv = &plan.steps[0].argv;
+            assert_eq!(value(argv, "-af"), "atempo=2", "{from:?} -> {to:?}");
+            assert!(!has(argv, ["-c:a", "copy"]), "{argv:?}");
+            ends_retimed(argv);
+        }
+    }
+
+    #[test]
+    fn a_webm_target_retimes_ahead_of_the_opus_channel_layouts() {
+        let plan = sped_plan(Format::Mp4, Format::Webm, &sped("2"), &clip_probe(600));
+        let argv = &plan.steps[0].argv;
+        assert!(value(argv, "-vf").starts_with("setpts=PTS/2"), "{argv:?}");
+        assert_eq!(
+            value(argv, "-af"),
+            format!("atempo=2,{}", registry::OPUS_CHANNEL_LAYOUTS)
+        );
+        assert!(has(argv, ["-c:a", "libopus"]), "{argv:?}");
+    }
+
+    #[test]
+    fn a_gif_is_retimed_ahead_of_its_frame_rate_cap() {
+        let plan = sped_plan(Format::Mp4, Format::Gif, &sped("3"), &clip_probe(20));
+        let argv = &plan.steps[0].argv;
+        assert!(
+            value(argv, "-vf").starts_with("setpts=PTS/3,fps=15,"),
+            "{argv:?}"
+        );
+        assert!(!argv.iter().any(|a| a == "-af"), "{argv:?}");
+        let gif = sped_plan(Format::Gif, Format::Mp4, &sped("3"), &clip_probe(20));
+        assert!(value(&gif.steps[0].argv, "-vf").starts_with("setpts=PTS/3,"));
+    }
+
+    #[test]
+    fn a_stripped_file_sped_into_its_own_format_is_retimed_not_copied() {
+        let t = Tuning {
+            strip_metadata: true,
+            ..sped("2")
+        };
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(600));
+        let argv = &plan.steps[0].argv;
+        assert!(!has(argv, ["-c", "copy"]), "{argv:?}");
+        assert!(value(argv, "-vf").starts_with("setpts=PTS/2,"), "{argv:?}");
+        assert!(has(argv, ["-map_metadata", "-1"]), "{argv:?}");
+    }
+
+    #[test]
+    fn a_cut_and_a_speed_change_cut_the_source_then_retime_it() {
+        let t = Tuning {
+            speed: Some(crate::speed::parse("2").unwrap()),
+            ..ranged(Some("1:00"), Some("1:10"))
+        };
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(600));
+        let argv = &plan.steps[0].argv;
+        assert_eq!(&argv[..4], ["-ss", "60", "-t", "10"], "{argv:?}");
+        assert!(value(argv, "-vf").starts_with("setpts=PTS/2,"), "{argv:?}");
+        ends_retimed(argv);
+        assert!(plan.range.is_some() && plan.speed.is_some());
+    }
+
+    #[test]
+    fn a_silent_clip_sped_up_gets_no_audio_filter() {
+        let t = Tuning {
+            mute: true,
+            ..sped("2")
+        };
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(600));
+        let argv = &plan.steps[0].argv;
+        assert!(argv.contains(&"-an".to_string()), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "-af"), "{argv:?}");
+    }
+
+    #[test]
+    fn shift_pitch_relabels_the_sample_rate() {
+        let probe = MediaProbe {
+            audio_sample_rate: Some(44_100),
+            ..clip_probe(600)
+        };
+        let t = Tuning {
+            shift_pitch: true,
+            ..sped("2")
+        };
+        for to in [Format::M4a, Format::Mp4] {
+            let plan = sped_plan(Format::Mp4, to, &t, &probe);
+            assert_eq!(
+                value(&plan.steps[0].argv, "-af"),
+                "aresample=44100,asetrate=88200,aresample=44100",
+                "{to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_speed_change_is_refused_on_a_still_image() {
+        let e = build_tuned(
+            Format::Png,
+            Format::Jpg,
+            &[p("a.png")],
+            Path::new("a.jpg"),
+            None,
+            None,
+            &sped("2"),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::InvalidInvocation);
+        assert!(
+            e.message
+                .starts_with("--speed does not apply to png -> jpg"),
+            "{}",
+            e.message
+        );
     }
 }

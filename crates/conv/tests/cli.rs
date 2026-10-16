@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use assert_cmd::Command;
@@ -2928,6 +2929,317 @@ fn a_batch_cut_fails_only_the_file_too_short_for_it() {
     let clips = dir.path().join("10s-12s");
     assert!(clips.join("long.mkv").is_file());
     assert!(!clips.join("short.mkv").exists());
+}
+
+// --- --speed -------------------------------------------------------------
+
+/// Every pair with a timeline lists the speed flags, and nothing else does.
+#[test]
+fn capabilities_lists_the_speed_flags_where_a_cut_works() {
+    let out = conv()
+        .args(["capabilities", "mp4", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    for target in [
+        "mov", "mkv", "webm", "gif", "mp3", "m4a", "wav", "flac", "opus",
+    ] {
+        let flags = tuning_row(&v, target);
+        for f in ["--speed", "--shift-pitch"] {
+            assert!(flags.iter().any(|x| x == f), "mp4 -> {target} lacks {f}");
+        }
+    }
+    let out = conv()
+        .args(["capabilities", "png", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert!(!tuning_row(&v, "jpg").iter().any(|x| x == "--speed"));
+}
+
+#[test]
+fn a_speed_on_an_image_is_refused_by_name() {
+    conv()
+        .args(["photo.png", "out.jpg", "--speed", "2", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--speed does not apply to png -> jpg: jpg is a still image",
+        ));
+}
+
+#[test]
+fn a_speed_that_changes_nothing_or_is_out_of_range_is_a_usage_error() {
+    for (speed, why) in [
+        ("1", "1 is the speed it already plays at"),
+        ("200", "conv takes 0.01 to 100"),
+        ("fast", "expected a number such as 2, 0.5 or 1.25x"),
+    ] {
+        conv()
+            .args(["clip.mp4", "--speed", speed, "--dry-run"])
+            .assert()
+            .code(2)
+            .stderr(contains(why));
+    }
+    conv()
+        .args(["clip.mp4", "--shift-pitch", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("--speed"));
+}
+
+/// ffmpeg and ffprobe, found the way conv finds them.
+fn media_tools() -> (PathBuf, PathBuf) {
+    let resolver = convkit_core::Resolver::new();
+    let find = |b| resolver.resolve(b).expect("this test needs ffmpeg").path;
+    (
+        find(convkit_core::Backend::Ffmpeg),
+        find(convkit_core::Backend::Ffprobe),
+    )
+}
+
+/// Ten seconds of 30 fps video and a 440 Hz tone at 44.1 kHz, with a
+/// subtitle track and two chapters, which a speed change leaves out.
+fn talk_with_extras(dir: &Path, ffmpeg: &Path) -> PathBuf {
+    std::fs::write(
+        dir.join("subs.srt"),
+        "1\n00:00:02,000 --> 00:00:04,000\nhello\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("chapters.txt"),
+        ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=5000\ntitle=one\n\
+         [CHAPTER]\nTIMEBASE=1/1000\nSTART=5000\nEND=10000\ntitle=two\n",
+    )
+    .unwrap();
+    let talk = dir.join("talk.mp4");
+    let ok = std::process::Command::new(ffmpeg)
+        .current_dir(dir)
+        .args(["-v", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x90:rate=30:duration=10",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=10",
+        ])
+        .args(["-i", "subs.srt", "-i", "chapters.txt"])
+        .args(["-map", "0", "-map", "1", "-map", "2"])
+        .args(["-map_metadata", "3", "-map_chapters", "3"])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args(["-c:a", "aac", "-c:s", "mov_text"])
+        .arg(&talk)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    talk
+}
+
+/// What ffprobe reports of a file: its length in seconds, each stream's
+/// type, its chapters, and the first stream's frame rate and the first audio
+/// stream's sample rate where it has them.
+struct Probed {
+    secs: f64,
+    kinds: Vec<String>,
+    chapters: usize,
+    rate: Option<String>,
+    sample_rate: Option<String>,
+}
+
+fn probed(ffprobe: &Path, file: &Path) -> Probed {
+    let out = std::process::Command::new(ffprobe)
+        .args(["-v", "error", "-print_format", "json"])
+        .args(["-show_format", "-show_streams", "-show_chapters"])
+        .arg(file)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let streams = v["streams"].as_array().unwrap();
+    let first = |kind: &str, key: &str| {
+        streams
+            .iter()
+            .find(|s| s["codec_type"] == kind)
+            .and_then(|s| s[key].as_str())
+            .map(str::to_owned)
+    };
+    Probed {
+        secs: v["format"]["duration"].as_str().unwrap().parse().unwrap(),
+        kinds: streams
+            .iter()
+            .map(|s| s["codec_type"].as_str().unwrap().to_owned())
+            .collect(),
+        chapters: v["chapters"].as_array().map_or(0, Vec::len),
+        rate: first("video", "avg_frame_rate"),
+        sample_rate: first("audio", "sample_rate"),
+    }
+}
+
+/// The tone's pitch in Hz, from its zero crossings in the middle second of
+/// the sound, decoded to mono 16-bit samples at 44.1 kHz.
+fn pitch(ffmpeg: &Path, file: &Path, secs: f64) -> f64 {
+    let out = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(file)
+        .args(["-vn", "-ac", "1", "-ar", "44100", "-f", "s16le", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let samples: Vec<i16> = out
+        .stdout
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    let mid = (secs / 2.0 * 44_100.0) as usize;
+    let second = &samples[mid - 22_050..mid + 22_050];
+    let crossings = second
+        .windows(2)
+        .filter(|w| (w[0] < 0) != (w[1] < 0))
+        .count();
+    crossings as f64 / 2.0
+}
+
+fn close(got: f64, want: f64, within: f64) -> bool {
+    (got - want).abs() <= within
+}
+
+#[test]
+#[ignore]
+fn a_speed_change_retimes_picture_and_sound_and_drops_subtitles_and_chapters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, ffprobe) = media_tools();
+    talk_with_extras(dir.path(), &ffmpeg);
+    for (speed, name, secs) in [
+        ("2", "talk-2x.mp4", 5.0),
+        ("0.5x", "talk-0.5x.mp4", 20.0),
+        ("0.25", "talk-0.25x.mp4", 40.0),
+    ] {
+        conv()
+            .current_dir(dir.path())
+            .args(["talk.mp4", "--speed", speed])
+            .assert()
+            .success();
+        let p = probed(&ffprobe, &dir.path().join(name));
+        assert!(close(p.secs, secs, 0.15), "{name}: {} s", p.secs);
+        assert_eq!(
+            p.rate.as_deref(),
+            Some("30/1"),
+            "{name} keeps the frame rate"
+        );
+        assert_eq!(p.kinds, ["video", "audio"], "{name}");
+        assert_eq!(p.chapters, 0, "{name}");
+        let hz = pitch(&ffmpeg, &dir.path().join(name), secs);
+        assert!(close(hz, 440.0, 10.0), "{name} keeps its pitch: {hz} Hz");
+    }
+}
+
+#[test]
+#[ignore]
+fn shift_pitch_moves_the_pitch_with_the_speed_and_keeps_the_sample_rate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, ffprobe) = media_tools();
+    talk_with_extras(dir.path(), &ffmpeg);
+    for (speed, name, secs, hz) in [
+        ("2", "talk-2x-pitched.m4a", 5.0, 880.0),
+        ("0.5", "talk-0.5x-pitched.m4a", 20.0, 220.0),
+    ] {
+        conv()
+            .current_dir(dir.path())
+            .args(["talk.mp4", ".m4a", "--speed", speed, "--shift-pitch"])
+            .assert()
+            .success();
+        let out = dir.path().join("talk.m4a");
+        let p = probed(&ffprobe, &out);
+        assert!(close(p.secs, secs, 0.15), "{name}: {} s", p.secs);
+        assert_eq!(p.sample_rate.as_deref(), Some("44100"), "{name}");
+        let got = pitch(&ffmpeg, &out, secs);
+        assert!(close(got, hz, 10.0), "{name}: {got} Hz, wanted {hz}");
+        std::fs::remove_file(out).unwrap();
+    }
+}
+
+#[test]
+#[ignore]
+fn a_speed_change_reaches_gif_webm_and_audio_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, ffprobe) = media_tools();
+    talk_with_extras(dir.path(), &ffmpeg);
+    for out in ["fast.gif", "fast.webm", "fast.mp3", "fast.opus", "fast.wav"] {
+        conv()
+            .current_dir(dir.path())
+            .args(["talk.mp4", out, "--speed", "2"])
+            .assert()
+            .success();
+        let p = probed(&ffprobe, &dir.path().join(out));
+        assert!(close(p.secs, 5.0, 0.15), "{out}: {} s", p.secs);
+        if out.ends_with(".webm") {
+            assert_eq!(p.rate.as_deref(), Some("30/1"), "{out}");
+        }
+    }
+    // Slowed into matroska, which keeps whatever timestamps it is given.
+    conv()
+        .current_dir(dir.path())
+        .args(["talk.mp4", "slow.mkv", "--speed", "0.5"])
+        .assert()
+        .success();
+    let p = probed(&ffprobe, &dir.path().join("slow.mkv"));
+    assert!(close(p.secs, 20.0, 0.15), "{} s", p.secs);
+    assert_eq!(p.rate.as_deref(), Some("30/1"));
+}
+
+#[test]
+#[ignore]
+fn a_cut_then_a_speed_change_plays_the_clip_faster() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, ffprobe) = media_tools();
+    talk_with_extras(dir.path(), &ffmpeg);
+    let out = conv()
+        .current_dir(dir.path())
+        .args([
+            "talk.mp4", "--start", "2", "--end", "6", "--speed", "2", "--json",
+        ])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(
+        v["results"][0]["speed"],
+        serde_json::json!({"factor": 2.0, "shift_pitch": false})
+    );
+    let p = probed(&ffprobe, &dir.path().join("talk-2s-6s-2x.mp4"));
+    assert!(close(p.secs, 2.0, 0.15), "{} s", p.secs);
+}
+
+#[test]
+#[ignore]
+fn a_sized_speed_change_fits_the_output_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, ffprobe) = media_tools();
+    talk_with_extras(dir.path(), &ffmpeg);
+    conv()
+        .current_dir(dir.path())
+        .args(["talk.mp4", "--speed", "2", "--max-size", "300kb", "--yes"])
+        .assert()
+        .success();
+    let out = dir.path().join("talk-2x-300kb.mp4");
+    let p = probed(&ffprobe, &out);
+    assert!(close(p.secs, 5.0, 0.15), "{} s", p.secs);
+    assert!(std::fs::metadata(&out).unwrap().len() <= 300_000);
 }
 
 // --- conv trim -----------------------------------------------------------

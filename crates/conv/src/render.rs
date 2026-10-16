@@ -279,6 +279,9 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     if let Some(r) = &o.range {
         v["range"] = json!(r);
     }
+    if let Some(s) = &o.speed {
+        v["speed"] = json!(s);
+    }
     v
 }
 
@@ -650,6 +653,7 @@ mod tests {
             sizing: None,
             enlarged: None,
             range: None,
+            speed: None,
         }
     }
 
@@ -699,6 +703,20 @@ mod tests {
             outcome_json(&o)["range"],
             serde_json::json!({"start_ms": 62000, "end_ms": 70000,
                                "requested": {"start": "1:02", "end": "1:10"}})
+        );
+    }
+
+    #[test]
+    fn a_sped_result_reports_its_speed_and_others_do_not() {
+        let mut o = sample_outcome(10, false, vec![]);
+        assert!(outcome_json(&o).get("speed").is_none());
+        o.speed = Some(convkit_core::speed::SpeedReport {
+            factor: convkit_core::speed::parse("0.5x").unwrap(),
+            shift_pitch: true,
+        });
+        assert_eq!(
+            outcome_json(&o)["speed"],
+            serde_json::json!({"factor": 0.5, "shift_pitch": true})
         );
     }
 
