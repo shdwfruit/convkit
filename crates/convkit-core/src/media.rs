@@ -493,7 +493,18 @@ pub(crate) fn transcoded_invocation(
         Format::Webm => (
             "libvpx-vp9",
             registry::WEBM_CRF,
-            &["-b:v", "0", "-row-mt", "1", "-threads", "0"],
+            &[
+                "-b:v",
+                "0",
+                "-row-mt",
+                "1",
+                "-threads",
+                "0",
+                "-deadline",
+                "good",
+                "-cpu-used",
+                registry::VP9_CPU_USED,
+            ],
         ),
         _ => return None,
     };
@@ -552,7 +563,19 @@ pub(crate) fn two_pass_invocations(
         Format::Mp4 | Format::Mov | Format::Mkv => ("libx264", &["-pix_fmt", "yuv420p"]),
         // No `-b:v 0`: that is libvpx's constant-quality switch, the
         // opposite of a bitrate target.
-        Format::Webm => ("libvpx-vp9", &["-row-mt", "1", "-threads", "0"]),
+        Format::Webm => (
+            "libvpx-vp9",
+            &[
+                "-row-mt",
+                "1",
+                "-threads",
+                "0",
+                "-deadline",
+                "good",
+                "-cpu-used",
+                registry::VP9_CPU_USED,
+            ],
+        ),
         _ => return None,
     };
     let chain = registry::TRANSCODE_CHAIN.compose(resolved);
@@ -1675,6 +1698,13 @@ mod tests {
             "{:?}",
             m.argv
         );
+        assert!(
+            m.argv
+                .windows(4)
+                .any(|w| w == ["-deadline", "good", "-cpu-used", registry::VP9_CPU_USED]),
+            "{:?}",
+            m.argv
+        );
     }
 
     #[test]
@@ -1922,6 +1952,11 @@ mod tests {
                 "constant-quality mode must be off: {argv:?}"
             );
             assert!(!argv.iter().any(|x| x == "-crf"), "{argv:?}");
+            assert!(
+                argv.windows(4)
+                    .any(|w| w == ["-deadline", "good", "-cpu-used", registry::VP9_CPU_USED]),
+                "both passes run at the same speed: {argv:?}"
+            );
         }
         assert!(has(&t.pass2.argv, ["-c:a", "libopus"]));
         assert!(has(&t.pass2.argv, ["-b:a", "64k"]));

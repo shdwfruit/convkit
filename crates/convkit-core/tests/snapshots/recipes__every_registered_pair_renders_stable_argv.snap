@@ -12,7 +12,7 @@ avi -> mp4: ffmpeg -i in.avi -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 
 avi -> ogg: ffmpeg -i in.avi -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 avi -> opus: ffmpeg -i in.avi -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 avi -> wav: ffmpeg -i in.avi -vn -c:a pcm_s16le -y out.wav
-avi -> webm: ffmpeg -i in.avi -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+avi -> webm: ffmpeg -i in.avi -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
 avif -> bmp: magick in.avif[0] -auto-orient out.bmp
 avif -> jpg: magick in.avif[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
 avif -> pdf: magick in.avif -auto-orient -compress jpeg -quality 92 out.pdf
@@ -76,7 +76,7 @@ mkv -> mp4: ffmpeg -i in.mkv -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 
 mkv -> ogg: ffmpeg -i in.mkv -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 mkv -> opus: ffmpeg -i in.mkv -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 mkv -> wav: ffmpeg -i in.mkv -vn -c:a pcm_s16le -y out.wav
-mkv -> webm: ffmpeg -i in.mkv -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+mkv -> webm: ffmpeg -i in.mkv -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
 mov -> flac: ffmpeg -i in.mov -vn -c:a flac -y out.flac
 mov -> gif: ffmpeg -i in.mov -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
 mov -> m4a: ffmpeg -i in.mov -vn -c:a aac -b:a 192k -y out.m4a
@@ -86,7 +86,7 @@ mov -> mp4: ffmpeg -i in.mov -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 
 mov -> ogg: ffmpeg -i in.mov -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 mov -> opus: ffmpeg -i in.mov -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 mov -> wav: ffmpeg -i in.mov -vn -c:a pcm_s16le -y out.wav
-mov -> webm: ffmpeg -i in.mov -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+mov -> webm: ffmpeg -i in.mov -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
 mp3 -> flac: ffmpeg -i in.mp3 -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
 mp3 -> m4a: ffmpeg -i in.mp3 -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
 mp3 -> ogg: ffmpeg -i in.mp3 -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
@@ -101,7 +101,7 @@ mp4 -> mp3: ffmpeg -i in.mp4 -vn -c:a libmp3lame -q:a 2 -y out.mp3
 mp4 -> ogg: ffmpeg -i in.mp4 -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 mp4 -> opus: ffmpeg -i in.mp4 -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 mp4 -> wav: ffmpeg -i in.mp4 -vn -c:a pcm_s16le -y out.wav
-mp4 -> webm: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+mp4 -> webm: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
 ods -> csv: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to csv:Text - txt - csv (StarCalc):44,34,76,1,,1033,false,true,false,false,false,0 --outdir . in.ods
 ods -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.ods
 odt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.odt
