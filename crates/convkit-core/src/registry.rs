@@ -1875,7 +1875,10 @@ fn recipe_read_for(from: Format, to: Format, tuning: &Tuning) -> Option<Recipe> 
 /// largest, and at the density it renders a vector source at.
 pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::probe::ImageRead> {
     let upscale = tuning.upscale && tuning.resize.is_some();
-    if !upscale && to != Format::Ico {
+    // A resize into the file's own format may be a no-op, which the note
+    // says only when the size is known.
+    let in_place = from == to && tuning.resize.is_some();
+    if !upscale && !in_place && to != Format::Ico {
         return None;
     }
     let step = recipe_read_for(from, to, tuning)?.steps.iter().find(|s| {
@@ -2151,7 +2154,14 @@ pub fn resize_in_place(f: Format) -> Result<(), String> {
     let ext = f.ext();
     let reason = match f.kind() {
         Kind::Image if matches!(f, Format::Heic | Format::Heif) => format!("write {ext}"),
-        Kind::Image => format!("resize a {ext} into a {ext}"),
+        Kind::Image => {
+            let a = if matches!(f, Format::Svg | Format::Ico) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("resize {a} {ext} into {a} {ext}")
+        }
         Kind::Video => format!("write {ext}"),
         Kind::Audio => "resize sound".to_string(),
         Kind::Document => "resize a document".to_string(),
@@ -3366,12 +3376,12 @@ mod tests {
             ),
             (
                 Format::Svg,
-                "--resize keeps svg's own format, and conv can't resize a svg into a svg; \
+                "--resize keeps svg's own format, and conv can't resize an svg into an svg; \
                  add --to png",
             ),
             (
                 Format::Ico,
-                "--resize keeps ico's own format, and conv can't resize a ico into a ico; \
+                "--resize keeps ico's own format, and conv can't resize an ico into an ico; \
                  add --to <format>",
             ),
             (

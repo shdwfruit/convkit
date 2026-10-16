@@ -1871,6 +1871,35 @@ mod tests {
         assert!(has(argv, ["-metadata", "title=Clip"]), "{argv:?}");
     }
 
+    /// A photo already within the size says so too, from the size the
+    /// caller read for it; the read is asked for only when a resize in place
+    /// could be a no-op.
+    #[test]
+    fn a_photo_resized_in_place_that_does_not_bind_says_so() {
+        let tuning = resized("4000");
+        assert!(
+            registry::image_read(Format::Jpg, Format::Jpg, &tuning).is_some(),
+            "the size is read"
+        );
+        let plan = build_tuned(
+            Format::Jpg,
+            Format::Jpg,
+            &[p("photo.jpg")],
+            Path::new("photo-4000w.jpg"),
+            Some(&clip_probe(60)),
+            None,
+            &tuning,
+        )
+        .unwrap();
+        assert!(
+            plan.warnings.iter().any(|w| {
+                w == "Source is 1280x720; --resize 4000 left it unchanged (add --upscale to enlarge)."
+            }),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
     /// A video already within the size is left as it is, and the note says
     /// so, as it does for a conversion.
     #[test]

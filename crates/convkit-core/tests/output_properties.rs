@@ -3771,6 +3771,18 @@ fn a_photo_and_a_clip_resized_in_place_shrink_and_keep_their_format() {
     assert_eq!(imagemagick_dimensions(&half), (96, 48), "upright, halved");
     assert!(carries_identifying(&half));
     assert!(says_location(&outcome), "{:?}", outcome.warnings);
+    // A resize larger than the picture changes nothing, and says so.
+    let same = dir.path().join("IMG_0042-4000w.jpg");
+    let outcome = convert_tuned(&photo, &same, &resize("4000")).unwrap();
+    assert_eq!(imagemagick_dimensions(&same), (192, 96));
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("Source is 192x96; --resize 4000 left it unchanged")),
+        "{:?}",
+        outcome.warnings
+    );
 
     let clip = synth_video(&dir, 640, 360, 30);
     let small = dir.path().join("src-320w.mov");
