@@ -430,7 +430,10 @@ fn in_place(
             validate_tuning(&recipe, format, format, tuning, &resolved)?;
             let steps = render_steps(&recipe, inputs, output, tuning, &resolved, kept);
             let mut warnings = registry::notes_for(&recipe, probe);
-            if matches!(format, Format::Jpg | Format::Webp | Format::Avif) {
+            if matches!(
+                format,
+                Format::Jpg | Format::Webp | Format::Avif | Format::Heic
+            ) {
                 warnings.push(crate::metadata::reencode_note(format, tuning));
             }
             (steps, warnings, resolved.enlarged)
@@ -510,6 +513,7 @@ fn target_for(to: Format) -> Target {
         Format::Jpg => Some((0.05, 0.3)),
         Format::Webp => Some((0.02, 0.15)),
         Format::Avif => Some((0.01, 0.1)),
+        Format::Heic => Some((0.003, 0.06)),
         Format::Png => Some((0.3, 2.0)),
         Format::Tiff => Some((1.0, 4.0)),
         Format::Bmp => Some((3.0, 4.0)),
@@ -666,7 +670,7 @@ fn validate_tuning(
     if tuning.quality.is_some() && !has_slot(|a| matches!(a, Arg::Quality(_))) {
         let why = if matches!(to, Format::Png | Format::Bmp | Format::Tiff) {
             format!(
-                "{} is lossless; --quality applies to jpg/webp/avif targets and image -> pdf",
+                "{} is lossless; --quality applies to jpg/webp/avif/heic targets and image -> pdf",
                 to.ext()
             )
         } else {
@@ -1172,6 +1176,24 @@ mod tests {
         )
         .unwrap();
         assert!(webp.warnings.iter().any(|w| w.contains("quality 70")));
+        // A heic is re-encoded at its own anchor, not JPEG's.
+        let heic = build_tuned(
+            Format::Heic,
+            Format::Heic,
+            &[p("a.heic")],
+            Path::new("a-stripped.heic"),
+            None,
+            None,
+            &stripped(),
+        )
+        .unwrap();
+        assert!(
+            heic.warnings
+                .iter()
+                .any(|w| w.starts_with("The heic is re-encoded at quality 60")),
+            "{:?}",
+            heic.warnings
+        );
         let png = build_tuned(
             Format::Png,
             Format::Png,
@@ -1308,15 +1330,15 @@ mod tests {
         assert!(plan.steps[0].argv.contains(&"50%>".to_string()));
     }
 
-    /// conv cannot write heic, and without the flag a same-format pair is
+    /// conv cannot write heif, and without the flag a same-format pair is
     /// still no pair at all.
     #[test]
     fn only_the_flag_and_a_writable_format_strip_in_place() {
         let e = build_tuned(
-            Format::Heic,
-            Format::Heic,
-            &[p("a.heic")],
-            Path::new("b.heic"),
+            Format::Heif,
+            Format::Heif,
+            &[p("a.heif")],
+            Path::new("b.heif"),
             None,
             None,
             &stripped(),
@@ -1325,7 +1347,7 @@ mod tests {
         assert_eq!(e.code, ErrorCode::InvalidInvocation);
         assert_eq!(
             e.message,
-            "conv cannot write heic; add --to jpg to strip it into a jpg"
+            "conv cannot write heif; add --to heic to strip it into a heic"
         );
         let e = build_tuned(
             Format::Docx,
