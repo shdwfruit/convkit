@@ -254,8 +254,9 @@ pub enum Arg {
     /// Every input path, in order, for ImageMagick's image→PDF merge. A GIF
     /// or WebP gets the `[0]` frame selector (`first_frame_only`), so an
     /// animated one is one page, its first frame, as on the Typst route; any
-    /// other input is taken whole, so a multi-page TIFF keeps every page. A
-    /// path position with its selector, for `InputFirstFrame`'s reason.
+    /// other input is taken whole, so a multi-page TIFF keeps every page.
+    /// Each one, selector and all, is recorded as a path, so the Windows
+    /// long-path rewrite still reaches it, as it does `InputFirstFrame`.
     Inputs,
     /// The output path this step writes.
     Output,

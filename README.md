@@ -153,10 +153,14 @@ are always an ordinary pair: `conv a.png out.pdf` converts one file.
 
 JPG, PNG, WebP and GIF go into a PDF through Typst, which conv can install
 for you. Each picture gets a page of its own size, upright as its EXIF says,
-and a JPEG goes in as it is, without being re-encoded. An animated GIF or
-WebP contributes its first frame. HEIC, HEIF, AVIF, TIFF, BMP and SVG need
-ImageMagick, and so do `--quality` and `--resize`, which re-encode the
-pictures. Any one of them sends the whole merge through ImageMagick.
+and a JPEG goes in as it is, without being re-encoded. PNG and WebP pages
+are kept without loss, so a PDF of photos in those formats can come out
+several times their size; conv says when that happens, and `--quality`
+stores them as JPEG instead. An animated GIF or WebP contributes its first
+frame. HEIC, HEIF, AVIF, TIFF and BMP need ImageMagick, and so do
+`--quality` and `--resize`, which re-encode the pictures. Any one of them
+sends the whole merge through ImageMagick. An SVG or ICO can't start a
+merge, but later in the list it goes in through ImageMagick too.
 
 A failure never looks like a success, and carries its own fix — `try` names
 whichever package manager is on `PATH` (winget/scoop/choco, brew,
@@ -337,11 +341,12 @@ OK IMG_0042.jpg - 2.5 MB - 0.4s
 camera, its serial number, the owner's name, the capture time. An image
 keeps only its colour profile, and is turned upright first, so it comes out
 neither sideways nor with shifted colours. When Typst makes a PDF, a JPEG is
-not re-encoded for this: conv removes the metadata from the file itself and
-keeps the orientation and resolution, so the page comes out the same size
-and the same way up. Video and audio keep their title, artist, album, album
-artist, composer, genre and track and disc numbers, as well as cover art and
-rotation, and a stream copy stays a stream copy:
+not re-encoded for this: the one in the PDF is a copy with its metadata
+taken out, except the orientation and resolution, so the page comes out the
+same size and the same way up. The original is not touched. Video and audio
+keep their title, artist, album, album artist, composer, genre and track and
+disc numbers, as well as cover art and rotation, and a stream copy stays a
+stream copy:
 
 ```console
 $ conv IMG_0042.heic IMG_0042.jpg --strip-metadata
@@ -727,7 +732,7 @@ convkit dispatches to six binaries, each invoked as a subprocess:
 | Backend | Used for | `conv install` | Pinned version |
 |---|---|---|---|
 | `ffmpeg` / `ffprobe` | video, audio, GIF, remux | Yes | 9.0.1 |
-| `magick` (ImageMagick) | images, HEIC/HEIF read, HEIC/HEIF/AVIF/TIFF/BMP → PDF | No — use your package manager | — |
+| `magick` (ImageMagick) | images, HEIC/HEIF read, HEIC/HEIF/AVIF/TIFF/BMP → PDF, and image → PDF with `--quality`, `--resize`, or an SVG or ICO in the merge | No — use your package manager | — |
 | `pandoc` | Markdown → HTML/DOCX; parses docx/odt for the PDF fallback | Yes | 3.11 |
 | `typst` | JPG/PNG/WebP/GIF → PDF; PDF engine for the docx/odt → pdf fallback | Yes | 0.15.1 |
 | `soffice` (LibreOffice) | Office documents ⇄ PDF | No — manual install, always | — |
