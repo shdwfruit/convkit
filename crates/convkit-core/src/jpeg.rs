@@ -6,7 +6,6 @@
 //! re-encoded. What stays is what changes how the picture looks: JFIF, the
 //! ICC profile, Adobe's colour flag, and a minimal EXIF holding only the
 //! orientation and resolution.
-#![allow(dead_code)]
 
 use std::path::Path;
 
@@ -233,6 +232,7 @@ fn exif_tiff<'a>(segs: &[Segment<'a>]) -> Option<Tiff<'a>> {
         .find_map(|s| Tiff::new(s.payload.strip_prefix(EXIF_HEADER)?))
 }
 
+#[allow(dead_code)]
 /// Whether the JPEG records where it was taken: an EXIF GPS block with a
 /// latitude.
 pub(crate) fn has_location(bytes: &[u8]) -> bool {
@@ -250,6 +250,7 @@ pub(crate) fn has_location(bytes: &[u8]) -> bool {
         .any(|gps| gps.iter().any(|e| e.tag == TAG_GPS_LATITUDE))
 }
 
+#[allow(dead_code)]
 /// `has_location` for a file; false when it cannot be read.
 pub(crate) fn file_has_location(path: &Path) -> bool {
     std::fs::read(path).is_ok_and(|b| has_location(&b))
