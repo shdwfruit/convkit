@@ -2633,11 +2633,13 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
 
     // --- prepare steps ---------------------------------------------------------
 
+    #[cfg(unix)]
     fn staged_from_hard_link(from: &Path, to: &Path) -> Result<()> {
         stage_file(from, to, false, hard_link)
     }
 
     /// A magick-shaped step whose argv is the three files the stub looks at.
+    #[cfg(unix)]
     fn prepared_step(
         written: &Path,
         staged: &Path,
