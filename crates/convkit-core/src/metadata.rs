@@ -115,7 +115,7 @@ pub fn strip_target_for(f: Format) -> Option<Format> {
     match f {
         Format::Heic | Format::Heif => Some(Format::Jpg),
         Format::Svg => Some(Format::Png),
-        // gif -> mp4 is the only conversion conv has for a gif.
+        // gif -> mp4 keeps every frame, where gif -> pdf keeps the first.
         Format::Gif | Format::Avi => Some(Format::Mp4),
         _ => None,
     }

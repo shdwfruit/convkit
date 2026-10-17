@@ -19,6 +19,162 @@ fn dry_run_prints_the_expert_ffmpeg_command() {
         .stdout(contains("palettegen=stats_mode=diff"));
 }
 
+/// Photos merge on Typst, an uppercase extension included, with nothing
+/// installed: the preview is the Typst command, its layout beside the
+/// output.
+#[test]
+fn an_image_merge_dry_run_shows_the_typst_command() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.jpg", "B.JPG"] {
+        std::fs::write(dir.path().join(name), b"not really a jpeg").unwrap();
+    }
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .current_dir(dir.path())
+        .args(["a.jpg", "B.JPG", "out.pdf", "--dry-run"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with("typst compile --root "))
+        .unwrap_or_else(|| panic!("no typst command: {stdout}"));
+    assert!(
+        line.contains(" out.convkit-layout.typ ") && line.ends_with(" out.pdf"),
+        "{line}"
+    );
+    assert!(!stdout.contains("magick"), "{stdout}");
+}
+
+/// The start of a JPEG whose EXIF records a GPS latitude, which is all
+/// conv reads for the location note: IFD0's GPS pointer, to a GPS IFD
+/// holding a latitude.
+#[cfg(unix)]
+const LOCATED_JPEG: &[u8] = b"\xff\xd8\xff\xe1\x00\x34Exif\0\0MM\0\x2a\0\0\0\x08\
+    \0\x01\x88\x25\0\x04\0\0\0\x01\0\0\0\x1a\0\0\0\0\
+    \0\x01\0\x02\0\x05\0\0\0\x03\0\0\0\0\0\0\0\0";
+
+/// Photos merge on the managed Typst with no ImageMagick anywhere, and the
+/// preview and the run both note the JPEG's location, which conv reads
+/// itself.
+#[cfg(unix)]
+#[test]
+fn a_typst_merge_runs_without_imagemagick() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.jpg"), LOCATED_JPEG).unwrap();
+    std::fs::write(dir.path().join("b.png"), b"not really a png").unwrap();
+    let stub = dir.path().join("typst_stub.sh");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\n\
+         if [ \"$#\" = \"1\" ]; then exit 0; fi\n\
+         for a in \"$@\"; do last=\"$a\"; done\n\
+         printf pdf > \"$last\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let note = "The source records a GPS location, and the pdf keeps it";
+    for dry_run in [true, false] {
+        let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+        cmd.current_dir(dir.path())
+            .env("CONVKIT_TYPST", &stub)
+            .args(["a.jpg", "b.png", "out.pdf"]);
+        if dry_run {
+            cmd.arg("--dry-run");
+        }
+        let assert = cmd.timeout(Duration::from_secs(10)).assert().success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+        assert!(stdout.contains(note), "{stdout}");
+        assert!(!stdout.contains("magick"), "{stdout}");
+        if !dry_run {
+            assert!(stdout.starts_with("OK out.pdf"), "{stdout}");
+        }
+    }
+    assert_eq!(std::fs::read(dir.path().join("out.pdf")).unwrap(), b"pdf");
+}
+
+/// A merge that needs ImageMagick says why when it is missing: a photos
+/// merge otherwise needs nothing the user installs by hand.
+#[test]
+fn a_merge_that_needs_imagemagick_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.jpg", "b.heic"] {
+        std::fs::write(dir.path().join(name), b"not really a photo").unwrap();
+    }
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .current_dir(dir.path())
+        .args(["a.jpg", "b.heic", "out.pdf"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains(
+            "magick not found; b.heic needs it (the built-in route reads JPG, PNG, WebP and GIF only)"
+        ),
+        "{stderr}"
+    );
+    assert!(stderr.contains("try  "), "{stderr}");
+}
+
+/// With neither Typst nor ImageMagick, a photos merge says what Typst is
+/// for, and the fix is `conv install typst`.
+#[test]
+fn a_merge_without_typst_says_why_and_offers_to_install_it() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.jpg", "b.png"] {
+        std::fs::write(dir.path().join(name), b"not really a photo").unwrap();
+    }
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .current_dir(dir.path())
+        .args(["a.jpg", "b.png", "out.pdf"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("typst not found; images go into a PDF through Typst"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("try  conv install typst"), "{stderr}");
+}
+
+/// Photos merged on ImageMagick before Typst took them, so with only
+/// ImageMagick installed they still do, in the preview and the run, and the
+/// note says why and how to get Typst.
+#[test]
+fn a_merge_without_typst_runs_on_imagemagick_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.jpg", "b.png"] {
+        std::fs::write(dir.path().join(name), b"not really a photo").unwrap();
+    }
+    let stub = write_magick_stub(dir.path());
+    let note = "Typst is not installed, so ImageMagick made this PDF";
+    for dry_run in [true, false] {
+        let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+        cmd.current_dir(dir.path())
+            .env("CONVKIT_MAGICK", &stub)
+            .args(["a.jpg", "b.png", "out.pdf"]);
+        if dry_run {
+            cmd.arg("--dry-run");
+        }
+        let assert = cmd.timeout(Duration::from_secs(10)).assert().success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+        assert!(stdout.contains(note), "{stdout}");
+        assert!(stdout.contains("conv install typst"), "{stdout}");
+        if dry_run {
+            assert!(stdout.contains(" -compress jpeg "), "{stdout}");
+            assert!(!stdout.contains("typst compile"), "{stdout}");
+        } else {
+            assert!(stdout.starts_with("OK out.pdf"), "{stdout}");
+        }
+    }
+    assert_eq!(std::fs::read(dir.path().join("out.pdf")).unwrap(), b"x");
+}
+
 /// A lone photo under `--strip-metadata` keeps its format under a new name,
 /// and the command strips only after orienting.
 #[test]
@@ -1361,6 +1517,34 @@ fn capabilities_lists_strip_metadata_where_it_applies() {
     let assert = conv().args(["capabilities", "docx"]).assert().success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(!stdout.contains("--strip-metadata"), "{stdout}");
+}
+
+/// Photos merge into a PDF on Typst, which embeds a JPEG as it is, and
+/// `--quality` and `--resize` still work there: they move the run to
+/// ImageMagick, so the pair lists both routes' flags. Its defaults are the
+/// Typst route's, which re-encodes nothing.
+#[test]
+fn capabilities_list_quality_and_resize_for_jpg_to_pdf() {
+    for format in ["jpg", "gif"] {
+        let out = conv()
+            .args(["capabilities", format, "--json"])
+            .assert()
+            .success();
+        let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+        let flags = tuning_row(&v, "pdf");
+        for f in ["--quality", "--resize", "--upscale", "--strip-metadata"] {
+            assert!(flags.iter().any(|x| x == f), "{format} -> pdf lacks {f}");
+        }
+        assert!(!flags.iter().any(|x| x == "--colors"), "{flags:?}");
+        let row = v["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["to"] == "pdf")
+            .unwrap();
+        assert_eq!(row["backends"], serde_json::json!(["typst"]), "{row}");
+        assert_eq!(row["defaults"], serde_json::json!({}), "{row}");
+    }
 }
 
 /// `conv scan` answers the one question the tool could not: what is in front

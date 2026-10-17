@@ -447,7 +447,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             .ok()
             .and_then(|p| probe::run(&p.path, &req.inputs[0]).ok())
     } else if let (Some(read), Some(geometry)) = (
-        registry::image_read(req.from, req.to, &req.tuning),
+        registry::image_read(req.from, req.to, &req.inputs, &req.tuning),
         registry::image_read_geometry(req.to, &req.tuning),
     ) {
         // A size that cannot be read leaves `--upscale` its general
@@ -460,17 +460,23 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     } else {
         None
     };
+    // Likewise: only check backend availability when this pair actually has
+    // more than one recipe to choose between (today: docx/odt -> pdf, and a
+    // photos merge). An ordinary conversion never pays for the extra
+    // resolve() calls this would otherwise cost.
+    let backends = registry::fallback_backends(req.from, req.to);
+    let available = (!backends.is_empty()).then(|| resolver.check_availability(backends));
     // Whether a jpg/png/bmp target's notes apply, and whether the source
-    // records a location the output would keep. A read that fails keeps the
-    // frame and alpha notes whole, and gives no location note.
-    if registry::notes_need_image(req.from, req.to, &req.tuning) {
-        let traits = resolver
-            .resolve(Backend::Magick)
-            .ok()
-            .and_then(|m| probe::image_traits(&m.path, &req.inputs).ok());
-        if let Some(t) = traits {
-            probed.get_or_insert_with(MediaProbe::default).image = Some(t);
-        }
+    // records a location the output would keep.
+    if let Some(t) = probe::traits_for_notes(
+        resolver,
+        req.from,
+        req.to,
+        &req.inputs,
+        &req.tuning,
+        available.as_ref(),
+    ) {
+        probed.get_or_insert_with(MediaProbe::default).image = Some(t);
     }
     // Whether an Office source is encrypted or carries macros. A plain
     // file read, no backend.
@@ -500,16 +506,6 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             probed.get_or_insert_with(MediaProbe::default).table = Some(t);
         }
     }
-
-    // Likewise: only check backend availability when this pair actually has
-    // more than one recipe to choose between (today: docx/odt -> pdf). An
-    // ordinary conversion never pays for the extra resolve() calls this
-    // would otherwise cost.
-    let available = if registry::has_fallback(req.from, req.to) {
-        Some(resolver.check_availability(registry::FALLBACK_BACKENDS))
-    } else {
-        None
-    };
 
     let dest_dir = req
         .output
@@ -584,7 +580,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                 {
                     ConvError::password_protected(&req.inputs[0], req.from)
                 } else {
-                    e
+                    explain_missing_backend(e, req)
                 }
             })?;
             (built, None)
@@ -624,6 +620,23 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let range = ran.range.clone();
     let speed = ran.speed.clone();
     let mut warnings = ran.warnings;
+    // Only the written PDF says what Typst's lossless pages cost, so it is
+    // measured against the images, and said with the other notes.
+    if registry::typst_merge(
+        req.from,
+        req.to,
+        &req.inputs,
+        &req.tuning,
+        available.as_ref(),
+    ) {
+        let images = req
+            .inputs
+            .iter()
+            .filter_map(|i| std::fs::metadata(i).ok())
+            .map(|m| m.len())
+            .sum();
+        warnings.extend(registry::lossless_size_note(&req.inputs, images, bytes));
+    }
     let sizing = sizing.map(|(sz, attempts, held_back)| {
         let tracks = probed.as_ref().map_or(0, |p| p.audio_codecs.len());
         let report = sized::report(&sz, bytes, attempts, tracks);
@@ -666,6 +679,28 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     })
 }
 
+/// A missing ImageMagick or Typst says what needs it on a photos merge,
+/// where the user may never have asked for either: ImageMagick where the
+/// merge would otherwise run without it (`registry::magick_reason`), Typst
+/// where it runs on Typst (`registry::typst_reason`). The code, backend and
+/// fix stay as they are, so the install prompt still offers the fix.
+fn explain_missing_backend(mut e: ConvError, req: &Request) -> ConvError {
+    if e.code != ErrorCode::BackendMissing {
+        return e;
+    }
+    let reason = match e.backend {
+        Some(Backend::Magick) => registry::magick_reason(req.to, &req.inputs, &req.tuning),
+        Some(Backend::Typst) => {
+            registry::typst_reason(req.from, req.to, &req.inputs, &req.tuning).map(str::to_string)
+        }
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        e.message = format!("{}; {reason}", e.message);
+    }
+    e
+}
+
 /// Runs plan steps for one conversion and accumulates what they report.
 /// Extracted from `run`'s loop so a sized conversion can run its passes
 /// again through exactly the same spawn, check and report path.
@@ -698,6 +733,17 @@ impl StepRunner<'_> {
             backend: step.backend,
         });
         let resolved = self.resolver.resolve(step.backend)?;
+
+        for prepare in &step.prepare {
+            match prepare {
+                plan::Prepare::Write { path, contents } => {
+                    std::fs::write(path, contents).map_err(io_err)?;
+                }
+                plan::Prepare::Stage { from, to, strip } => {
+                    stage_file(from, to, *strip, hard_link)?;
+                }
+            }
+        }
 
         // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
         // inside `backend_command`, not repeated here -- see its docs.
@@ -816,6 +862,9 @@ impl StepRunner<'_> {
                 step_report.push_str(&stdout);
             }
         }
+        // Typst's merge reads copies under names convkit made up; the user
+        // knows only their own files.
+        let step_report = crate::layout::name_inputs(&step_report, step);
 
         if !step_report.trim().is_empty() {
             (self.on_event)(Event::StepReport {
@@ -1185,6 +1234,57 @@ fn locate_outdir_result(input_stem: &OsStr, want_ext: &str, dir: &Path) -> Resul
 
 fn io_err(e: std::io::Error) -> ConvError {
     ConvError::new(ErrorCode::ConversionFailed, e.to_string())
+}
+
+fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(from, to)
+}
+
+/// Places `from` at `to` for a step to read: a hard link to the input's
+/// resolved path (so a relative symlink never dangles in scratch), else a
+/// copy. With `strip`, a JPEG is written without its metadata instead.
+/// `link` is a parameter so the copy fallback is testable. Every failure
+/// names `from`, the user's file, never `to`, which is convkit's.
+fn stage_file(
+    from: &Path,
+    to: &Path,
+    strip: bool,
+    link: fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    // A path that does not resolve (as on some Windows virtual drives) is
+    // used as given: only reading, linking or copying it can fail the run.
+    let source = std::fs::canonicalize(from).unwrap_or_else(|_| from.to_path_buf());
+    let failed = |what: &str, e: std::io::Error| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!("could not {what} {}: {e}", from.display()),
+        )
+    };
+    // A file already at `to` is replaced, never written into: it may be a
+    // hard link to this very input, and a copy or a stripped write onto a
+    // link empties or rewrites the user's own file.
+    match std::fs::remove_file(to) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed("copy", e)),
+        _ => {}
+    }
+    if strip {
+        let bytes = std::fs::read(&source).map_err(|e| failed("read", e))?;
+        let clean = crate::jpeg::strip(&bytes).map_err(|reason| {
+            ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!(
+                    "could not remove the metadata from {}: {reason}; add --quality to \
+                     re-encode it with ImageMagick instead",
+                    from.display()
+                ),
+            )
+        })?;
+        return std::fs::write(to, clean).map_err(|e| failed("copy", e));
+    }
+    if link(&source, to).is_err() {
+        std::fs::copy(&source, to).map_err(|e| failed("copy", e))?;
+    }
+    Ok(())
 }
 
 /// Uniquifies the LibreOffice profile directory across however many soffice
@@ -2531,6 +2631,441 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         assert_eq!(e.backend, Some(Backend::Typst));
     }
 
+    // --- prepare steps ---------------------------------------------------------
+
+    #[cfg(unix)]
+    fn staged_from_hard_link(from: &Path, to: &Path) -> Result<()> {
+        stage_file(from, to, false, hard_link)
+    }
+
+    /// A magick-shaped step whose argv is the three files the stub looks at.
+    #[cfg(unix)]
+    fn prepared_step(
+        written: &Path,
+        staged: &Path,
+        out: &Path,
+        prepare: Vec<plan::Prepare>,
+    ) -> plan::PlannedStep {
+        plan::PlannedStep {
+            backend: Backend::Magick,
+            program: "magick".to_string(),
+            argv: [written, staged, out]
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            output_mode: OutputMode::Path,
+            output: out.to_path_buf(),
+            intermediate_ext: None,
+            path_args: Vec::new(),
+            prepare,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_writes_and_stages_before_the_step_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("check.sh");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n\
+             if [ \"$#\" = \"1\" ]; then exit 0; fi\n\
+             [ -f \"$1\" ] && [ -f \"$2\" ] || exit 1\n\
+             printf x > \"$3\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub);
+
+        let input = dir.path().join("in.png");
+        std::fs::write(&input, b"pixels").unwrap();
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let (written, staged, out) = (
+            scratch.join("layout.typ"),
+            scratch.join("0.png"),
+            scratch.join("out.pdf"),
+        );
+        let step = prepared_step(
+            &written,
+            &staged,
+            &out,
+            vec![
+                plan::Prepare::Write {
+                    path: written.clone(),
+                    contents: "#image(\"0.png\")".to_string(),
+                },
+                plan::Prepare::Stage {
+                    from: input,
+                    to: staged.clone(),
+                    strip: false,
+                },
+            ],
+        );
+
+        {
+            let mut guard = ScratchGuard::new(scratch.clone());
+            let mut on_event = |_: Event| {};
+            let mut runner = StepRunner {
+                resolver: &r,
+                guard: &mut guard,
+                on_event: &mut on_event,
+                current_input_stem: OsString::new(),
+                notes: Vec::new(),
+                backend_output: Vec::new(),
+                backends: Vec::new(),
+            };
+            runner.run(&step, 0, 1).unwrap();
+            assert_eq!(std::fs::read(&written).unwrap(), b"#image(\"0.png\")");
+            assert_eq!(std::fs::read(&staged).unwrap(), b"pixels");
+            assert!(out.is_file());
+        }
+        assert!(!scratch.exists(), "scratch is removed afterwards");
+    }
+
+    #[test]
+    fn staging_falls_back_to_a_copy_when_linking_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.png");
+        let to = dir.path().join("b.png");
+        std::fs::write(&from, b"pixels").unwrap();
+        stage_file(&from, &to, false, |_, _| {
+            Err(std::io::Error::other("cross-device"))
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"pixels");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_a_relative_symlink_stages_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(src.join("photo.jpg"), b"pixels").unwrap();
+        std::os::unix::fs::symlink("photo.jpg", src.join("alias.jpg")).unwrap();
+        let to = scratch.join("0.jpg");
+        staged_from_hard_link(&src.join("alias.jpg"), &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"pixels");
+    }
+
+    #[test]
+    fn staging_with_strip_writes_the_stripped_jpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        // SOI, a comment, a start-of-scan header, entropy data, EOI.
+        let jpeg: Vec<u8> = [
+            &[0xFF, 0xD8][..],
+            &[0xFF, 0xFE, 0x00, 0x07, b'h', b'e', b'l', b'l', b'o'],
+            &[0xFF, 0xDA, 0x00, 0x02, 0x12, 0x34, 0xFF, 0xD9],
+        ]
+        .concat();
+        let from = dir.path().join("a.jpg");
+        let to = dir.path().join("b.jpg");
+        std::fs::write(&from, &jpeg).unwrap();
+        stage_file(&from, &to, true, hard_link).unwrap();
+        let staged = std::fs::read(&to).unwrap();
+        assert_eq!(staged, crate::jpeg::strip(&jpeg).unwrap());
+        assert_ne!(staged, jpeg, "the comment is gone");
+    }
+
+    /// A second stage to the same place replaces the first rather than
+    /// writing through it: the first is a hard link to the user's file, so
+    /// a copy or a stripped write onto it would empty or rewrite their photo.
+    #[test]
+    fn staging_twice_to_the_same_place_leaves_the_source_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg: Vec<u8> = [
+            &[0xFF, 0xD8][..],
+            &[0xFF, 0xFE, 0x00, 0x07, b'h', b'e', b'l', b'l', b'o'],
+            &[0xFF, 0xDA, 0x00, 0x02, 0x12, 0x34, 0xFF, 0xD9],
+        ]
+        .concat();
+        let from = dir.path().join("a.jpg");
+        let to = dir.path().join("b.jpg");
+        std::fs::write(&from, &jpeg).unwrap();
+        stage_file(&from, &to, false, hard_link).unwrap();
+        stage_file(&from, &to, false, hard_link).unwrap();
+        assert_eq!(std::fs::read(&from).unwrap(), jpeg, "copied onto itself");
+        assert_eq!(std::fs::read(&to).unwrap(), jpeg);
+        stage_file(&from, &to, true, hard_link).unwrap();
+        assert_eq!(std::fs::read(&from).unwrap(), jpeg, "stripped in place");
+        assert_eq!(
+            std::fs::read(&to).unwrap(),
+            crate::jpeg::strip(&jpeg).unwrap()
+        );
+    }
+
+    /// A JPEG the strip cannot read fails naming it, and says what does
+    /// take it: ImageMagick decodes it, and `--quality` sends it there.
+    #[test]
+    fn a_jpeg_that_cannot_be_stripped_fails_naming_the_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.jpg");
+        let to = dir.path().join("b.jpg");
+        std::fs::write(&from, b"not a jpeg").unwrap();
+        let e = stage_file(&from, &to, true, hard_link).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConversionFailed);
+        assert_eq!(
+            e.message,
+            format!(
+                "could not remove the metadata from {}: not a JPEG; add --quality to \
+                 re-encode it with ImageMagick instead",
+                from.display()
+            )
+        );
+        assert!(!to.exists());
+    }
+
+    /// A file that cannot be staged is named in the error, whether it
+    /// could not be read for the strip or copied: a bare "No such file or
+    /// directory" does not say which of the inputs it was. A path that does
+    /// not resolve is not refused for that alone; reading it is what fails.
+    #[test]
+    fn a_file_that_cannot_be_staged_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.jpg");
+        let folder = dir.path().join("folder.jpg");
+        std::fs::create_dir(&folder).unwrap();
+        let to = dir.path().join("b.jpg");
+        for from in [&missing, &folder] {
+            for (strip, verb) in [(false, "copy"), (true, "read")] {
+                let e = stage_file(from, &to, strip, hard_link).unwrap_err();
+                assert_eq!(e.code, ErrorCode::ConversionFailed);
+                let named = format!("could not {verb} {}: ", from.display());
+                assert!(e.message.starts_with(&named), "{}", e.message);
+            }
+        }
+    }
+
+    // --- the Typst merge -------------------------------------------------------
+
+    /// Typst stand-in: answers its version probe, and otherwise runs `body`
+    /// with `$layout` the layout it was given and `$out` its output.
+    #[cfg(unix)]
+    fn typst_stub(dir: &Path, body: &str) -> Resolver {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("typst_stub.sh");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$#\" = \"1\" ]; then exit 0; fi\n\
+                 for a in \"$@\"; do layout=\"$out\"; out=\"$a\"; done\n\
+                 {body}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = Resolver::new();
+        r.overrides_only();
+        r.with_override(Backend::Typst, p);
+        r
+    }
+
+    /// A merge of `names`, each written under `dir`, into `dir/out.pdf`.
+    fn merge_request(dir: &Path, names: &[&str]) -> Request {
+        let inputs: Vec<PathBuf> = names
+            .iter()
+            .map(|n| {
+                let p = dir.join(n);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"picture").unwrap();
+                p
+            })
+            .collect();
+        Request {
+            from: Format::from_path(&inputs[0]).unwrap(),
+            to: Format::Pdf,
+            inputs,
+            output: dir.join("out.pdf"),
+            overwrite: false,
+            tuning: Default::default(),
+            allow_extreme: false,
+        }
+    }
+
+    /// Typst reports a bad picture against the layout line that places it.
+    /// The error, and the transcript `--verbose` prints, name the user's
+    /// file instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_typst_step_reports_the_input_not_the_scratch_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = typst_stub(
+            dir.path(),
+            "echo \"$layout:4:6: error: failed to decode image (Invalid PNG signature.)\" >&2\n\
+             exit 1",
+        );
+        let req = merge_request(dir.path(), &["a.jpg", "b.png", "photos/c d.png"]);
+        let mut reports = Vec::new();
+        let e = run(&req, &r, &mut |event| {
+            if let Event::StepReport { report, .. } = event {
+                reports.push(report);
+            }
+        })
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConversionFailed);
+        let said = format!(
+            "{}: error: failed to decode image (Invalid PNG signature.)",
+            req.inputs[2].display()
+        );
+        // Typst writes nothing when it fails.
+        assert_eq!(
+            e.message,
+            format!("typst produced no output (exit status: 1). {said}")
+        );
+        assert_eq!(reports, [format!("{said}\n")]);
+    }
+
+    /// ImageMagick is needed only off the Typst merge, so a user who never
+    /// asked for it is told what needs it. Any other target needs it
+    /// plainly.
+    #[test]
+    fn a_missing_magick_says_why_the_merge_needs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_convert = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.overrides_only();
+        r.with_convert_search_dir(no_convert.path().to_path_buf());
+        let quality = crate::Tuning {
+            quality: Some(80),
+            ..Default::default()
+        };
+        let resize = crate::Tuning {
+            resize: Some("800x".into()),
+            ..Default::default()
+        };
+        for (names, tuning, reason) in [
+            (
+                &["a.jpg", "b.heic"][..],
+                crate::Tuning::default(),
+                "b.heic needs it (the built-in route reads JPG, PNG, WebP and GIF only)",
+            ),
+            (
+                &["a.jpg", "b.png"][..],
+                quality,
+                "--quality re-encodes the images, which needs it",
+            ),
+            (
+                &["a.jpg", "b.png"][..],
+                resize,
+                "--resize re-encodes the images, which needs it",
+            ),
+        ] {
+            let mut req = merge_request(dir.path(), names);
+            req.tuning = tuning;
+            let e = run(&req, &r, &mut |_| {}).unwrap_err();
+            assert_eq!(e.code, ErrorCode::BackendMissing, "{}", e.message);
+            assert_eq!(e.backend, Some(Backend::Magick));
+            assert_eq!(e.message, format!("magick not found; {reason}"));
+        }
+
+        let mut req = merge_request(dir.path(), &["c.heic"]);
+        req.to = Format::Jpg;
+        req.output = dir.path().join("c.jpg");
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.message, "magick not found");
+    }
+
+    /// With neither Typst nor ImageMagick, which would take the merge in
+    /// its place, a user who never asked for Typst is told what it is for,
+    /// and still offered to install it.
+    #[test]
+    fn a_missing_typst_says_the_merge_needs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_convert = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.overrides_only();
+        r.with_convert_search_dir(no_convert.path().to_path_buf());
+        let req = merge_request(dir.path(), &["a.jpg", "b.png"]);
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, ErrorCode::BackendMissing, "{}", e.message);
+        assert_eq!(e.backend, Some(Backend::Typst));
+        assert_eq!(
+            e.message,
+            "typst not found; images go into a PDF through Typst"
+        );
+        assert_eq!(
+            e.remediation,
+            ConvError::backend_missing(Backend::Typst).remediation,
+            "the fix is untouched"
+        );
+    }
+
+    /// A JPEG anywhere in a Typst merge is read for its location with no
+    /// ImageMagick to read it, and a GIF says it gives its first frame.
+    #[cfg(unix)]
+    #[test]
+    fn a_typst_merge_notes_a_located_jpeg_without_imagemagick() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = typst_stub(dir.path(), "printf pdf > \"$out\"");
+        let req = merge_request(dir.path(), &["a.gif", "b.jpg"]);
+        std::fs::write(&req.inputs[1], crate::jpeg::located_for_tests()).unwrap();
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(
+            o.warnings,
+            [
+                registry::GIF_FIRST_FRAME_NOTE,
+                "The source records a GPS location, and the pdf keeps it; add \
+                 --strip-metadata to remove it."
+            ]
+        );
+    }
+
+    /// The PDF a Typst merge wrote is measured against its images, and a
+    /// note says when the lossless pages made it much larger, with the
+    /// sizes, among the notes a result line shows. A merge of JPEGs alone,
+    /// which go in as they are, is never told.
+    #[cfg(unix)]
+    #[test]
+    fn a_typst_merge_that_grows_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two 7-byte inputs; just over a megabyte more than them.
+        let r = typst_stub(dir.path(), "head -c 1100000 /dev/zero > \"$out\"");
+        let photos = merge_request(dir.path(), &["a.jpg", "b.webp"]);
+        let o = run(&photos, &r, &mut |_| {}).unwrap();
+        assert_eq!(
+            o.warnings,
+            [registry::lossless_size_note(&photos.inputs, 14, 1_100_000).unwrap()]
+        );
+        assert!(
+            o.warnings[0].contains("this PDF 1.0 MB against 14 B"),
+            "{:?}",
+            o.warnings
+        );
+        assert!(o.notes.is_empty(), "{:?}", o.notes);
+
+        let mut jpegs = merge_request(dir.path(), &["c.jpg", "d.jpeg"]);
+        jpegs.output = dir.path().join("jpegs.pdf");
+        let o = run(&jpegs, &r, &mut |_| {}).unwrap();
+        assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+    }
+
+    /// On ImageMagick a merge that starts with a GIF still carries a
+    /// JPEG's EXIF into the pdf, so the inputs are read and the note said.
+    #[cfg(unix)]
+    #[test]
+    fn an_imagemagick_merge_after_a_gif_reads_and_notes_a_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "GIF Undefined 1 [51/1,30/1,63/25]");
+        let mut req = merge_request(dir.path(), &["a.gif", "gps.jpg"]);
+        req.tuning.quality = Some(80);
+        let o = run(&req, &r, &mut |_| {}).unwrap();
+        assert_eq!(pings(dir.path()), 1);
+        assert_eq!(
+            o.warnings,
+            [
+                registry::GIF_FIRST_FRAME_NOTE,
+                "The source records a GPS location, and the pdf keeps it; add \
+                 --strip-metadata to remove it."
+            ]
+        );
+    }
+
     // --- extended-length path rewriting (F193) -------------------------------
 
     fn step_with(argv: &[&str], path_args: Vec<usize>, output: &str) -> plan::PlannedStep {
@@ -2542,6 +3077,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             output: PathBuf::from(output),
             intermediate_ext: None,
             path_args,
+            prepare: Vec::new(),
         }
     }
 
@@ -3801,6 +4337,41 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
                 .starts_with("--resize 2000x --upscale enlarges tiny.png (100x100) to 2000x2000"),
             "{}",
             e.warning
+        );
+    }
+
+    /// A merge takes a GIF's first frame alone, so that is the frame sized:
+    /// an optimized GIF's later frames are fragments a few pixels wide,
+    /// which would otherwise be named as the picture enlarged most.
+    #[cfg(unix)]
+    #[test]
+    fn a_merge_sizes_only_the_first_frame_of_a_gif() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = magick_stub(dir.path(), "");
+        answer_ping(dir.path(), "big.png", "3000 2000 TopLeft 72\n");
+        answer_ping(dir.path(), "anim.gif", "3000 2000 TopLeft 72\n");
+        let req = image_request(
+            dir.path(),
+            (Format::Png, Format::Pdf),
+            &["big.png", "anim.gif"],
+            "2000x",
+        );
+        run(&req, &r, &mut |_| {}).unwrap();
+        let log = |name| std::fs::read_to_string(dir.path().join("bin").join(name)).unwrap();
+        let pinged: Vec<String> = log("pings")
+            .lines()
+            .filter(|l| l.contains("%w %h"))
+            .map(|l| l.split(' ').nth(1).unwrap().to_string())
+            .collect();
+        let gif = dir.path().join("anim.gif");
+        let png = dir.path().join("big.png");
+        assert_eq!(
+            pinged,
+            [png.display().to_string(), format!("{}[0]", gif.display())]
+        );
+        assert!(
+            log("calls").contains(&format!("{}[0] ", gif.display())),
+            "the run takes the same frame"
         );
     }
 

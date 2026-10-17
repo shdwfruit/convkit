@@ -187,11 +187,14 @@ pub enum Arg {
     /// `--strip-metadata`'s arguments for this step's backend when the flag
     /// was given (`metadata::MAGICK_STRIP` or `metadata::ffmpeg_args`);
     /// renders nothing otherwise, keeping untuned argv byte-identical.
-    /// Authored only on ImageMagick and ffmpeg steps. Without the flag, an
-    /// Ogg source (`ResolvedVideo::ogg_tags`) gets `-map_metadata 0:s:a:0`:
-    /// Ogg keeps its tags in the audio stream's comment header, and every
-    /// other muxer writes only the file's own tags, so the title, artist
-    /// and the rest were lost (ffmpeg 6.1 and 9.0 alike).
+    /// Authored on ImageMagick and ffmpeg steps, and on the Typst merge,
+    /// where it renders nothing either way: that strips in the staging
+    /// (`layout::image_pages`), and the slot says the flag applies. Without
+    /// the flag, an Ogg source (`ResolvedVideo::ogg_tags`) gets
+    /// `-map_metadata 0:s:a:0`: Ogg keeps its tags in the audio stream's
+    /// comment header, and every other muxer writes only the file's own
+    /// tags, so the title, artist and the rest were lost (ffmpeg 6.1 and
+    /// 9.0 alike).
     StripMetadata,
     /// The cut, as ffmpeg input options (`-ss S -t D`), when a range was
     /// given; renders *nothing* otherwise, keeping untuned argv
@@ -248,13 +251,21 @@ pub enum Arg {
     /// <this>`, `conv docs/readme.md out.docx` run from anywhere but
     /// `docs/` silently dropped every image.
     InputDir,
-    /// Every input path, in order. Used by the image→PDF merge recipe.
+    /// Every input path, in order, for ImageMagick's image→PDF merge. A GIF
+    /// or WebP gets the `[0]` frame selector (`first_frame_only`), so an
+    /// animated one is one page, its first frame, as on the Typst route; any
+    /// other input is taken whole, so a multi-page TIFF keeps every page.
+    /// Each one, selector and all, is recorded as a path, so the Windows
+    /// long-path rewrite still reaches it, as it does `InputFirstFrame`.
     Inputs,
     /// The output path this step writes.
     Output,
     /// The directory containing the output path. For backends like `soffice`
     /// that take `--outdir` and name the file themselves.
     OutDir,
+    /// The layout a Typst image merge compiles, beside the output
+    /// (`layout::layout_path`); exec writes it before the step runs.
+    TypstLayout,
     /// A resolved backend's absolute path, substituted in by `exec::run` at
     /// execution time. `render` (and therefore `plan::build`) can't know the
     /// real path — that requires filesystem access `plan::build` must never
@@ -392,6 +403,8 @@ impl Step {
                             .map(|s| (*s).to_string()),
                     ),
                     Backend::Ffmpeg => argv.extend(crate::metadata::ffmpeg_args(kept)),
+                    // Stripped in the staging (`layout::image_pages`).
+                    Backend::Typst => {}
                     other => unreachable!("--strip-metadata slot authored on a {other:?} step"),
                 },
                 Arg::StripMetadata if video.ogg_tags && self.backend == Backend::Ffmpeg => {
@@ -483,7 +496,11 @@ impl Step {
                 Arg::Inputs => {
                     for input in inputs {
                         path_args.push(argv.len());
-                        argv.push(input.to_string_lossy().into_owned());
+                        argv.push(if first_frame_only(input) {
+                            format!("{}[0]", input.to_string_lossy())
+                        } else {
+                            input.to_string_lossy().into_owned()
+                        });
                     }
                 }
                 Arg::Output => {
@@ -504,6 +521,14 @@ impl Step {
                         None => ".".to_string(),
                     });
                 }
+                Arg::TypstLayout => {
+                    path_args.push(argv.len());
+                    argv.push(
+                        crate::layout::layout_path(output)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
                 // Not a filesystem path in the sense `path_args` means: it is
                 // a placeholder the executor swaps for a resolved executable,
                 // and rewriting it as a path would break that substitution.
@@ -512,6 +537,18 @@ impl Step {
         }
         Rendered { argv, path_args }
     }
+}
+
+/// Whether `Arg::Inputs` takes only the first frame of `input`: a GIF or a
+/// WebP, either of which may be animated. Read whole, an optimized GIF's
+/// later frames, which hold only what changed, each became a page a few
+/// pixels across, and the page count hung on whether a flag took the merge
+/// to ImageMagick. By extension, as the route is decided.
+pub(crate) fn first_frame_only(input: &Path) -> bool {
+    matches!(
+        crate::Format::from_path(input),
+        Some(crate::Format::Gif | crate::Format::Webp)
+    )
 }
 
 /// One step's rendered command line, plus the positions in it that hold

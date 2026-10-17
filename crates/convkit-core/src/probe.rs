@@ -552,7 +552,11 @@ fn image_pages(magick: &Path, input: &Path, read: ImageRead) -> Result<Vec<(u32,
         ));
     }
     let mut target = input.as_os_str().to_owned();
-    if !read.every_page && !read.largest_frame {
+    // A merge takes a GIF's or WebP's first frame alone (`Arg::Inputs`, the
+    // slot `every_input` is read from), so that is the frame sized.
+    let first_frame =
+        !read.every_page || (read.every_input && crate::recipe::first_frame_only(input));
+    if first_frame && !read.largest_frame {
         target.push("[0]");
     }
     let out = backend_command(magick)
@@ -609,6 +613,32 @@ fn parse_page(line: &str, density: Option<f64>) -> Option<(u32, u32)> {
         }
     };
     Some(if on_its_side { (h, w) } else { (w, h) })
+}
+
+/// What the notes need to know of an image source, read the way the run
+/// takes it: natively on Typst's merge, which must not need ImageMagick
+/// (`registry::native_image_traits`), else with `image_traits` where a note
+/// depends on it (`registry::notes_need_image`). `available` is what
+/// `plan::build_tuned` is given, which says whether a merge runs on Typst.
+/// `None` when nothing needs reading or the read fails, which keeps the
+/// frame and alpha notes whole and gives no location note. `exec::run` and
+/// the `--dry-run` preview both read through this, so they agree.
+pub fn traits_for_notes(
+    resolver: &crate::Resolver,
+    from: crate::Format,
+    to: crate::Format,
+    inputs: &[std::path::PathBuf],
+    tuning: &crate::Tuning,
+    available: Option<&crate::AvailableBackends>,
+) -> Option<ImageTraits> {
+    if let Some(t) = crate::registry::native_image_traits(from, to, inputs, tuning, available) {
+        return Some(t);
+    }
+    if !crate::registry::notes_need_image(from, to, inputs, tuning, available) {
+        return None;
+    }
+    let magick = resolver.resolve(crate::Backend::Magick).ok()?;
+    image_traits(&magick.path, inputs).ok()
 }
 
 /// Reads an image's `ImageTraits` with `-ping`, which stops before the

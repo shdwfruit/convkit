@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use crate::recipe::{ScaleStyle, VideoChainSpec};
-use crate::{Arg, Backend, Format, Kind, OutputMode, Recipe, Step, Tuning};
+use crate::{Arg, AvailableBackends, Backend, Format, Kind, OutputMode, Recipe, Step, Tuning};
 
 /// JPEG/WebP/AVIF quality. Visually transparent without bloat; see spec §7.4.
 /// `pub` so `conv capabilities <format>` can state the default it is
@@ -181,11 +180,14 @@ const SVG_TO_LOSSLESS: Recipe = Recipe {
     warnings: &[],
 };
 
-/// `-compress jpeg` matters: magick's PDF default embeds pixels
-/// losslessly (Zip/Flate over raw RGB), which turned a 1.6 MB phone photo
-/// into a 35 MB PDF — 14× what JPEG-in-PDF at the same visual quality
-/// produces. Photographic sources are the overwhelmingly common case for
-/// image→PDF; the registry-wide quality anchor applies.
+/// image -> pdf on ImageMagick, for what `TYPST_IMG_TO_PDF` does not take:
+/// an input outside `TYPST_READS` (HEIC, HEIF, AVIF, TIFF, BMP, or an SVG
+/// or ICO later in a merge), or `--quality` or `--resize`, which re-encode
+/// the pixels (`image_pdf_variant`). `-compress jpeg` matters: magick's PDF
+/// default embeds pixels losslessly (Zip/Flate over raw RGB), which turned
+/// a 1.6 MB phone photo into a 35 MB PDF — 14× what JPEG-in-PDF at the same
+/// visual quality produces. Photographic sources are the overwhelmingly
+/// common case for image→PDF; the registry-wide quality anchor applies.
 const IMG_TO_PDF: Recipe = Recipe {
     steps: &[step!(
         Backend::Magick,
@@ -203,6 +205,222 @@ const IMG_TO_PDF: Recipe = Recipe {
     )],
     warnings: &[],
 };
+
+/// The formats the Typst merge takes. Typst reads no HEIC, HEIF, AVIF,
+/// TIFF or BMP ("unknown image format"), so those stay with ImageMagick. It
+/// does read SVG, but an SVG in a merge stays with ImageMagick too, so it is
+/// rasterised as it always was.
+pub(crate) const TYPST_READS: &[Format] = &[Format::Jpg, Format::Png, Format::Webp, Format::Gif];
+
+/// jpg/png/webp/gif -> pdf on the managed Typst, so photos merge with
+/// nothing to install by hand. Each image gets a page of its own size at
+/// its DPI, turned by its EXIF orientation, and a JPEG is embedded byte for
+/// byte: no generation lost, no size gained, where `IMG_TO_PDF` re-encodes
+/// every photo at quality 92.
+///
+/// Typst reads only under `--root`, so `layout::image_pages` stages the
+/// inputs beside the output (the scratch dir in a real run) and writes the
+/// layout that names them there. `--ignore-system-fonts`: nothing is
+/// typeset, and it skips the font scan. `--diagnostic-format short` puts
+/// an error on one `file:line:col` line, which leads back to the input.
+/// `--strip-metadata` strips in the staging, so its slot renders nothing.
+/// `--quality` and `--resize` re-encode the pixels, which Typst cannot do,
+/// so `image_pdf_variant` hands those runs to `IMG_TO_PDF`.
+pub(crate) const TYPST_IMG_TO_PDF: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Typst,
+        [
+            Arg::Lit("compile"),
+            Arg::Lit("--root"),
+            Arg::OutDir,
+            Arg::Lit("--ignore-system-fonts"),
+            Arg::Lit("--diagnostic-format"),
+            Arg::Lit("short"),
+            Arg::StripMetadata,
+            Arg::TypstLayout,
+            Arg::Output,
+        ]
+    )],
+    warnings: &[],
+};
+
+/// The recipe a run of `recipe` takes on these inputs and this tuning:
+/// `IMG_TO_PDF` in place of `TYPST_IMG_TO_PDF` when a knob re-encodes the
+/// pixels, an input is of no format in `TYPST_READS`, or `available` says
+/// Typst is not installed and ImageMagick is (`typst_absent`); `recipe`
+/// otherwise. A merge's pair is named by its first input alone (`conv a.jpg
+/// b.heic out.pdf` is `jpg -> pdf`), so every input is checked. By
+/// extension, as everywhere in convkit; a name with none is left to
+/// ImageMagick, which reads the content.
+pub(crate) fn image_pdf_variant(
+    recipe: Recipe,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+    available: Option<&AvailableBackends>,
+) -> Recipe {
+    let reencodes = tuning.quality.is_some() || tuning.resize.is_some();
+    let foreign = inputs.iter().any(|i| !typst_reads(i));
+    if recipe == TYPST_IMG_TO_PDF && (reencodes || foreign || typst_absent(available)) {
+        IMG_TO_PDF
+    } else {
+        recipe
+    }
+}
+
+/// Whether ImageMagick takes a Typst merge because Typst is not installed
+/// and ImageMagick is. Photos merged on ImageMagick before Typst took them,
+/// so a merge that worked keeps working, with `TYPST_MISSING_NOTE`. With
+/// neither, the merge stays Typst's, and its error offers `conv install
+/// typst`. `None` (nothing was checked) is Typst's.
+fn typst_absent(available: Option<&AvailableBackends>) -> bool {
+    available.is_some_and(|a| !a.has(Backend::Typst) && a.has(Backend::Magick))
+}
+
+/// Said when ImageMagick merges the photos only because Typst is missing.
+pub(crate) const TYPST_MISSING_NOTE: &str = "Typst is not installed, so ImageMagick made this \
+     PDF and re-encoded the pictures; conv install typst keeps JPEGs as they are.";
+
+/// `TYPST_MISSING_NOTE` when `recipe` would merge these inputs on Typst
+/// and runs on ImageMagick only because Typst is missing, not when an input
+/// or a knob sends it there anyway.
+pub(crate) fn typst_missing_note(
+    recipe: Recipe,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+    available: Option<&AvailableBackends>,
+) -> Option<String> {
+    (image_pdf_variant(recipe, inputs, tuning, None) == TYPST_IMG_TO_PDF && typst_absent(available))
+        .then(|| TYPST_MISSING_NOTE.to_string())
+}
+
+/// Whether the Typst merge takes this input, by its extension.
+fn typst_reads(input: &Path) -> bool {
+    Format::from_path(input).is_some_and(|f| TYPST_READS.contains(&f))
+}
+
+/// Why a conversion into a pdf needs ImageMagick, for the error that says
+/// it is missing: a photos merge otherwise runs on the managed Typst, so a
+/// user who never asked for ImageMagick is told what does. The first input
+/// Typst cannot read, else the knob that re-encodes the pictures
+/// (`image_pdf_variant`). `None` for any other target, which needs it
+/// plainly.
+pub(crate) fn magick_reason(to: Format, inputs: &[PathBuf], tuning: &Tuning) -> Option<String> {
+    if to != Format::Pdf {
+        return None;
+    }
+    if let Some(input) = inputs.iter().find(|i| !typst_reads(i)) {
+        let name = input.file_name().map_or_else(
+            || input.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        return Some(format!(
+            "{name} needs it (the built-in route reads JPG, PNG, WebP and GIF only)"
+        ));
+    }
+    let knob = if tuning.quality.is_some() {
+        "--quality"
+    } else if tuning.resize.is_some() {
+        "--resize"
+    } else {
+        return None;
+    };
+    Some(format!("{knob} re-encodes the images, which needs it"))
+}
+
+/// Why a conversion needs Typst, for the error that says it is missing,
+/// which a merge gives only when ImageMagick is missing too
+/// (`typst_absent`): a user who never asked for Typst is told what it is
+/// for. `None` off the Typst merge (the docx/odt -> pdf fallback needs it
+/// plainly).
+pub(crate) fn typst_reason(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+) -> Option<&'static str> {
+    typst_merge(from, to, inputs, tuning, None).then_some("images go into a PDF through Typst")
+}
+
+/// Said whenever a GIF is merged into a pdf: either route places its first
+/// frame only (Typst does, and `IMG_TO_PDF` reads a GIF's `[0]`). Not for a
+/// WebP, which is rarely animated: the note would sit on every still one.
+pub(crate) const GIF_FIRST_FRAME_NOTE: &str = "An animated GIF contributes its first frame.";
+
+/// `GIF_FIRST_FRAME_NOTE` when `recipe` merges images into a pdf and one
+/// of `inputs` is a GIF.
+pub(crate) fn gif_note(recipe: &Recipe, inputs: &[PathBuf]) -> Option<String> {
+    let merge = *recipe == TYPST_IMG_TO_PDF || *recipe == IMG_TO_PDF;
+    let gif = inputs
+        .iter()
+        .any(|i| Format::from_path(i) == Some(Format::Gif));
+    (merge && gif).then(|| GIF_FIRST_FRAME_NOTE.to_string())
+}
+
+/// What a Typst merge's size cost, said once the PDF is more than 1.5 times
+/// `images`, the inputs' total size in bytes, and more than 1,000,000 bytes
+/// over it, and an input is not a JPEG. Typst embeds a JPEG as it is but
+/// keeps every other picture without loss (Flate), which a photo pays for:
+/// a 945 KB WebP made a 13 MB PDF, where ImageMagick's JPEG pages at
+/// quality 92 made 2.3 MB. A screenshot comes out near its own size, so the
+/// default stays lossless and this is measured after the run rather than
+/// assumed. The megabyte keeps it off a tiny or flat picture, which Typst's
+/// few kilobytes of PDF make many times larger for nothing worth saying (a
+/// 515 B PNG made a 5 KB PDF).
+pub(crate) fn lossless_size_note(inputs: &[PathBuf], images: u64, pdf: u64) -> Option<String> {
+    let lossless = inputs
+        .iter()
+        .any(|i| Format::from_path(i) != Some(Format::Jpg));
+    let grew =
+        u128::from(pdf) * 2 > u128::from(images) * 3 && pdf.saturating_sub(images) > 1_000_000;
+    (lossless && grew).then(|| {
+        format!(
+            "The PNG and WebP pages are stored without loss, which makes this PDF {} \
+             against {} of images; --quality stores them as JPEG instead (needs ImageMagick).",
+            crate::size::human(pdf),
+            crate::size::human(images)
+        )
+    })
+}
+
+/// The format a run's location note is judged from
+/// (`metadata::keeps_exif_location`). A merge is named by its first input,
+/// but a later one's EXIF reaches the pdf too: on Typst's merge only a
+/// JPEG's does, and on `IMG_TO_PDF` every input's that ImageMagick keeps,
+/// so it is judged from the first of those whose location its read can see
+/// (not a WebP: `-ping` loads no WebP EXIF). `from` for any other recipe.
+pub(crate) fn location_source(recipe: &Recipe, from: Format, inputs: &[PathBuf]) -> Format {
+    if *recipe == TYPST_IMG_TO_PDF {
+        return Format::Jpg;
+    }
+    if *recipe != IMG_TO_PDF {
+        return from;
+    }
+    inputs
+        .iter()
+        .filter_map(|i| Format::from_path(i))
+        .find(|&f| f != Format::Webp && crate::metadata::keeps_exif_location(f, Format::Pdf))
+        .unwrap_or(from)
+}
+
+/// Whether this conversion runs on Typst's image merge.
+pub fn typst_merge(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+    available: Option<&AvailableBackends>,
+) -> bool {
+    lookup(from, to)
+        .is_some_and(|r| image_pdf_variant(r, inputs, tuning, available) == TYPST_IMG_TO_PDF)
+}
+
+/// The recipe a pair runs in place of its own when a knob or an input
+/// calls for it (`image_pdf_variant`): `IMG_TO_PDF` for a pair Typst
+/// merges, `None` for every other. For `conv capabilities`, which lists the
+/// flags of both.
+pub fn alternate(from: Format, to: Format) -> Option<Recipe> {
+    (lookup(from, to) == Some(TYPST_IMG_TO_PDF)).then_some(IMG_TO_PDF)
+}
 
 /// ImageMagick reads every EXIF field into an image property, and its PNG
 /// writer writes every property as a tEXt chunk, GPS included, after
@@ -437,8 +655,16 @@ fn insert_image_family(t: &mut Table) {
             let recipe = image_recipe_for(to).expect("every writable raster has a recipe");
             t.insert((from, to), recipe);
         }
-        t.insert((from, Format::Pdf), IMG_TO_PDF);
+        let to_pdf = if TYPST_READS.contains(&from) {
+            TYPST_IMG_TO_PDF
+        } else {
+            IMG_TO_PDF
+        };
+        t.insert((from, Format::Pdf), to_pdf);
     }
+    // A GIF is no raster source here (the media family takes it to video),
+    // but Typst places it on a page, its first frame.
+    t.insert((Format::Gif, Format::Pdf), TYPST_IMG_TO_PDF);
 
     for &to in &[Format::Png, Format::Jpg] {
         t.insert(
@@ -1573,11 +1799,21 @@ static FALLBACK_TABLE: LazyLock<Table> = LazyLock::new(|| {
     t
 });
 
-/// The backends `plan::select` needs an availability answer for on a pair
-/// where `lookup_fallback` might return something. Fixed today because
-/// there is exactly one fallback decision in the registry; a second one
-/// with a different backend set would need this to vary per pair.
-pub const FALLBACK_BACKENDS: &[Backend] = &[Backend::Soffice, Backend::Pandoc, Backend::Typst];
+/// The backends whose availability chooses this pair's recipe, which the
+/// caller checks (`Resolver::check_availability`) and hands to
+/// `plan::build_tuned`: soffice, pandoc and Typst for docx/odt -> pdf
+/// (`lookup_fallback`), and Typst and ImageMagick for a pair Typst merges,
+/// which ImageMagick runs when Typst is missing (`image_pdf_variant`).
+/// Empty for every other pair, which has one recipe and is never checked.
+pub fn fallback_backends(from: Format, to: Format) -> &'static [Backend] {
+    if FALLBACK_TABLE.contains_key(&(from, to)) {
+        &[Backend::Soffice, Backend::Pandoc, Backend::Typst]
+    } else if lookup(from, to) == Some(TYPST_IMG_TO_PDF) {
+        &[Backend::Typst, Backend::Magick]
+    } else {
+        &[]
+    }
+}
 
 pub fn lookup(from: Format, to: Format) -> Option<Recipe> {
     TABLE.get(&(from, to)).copied()
@@ -1589,12 +1825,13 @@ pub fn lookup_fallback(from: Format, to: Format) -> Option<Recipe> {
     FALLBACK_TABLE.get(&(from, to)).copied()
 }
 
-/// True when `from -> to` has a second recipe `plan::select` could fall
-/// back to — the gate callers use to decide whether checking backend
-/// availability is even worth doing before building a plan (mirrors
-/// `needs_probe`'s role for the media-remux decision).
+/// True when `from -> to` has a second recipe to fall back to when a
+/// backend is missing (`fallback_backends`) — the gate callers use to
+/// decide whether checking backend availability is even worth doing before
+/// building a plan (mirrors `needs_probe`'s role for the media-remux
+/// decision).
 pub fn has_fallback(from: Format, to: Format) -> bool {
-    FALLBACK_TABLE.contains_key(&(from, to))
+    !fallback_backends(from, to).is_empty()
 }
 
 pub fn all_pairs() -> Vec<(Format, Format)> {
@@ -1688,14 +1925,23 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
 }
 
 /// The recipe whose reads (a size, the notes' traits) a conversion makes:
-/// the pair's own, or for a file stripped into its own format, which has no
-/// pair, the recipe any raster takes to that format.
-fn recipe_read_for(from: Format, to: Format, tuning: &Tuning) -> Option<Recipe> {
-    lookup(from, to).or_else(|| {
-        (from == to && tuning.strip_metadata)
-            .then(|| image_recipe_for(to))
-            .flatten()
-    })
+/// the one the pair runs on these inputs (`image_pdf_variant`, as
+/// `plan::build_tuned` applies it), or for a file stripped into its own
+/// format, which has no pair, the recipe any raster takes to that format.
+fn recipe_read_for(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+    available: Option<&AvailableBackends>,
+) -> Option<Recipe> {
+    lookup(from, to)
+        .map(|r| image_pdf_variant(r, inputs, tuning, available))
+        .or_else(|| {
+            (from == to && tuning.strip_metadata)
+                .then(|| image_recipe_for(to))
+                .flatten()
+        })
 }
 
 /// How to read an image's size before converting it, when to at all: for
@@ -1706,16 +1952,25 @@ fn recipe_read_for(from: Format, to: Format, tuning: &Tuning) -> Option<Recipe> 
 /// off the step's own args, so the size is taken the way the recipe takes
 /// its input: every input or the first, every page, the first frame or the
 /// largest, and at the density it renders a vector source at.
-pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::probe::ImageRead> {
+pub fn image_read(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+) -> Option<crate::probe::ImageRead> {
     let upscale = tuning.upscale && tuning.resize.is_some();
     if !upscale && to != Format::Ico {
         return None;
     }
-    let step = recipe_read_for(from, to, tuning)?.steps.iter().find(|s| {
-        s.args
-            .iter()
-            .any(|a| matches!(a, Arg::TuneResize | Arg::IconCanvas(_)))
-    })?;
+    // A resize takes a merge to ImageMagick whatever is installed.
+    let step = recipe_read_for(from, to, inputs, tuning, None)?
+        .steps
+        .iter()
+        .find(|s| {
+            s.args
+                .iter()
+                .any(|a| matches!(a, Arg::TuneResize | Arg::IconCanvas(_)))
+        })?;
     let has = |wanted: fn(&Arg) -> bool| step.args.iter().any(wanted);
     Some(crate::probe::ImageRead {
         density: step.args.windows(2).find_map(|w| match w {
@@ -1747,11 +2002,24 @@ pub fn reads_frames(from: Format, to: Format) -> bool {
 /// Whether a note on this pair depends on what the source image holds, so
 /// the caller should read it with `probe::image_traits` before planning:
 /// the frame and alpha notes, and the location note wherever the target
-/// keeps an EXIF GPS and the flag is not taking it out. Not for the
+/// keeps an EXIF GPS and the flag is not taking it out, judged for a merge
+/// from any input whose location it keeps (`location_source`). Not for the
 /// location note alone from a WebP: its GPS survives, but ImageMagick's
-/// `-ping` loads no WebP EXIF, so the read could never find it.
-pub fn notes_need_image(from: Format, to: Format, tuning: &Tuning) -> bool {
-    let frame_notes = recipe_read_for(from, to, tuning).is_some_and(|r| {
+/// `-ping` loads no WebP EXIF, so the read could never find it. Never on
+/// the Typst merge, which must not need ImageMagick for anything.
+pub fn notes_need_image(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+    available: Option<&AvailableBackends>,
+) -> bool {
+    let recipe = recipe_read_for(from, to, inputs, tuning, available);
+    if recipe == Some(TYPST_IMG_TO_PDF) {
+        return false;
+    }
+    let located = recipe.map_or(from, |r| location_source(&r, from, inputs));
+    let frame_notes = recipe.is_some_and(|r| {
         r.warnings
             .iter()
             .any(|&w| matches!(w, FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE))
@@ -1762,9 +2030,35 @@ pub fn notes_need_image(from: Format, to: Format, tuning: &Tuning) -> bool {
     frame_notes
         || tiff_in_place
         || (!tuning.strip_metadata
-            && from != Format::Webp
+            && located != Format::Webp
             && lookup(from, to).is_some()
-            && crate::metadata::keeps_exif_location(from, to))
+            && crate::metadata::keeps_exif_location(located, to))
+}
+
+/// What the notes need to know of a Typst merge's inputs, read without
+/// ImageMagick, which the merge must not need: whether a JPEG records a
+/// location. Typst embeds a JPEG as it is, EXIF included, and decodes a
+/// PNG, WebP or GIF to pixels, so only a JPEG's reaches the PDF, wherever
+/// it is in the merge. A plain file read of each JPEG's metadata, like
+/// `office::traits`, and none at all when the flag takes the location out.
+/// `None` off the Typst route, where `probe::image_traits` reads the inputs.
+pub(crate) fn native_image_traits(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    tuning: &Tuning,
+    available: Option<&AvailableBackends>,
+) -> Option<crate::probe::ImageTraits> {
+    typst_merge(from, to, inputs, tuning, available).then(|| crate::probe::ImageTraits {
+        alpha: None,
+        multi_frame: false,
+        location: !tuning.strip_metadata
+            && inputs
+                .iter()
+                .filter(|i| Format::from_path(i) == Some(Format::Jpg))
+                .any(|i| crate::jpeg::file_has_location(i)),
+        compressed: false,
+    })
 }
 
 /// Whether to read an Office source with `office::traits` before planning:
@@ -1987,6 +2281,11 @@ pub(crate) fn compat_tables(
 mod tests {
     use super::*;
 
+    /// One input of format `f`, as a conversion of a single file has.
+    fn one(f: Format) -> Vec<PathBuf> {
+        vec![PathBuf::from(format!("in.{}", f.ext()))]
+    }
+
     #[test]
     fn an_image_read_mirrors_how_the_recipe_takes_its_input() {
         let up = Tuning {
@@ -1994,13 +2293,16 @@ mod tests {
             upscale: true,
             ..Default::default()
         };
-        let svg = image_read(Format::Svg, Format::Png, &up).unwrap();
+        let svg = image_read(Format::Svg, Format::Png, &one(Format::Svg), &up).unwrap();
         assert_eq!(svg.density, Some(SVG_DENSITY), "the density it renders at");
         assert!(!svg.every_input);
-        let pdf = image_read(Format::Png, Format::Pdf, &up).unwrap();
+        // `--resize` takes a merge to ImageMagick, so it is read the way
+        // ImageMagick takes it.
+        let merge = [PathBuf::from("a.png"), PathBuf::from("b.png")];
+        let pdf = image_read(Format::Png, Format::Pdf, &merge, &up).unwrap();
         assert!(pdf.every_input && pdf.every_page, "{pdf:?}");
         assert_eq!(pdf.density, None);
-        let png = image_read(Format::Jpg, Format::Png, &up).unwrap();
+        let png = image_read(Format::Jpg, Format::Png, &one(Format::Jpg), &up).unwrap();
         assert!(
             !png.every_input && !png.every_page,
             "only the first frame: {png:?}"
@@ -2009,9 +2311,12 @@ mod tests {
             upscale: false,
             ..up.clone()
         };
-        assert_eq!(image_read(Format::Jpg, Format::Png, &plain), None);
         assert_eq!(
-            image_read(Format::Mp4, Format::Mkv, &up),
+            image_read(Format::Jpg, Format::Png, &one(Format::Jpg), &plain),
+            None
+        );
+        assert_eq!(
+            image_read(Format::Mp4, Format::Mkv, &one(Format::Mp4), &up),
             None,
             "video is probed"
         );
@@ -2021,9 +2326,13 @@ mod tests {
             strip_metadata: true,
             ..up.clone()
         };
-        let jpg = image_read(Format::Jpg, Format::Jpg, &stripped_up).unwrap();
+        let jpg = image_read(Format::Jpg, Format::Jpg, &one(Format::Jpg), &stripped_up).unwrap();
         assert!(!jpg.every_page && !jpg.every_input, "{jpg:?}");
-        assert_eq!(image_read(Format::Jpg, Format::Jpg, &up), None, "no pair");
+        assert_eq!(
+            image_read(Format::Jpg, Format::Jpg, &one(Format::Jpg), &up),
+            None,
+            "no pair"
+        );
     }
 
     fn read_image(alpha: Option<bool>, multi_frame: bool) -> crate::MediaProbe {
@@ -2103,7 +2412,8 @@ mod tests {
     /// webp/avif/pdf targets read it only for the location note, so not
     /// under --strip-metadata, and not from a source that keeps no EXIF
     /// there. Never an SVG, whose transparency a ping cannot see, and never
-    /// for a tiff target, which keeps no EXIF.
+    /// for a tiff target, which keeps no EXIF. Never with ImageMagick on the
+    /// Typst route into a pdf, which must not need it.
     #[test]
     fn a_source_is_read_only_where_its_notes_depend_on_it() {
         let off = Tuning::default();
@@ -2112,44 +2422,99 @@ mod tests {
             ..Tuning::default()
         };
         for &from in RASTER {
+            let inputs = one(from);
             for to in [Format::Jpg, Format::Png, Format::Bmp] {
                 if from != to {
-                    assert!(notes_need_image(from, to, &off), "{from:?} -> {to:?}");
-                    assert!(notes_need_image(from, to, &on), "{from:?} -> {to:?}");
+                    let need = |t| notes_need_image(from, to, &inputs, t, None);
+                    assert!(need(&off), "{from:?} -> {to:?}");
+                    assert!(need(&on), "{from:?} -> {to:?}");
                 }
             }
             for to in [Format::Webp, Format::Avif, Format::Pdf] {
                 if from != to {
+                    let need = |t| notes_need_image(from, to, &inputs, t, None);
                     // A WebP's EXIF survives, but a header read cannot see
                     // it, so reading one could never give the note.
                     let readable_exif = !matches!(from, Format::Bmp | Format::Tiff | Format::Webp);
-                    assert_eq!(
-                        notes_need_image(from, to, &off),
-                        readable_exif,
-                        "{from:?} -> {to:?}"
-                    );
-                    assert!(!notes_need_image(from, to, &on), "{from:?} -> {to:?}");
+                    let typst = to == Format::Pdf && TYPST_READS.contains(&from);
+                    assert_eq!(need(&off), readable_exif && !typst, "{from:?} -> {to:?}");
+                    assert!(!need(&on), "{from:?} -> {to:?}");
                 }
             }
             if from != Format::Tiff {
-                assert!(!notes_need_image(from, Format::Tiff, &off), "{from:?}");
+                assert!(
+                    !notes_need_image(from, Format::Tiff, &inputs, &off, None),
+                    "{from:?}"
+                );
             }
         }
-        assert!(!notes_need_image(Format::Svg, Format::Jpg, &off));
-        assert!(!notes_need_image(Format::Mp4, Format::Gif, &off));
+        // A heic in the merge takes it to ImageMagick, which reads it.
+        let mixed = [PathBuf::from("a.jpg"), PathBuf::from("b.heic")];
+        assert!(notes_need_image(
+            Format::Jpg,
+            Format::Pdf,
+            &mixed,
+            &off,
+            None
+        ));
+        let need =
+            |from: Format, to: Format, t: &Tuning| notes_need_image(from, to, &one(from), t, None);
+        assert!(!need(Format::Svg, Format::Jpg, &off));
+        assert!(!need(Format::Mp4, Format::Gif, &off));
         // Stripped into its own format, a jpg/png/bmp is read like any
         // other source to one; without the flag there is no such pair.
-        assert!(notes_need_image(Format::Jpg, Format::Jpg, &on));
-        assert!(notes_need_image(Format::Png, Format::Png, &on));
-        assert!(!notes_need_image(Format::Webp, Format::Webp, &on));
-        assert!(!notes_need_image(Format::Jpg, Format::Jpg, &off));
+        assert!(need(Format::Jpg, Format::Jpg, &on));
+        assert!(need(Format::Png, Format::Png, &on));
+        assert!(!need(Format::Webp, Format::Webp, &on));
+        assert!(!need(Format::Jpg, Format::Jpg, &off));
         // A tiff stripped into a tiff is read for its compression.
-        assert!(notes_need_image(Format::Tiff, Format::Tiff, &on));
-        assert!(!notes_need_image(Format::Tiff, Format::Tiff, &off));
+        assert!(need(Format::Tiff, Format::Tiff, &on));
+        assert!(!need(Format::Tiff, Format::Tiff, &off));
         let opaque = read_image(Some(false), false);
         assert_eq!(
             notes(Format::Svg, Format::Jpg, Some(&opaque)),
             vec![FLATTEN_NOTE]
+        );
+    }
+
+    /// A merge is named by its first input, but ImageMagick carries every
+    /// input's EXIF into the pdf, so a later JPEG's location is read for
+    /// whatever comes first. Typst's merge is never read with ImageMagick.
+    #[test]
+    fn a_merge_is_read_for_the_location_of_any_input_imagemagick_keeps() {
+        let p = |names: &[&str]| -> Vec<PathBuf> { names.iter().map(PathBuf::from).collect() };
+        let quality = Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        };
+        let plain = Tuning::default();
+        let need = |from, names: &[&str], t: &Tuning| {
+            notes_need_image(from, Format::Pdf, &p(names), t, None)
+        };
+        assert!(need(Format::Gif, &["a.gif", "gps.jpg"], &quality));
+        assert!(need(Format::Webp, &["a.webp", "gps.jpg"], &quality));
+        assert!(need(Format::Gif, &["a.gif", "gps.jpg", "x.heic"], &plain));
+        assert!(!need(Format::Gif, &["a.gif", "b.png"], &plain), "on Typst");
+        // Nothing in these keeps a location the read could see.
+        assert!(!need(Format::Gif, &["a.gif", "b.tiff"], &plain));
+        assert!(!need(Format::Webp, &["a.webp", "b.gif"], &quality));
+        let strip = Tuning {
+            strip_metadata: true,
+            ..quality
+        };
+        assert!(!need(Format::Gif, &["a.gif", "gps.jpg"], &strip));
+
+        let magick = |names: &[&str]| location_source(&IMG_TO_PDF, Format::Gif, &p(names));
+        assert_eq!(magick(&["a.gif", "b.webp", "c.JPG"]), Format::Jpg);
+        assert_eq!(magick(&["a.gif", "b.heic", "c.jpg"]), Format::Heic);
+        assert_eq!(magick(&["a.gif", "b.tiff"]), Format::Gif);
+        assert_eq!(
+            location_source(&TYPST_IMG_TO_PDF, Format::Png, &p(&["a.png"])),
+            Format::Jpg
+        );
+        assert_eq!(
+            location_source(&IMG_TO_JPG, Format::Heic, &p(&["a.heic"])),
+            Format::Heic
         );
     }
 
@@ -2250,9 +2615,14 @@ mod tests {
                 if matches!(s.backend, Backend::Magick | Backend::Ffmpeg) {
                     assert!(strip.is_some(), "{from:?} -> {to:?}");
                 }
+                // A Typst step's slot renders nothing: it strips in the
+                // staging, and turns the picture itself.
                 if strip.is_some() {
                     assert!(
-                        matches!(s.backend, Backend::Magick | Backend::Ffmpeg),
+                        matches!(
+                            s.backend,
+                            Backend::Magick | Backend::Ffmpeg | Backend::Typst
+                        ),
                         "{from:?} -> {to:?}"
                     );
                 }
@@ -2410,19 +2780,22 @@ mod tests {
     #[test]
     fn an_icon_pair_reads_the_source_the_way_its_recipe_does() {
         let none = Tuning::default();
-        let png = image_read(Format::Png, Format::Ico, &none).unwrap();
+        let png = image_read(Format::Png, Format::Ico, &one(Format::Png), &none).unwrap();
         assert!(!png.every_page && !png.largest_frame && png.density.is_none());
-        let svg = image_read(Format::Svg, Format::Ico, &none).unwrap();
+        let svg = image_read(Format::Svg, Format::Ico, &one(Format::Svg), &none).unwrap();
         assert_eq!(svg.density, Some(SVG_DENSITY));
         assert_eq!(image_read_geometry(Format::Ico, &none), Some("256x256"));
         assert_eq!(image_read_geometry(Format::Png, &none), None);
-        assert_eq!(image_read(Format::Ico, Format::Png, &none), None);
+        assert_eq!(
+            image_read(Format::Ico, Format::Png, &one(Format::Ico), &none),
+            None
+        );
         let up = Tuning {
             resize: Some("64x".into()),
             upscale: true,
             ..Tuning::default()
         };
-        let ico = image_read(Format::Ico, Format::Png, &up).unwrap();
+        let ico = image_read(Format::Ico, Format::Png, &one(Format::Ico), &up).unwrap();
         assert!(ico.largest_frame && !ico.every_page, "{ico:?}");
         assert!(reads_frames(Format::Ico, Format::Png));
         assert!(!reads_frames(Format::Png, Format::Ico));
@@ -2472,14 +2845,231 @@ mod tests {
     }
 
     #[test]
-    fn images_merge_into_pdf_using_every_input() {
-        let r = lookup(Format::Png, Format::Pdf).unwrap();
-        let argv = r.steps[0].render(
-            &[Path::new("a.png"), Path::new("b.png")],
-            Path::new("out.pdf"),
+    fn typst_reads_jpg_png_webp_and_gif_into_pdf() {
+        for &from in TYPST_READS {
+            assert_eq!(
+                lookup(from, Format::Pdf),
+                Some(TYPST_IMG_TO_PDF),
+                "{from:?}"
+            );
+            assert_eq!(alternate(from, Format::Pdf), Some(IMG_TO_PDF), "{from:?}");
+        }
+    }
+
+    #[test]
+    fn magick_keeps_heic_heif_avif_tiff_and_bmp_into_pdf() {
+        for from in [
+            Format::Heic,
+            Format::Heif,
+            Format::Avif,
+            Format::Tiff,
+            Format::Bmp,
+        ] {
+            assert_eq!(lookup(from, Format::Pdf), Some(IMG_TO_PDF), "{from:?}");
+            assert_eq!(alternate(from, Format::Pdf), None, "{from:?}");
+        }
+        assert_eq!(alternate(Format::Png, Format::Jpg), None);
+    }
+
+    /// A merge is named by its first input, so the route is decided over
+    /// every input, in either order, and over the knobs only ImageMagick
+    /// honours. The flag that strips a JPEG is honoured on Typst.
+    #[test]
+    fn quality_resize_or_a_foreign_input_moves_a_merge_to_magick() {
+        let p = |s: &str| PathBuf::from(s);
+        let typst = lookup(Format::Jpg, Format::Pdf).unwrap();
+        let both = [p("a.jpg"), p("b.png")];
+        let quality = Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        };
+        let resize = Tuning {
+            resize: Some("800x".into()),
+            ..Tuning::default()
+        };
+        let strip = Tuning {
+            strip_metadata: true,
+            ..Tuning::default()
+        };
+        let plain = Tuning::default();
+        assert_eq!(image_pdf_variant(typst, &both, &quality, None), IMG_TO_PDF);
+        assert_eq!(image_pdf_variant(typst, &both, &resize, None), IMG_TO_PDF);
+        assert_eq!(
+            image_pdf_variant(typst, &[p("a.jpg"), p("b.heic")], &plain, None),
+            IMG_TO_PDF
         );
-        assert!(argv.contains(&"a.png".to_string()));
-        assert!(argv.contains(&"b.png".to_string()));
+        let heic_first = lookup(Format::Heic, Format::Pdf).unwrap();
+        assert_eq!(
+            image_pdf_variant(heic_first, &[p("b.heic"), p("a.jpg")], &plain, None),
+            IMG_TO_PDF
+        );
+        assert_eq!(
+            image_pdf_variant(typst, &both, &plain, None),
+            TYPST_IMG_TO_PDF
+        );
+        assert_eq!(
+            image_pdf_variant(typst, &both, &strip, None),
+            TYPST_IMG_TO_PDF
+        );
+        // Only the Typst recipe is ever swapped.
+        assert_eq!(
+            image_pdf_variant(IMG_TO_JPG, &[p("a.heic")], &quality, None),
+            IMG_TO_JPG
+        );
+        assert!(typst_merge(Format::Jpg, Format::Pdf, &both, &strip, None));
+        assert!(!typst_merge(
+            Format::Jpg,
+            Format::Pdf,
+            &both,
+            &quality,
+            None
+        ));
+        assert!(!typst_merge(
+            Format::Jpg,
+            Format::Pdf,
+            &[p("a.jpg"), p("b.tiff")],
+            &plain,
+            None
+        ));
+        assert!(!typst_merge(
+            Format::Heic,
+            Format::Jpg,
+            &[p("a.heic")],
+            &plain,
+            None
+        ));
+    }
+
+    /// A merge that worked on ImageMagick before Typst took it keeps
+    /// working when only ImageMagick is installed, and says why it ran
+    /// there. With both, or with neither, it stays Typst's; the note is
+    /// only for a merge Typst would otherwise have run.
+    #[test]
+    fn a_merge_falls_back_to_magick_only_when_typst_is_missing() {
+        let p = |s: &str| PathBuf::from(s);
+        let typst = lookup(Format::Jpg, Format::Pdf).unwrap();
+        let both = [p("a.jpg"), p("b.png")];
+        let plain = Tuning::default();
+        let quality = Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        };
+        let set = |b: &[Backend]| b.iter().copied().collect::<AvailableBackends>();
+        let magick_only = set(&[Backend::Magick]);
+        for (available, recipe) in [
+            (set(&[Backend::Magick]), IMG_TO_PDF),
+            (set(&[Backend::Typst, Backend::Magick]), TYPST_IMG_TO_PDF),
+            (set(&[Backend::Typst]), TYPST_IMG_TO_PDF),
+            (set(&[]), TYPST_IMG_TO_PDF),
+        ] {
+            assert_eq!(
+                image_pdf_variant(typst, &both, &plain, Some(&available)),
+                recipe
+            );
+            assert_eq!(
+                typst_missing_note(typst, &both, &plain, Some(&available)).is_some(),
+                recipe == IMG_TO_PDF
+            );
+        }
+        assert!(!typst_merge(
+            Format::Jpg,
+            Format::Pdf,
+            &both,
+            &plain,
+            Some(&magick_only)
+        ));
+        // ImageMagick runs these anyway, so Typst being missing is no news.
+        assert_eq!(
+            typst_missing_note(typst, &both, &quality, Some(&magick_only)),
+            None
+        );
+        let heic = [p("a.jpg"), p("b.heic")];
+        assert_eq!(
+            typst_missing_note(typst, &heic, &plain, Some(&magick_only)),
+            None
+        );
+
+        assert_eq!(
+            fallback_backends(Format::Jpg, Format::Pdf),
+            [Backend::Typst, Backend::Magick]
+        );
+        assert_eq!(
+            fallback_backends(Format::Docx, Format::Pdf),
+            [Backend::Soffice, Backend::Pandoc, Backend::Typst]
+        );
+        assert!(fallback_backends(Format::Heic, Format::Pdf).is_empty());
+        assert!(fallback_backends(Format::Jpg, Format::Png).is_empty());
+    }
+
+    /// Typst keeps a PNG, WebP or GIF page without loss, so a merge says
+    /// what that cost once the PDF is more than half again the size of its
+    /// images and more than a megabyte over them. Below that, Typst's own
+    /// few kilobytes and a tiny flat picture would trip it for nothing. A
+    /// merge of JPEGs alone, embedded as they are, never does.
+    #[test]
+    fn a_merge_notes_its_size_once_it_is_half_again_its_images_and_a_megabyte_over() {
+        let p = |s: &str| PathBuf::from(s);
+        let photos = [p("a.jpg"), p("b.webp")];
+        let kb = 1024;
+        let mb = 1024 * kb;
+        assert_eq!(
+            lossless_size_note(&photos, 945 * kb, 13 * mb).as_deref(),
+            Some(
+                "The PNG and WebP pages are stored without loss, which makes this PDF \
+                 13.0 MB against 945 KB of images; --quality stores them as JPEG instead \
+                 (needs ImageMagick)."
+            )
+        );
+        let photo_png = [p("photo.png")];
+        assert!(lossless_size_note(&photo_png, 10_200_000, 17_000_000).is_some());
+        // Many times larger, but by kilobytes: a flat PNG, a palette PNG.
+        assert_eq!(lossless_size_note(&[p("flat.png")], 515, 5 * kb), None);
+        assert_eq!(lossless_size_note(&[p("ui.png")], 12 * kb, 41 * kb), None);
+        // More than 1.5 times, not at it.
+        assert!(lossless_size_note(&photos, 2_000_000, 3_000_001).is_some());
+        assert_eq!(lossless_size_note(&photos, 2_000_000, 3_000_000), None);
+        // More than a megabyte over, not exactly one.
+        assert!(lossless_size_note(&photos, 100_000, 1_100_001).is_some());
+        assert_eq!(lossless_size_note(&photos, 100_000, 1_100_000), None);
+        assert_eq!(lossless_size_note(&photos, 3_000_000, 2_000_000), None);
+        for other in ["c.png", "c.PNG", "c.gif"] {
+            assert!(
+                lossless_size_note(&[p("a.jpg"), p(other)], 100_000, 1_100_001).is_some(),
+                "{other}"
+            );
+        }
+        let jpegs = [p("a.jpg"), p("b.JPEG"), p("c.jfif")];
+        assert_eq!(lossless_size_note(&jpegs, 1000, 10_000_000), None);
+    }
+
+    /// A missing Typst gets a reason on the Typst merge only: a merge that
+    /// goes to ImageMagick does not need it, and the docx -> pdf fallback
+    /// needs it plainly.
+    #[test]
+    fn typst_is_explained_only_where_it_merges() {
+        let p = |s: &str| PathBuf::from(s);
+        let plain = Tuning::default();
+        let quality = Tuning {
+            quality: Some(80),
+            ..Tuning::default()
+        };
+        let both = [p("a.jpg"), p("b.png")];
+        assert_eq!(
+            typst_reason(Format::Jpg, Format::Pdf, &both, &plain),
+            Some("images go into a PDF through Typst")
+        );
+        assert_eq!(
+            typst_reason(Format::Jpg, Format::Pdf, &both, &quality),
+            None
+        );
+        assert_eq!(
+            typst_reason(Format::Jpg, Format::Pdf, &[p("a.jpg"), p("b.heic")], &plain),
+            None
+        );
+        assert_eq!(
+            typst_reason(Format::Docx, Format::Pdf, &[p("a.docx")], &plain),
+            None
+        );
     }
 
     /// Transparent PNG/WebP/AVIF used to become JPEGs on solid black — the
@@ -2523,6 +3113,7 @@ mod tests {
     #[test]
     fn image_to_pdf_compresses_with_jpeg_at_the_quality_anchor() {
         let r = lookup(Format::Heic, Format::Pdf).unwrap();
+        assert_eq!(r, IMG_TO_PDF);
         let argv = r.steps[0].render(&[Path::new("in.heic")], Path::new("out.pdf"));
         let joined = argv.join(" ");
         assert!(joined.contains("-compress jpeg"), "{joined}");

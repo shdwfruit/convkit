@@ -1,5 +1,5 @@
 use convkit_core::recipe::ScaleStyle;
-use convkit_core::{registry, Arg, ConvError, Format};
+use convkit_core::{registry, Arg, ConvError, Format, Recipe};
 use serde_json::json;
 
 use crate::cli::Cli;
@@ -64,11 +64,24 @@ pub fn run(cli: &Cli, format: Option<&str>) -> i32 {
 /// nothing in the recipe carries them: webm's `--resize` and `--fps`
 /// (its chain is composed at run time) and `--max-size` (a policy over a
 /// whole video conversion, not a slot in one recipe).
+///
+/// A pair with a second route (`registry::alternate`: images into a PDF go
+/// through Typst, or ImageMagick for `--quality` and `--resize`) lists the
+/// flags of both, since giving one of the second route's is what takes the
+/// run there.
 fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     let Some(recipe) = registry::lookup(from, to) else {
         return Vec::new();
     };
-    let has = |wanted: fn(&Arg) -> bool| recipe.steps.iter().any(|s| s.args.iter().any(&wanted));
+    let recipes: Vec<Recipe> = std::iter::once(recipe)
+        .chain(registry::alternate(from, to))
+        .collect();
+    let has = |wanted: fn(&Arg) -> bool| {
+        recipes
+            .iter()
+            .flat_map(|r| r.steps)
+            .any(|s| s.args.iter().any(&wanted))
+    };
     let mut flags = Vec::new();
     if has(|a| matches!(a, Arg::TuneResize)) {
         push_flag(&mut flags, "--resize");
@@ -168,6 +181,10 @@ fn common_tuning_flags(sources: &[Format], fmt: Format) -> Vec<&'static str> {
 /// default belongs to the *pair*, not to either format alone: `mkv` as a
 /// target bakes `crf 20`, `mkv -> webm` bakes `crf 32`, `mkv -> gif` bakes
 /// `fps 15` -- one key cannot hold three truths.
+///
+/// The pair's own recipe only, not its `registry::alternate`: `jpg -> pdf`
+/// embeds a JPEG as it is, and listing ImageMagick's quality 92 there
+/// would say every photo is re-encoded at it.
 fn default_anchors_for(from: Format, to: Format) -> Vec<(&'static str, &'static str)> {
     let Some(recipe) = registry::lookup(from, to) else {
         return Vec::new();
