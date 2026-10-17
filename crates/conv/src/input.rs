@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use convkit_core::{ConvError, ErrorCode, Format, Kind, Remediation};
 
@@ -22,8 +22,39 @@ pub struct Job {
 /// `out.gif` instead of misparsing the target as an unknown extension
 /// `"/out.gif"`. The one case this gives up is converting to a file
 /// literally named `.hidden`, where the user must write `./.hidden`.
-pub(crate) fn is_bare_extension_shorthand(rest: &str) -> bool {
+fn is_bare_extension_shorthand(rest: &str) -> bool {
     !rest.contains('/') && !rest.contains('\\') && !rest.contains('.')
+}
+
+/// Whether a positional is the `.ext` shorthand: `.jpg`, not `./out.gif`.
+pub(crate) fn is_extension_shorthand(p: &Path) -> bool {
+    p.to_string_lossy()
+        .strip_prefix('.')
+        .is_some_and(is_bare_extension_shorthand)
+}
+
+/// Where a named output goes: as typed, or under `-o`, into that directory
+/// by its name. A name that has its own directory already says where it
+/// goes, and `-o` says somewhere else, so the two together are refused
+/// rather than one quietly winning.
+pub(crate) fn in_outdir(output: &Path, outdir: Option<&Path>) -> Result<PathBuf, ConvError> {
+    let Some(dir) = outdir else {
+        return Ok(output.to_path_buf());
+    };
+    let mut parts = output
+        .components()
+        .filter(|c| !matches!(c, Component::CurDir));
+    match (parts.next(), parts.next()) {
+        (Some(Component::Normal(name)), None) => Ok(dir.join(name)),
+        _ => Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "{} already names a directory; drop -o {}, or give only a file name",
+                output.display(),
+                dir.display()
+            ),
+        )),
+    }
 }
 
 /// Resolves the `IN OUT` and `IN .ext` positional forms.
@@ -246,7 +277,7 @@ pub fn jobs_from(
             let from_fmt = format_of(&leading[0])?;
             return Ok(vec![Job {
                 inputs: leading.to_vec(),
-                output: last[0].clone(),
+                output: in_outdir(&last[0], outdir)?,
                 from: from_fmt,
                 to: Format::Pdf,
             }]);
@@ -259,6 +290,14 @@ pub fn jobs_from(
     }
 
     let (input, output) = resolve_pair(paths)?;
+    // The shorthand's output is named after the input, which may be in
+    // another directory; only its name goes into `-o`.
+    let output = match outdir {
+        Some(dir) if is_extension_shorthand(&paths[1]) => {
+            dir.join(output.file_name().unwrap_or_default())
+        }
+        _ => in_outdir(&output, outdir)?,
+    };
     let from_fmt = format_of(&input)?;
     let to_fmt = output_format_of(&output)?;
     Ok(vec![Job {
@@ -668,6 +707,7 @@ pub(crate) fn expand_globs(paths: &[PathBuf], globbable: usize) -> Vec<PathBuf> 
 /// honest unsupported-pair error; we only get to skip files we discovered
 /// ourselves.
 pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
+    let jobs = plan(cli)?;
     // `-o/--outdir` is a request to write there, not a precondition that it
     // already exists — `exec::run` refuses outright when its scratch
     // directory's parent is missing, and until this fix nothing ever
@@ -677,12 +717,16 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
     // component collides with an existing file), not a conversion failure,
     // hence `InvalidInvocation` (exit 2) rather than letting it surface
     // later as an exec-time `ConversionFailed` (exit 1) once per job.
-    // Skipped under `--dry-run`, which is documented as inert: a preview
-    // must not leave a directory behind.
+    // Created only once the jobs are planned, so a refused invocation
+    // leaves no empty directory behind, and skipped under `--dry-run`,
+    // which is documented as inert.
     if let Some(dir) = cli.outdir.as_ref().filter(|_| !cli.dry_run) {
         create_output_dir(dir)?;
     }
+    Ok(jobs)
+}
 
+fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
     let target_format = cli.to.as_deref().and_then(Format::from_ext);
 
     // Without `--to`, the last positional is the output and must not be
@@ -839,12 +883,8 @@ pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
     };
     // A typed-out OUT is the user's explicit choice and is never renamed;
     // the `.ext` shorthand and every --to output are derived.
-    let explicit_output = cli.to.is_none()
-        && expanded.len() == 2
-        && !expanded[1]
-            .to_string_lossy()
-            .strip_prefix('.')
-            .is_some_and(is_bare_extension_shorthand);
+    let explicit_output =
+        cli.to.is_none() && expanded.len() == 2 && !is_extension_shorthand(&expanded[1]);
     if cli.to.is_none() {
         refuse_a_batch_without_to(&expanded, explicit_output, &own)?;
     }
@@ -1438,6 +1478,76 @@ mod tests {
         let jobs = jobs_from(&v(&["a.mp4", "b.gif"]), None, None).unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].inputs, v(&["a.mp4"]));
+    }
+
+    // --- `-o` with a named output: it used to be ignored, so `conv a.png
+    // b.jpg -o out` created out/ and wrote b.jpg beside the input ---------
+
+    #[test]
+    fn outdir_takes_the_extension_shorthands_output() {
+        let jobs = jobs_from(&v(&["x/a.heic", ".jpg"]), None, Some(Path::new("out"))).unwrap();
+        assert_eq!(jobs[0].output, Path::new("out").join("a.jpg"));
+    }
+
+    #[test]
+    fn outdir_takes_a_named_output_by_its_name() {
+        for named in ["b.jpg", "./b.jpg"] {
+            let jobs = jobs_from(&v(&["a.heic", named]), None, Some(Path::new("out"))).unwrap();
+            assert_eq!(jobs[0].output, Path::new("out").join("b.jpg"), "{named}");
+        }
+    }
+
+    #[test]
+    fn outdir_takes_an_image_merges_pdf() {
+        let jobs = jobs_from(
+            &v(&["a.png", "b.png", "scans.pdf"]),
+            None,
+            Some(Path::new("out")),
+        )
+        .unwrap();
+        assert_eq!(jobs[0].output, Path::new("out").join("scans.pdf"));
+    }
+
+    /// Two places to write is a contradiction, not a choice to make for
+    /// the user.
+    #[test]
+    fn a_named_output_with_its_own_directory_and_outdir_is_refused() {
+        for named in ["sub/b.jpg", "../b.jpg"] {
+            let e = jobs_from(&v(&["a.heic", named]), None, Some(Path::new("out"))).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation, "{named}");
+            assert!(e.message.contains("drop -o out"), "{}", e.message);
+        }
+        let e = jobs_from(
+            &v(&["a.png", "b.png", "sub/scans.pdf"]),
+            None,
+            Some(Path::new("out")),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+    }
+
+    /// The shorthand under a flag that keeps the format: the name is kept
+    /// in another directory, as without the shorthand, and a speed is
+    /// still named.
+    #[test]
+    fn a_refused_invocation_does_not_create_the_outdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.heic");
+        std::fs::write(&input, b"x").unwrap();
+        let outdir = dir.path().join("out");
+        let cli = cli_for(vec![input, p("sub/b.jpg")], None, Some(outdir.clone()));
+        assert!(plan_jobs(&cli).is_err());
+        assert!(!outdir.exists());
+    }
+
+    #[test]
+    fn outdir_takes_the_shorthand_under_a_flag_that_keeps_the_format() {
+        let mut c = sped("2", v(&["clips/clip.mp4", ".mp4"]), None, Some(p("out")));
+        c.dry_run = true;
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            Path::new("out").join("clip-2x.mp4")
+        );
     }
 
     // --- Skip already-converted files by format, not by location, so

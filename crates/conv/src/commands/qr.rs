@@ -72,27 +72,10 @@ fn output_path(
                 ),
             ))
         }
-        Some(p) => match p.to_string_lossy().strip_prefix('.') {
-            Some(ext) if input::is_bare_extension_shorthand(ext) => {
-                PathBuf::from(format!("qr.{ext}"))
-            }
-            _ => p.to_path_buf(),
-        },
+        Some(p) if input::is_extension_shorthand(p) => PathBuf::from(format!("qr{}", p.display())),
+        Some(p) => p.to_path_buf(),
     };
-    let path = match outdir {
-        Some(dir) if name.parent().is_some_and(|p| !p.as_os_str().is_empty()) => {
-            return Err(ConvError::new(
-                ErrorCode::InvalidInvocation,
-                format!(
-                    "{} already names a directory; drop -o {}, or give only a file name",
-                    name.display(),
-                    dir.display()
-                ),
-            ))
-        }
-        Some(dir) => dir.join(name),
-        None => name,
-    };
+    let path = input::in_outdir(&name, outdir)?;
     let format = input::output_format_of(&path)?;
     if !matches!(format, Format::Png | Format::Svg)
         && registry::lookup(Format::Png, format).is_none()

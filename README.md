@@ -94,6 +94,7 @@ conversion also prompts to install whichever backend it needs.
 ```console
 conv in.mp4 out.gif              # target inferred from output extension
 conv in.mp4 .gif                 # same basename, new extension
+conv in.mp4 .gif -o ./clips      # same, written into another folder
 conv *.heic --to jpg             # batch; globs expanded by conv itself, so this works on Windows too
 conv ./photos --to jpg -o ./out  # folder input, non-recursive, outputs redirected
 conv a.png b.png out.pdf         # merge two or more images into one PDF
@@ -691,8 +692,9 @@ backend's full output to stderr as a job runs.
 ## Batch conversion
 
 `--to <format>` converts many inputs at once — a glob, a list of files, or a
-folder (non-recursive). `-o/--outdir` redirects outputs; `-j/--jobs` sets
-parallelism (default: core count). A batch prints one summary line; per-job
+folder (non-recursive). `-o/--outdir` puts the outputs in another folder,
+as it does for a single named output; `-j/--jobs` sets parallelism
+(default: core count). A batch prints one summary line; per-job
 failures still print in full, on stderr:
 
 ```console
