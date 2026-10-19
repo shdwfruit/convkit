@@ -847,6 +847,14 @@ passes after the measurements: without it ffmpeg 6.1 encodes a different
 number of frames in each pass of an mp4 and pass 2 hangs. It changes nothing
 for these sources, whose frames are already evenly spaced.
 
+`-deadline good -cpu-used 4` was also added to both VP9 passes after the
+measurements (2026-10-16), for an encode several times faster than ffmpeg's
+default speed 1. It was not refitted. Checked instead on three other 1080p
+clips (a screen recording, a grainy photo pan and `testsrc2`) at 0.01 and
+0.04 bpp, it scored between 1.8 VMAF lower and 0.2 higher than speed 1 at
+the same rate (median 0.8 lower), well inside `VP9_FIT`'s 19 VMAF rmse, and
+its files came out at most 2.3% over their rate, inside the 2.9% reserve.
+
 Each encode is scored against the reference with VMAF, every frame, the
 encode scaled back up to 1920x1080 with bicubic first, so that the loss from
 a smaller picture is counted. The model is libvmaf's default,
@@ -1031,7 +1039,8 @@ ladder, not a cut. The reserve at 1 MB is 29 kB.
 - Every encode is at the source's 50 fps, so a reduced frame rate was not
   exercised; the frame-rate cost is authored, below.
 - VP9 and x264 are both measured on all three clips: x264 at its default
-  preset, VP9 with the options shown above and no others.
+  preset, VP9 with the options shown above and no others (so at speed 1,
+  not the speed 4 convkit now encodes at; see above).
 - VMAF is one metric, trained on a particular range of viewing conditions.
   It says nothing about audio, and nothing about motion smoothness.
 
