@@ -10,13 +10,20 @@ use crate::{Arg, Backend, Format, Kind, OutputMode, Recipe, Step, Tuning};
 /// `pub` so `conv capabilities <format>` can state the default it is
 /// documenting; overridable per run via `Arg::Quality`'s tuning slot.
 pub const IMAGE_QUALITY: &str = "92";
+/// HEIC's own quality anchor, on libheif's scale rather than JPEG's: its
+/// x265 encoder runs at CRF `50 - quality/2`, so 92 is CRF 4, and an
+/// iPhone photo's 2.6 MB JPEG came back as a 4.3 MB HEIC. 60 is CRF 20:
+/// 1.59 MB, about what the phone itself wrote (1.62 MB), and closer to the
+/// JPEG than a JPEG at quality 85 is (DSSIM 0.0033 against 0.0062). `pub`
+/// for `IMAGE_QUALITY`'s reason.
+pub const HEIC_QUALITY: &str = "60";
 /// DPI used when rasterising vectors. 384 gives a crisp result at 4x a 96dpi
 /// nominal size without producing an absurd bitmap.
 pub(crate) const SVG_DENSITY: &str = "384";
 
 /// Lossy raster targets take a quality flag; lossless ones must not.
 fn is_lossy(f: Format) -> bool {
-    matches!(f, Format::Jpg | Format::Webp | Format::Avif)
+    matches!(f, Format::Jpg | Format::Webp | Format::Avif | Format::Heic)
 }
 
 macro_rules! step {
@@ -94,6 +101,28 @@ const IMG_TO_JPG: Recipe = Recipe {
         ]
     )],
     warnings: &[FLATTEN_FIRST_FRAME_NOTE],
+};
+
+/// HEIC, through libheif's x265 encoder. One frame: ImageMagick writes
+/// every frame of a multi-frame source as a separate image in the file,
+/// and viewers show only the first. Alpha is kept, as HEIC can hold it.
+/// The writer also sets libheif's orientation from the image's, which
+/// `-auto-orient` has already turned upright, so no rotation is written.
+const IMG_TO_HEIC: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Magick,
+        [
+            Arg::InputFirstFrame,
+            Arg::Lit("-auto-orient"),
+            Arg::StripMetadata,
+            Arg::TuneResize,
+            Arg::TuneColors,
+            Arg::Lit("-quality"),
+            Arg::Quality(HEIC_QUALITY),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[FIRST_FRAME_NOTE],
 };
 
 /// Lossless targets that keep frames as-is (tiff holds multi-page sources
@@ -400,13 +429,17 @@ const RASTER: &[Format] = &[
     Format::Bmp,
 ];
 
-/// Raster formats we are willing to *write*. HEIC/HEIF are read-only in v1:
-/// encoding them needs a patent-encumbered encoder most ImageMagick builds omit.
+/// Raster formats we are willing to *write*. HEIC needs an HEVC encoder in
+/// ImageMagick's libheif, which some builds leave out (Debian and Ubuntu
+/// ship it as a separate plugin, the Windows build has none); without one
+/// the conversion fails and says what to install. HEIF stays read-only: it
+/// is the same container under its generic name.
 const RASTER_WRITABLE: &[Format] = &[
     Format::Jpg,
     Format::Png,
     Format::Webp,
     Format::Avif,
+    Format::Heic,
     Format::Tiff,
     Format::Bmp,
 ];
@@ -414,13 +447,14 @@ const RASTER_WRITABLE: &[Format] = &[
 type Table = BTreeMap<(Format, Format), Recipe>;
 
 /// The recipe every raster source takes to `to`, by `to`'s frame policy:
-/// jpg/png/bmp hold one image, so they take the first frame explicitly (jpg
-/// additionally flattens alpha); webp/avif hold animation and alpha as-is;
-/// tiff holds multi-page sources faithfully. `None` for a format conv does
-/// not write. Also what a raster stripped into its own format runs.
+/// jpg/png/bmp/heic hold one image, so they take the first frame explicitly
+/// (jpg additionally flattens alpha); webp/avif hold animation and alpha
+/// as-is; tiff holds multi-page sources faithfully. `None` for a format conv
+/// does not write. Also what a raster stripped into its own format runs.
 pub(crate) fn image_recipe_for(to: Format) -> Option<Recipe> {
     Some(match to {
         Format::Jpg => IMG_TO_JPG,
+        Format::Heic => IMG_TO_HEIC,
         Format::Png | Format::Bmp => IMG_LOSSLESS_SINGLE_FRAME,
         _ if !RASTER_WRITABLE.contains(&to) => return None,
         _ if is_lossy(to) => IMG_LOSSY,
@@ -2112,7 +2146,7 @@ mod tests {
             ..Tuning::default()
         };
         for &from in RASTER {
-            for to in [Format::Jpg, Format::Png, Format::Bmp] {
+            for to in [Format::Jpg, Format::Png, Format::Bmp, Format::Heic] {
                 if from != to {
                     assert!(notes_need_image(from, to, &off), "{from:?} -> {to:?}");
                     assert!(notes_need_image(from, to, &on), "{from:?} -> {to:?}");
@@ -2498,11 +2532,12 @@ mod tests {
 
     /// Multi-page TIFF / animated WebP into single-image targets used to
     /// fail with an empty "produced no output" (magick wrote stem-0.jpg,
-    /// stem-1.jpg, …). jpg/png/bmp select the first frame explicitly;
+    /// stem-1.jpg, …). jpg/png/bmp select the first frame explicitly, and
+    /// heic, which would hold the rest as images no viewer shows;
     /// webp/avif/tiff keep every frame.
     #[test]
     fn single_image_targets_select_the_first_frame_explicitly() {
-        for to in [Format::Jpg, Format::Png, Format::Bmp] {
+        for to in [Format::Jpg, Format::Png, Format::Bmp, Format::Heic] {
             let r = lookup(Format::Tiff, to).unwrap();
             let argv = r.steps[0].render(&[Path::new("scan.tiff")], Path::new("out"));
             assert!(argv.iter().any(|a| a == "scan.tiff[0]"), "{to:?}: {argv:?}");
@@ -3299,13 +3334,23 @@ mod tests {
         assert!(argv.contains(&"--standalone".to_string()), "{argv:?}");
     }
 
+    /// Every other raster is written to HEIC, one frame, at HEIC's own
+    /// quality anchor rather than JPEG's. HEIF, the same container under
+    /// its generic name, is still only read.
     #[test]
-    fn no_recipe_targets_heic_or_heif() {
+    fn every_raster_reaches_heic_and_none_reaches_heif() {
+        for &from in RASTER {
+            if from == Format::Heic {
+                continue;
+            }
+            let r = lookup(from, Format::Heic).unwrap_or_else(|| panic!("{from:?} -> heic"));
+            let argv = r.steps[0].render(&[Path::new("in.x")], Path::new("out.heic"));
+            assert!(argv.iter().any(|a| a == "in.x[0]"), "one frame: {argv:?}");
+            let q = argv.iter().position(|a| a == "-quality").unwrap();
+            assert_eq!(argv[q + 1], HEIC_QUALITY, "{from:?}");
+        }
         for (from, to) in all_pairs() {
-            assert!(
-                !matches!(to, Format::Heic | Format::Heif),
-                "{from:?}->{to:?} targets a read-only, encode-unsupported format"
-            );
+            assert_ne!(to, Format::Heif, "{from:?} -> heif");
         }
     }
 
