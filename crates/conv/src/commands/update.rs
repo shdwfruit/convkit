@@ -29,13 +29,14 @@ use serde_json::json;
 use crate::cli::Cli;
 use crate::commands::install;
 
-const BACKENDS: [Backend; 6] = [
+const BACKENDS: [Backend; 7] = [
     Backend::Ffmpeg,
     Backend::Ffprobe,
     Backend::Magick,
     Backend::Pandoc,
     Backend::Soffice,
     Backend::Typst,
+    Backend::Qpdf,
 ];
 
 /// One backend's row in the report. `--check` and a real update share this

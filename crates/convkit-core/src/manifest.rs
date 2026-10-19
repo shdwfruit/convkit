@@ -412,6 +412,74 @@ pub static ALL: &[Asset] = &[
         }],
         version: "0.15.1",
     },
+    // --- qpdf: all five platforms ----------------------------------------
+    // qpdf/qpdf release v12.4.2 (2026-09-27). Each asset is a zip of
+    // upstream's bin/ and lib/ trees -- the program plus the shared
+    // libraries it loads relative to itself -- so qpdf installs as a folder
+    // (`ManagedLayout::Folder`): `archive_member` names the program, and
+    // `install::extract_folder` takes the runtime files around it. The
+    // Linux builds need glibc 2.34 or newer. Every digest was computed from
+    // an actual download and matches upstream's own `qpdf-12.4.2.sha256`.
+    Asset {
+        os: "windows",
+        arch: "x64",
+        url: "https://github.com/qpdf/qpdf/releases/download/v12.4.2/qpdf-12.4.2-msvc64.zip",
+        sha256: "db87077e683630c1217e0e8f9a20a9749d952ab676e881c3689187763a5de25d",
+        packaging: Packaging::Zip,
+        members: &[ArchiveMember {
+            backend: Backend::Qpdf,
+            archive_member: "qpdf-12.4.2-msvc64/bin/qpdf.exe",
+        }],
+        version: "12.4.2",
+    },
+    Asset {
+        os: "linux",
+        arch: "x64",
+        url: "https://github.com/qpdf/qpdf/releases/download/v12.4.2/qpdf-12.4.2-bin-linux-x86_64.zip",
+        sha256: "db367d897829f22c4198ce1094143c9d467bd6ee7dfabc44ba6f02056b24f8b1",
+        packaging: Packaging::Zip,
+        members: &[ArchiveMember {
+            backend: Backend::Qpdf,
+            archive_member: "bin/qpdf",
+        }],
+        version: "12.4.2",
+    },
+    Asset {
+        os: "linux",
+        arch: "arm64",
+        url: "https://github.com/qpdf/qpdf/releases/download/v12.4.2/qpdf-12.4.2-bin-linux-aarch64.zip",
+        sha256: "8fd9d009eb0838398180a603f2cf76531e5c68a4ecc8847598e0a1ccb1d3b600",
+        packaging: Packaging::Zip,
+        members: &[ArchiveMember {
+            backend: Backend::Qpdf,
+            archive_member: "bin/qpdf",
+        }],
+        version: "12.4.2",
+    },
+    Asset {
+        os: "macos",
+        arch: "x64",
+        url: "https://github.com/qpdf/qpdf/releases/download/v12.4.2/qpdf-12.4.2-bin-macos-x86_64.zip",
+        sha256: "dd3b01f4414d198529bb0f13bba59c2f016a328bb3506695087a96fb80fc1481",
+        packaging: Packaging::Zip,
+        members: &[ArchiveMember {
+            backend: Backend::Qpdf,
+            archive_member: "bin/qpdf",
+        }],
+        version: "12.4.2",
+    },
+    Asset {
+        os: "macos",
+        arch: "arm64",
+        url: "https://github.com/qpdf/qpdf/releases/download/v12.4.2/qpdf-12.4.2-bin-macos-arm64.zip",
+        sha256: "62e46987a30ea167cbc530ccb22690aec3d8c812ed09979a941bcee92e504b79",
+        packaging: Packaging::Zip,
+        members: &[ArchiveMember {
+            backend: Backend::Qpdf,
+            archive_member: "bin/qpdf",
+        }],
+        version: "12.4.2",
+    },
 ];
 
 /// The running process's OS, in the vocabulary this manifest uses.
@@ -848,6 +916,58 @@ mod tests {
                     && a.members.iter().any(|m| m.backend == backend)),
                 "missing a linux-arm64 manifest entry for {backend:?} (review finding F232)"
             );
+        }
+    }
+
+    #[test]
+    fn qpdf_has_a_manifest_entry_for_every_platform_this_manifest_covers() {
+        for (os, arch) in [
+            ("windows", "x64"),
+            ("linux", "x64"),
+            ("linux", "arm64"),
+            ("macos", "x64"),
+            ("macos", "arm64"),
+        ] {
+            assert!(
+                ALL.iter().any(|a| a.os == os
+                    && a.arch == arch
+                    && a.members.iter().any(|m| m.backend == Backend::Qpdf)),
+                "missing a qpdf manifest entry for {os}-{arch}"
+            );
+        }
+    }
+
+    /// `install::extract_folder` reads zips only, and finds the folder's
+    /// root by stripping `bin/<program>` off the member.
+    #[test]
+    fn every_folder_backend_asset_is_a_zip_naming_its_program_under_bin() {
+        use crate::ManagedLayout;
+        for a in ALL {
+            for m in a
+                .members
+                .iter()
+                .filter(|m| m.backend.managed_layout() == ManagedLayout::Folder)
+            {
+                assert_eq!(a.packaging, Packaging::Zip, "{}", a.url);
+                let exe = if a.os == "windows" {
+                    format!("bin/{}.exe", m.backend.exe_name())
+                } else {
+                    format!("bin/{}", m.backend.exe_name())
+                };
+                assert!(
+                    m.archive_member.ends_with(&exe),
+                    "{}: {}",
+                    a.url,
+                    m.archive_member
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn has_managed_build_is_true_for_qpdf_on_a_covered_platform() {
+        if manifest_covers_current_platform() {
+            assert!(has_managed_build(Backend::Qpdf));
         }
     }
 

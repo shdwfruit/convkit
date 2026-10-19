@@ -13,6 +13,10 @@ pub enum Backend {
     /// on every platform this manifest covers, so — unlike `Soffice` — it is
     /// managed.
     Typst,
+    /// qpdf, which merges and splits PDFs by rewriting their structure
+    /// (`conv merge`, `conv split`). Its upstream builds are a program plus
+    /// shared libraries, so it installs as a folder; see `ManagedLayout`.
+    Qpdf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +28,19 @@ pub enum PackageManager {
     Apt,
     Dnf,
     Pacman,
+}
+
+/// How `conv install` lays a managed backend out under the managed
+/// directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedLayout {
+    /// One executable: `<managed dir>/<exe>`.
+    File,
+    /// Upstream's own `bin/` and `lib/` tree, kept intact under
+    /// `<managed dir>/<exe>/`, because the program finds its shared
+    /// libraries relative to itself (`$ORIGIN/../lib` on Linux,
+    /// `@loader_path/../lib` on macOS, beside the `.exe` on Windows).
+    Folder,
 }
 
 impl PackageManager {
@@ -67,6 +84,7 @@ impl Backend {
             Backend::Soffice => "soffice",
             Backend::Pandoc => "pandoc",
             Backend::Typst => "typst",
+            Backend::Qpdf => "qpdf",
         }
     }
 
@@ -74,6 +92,14 @@ impl Backend {
     /// LibreOffice has no relocatable binary and is therefore never managed.
     pub fn is_managed(&self) -> bool {
         !matches!(self, Backend::Soffice)
+    }
+
+    /// Where `conv install` puts this backend; see [`ManagedLayout`].
+    pub fn managed_layout(&self) -> ManagedLayout {
+        match self {
+            Backend::Qpdf => ManagedLayout::Folder,
+            _ => ManagedLayout::File,
+        }
     }
 
     /// The command we print for the user to run. We never run it ourselves.
@@ -131,6 +157,14 @@ impl Backend {
             (Backend::Typst, PackageManager::Apt) => "cargo install typst-cli",
             (Backend::Typst, PackageManager::Dnf) => "cargo install typst-cli",
             (Backend::Typst, PackageManager::Pacman) => "sudo pacman -S typst",
+
+            (Backend::Qpdf, PackageManager::Winget) => "winget install QPDF.QPDF",
+            (Backend::Qpdf, PackageManager::Scoop) => "scoop install qpdf",
+            (Backend::Qpdf, PackageManager::Choco) => "choco install qpdf",
+            (Backend::Qpdf, PackageManager::Brew) => "brew install qpdf",
+            (Backend::Qpdf, PackageManager::Apt) => "sudo apt-get install qpdf",
+            (Backend::Qpdf, PackageManager::Dnf) => "sudo dnf install qpdf",
+            (Backend::Qpdf, PackageManager::Pacman) => "sudo pacman -S qpdf",
         }
     }
 
@@ -164,6 +198,48 @@ impl Backend {
             Backend::Soffice => "install LibreOffice from https://www.libreoffice.org/download/",
             Backend::Pandoc => "install pandoc from https://github.com/jgm/pandoc/releases",
             Backend::Typst => "install typst from https://github.com/typst/typst/releases",
+            Backend::Qpdf => "install qpdf from https://github.com/qpdf/qpdf/releases",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_qpdf_installs_as_a_folder() {
+        for b in [
+            Backend::Ffmpeg,
+            Backend::Ffprobe,
+            Backend::Magick,
+            Backend::Soffice,
+            Backend::Pandoc,
+            Backend::Typst,
+        ] {
+            assert_eq!(b.managed_layout(), ManagedLayout::File, "{b:?}");
+        }
+        assert_eq!(Backend::Qpdf.managed_layout(), ManagedLayout::Folder);
+        assert!(Backend::Qpdf.is_managed());
+        assert_eq!(Backend::Qpdf.exe_name(), "qpdf");
+    }
+
+    #[test]
+    fn qpdf_has_an_install_hint_for_every_package_manager() {
+        for pm in [
+            PackageManager::Winget,
+            PackageManager::Choco,
+            PackageManager::Scoop,
+            PackageManager::Brew,
+            PackageManager::Apt,
+            PackageManager::Dnf,
+            PackageManager::Pacman,
+        ] {
+            let hint = Backend::Qpdf.manual_hint(pm);
+            assert!(hint.to_ascii_lowercase().contains("qpdf"), "{pm:?}: {hint}");
+        }
+        assert!(Backend::Qpdf
+            .download_hint()
+            .contains("github.com/qpdf/qpdf"));
     }
 }
