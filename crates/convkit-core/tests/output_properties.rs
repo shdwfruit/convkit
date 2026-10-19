@@ -1839,6 +1839,133 @@ fn a_workbook_with_excels_default_password_still_converts() {
     assert!(zip_text(&xlsx, "xl/sharedStrings.xml").contains("velvet"));
 }
 
+// --- Workbooks to PDF -------------------------------------------------------
+
+/// Three sheets on A4 with 2 cm margins. `Sales` has prices in a 1.2 cm
+/// column, which prints them as ###. `Wide` is 20 columns of numbers at the
+/// default width, about 45 cm, which LibreOffice cuts into three pages
+/// across. `Scaled` is the same, but its page style prints it at 80%, which
+/// is the workbook's own say.
+fn workbook_fods() -> String {
+    let wide = |name: &str, style: &str| {
+        let rows: String = (1..=3)
+            .map(|r| {
+                let cells: String = (0..20)
+                    .map(|c| {
+                        format!(
+                            r#"<table:table-cell office:value-type="float" office:value="{}"/>"#,
+                            r * 1000 + c
+                        )
+                    })
+                    .collect();
+                format!("<table:table-row>{cells}</table:table-row>")
+            })
+            .collect();
+        format!(
+            r#"<table:table table:name="{name}" table:style-name="{style}"><table:table-column table:number-columns-repeated="20"/>{rows}</table:table>"#
+        )
+    };
+    let label = |t: &str| {
+        format!(
+            r#"<table:table-cell office:value-type="string"><text:p>{t}</text:p></table:table-cell>"#
+        )
+    };
+    let price = |v: &str| {
+        format!(
+            r#"<table:table-cell table:style-name="ce1" office:value-type="currency" office:currency="USD" office:value="{v}"/>"#
+        )
+    };
+    let page = r#"fo:page-width="21cm" fo:page-height="29.7cm" fo:margin-left="2cm" fo:margin-right="2cm" fo:margin-top="2cm" fo:margin-bottom="2cm""#;
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" office:version="1.2" office:mimetype="application/vnd.oasis.opendocument.spreadsheet">
+<office:styles><style:default-style style:family="table-cell"><style:text-properties fo:font-size="10pt"/></style:default-style></office:styles>
+<office:automatic-styles>
+<style:style style:name="co1" style:family="table-column"><style:table-column-properties style:column-width="2.5cm"/></style:style>
+<style:style style:name="co2" style:family="table-column"><style:table-column-properties style:column-width="1.2cm"/></style:style>
+<number:currency-style style:name="N1"><number:currency-symbol>$</number:currency-symbol><number:number number:decimal-places="2" number:min-decimal-places="2" number:min-integer-digits="1" number:grouping="true"/></number:currency-style>
+<style:style style:name="ce1" style:family="table-cell" style:data-style-name="N1"/>
+<style:style style:name="ta1" style:family="table" style:master-page-name="Plain"><style:table-properties table:display="true"/></style:style>
+<style:style style:name="ta2" style:family="table" style:master-page-name="Scaled"><style:table-properties table:display="true"/></style:style>
+<style:page-layout style:name="pm1"><style:page-layout-properties {page}/></style:page-layout>
+<style:page-layout style:name="pm2"><style:page-layout-properties {page} style:scale-to="80%"/></style:page-layout>
+</office:automatic-styles>
+<office:master-styles>
+<style:master-page style:name="Plain" style:page-layout-name="pm1"/>
+<style:master-page style:name="Scaled" style:page-layout-name="pm2"/>
+</office:master-styles>
+<office:body><office:spreadsheet>
+<table:table table:name="Sales" table:style-name="ta1"><table:table-column table:style-name="co1"/><table:table-column table:style-name="co2"/>
+<table:table-row>{}{}</table:table-row>
+<table:table-row>{}{}</table:table-row>
+<table:table-row>{}{}</table:table-row>
+</table:table>
+{}
+{}
+</office:spreadsheet></office:body>
+</office:document>
+"#,
+        label("Item"),
+        label("Price"),
+        label("North"),
+        price("14962.88"),
+        label("South"),
+        price("34834.10"),
+        wide("Wide", "ta1"),
+        wide("Scaled", "ta2"),
+    )
+}
+
+/// The xlsx, and an ods saved from it. Straight from the flat file,
+/// LibreOffice makes an ods that prints its first two sheets blank, so the
+/// ods goes by way of the xlsx.
+fn workbooks(dir: &tempfile::TempDir) -> [PathBuf; 2] {
+    let fods = write_file(dir, "book.fods", &workbook_fods());
+    let xlsx = soffice_build(dir, &fods, &["--convert-to", "xlsx"], "xlsx");
+    let ods = soffice_build(dir, &xlsx, &["--convert-to", "ods"], "ods");
+    [xlsx, ods]
+}
+
+/// The price column is widened, so no ### is printed; `Wide` is scaled
+/// onto one page across; `Scaled` keeps the workbook's 80%, three pages
+/// across. Five pages, where `--convert-to` printed seven.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_workbook_to_pdf_widens_its_hashed_columns_and_fits_wide_sheets() {
+    let dir = tmp();
+    for book in workbooks(&dir) {
+        let (pdf, o) = convert_path(&book, "pdf");
+        assert_eq!(pdf_pages(&pdf), 5, "{}", book.display());
+        assert_eq!(
+            o.warnings[0],
+            "Widened 1 column whose numbers would otherwise print as ###.",
+            "{}",
+            book.display()
+        );
+        // 17 cm of page for about 45 cm of columns; the default column
+        // width depends on the fonts this machine has.
+        let scale: u32 = o.warnings[1]
+            .strip_prefix("Scaled 1 sheet down to fit the page width, to ")
+            .and_then(|s| s.strip_suffix("%."))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("{:?}", o.warnings));
+        assert!((30..=45).contains(&scale), "{:?}", o.warnings);
+        assert_eq!(o.warnings.len(), 2, "{:?}", o.warnings);
+    }
+}
+
+/// A sheet that already fits prints as it is, with nothing to say.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_workbook_that_fits_its_page_is_left_alone() {
+    let dir = tmp();
+    let csv = write_file(&dir, "small.csv", "item,price\nNorth,12.5\nSouth,7\n");
+    let xlsx = soffice_build(&dir, &csv, &["--convert-to", "xlsx"], "xlsx");
+    let (pdf, o) = convert_path(&xlsx, "pdf");
+    assert_eq!(pdf_pages(&pdf), 1);
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+}
+
 // --- Icons ------------------------------------------------------------------
 
 /// Every size an .ico target holds, largest first, as ImageMagick lists

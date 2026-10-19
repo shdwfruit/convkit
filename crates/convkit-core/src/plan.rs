@@ -438,6 +438,21 @@ fn render_steps(
     steps
 }
 
+/// The plain `--convert-to pdf` step for a workbook, which prints it as it
+/// is set: for when the macro fitting it to the page cannot run (see
+/// `sheet_pdf`).
+pub(crate) fn unfitted_sheet_step(input: &Path, output: &Path) -> PlannedStep {
+    render_steps(
+        &registry::OFFICE_TO_PDF,
+        &[input.to_path_buf()],
+        output,
+        &Tuning::default(),
+        &ResolvedVideo::default(),
+        &[],
+    )
+    .remove(0)
+}
+
 /// `photo.jpg --strip-metadata` -> `photo-stripped.jpg`, and the same for
 /// video and audio. An image runs the recipe any raster takes to its format
 /// (through the TIFF for png), which re-encodes a lossy one, so that is

@@ -152,6 +152,22 @@ page per input, in argument order; formats can mix. A directory there
 expands to its images in natural order (`p2` before `p10`). Two positionals
 are always an ordinary pair: `conv a.png out.pdf` converts one file.
 
+A workbook (`xlsx`, `xls`, `ods`) goes to PDF fitted to the page.
+LibreOffice prints a number too wide for its column as `###`, and cuts a
+sheet wider than the page into strips across several pages. conv widens
+only the columns that would print `###`, and scales a sheet wider than its
+page down to the page width, keeping the paper size and orientation. A sheet
+the workbook already scales, or gives a print range, is left as it is. The
+notes say what changed:
+
+```console
+$ conv book.xlsx book.pdf
+OK book.pdf - 44 KB - 2.3s
+  /home/user/Documents/book.pdf
+  note  Widened 1 column whose numbers would otherwise print as ###.
+  note  Scaled 1 sheet down to fit the page width, to 37%.
+```
+
 A failure never looks like a success, and carries its own fix — `try` names
 whichever package manager is on `PATH` (winget/scoop/choco, brew,
 apt-get/dnf/pacman):

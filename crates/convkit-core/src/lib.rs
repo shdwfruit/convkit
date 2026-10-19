@@ -18,6 +18,7 @@ pub mod qr;
 pub mod recipe;
 pub mod registry;
 pub mod resolve;
+mod sheet_pdf;
 pub mod size;
 pub mod sized;
 pub mod speed;
