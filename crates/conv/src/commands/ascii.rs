@@ -19,6 +19,8 @@ use crate::{ansi, clipboard, input, install_prompt, output, render};
 
 // Used by the session `conv ascii -i` runs, wired in with the flag.
 #[allow(dead_code)]
+mod frame;
+#[allow(dead_code)]
 mod tune;
 
 /// Where the art ends up, which decides its size, its cell shape and
