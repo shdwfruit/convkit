@@ -4,6 +4,7 @@
 
 pub mod art;
 pub mod grid;
+pub mod html;
 pub mod image;
 pub mod style;
 
