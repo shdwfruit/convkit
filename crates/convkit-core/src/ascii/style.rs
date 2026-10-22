@@ -24,21 +24,22 @@ pub enum Style {
 const NAMES: [&str; 3] = ["ascii", "blocks", "braille"];
 
 impl Style {
-    /// `--chars`: a style's name, or a ramp of two or more characters.
-    /// Four or more lowercase letters that aren't a name are taken for a
+    /// `--chars`: a style's name in any case, or a ramp of two or more
+    /// characters. Four or more letters that aren't a name are taken for a
     /// mistyped name rather than a ramp.
     pub fn parse(s: &str) -> Result<Style> {
-        match s {
+        let lower = s.to_ascii_lowercase();
+        match lower.as_str() {
             "ascii" => return Ok(Style::Ascii),
             "blocks" => return Ok(Style::Blocks),
             "braille" => return Ok(Style::Braille),
             _ => {}
         }
         let invalid = |m: String| ConvError::new(ErrorCode::InvalidInvocation, m);
-        if s.len() >= 4 && s.bytes().all(|b| b.is_ascii_lowercase()) {
+        if s.len() >= 4 && s.bytes().all(|b| b.is_ascii_alphabetic()) {
             let near = NAMES
                 .iter()
-                .min_by_key(|n| strsim::levenshtein(n, s))
+                .min_by_key(|n| strsim::levenshtein(n, &lower))
                 .expect("three names");
             return Err(invalid(format!(
                 "unknown style \"{s}\"; did you mean {near}? The styles are ascii, blocks and braille, or give your own characters from least ink to most, like \" .:oO@\""

@@ -3643,6 +3643,25 @@ fn ascii_json_gives_text() {
 }
 
 #[test]
+fn ascii_json_text_stays_plain_with_color() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let out = conv()
+        .current_dir(dir.path())
+        .args([
+            "ascii", "logo.svg", "--width", "20", "--chars", "blocks", "--color", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let text = v["results"][0]["text"].as_str().unwrap();
+    assert!(!text.contains('\x1b') && text.contains('█'), "{text}");
+    let warnings = v["results"][0]["warnings"].to_string();
+    assert!(warnings.contains("--json gives plain text"), "{warnings}");
+}
+
+#[test]
 fn ascii_color_into_txt_is_noted() {
     let dir = tempfile::tempdir().unwrap();
     ascii_logo(dir.path());
@@ -3654,6 +3673,40 @@ fn ascii_color_into_txt_is_noted() {
         .stdout(contains("can't hold colour"));
     let txt = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
     assert!(!txt.contains('\x1b'));
+}
+
+#[test]
+fn ascii_colour_only_note_fits_where_the_art_goes() {
+    // Red beside dark green: about as bright, so the plain styles lose it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("rg.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20"><rect width="20" height="20" fill="#ff0000"/><rect x="20" width="20" height="20" fill="#004c00"/></svg>"##,
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = conv()
+            .current_dir(dir.path())
+            .arg("ascii")
+            .arg("rg.svg")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    let plain = "a .png or .html with --color keeps the colours";
+    assert!(run(&["out.txt"]).contains(plain));
+    assert!(run(&["--json"]).contains(plain));
+    let piped = run(&[]);
+    assert!(
+        piped.contains("try --color") && !piped.contains(plain),
+        "{piped}"
+    );
 }
 
 #[test]
@@ -3671,7 +3724,16 @@ fn ascii_refusals() {
         (&["ascii", "logo.svg", "taken.txt"], "pass -y"),
         (
             &["ascii", "logo.svg", "--chars", " é", "out.png"],
-            "isn't one",
+            "\"é\" (U+00E9) isn't one",
+        ),
+        // The format asked for, and an invisible character by its number.
+        (
+            &["ascii", "logo.svg", "--chars", " \u{200B}", "out.jpg"],
+            "a .jpg can draw",
+        ),
+        (
+            &["ascii", "logo.svg", "--chars", " \u{200B}", "out.jpg"],
+            "U+200B, an invisible character, isn't one",
         ),
     ] {
         conv()

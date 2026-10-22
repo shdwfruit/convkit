@@ -104,7 +104,9 @@ pub struct Made {
     pub notes: Vec<String>,
 }
 
-const COLOUR_ONLY: &str = "this picture's shapes differ mostly in colour, not brightness, so they may not show; try --color or --chars blocks";
+/// The note for a picture whose shapes differ mostly in colour. The
+/// command that shows the art may word it for where it goes.
+pub const COLOUR_ONLY: &str = "this picture's shapes differ mostly in colour, not brightness, so they may not show; try --color or --chars blocks";
 
 /// The empty braille character: no dots, but as wide as the others where
 /// a font is not monospaced.
@@ -143,7 +145,13 @@ pub fn make(img: &Image, cols: u32, rows: u32, opts: &Options) -> Made {
             Style::Braille => braille_cells(ink, &grid.alpha, &shape),
         };
         if opts.colour {
-            colour_cells(&mut cells, &grid, &shape, opts.bg);
+            colour_cells(
+                &mut cells,
+                &grid,
+                &shape,
+                opts.bg,
+                opts.style == Style::Braille,
+            );
         }
         cells
     };
@@ -253,6 +261,20 @@ fn ramp_cells(ink: &[f32], shape: &Shape, ramp: &[char]) -> Vec<Cell> {
         .collect()
 }
 
+/// A braille character's dots, each its column and row in the cell and
+/// its bit: Unicode's numbering, the left column top to bottom, then the
+/// right, then the bottom pair.
+const BRAILLE_DOTS: [(usize, usize, u32); 8] = [
+    (0, 0, 0x01),
+    (0, 1, 0x02),
+    (0, 2, 0x04),
+    (1, 0, 0x08),
+    (1, 1, 0x10),
+    (1, 2, 0x20),
+    (0, 3, 0x40),
+    (1, 3, 0x80),
+];
+
 /// Dots by Floyd-Steinberg dithering of the ink, eight a cell. A clear
 /// sample never gets a dot and passes no error on, so a dither doesn't
 /// spill into the empty background.
@@ -282,22 +304,10 @@ fn braille_cells(mut ink: Vec<f32>, alpha: &[f32], shape: &Shape) -> Vec<Cell> {
             }
         }
     }
-    // Unicode's dot numbering: the left column top to bottom, then the
-    // right, then the bottom pair.
-    const BITS: [(usize, usize, u32); 8] = [
-        (0, 0, 0x01),
-        (0, 1, 0x02),
-        (0, 2, 0x04),
-        (1, 0, 0x08),
-        (1, 1, 0x10),
-        (1, 2, 0x20),
-        (0, 3, 0x40),
-        (1, 3, 0x80),
-    ];
     shape
         .cells()
         .map(|(cx, cy)| {
-            let bits = BITS
+            let bits = BRAILLE_DOTS
                 .iter()
                 .filter(|(dx, dy, _)| on[(cy as usize * 4 + dy) * w + cx as usize * 2 + dx])
                 .fold(0, |b, (_, _, bit)| b | bit);
@@ -340,7 +350,7 @@ fn coloured_blocks(grid: &Grid, shape: &Shape, opts: &Options) -> Vec<Cell> {
 /// Colours each drawn character with its cell's colour, pushed to full
 /// brightness on a dark page (the character's density already says how
 /// bright it is) and kept darker on a light one, so it reads there.
-fn colour_cells(cells: &mut [Cell], grid: &Grid, shape: &Shape, bg: Bg) {
+fn colour_cells(cells: &mut [Cell], grid: &Grid, shape: &Shape, bg: Bg, braille: bool) {
     let target = match bg {
         Bg::Dark => 255.0,
         Bg::Light => 140.0,
@@ -349,8 +359,21 @@ fn colour_cells(cells: &mut [Cell], grid: &Grid, shape: &Shape, bg: Bg) {
         if cell.ch == ' ' || cell.ch == NO_DOTS {
             continue;
         }
+        // A braille cell's colour is its lit dots', not the dark around
+        // them; samples run row by row, two a row.
+        let bits = (cell.ch as u32).wrapping_sub(0x2800);
+        let lit = |k: usize| {
+            !braille
+                || BRAILLE_DOTS
+                    .iter()
+                    .any(|&(dx, dy, bit)| (dy * 2 + dx) == k && bits & bit != 0)
+        };
         let (mut sum, mut n) = ([0f32; 3], 0);
-        for i in shape.samples(cx, cy).filter(|&i| grid.alpha[i] >= 0.5) {
+        for (_, i) in shape
+            .samples(cx, cy)
+            .enumerate()
+            .filter(|&(k, i)| grid.alpha[i] >= 0.5 && lit(k))
+        {
             for (total, c) in sum.iter_mut().zip(grid.rgb[i]) {
                 *total += c;
             }
@@ -439,6 +462,15 @@ mod tests {
             Style::parse("abc").unwrap(),
             Style::Ramp(vec!['a', 'b', 'c'])
         );
+    }
+
+    #[test]
+    fn style_names_match_in_any_case() {
+        assert_eq!(Style::parse("Braille").unwrap(), Style::Braille);
+        assert_eq!(Style::parse("BLOCKS").unwrap(), Style::Blocks);
+        assert_eq!(Style::parse("Ascii").unwrap(), Style::Ascii);
+        let e = Style::parse("Brail").unwrap_err();
+        assert!(e.message.contains("did you mean braille"), "{}", e.message);
     }
 
     #[test]
@@ -671,6 +703,23 @@ mod tests {
             }
         }
         assert!(lit > 0, "{}", art.text());
+    }
+
+    #[test]
+    fn braille_takes_its_colour_from_its_lit_dots() {
+        // Each cell: a bright yellow left column (lit) beside a dark blue
+        // right one (unlit). The cell is yellow, not the two mixed.
+        let img = pic(4, 8, |x, _| {
+            if x % 2 == 0 {
+                [255, 255, 0, 255]
+            } else {
+                [0, 0, 96, 255]
+            }
+        });
+        let art = make(&img, 2, 2, &opts(Style::Braille, Bg::Dark, true)).art;
+        for cell in &art.cells {
+            assert_eq!(cell.fg, Some([255, 255, 0]), "{:?}", cell);
+        }
     }
 
     fn red_green() -> Image {

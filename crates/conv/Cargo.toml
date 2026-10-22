@@ -50,6 +50,10 @@ base64 = "0.22"
 # conv trim reads keys with it, on macOS, Linux and Windows. Already in the
 # tree through indicatif.
 console = { version = "0.15", default-features = false }
+# conv ascii and conv qr keep a picture they hand to a backend in a folder
+# only this user can open, not under a guessable name in the shared temp
+# folder. Already in the tree as a dev-dependency.
+tempfile = "3"
 
 # APFS resolves names normalization-insensitively (NFC and NFD spellings of
 # one stem land on one physical file), so the batch output-collision key

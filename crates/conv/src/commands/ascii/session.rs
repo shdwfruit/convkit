@@ -282,7 +282,7 @@ fn write(
     path: &Path,
     shown: Shown,
 ) -> Result<Outcome, ConvError> {
-    check_drawable(shown, tune.style())?;
+    check_drawable(path, shown, tune.style())?;
     let aspect = cell_aspect(shown);
     let (cols, rows, _) = ascii::layout(img.width, img.height, Fit::Width(tune.width), aspect);
     let opts = options(tune, tune.colour && shown != Shown::Txt, aspect);

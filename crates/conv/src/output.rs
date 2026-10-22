@@ -2,7 +2,7 @@
 //! turning a drawn PNG into another format the way `conv a.png b.jpg`
 //! would.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use convkit_core::{exec, ConvError, ErrorCode, Format, Outcome, Request, Tuning};
 
@@ -85,6 +85,28 @@ pub fn convert(
     result
 }
 
+/// A path named `name` in a new folder only this user can open, for a
+/// file handed to a backend: nobody else can read it or put something in
+/// its place. The folder goes when the `TempDir` is dropped.
+pub fn private_temp(name: &str) -> Result<(tempfile::TempDir, PathBuf), ConvError> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("conv-");
+    // Owner only; elsewhere the temp folder is per user already.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let dir = builder.tempdir().map_err(|e| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!("cannot make a temporary folder: {e}"),
+        )
+    })?;
+    let path = dir.path().join(name);
+    Ok((dir, path))
+}
+
 /// Converts a drawn PNG to `format` at `path`, through a temporary file.
 pub fn convert_png(
     cli: &Cli,
@@ -93,14 +115,34 @@ pub fn convert_png(
     format: Format,
     overwrite: bool,
 ) -> Result<Outcome, ConvError> {
-    let temp = std::env::temp_dir().join(format!("conv-png-{}.png", std::process::id()));
+    let (_dir, temp) = private_temp("drawn.png")?;
     std::fs::write(&temp, png).map_err(|e| {
         ConvError::new(
             ErrorCode::ConversionFailed,
             format!("cannot write {}: {e}", temp.display()),
         )
     })?;
-    let result = convert(cli, Format::Png, &temp, format, path, overwrite);
-    let _ = std::fs::remove_file(&temp);
-    result
+    convert(cli, Format::Png, &temp, format, path, overwrite)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temp_files_go_in_a_private_folder() {
+        let (dir, path) = private_temp("picture.png").unwrap();
+        assert_eq!(path.parent(), Some(dir.path()));
+        assert_eq!(path.file_name().unwrap(), "picture.png");
+        assert_ne!(dir.path(), std::env::temp_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "only the owner can see in: {mode:o}");
+        }
+        let kept = dir.path().to_path_buf();
+        drop(dir);
+        assert!(!kept.exists(), "removed when dropped");
+    }
 }

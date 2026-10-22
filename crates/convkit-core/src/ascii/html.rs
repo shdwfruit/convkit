@@ -27,14 +27,24 @@ pub fn html(art: &Art, bg: Bg, title: &str) -> String {
         hex(bg.text())
     );
     let width = art.cols.max(1) as usize;
-    if art.is_blocks() {
+    // Blocks are drawn as cells only when nothing else is in the art; a
+    // ramp mixing them with letters stays text.
+    let blocks = art.is_blocks()
+        && art
+            .cells
+            .iter()
+            .all(|c| matches!(c.ch, ' ' | '▀' | '▄' | '█'));
+    if blocks {
         s.push_str("<div class=\"b\">\n");
         for row in art.cells.chunks(width) {
             s.push_str("<div>");
             for cell in row {
+                // Without its own colour a block is in the text colour.
+                let ink = Some(cell.fg.unwrap_or(bg.text()));
                 let (top, bottom) = match cell.ch {
-                    '▀' => (cell.fg, cell.bg),
-                    '▄' => (None, cell.fg),
+                    '▀' => (ink, cell.bg),
+                    '▄' => (cell.bg, ink),
+                    '█' => (ink, ink),
                     _ => (None, None),
                 };
                 let (top, bottom) = (
@@ -111,6 +121,32 @@ mod tests {
             fg: Some([255, 0, 0]),
             bg: None,
         }
+    }
+
+    fn plain(ch: char) -> Cell {
+        Cell {
+            ch,
+            fg: None,
+            bg: None,
+        }
+    }
+
+    #[test]
+    fn plain_half_blocks_show_in_the_text_colour() {
+        // A ramp of block characters has no colours of its own: drawn in
+        // the page's text colour, as the PNG does, not the page's.
+        let page = html(&art(vec![plain('▀'), plain('█')]), Bg::Dark, "t");
+        assert!(
+            page.contains("linear-gradient(#e4e4e7 50%,#0c0c0e 50%)"),
+            "{page}"
+        );
+        assert!(page.contains("background:#e4e4e7\""), "{page}");
+    }
+
+    #[test]
+    fn half_blocks_mixed_with_letters_stay_text() {
+        let page = html(&art(vec![plain('a'), plain('▀')]), Bg::Dark, "t");
+        assert!(page.contains("<pre>a▀"), "{page}");
     }
 
     #[test]

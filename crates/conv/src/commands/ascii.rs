@@ -111,7 +111,9 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
     }
     let terminal = std::io::stdout().is_terminal() && !cli.json;
     let (path, shown) = destination(args.input, args.output, args.outdir, terminal)?;
-    check_drawable(shown, &style)?;
+    if let Some(path) = &path {
+        check_drawable(path, shown, &style)?;
+    }
     if let Some(path) = &path {
         if path.exists() && !args.overwrite {
             return Err(ConvError::new(
@@ -163,7 +165,10 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
         cell_aspect,
     };
     let made = ascii::make(&img, cols, rows, &opts);
-    notes.extend(made.notes);
+    let has_clear = img.rgba.chunks_exact(4).any(|p| p[3] < 128);
+    notes.extend(bg_note(&opts.style, opts.colour, opts.bg, shown, has_clear).map(str::to_string));
+    let plain_text = shown == Shown::Txt || (cli.json && path.is_none());
+    notes.extend(made.notes.into_iter().map(|n| plain_note(n, plain_text)));
     let art = made.art;
     if args.clipboard {
         let text = clipboard_art(&img, &art, &opts).text();
@@ -187,17 +192,58 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
     Ok(())
 }
 
-/// Refuses a ramp a PNG can't draw when the art goes into a picture.
-fn check_drawable(shown: Shown, style: &Style) -> Result<(), ConvError> {
+/// A note when `--bg light` changes nothing: coloured blocks keep the
+/// picture's own colours, and the page only shows behind clear parts,
+/// which a terminal fills with its own background.
+fn bg_note(
+    style: &Style,
+    colour: bool,
+    bg: Bg,
+    shown: Shown,
+    has_clear: bool,
+) -> Option<&'static str> {
+    let no_page = matches!(shown, Shown::Terminal | Shown::Pipe) || !has_clear;
+    (*style == Style::Blocks && colour && bg == Bg::Light && no_page).then_some(
+        "--bg light changes nothing here: coloured blocks keep the picture's colours, and the page only shows behind clear parts",
+    )
+}
+
+/// The colour-only note where colour can't go (a .txt, `--json`'s text):
+/// pointing to `--color` there would do nothing.
+fn plain_note(note: String, plain_text: bool) -> String {
+    if plain_text && note == ascii::COLOUR_ONLY {
+        "this picture's shapes differ mostly in colour, not brightness, so they may not show in plain text; a .png or .html with --color keeps the colours".to_string()
+    } else {
+        note
+    }
+}
+
+/// Refuses a ramp a picture can't draw when the art goes into one at
+/// `path`.
+fn check_drawable(path: &Path, shown: Shown, style: &Style) -> Result<(), ConvError> {
     if let (Shown::Png | Shown::Image(_), Style::Ramp(ramp)) = (shown, style) {
-        if let Some(c) = ramp.iter().find(|&&c| !drawable(c)) {
+        if let Some(&c) = ramp.iter().find(|&&c| !drawable(c)) {
+            let ext = path.extension().unwrap_or_default().to_string_lossy();
+            let code = format!("U+{:04X}", u32::from(c));
+            // A character that shows nothing is named by its number alone.
+            let which = if c.is_whitespace() || invisible(c) {
+                format!("{code}, an invisible character,")
+            } else {
+                format!("\"{c}\" ({code})")
+            };
             return Err(ConvError::new(
                 ErrorCode::InvalidInvocation,
-                format!("a .png can draw ASCII, block and braille characters; \"{c}\" isn't one"),
+                format!("a .{ext} can draw ASCII, block and braille characters; {which} isn't one"),
             ));
         }
     }
     Ok(())
+}
+
+/// Characters that take no space and show nothing: zero-width spaces and
+/// joiners, direction marks, word joiners and the byte-order mark.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}' | '\u{00AD}')
 }
 
 /// Writes the art to `path` as `shown` says: text, a web page, a PNG, or a
@@ -243,10 +289,20 @@ fn print_art(cli: &Cli, art: &Art, opts: &Options, notes: Vec<String>) -> Result
     } else {
         art.text()
     };
-    // A reader that stops early (`| head`) is not an error.
-    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+    printed(std::io::stdout().lock().write_all(text.as_bytes()))?;
     eprint!("{}", render::notes_human(&notes, render::stderr_styled()));
     Ok(())
+}
+
+/// A failed print, except a reader that stopped early (`| head`).
+fn printed(result: std::io::Result<()>) -> Result<(), ConvError> {
+    match result {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!("cannot write the art: {e}"),
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn print_written(cli: &Cli, outcome: &Outcome, art: &Art, opts: &Options) {
@@ -479,7 +535,7 @@ fn read_picture(
             )
         }));
     };
-    let temp = std::env::temp_dir().join(format!("conv-ascii-{}.png", std::process::id()));
+    let (_dir, temp) = output::private_temp("picture.png")?;
     let read = output::convert(cli, from, input, Format::Png, &temp, true).and_then(|_| {
         let bytes = std::fs::read(&temp).map_err(|e| {
             ConvError::new(
@@ -489,7 +545,6 @@ fn read_picture(
         })?;
         ascii::decode_png(&bytes)
     });
-    let _ = std::fs::remove_file(&temp);
     Ok((read?, vec![]))
 }
 
@@ -542,6 +597,32 @@ mod tests {
             dir.map(Path::new),
             false,
         )
+    }
+
+    #[test]
+    fn bg_light_on_coloured_blocks_says_when_it_changes_nothing() {
+        let note = |style: Style, colour, bg, shown, has_clear| {
+            bg_note(&style, colour, bg, shown, has_clear).is_some()
+        };
+        // Nothing clear for the page to show through, or a terminal's own
+        // background behind it: --bg light does nothing.
+        assert!(note(Style::Blocks, true, Bg::Light, Shown::Png, false));
+        assert!(note(Style::Blocks, true, Bg::Light, Shown::Terminal, true));
+        // It sets the page behind clear parts of a .png.
+        assert!(!note(Style::Blocks, true, Bg::Light, Shown::Png, true));
+        // Text styles and plain blocks use it for every character.
+        assert!(!note(Style::Ascii, true, Bg::Light, Shown::Png, false));
+        assert!(!note(Style::Blocks, false, Bg::Light, Shown::Png, false));
+        assert!(!note(Style::Blocks, true, Bg::Dark, Shown::Png, false));
+    }
+
+    #[test]
+    fn only_a_closed_pipe_is_not_an_error() {
+        use std::io::{Error, ErrorKind};
+        assert!(printed(Err(Error::from(ErrorKind::BrokenPipe))).is_ok());
+        assert!(printed(Ok(())).is_ok());
+        let e = printed(Err(Error::other("disk full"))).unwrap_err();
+        assert!(e.message.contains("disk full"), "{}", e.message);
     }
 
     #[test]
