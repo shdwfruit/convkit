@@ -381,6 +381,15 @@ fn yellow_bold() -> Style {
     AnsiColor::Yellow.on_default().bold()
 }
 
+/// Notes about a result that was printed rather than written, for stderr:
+/// one dim `note  ...` line each, as under a written file's result line.
+pub fn notes_human(notes: &[String], styled: bool) -> String {
+    notes
+        .iter()
+        .map(|n| format!("{}\n", paint(&format!("note  {n}"), dim(), styled)))
+        .collect()
+}
+
 fn dim() -> Style {
     Style::new().dimmed()
 }

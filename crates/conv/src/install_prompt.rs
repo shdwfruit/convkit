@@ -7,7 +7,9 @@
 //! `ConvError` it always has; this module decides whether to ask the user
 //! about it, and `commands/convert.rs` decides what to do with the answer.
 
-use convkit_core::{manifest, Backend};
+use std::path::PathBuf;
+
+use convkit_core::{manifest, Backend, ConvError, ErrorCode};
 
 use crate::cli::Cli;
 
@@ -67,6 +69,23 @@ pub fn should_install(cli: &Cli, backend: Backend) -> bool {
         return true;
     }
     crate::prompt::is_interactive_session() && crate::prompt::ask(&prompt_message(backend))
+}
+
+/// Finds `backend` the way conversions do, and when it is missing, offers
+/// to install it (see `should_install`) and looks again.
+pub fn resolve_or_install(cli: &Cli, backend: Backend) -> Result<PathBuf, ConvError> {
+    match cli.resolver().resolve(backend) {
+        Ok(found) => Ok(found.path),
+        Err(e) if e.code == ErrorCode::BackendMissing => {
+            if should_install(cli, backend)
+                && crate::commands::install::install_backend(cli, backend).is_ok()
+            {
+                return Ok(cli.resolver().resolve(backend)?.path);
+            }
+            Err(e)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]

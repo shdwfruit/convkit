@@ -3549,3 +3549,178 @@ fn conv_trim_refuses_a_file_without_a_length() {
     assert!(stdout.contains("code=2"), "{stdout}");
     assert!(tty_given_back(&stdout), "{stdout}");
 }
+
+/// A 200x100 picture, white on its left half and transparent on its
+/// right: drawn by conv itself, so these tests need no backend.
+fn ascii_logo(dir: &Path) -> PathBuf {
+    let path = dir.join("logo.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect width="100" height="100" fill="#fff"/></svg>"##,
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn ascii_prints_plain_text_to_a_pipe() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["ascii", "logo.svg", "--width", "20"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.lines().count(), 5, "{text}");
+    assert!(text.contains('@') && !text.contains('\x1b'), "{text}");
+}
+
+#[test]
+fn ascii_blocks_stay_plain_in_a_pipe_unless_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let run = |extra: &[&str]| {
+        let out = conv()
+            .current_dir(dir.path())
+            .args(["ascii", "logo.svg", "--width", "20", "--chars", "blocks"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert!(!run(&[]).contains('\x1b'));
+    assert!(run(&["--color"]).contains("\x1b[38;"));
+}
+
+#[test]
+fn ascii_writes_txt_png_and_html() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let ok = |args: &[&str]| {
+        conv()
+            .current_dir(dir.path())
+            .args(["ascii", "logo.svg", "--width", "20"])
+            .args(args)
+            .assert()
+            .success();
+    };
+    ok(&[".txt"]);
+    let txt = std::fs::read_to_string(dir.path().join("logo-ascii.txt")).unwrap();
+    assert!(txt.contains('@') && !txt.contains('\x1b'), "{txt}");
+    ok(&["out.png"]);
+    let png = std::fs::read(dir.path().join("out.png")).unwrap();
+    assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 20 * 18);
+    ok(&["out.html"]);
+    let html = std::fs::read_to_string(dir.path().join("out.html")).unwrap();
+    assert!(html.contains("<pre"), "{html}");
+}
+
+#[test]
+fn ascii_json_gives_text() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["ascii", "logo.svg", "--width", "20", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["results"][0]["rows"], 5);
+    assert_eq!(v["results"][0]["text"].as_str().unwrap().lines().count(), 5);
+}
+
+#[test]
+fn ascii_color_into_txt_is_noted() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    conv()
+        .current_dir(dir.path())
+        .args(["ascii", "logo.svg", "out.txt", "--color"])
+        .assert()
+        .success()
+        .stdout(contains("can't hold colour"));
+    let txt = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
+    assert!(!txt.contains('\x1b'));
+}
+
+#[test]
+fn ascii_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    std::fs::write(dir.path().join("taken.txt"), "x").unwrap();
+    for (args, says) in [
+        (&["ascii", "missing.jpg"][..], "no such file"),
+        (
+            &["ascii", "logo.svg", "--chars", "brail"],
+            "did you mean braille",
+        ),
+        (&["ascii", "logo.svg", "out.svg"], "conv ascii writes"),
+        (&["ascii", "logo.svg", "taken.txt"], "pass -y"),
+        (
+            &["ascii", "logo.svg", "--chars", " é", "out.png"],
+            "isn't one",
+        ),
+    ] {
+        conv()
+            .current_dir(dir.path())
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(contains(says));
+    }
+}
+
+/// Needs a real ffmpeg. A photo tagged as rotated (EXIF orientation 6),
+/// blue on the left of its stored pixels, is drawn upright: blue on top.
+#[test]
+#[ignore]
+fn ascii_reads_a_rotated_photo_upright() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rotated.jpg");
+    let out = conv()
+        .env_remove("COLORTERM")
+        .env_remove("WT_SESSION")
+        .arg("ascii")
+        .arg(&fixture)
+        .args(["--width", "10", "--chars", "blocks", "--color"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 10, "{text}");
+    assert!(lines[0].contains("38;5;21"), "{text:?}");
+    assert!(lines[9].contains("38;5;196"), "{text:?}");
+}
+
+/// Needs magick: an iPhone HEIC is a grid of tiles, and comes out whole
+/// (4032x3024 is 38 rows at 100 columns; one 512x512 tile would be 50).
+#[test]
+#[ignore]
+fn ascii_reads_heic() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/photo.heic");
+    let out = conv()
+        .arg("ascii")
+        .arg(&fixture)
+        .args(["--width", "100"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap().lines().count(), 38);
+}

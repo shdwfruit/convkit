@@ -1,6 +1,8 @@
 //! Colour escape codes for the terminal, shared by `conv trim` (its
 //! picture and bars) and `conv ascii` (coloured art).
 
+use convkit_core::ascii::{Art, Cell};
+
 /// The SGR parameters for text in colour `c`: 24-bit where the terminal
 /// has it, the nearest of the 256-colour palette otherwise.
 pub fn fg_params(c: [u8; 3], truecolor: bool) -> String {
@@ -62,6 +64,36 @@ pub fn truecolor(env: &dyn Fn(&str) -> Option<String>) -> bool {
     is("COLORTERM", "truecolor") || is("COLORTERM", "24bit") || env("WT_SESSION").is_some()
 }
 
+/// The art in the terminal's colours: each character with its own colour
+/// and its cell's background, an escape only where those change, and a
+/// reset at the end of every line that used one. A missing colour is the
+/// terminal's own. Plain cells at the end of a line are left off.
+pub fn paint(art: &Art, truecolor: bool) -> String {
+    let mut s = String::new();
+    for row in art.cells.chunks(art.cols.max(1) as usize) {
+        let plain = |c: &Cell| c.ch == ' ' && c.fg.is_none() && c.bg.is_none();
+        let end = row.iter().rposition(|c| !plain(c)).map_or(0, |i| i + 1);
+        let mut last = None;
+        for cell in &row[..end] {
+            let pair = (cell.fg, cell.bg);
+            if (last.is_some() || pair != (None, None)) && last != Some(pair) {
+                s.push_str(&match cell.fg {
+                    Some(c) => fg(c, truecolor),
+                    None => "\x1b[39m".to_string(),
+                });
+                s.push_str(&bg(cell.bg, truecolor));
+                last = Some(pair);
+            }
+            s.push(cell.ch);
+        }
+        if last.is_some() {
+            s.push_str("\x1b[0m");
+        }
+        s.push('\n');
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +121,42 @@ mod tests {
         assert!(truecolor(&env(&[("COLORTERM", "truecolor")])));
         assert!(truecolor(&env(&[("WT_SESSION", "1")])));
         assert!(!truecolor(&env(&[])));
+    }
+    #[test]
+    fn paint_uses_lower_half_and_resets() {
+        use convkit_core::ascii::{Art, Cell};
+        let art = Art {
+            cols: 2,
+            rows: 1,
+            cells: vec![
+                Cell {
+                    ch: '▀',
+                    fg: Some([255, 0, 0]),
+                    bg: Some([0, 0, 255]),
+                },
+                Cell {
+                    ch: '▄',
+                    fg: Some([0, 0, 255]),
+                    bg: None,
+                },
+            ],
+        };
+        assert_eq!(
+            paint(&art, true),
+            "\x1b[38;2;255;0;0m\x1b[48;2;0;0;255m▀\x1b[38;2;0;0;255m\x1b[49m▄\x1b[0m\n"
+        );
+        let plain = Art {
+            cols: 3,
+            rows: 1,
+            cells: vec![
+                Cell {
+                    ch: '@',
+                    fg: None,
+                    bg: None
+                };
+                3
+            ],
+        };
+        assert_eq!(paint(&plain, true), "@@@\n");
     }
 }
