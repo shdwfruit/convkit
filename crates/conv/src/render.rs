@@ -43,7 +43,7 @@ fn is_bare_safe(c: char) -> bool {
 ///   containing `$` interpolates under PowerShell and one containing `%VAR%`
 ///   expands under cmd.exe. Neither appears in anything convkit generates,
 ///   only in a path a user chose.
-fn shell_quote(token: &str) -> String {
+pub(crate) fn shell_quote(token: &str) -> String {
     if !token.is_empty() && token.chars().all(is_bare_safe) {
         return token.to_string();
     }

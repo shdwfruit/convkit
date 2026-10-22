@@ -17,6 +17,10 @@ use serde_json::json;
 use crate::cli::{Cli, Command};
 use crate::{ansi, clipboard, input, install_prompt, output, render};
 
+// Used by the session `conv ascii -i` runs, wired in with the flag.
+#[allow(dead_code)]
+mod tune;
+
 /// Where the art ends up, which decides its size, its cell shape and
 /// whether it can be in colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
