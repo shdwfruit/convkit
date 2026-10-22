@@ -3577,8 +3577,9 @@ fn ascii_prints_plain_text_to_a_pipe() {
         String::from_utf8_lossy(&out.stderr)
     );
     let text = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(text.lines().count(), 5, "{text}");
-    assert!(text.contains('@') && !text.contains('\x1b'), "{text}");
+    // The logo's right half is clear, so it is left out and the square
+    // fills all 20 columns.
+    assert_eq!(text, format!("{}\n", "@".repeat(20)).repeat(10), "{text}");
 }
 
 #[test]
@@ -3634,8 +3635,11 @@ fn ascii_json_gives_text() {
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["ok"], true);
-    assert_eq!(v["results"][0]["rows"], 5);
-    assert_eq!(v["results"][0]["text"].as_str().unwrap().lines().count(), 5);
+    assert_eq!(v["results"][0]["rows"], 10);
+    assert_eq!(
+        v["results"][0]["text"].as_str().unwrap().lines().count(),
+        10
+    );
 }
 
 #[test]

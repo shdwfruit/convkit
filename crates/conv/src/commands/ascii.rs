@@ -118,6 +118,7 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
         }
     }
     let (img, mut notes) = read_picture(cli, args.input, format)?;
+    let img = img.trim_clear();
 
     let no_color_env = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
     let (mut colour, note) = colour_on(

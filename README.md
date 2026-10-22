@@ -637,7 +637,8 @@ detail. Or give your own characters from least ink to most:
 
 Name a file to write `.txt`, `.png`, `.html` or any other picture format
 conv writes, 100 characters wide unless `--width` or `--height` says
-otherwise. `--bg light` is for art shown on a light background, so it
+otherwise. A transparent border around the picture is left out, so the
+drawing fills that width. `--bg light` is for art shown on a light background, so it
 doesn't come out as a negative. `--clipboard` also copies the text; paste
 it inside ``` in Discord, Slack or GitHub to keep it lined up.
 

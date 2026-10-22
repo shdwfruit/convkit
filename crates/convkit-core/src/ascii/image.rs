@@ -85,6 +85,36 @@ pub fn from_svg(bytes: &[u8], max_side: u32) -> Result<Image> {
     })
 }
 
+impl Image {
+    /// The picture without its clear margins: the smallest box holding
+    /// every pixel that is drawn (at least half opaque), so a padded logo
+    /// fills the columns asked for. A picture with nothing drawn is kept
+    /// as it is.
+    pub fn trim_clear(self) -> Image {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let drawn = |x: usize, y: usize| self.rgba[(y * w + x) * 4 + 3] >= 128;
+        let rows: Vec<usize> = (0..h).filter(|&y| (0..w).any(|x| drawn(x, y))).collect();
+        let cols: Vec<usize> = (0..w).filter(|&x| (0..h).any(|y| drawn(x, y))).collect();
+        let (Some(&top), Some(&bottom), Some(&left), Some(&right)) =
+            (rows.first(), rows.last(), cols.first(), cols.last())
+        else {
+            return self;
+        };
+        if (top, left, bottom, right) == (0, 0, h - 1, w - 1) {
+            return self;
+        }
+        let rgba = (top..=bottom)
+            .flat_map(|y| &self.rgba[(y * w + left) * 4..(y * w + right + 1) * 4])
+            .copied()
+            .collect();
+        Image {
+            width: (right - left + 1) as u32,
+            height: (bottom - top + 1) as u32,
+            rgba,
+        }
+    }
+}
+
 /// Whether an SVG has text, which `from_svg` cannot draw.
 pub fn svg_has_text(bytes: &[u8]) -> bool {
     String::from_utf8_lossy(bytes).contains("<text")
@@ -156,6 +186,32 @@ mod tests {
         assert_eq!(img.rgba[..4], [255, 255, 255, 255], "the rect is drawn");
         let right = ((100 * 400 + 399) * 4) as usize;
         assert_eq!(img.rgba[right + 3], 0, "outside the rect is transparent");
+    }
+
+    #[test]
+    fn clear_margins_are_cut_off() {
+        // 6x4, clear but for a 2x2 block at (3, 1) and a faint pixel at
+        // (0, 0) that is still clear.
+        let mut rgba = vec![0u8; 6 * 4 * 4];
+        for (x, y) in [(3, 1), (4, 1), (3, 2), (4, 2)] {
+            rgba[(y * 6 + x) * 4..][..4].copy_from_slice(&[9, 8, 7, 255]);
+        }
+        rgba[3] = 40;
+        let img = Image {
+            width: 6,
+            height: 4,
+            rgba,
+        }
+        .trim_clear();
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(img.rgba, [9, 8, 7, 255].repeat(4));
+
+        let clear = Image {
+            width: 3,
+            height: 2,
+            rgba: vec![0; 24],
+        };
+        assert_eq!(clear.clone().trim_clear(), clear, "nothing to keep");
     }
 
     #[test]
