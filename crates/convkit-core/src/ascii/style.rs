@@ -111,6 +111,9 @@ const STRONG: f32 = 0.45;
 const FLOOR: f32 = 2.0;
 /// The share of a cell's strong samples that must point one way.
 const DOMINANCE: f32 = 0.6;
+/// A cell keeps its edge while it is at least this share of the
+/// strongest cell beside it across the line.
+const KEEP: f32 = 0.6;
 /// The blur before the gradient, in samples.
 const SIGMA: f32 = 1.2;
 
@@ -172,7 +175,11 @@ pub fn edges(lum: &[f32], w: u32, h: u32, sx: u32, sy: u32, cell_aspect: f32) ->
     // ask for half of a side's average, so horizontal edges (across the
     // short side) count as well as vertical ones.
     let need = (sx + sy).div_ceil(2);
-    let mut out = vec![None; cols * rows];
+    // How strong each cell's edge samples are in all, and its edge.
+    let mut strength = vec![0f32; cols * rows];
+    let mut found = vec![None; cols * rows];
+    // Whether a cell's edge sits in its lower part, for `_` over `-`.
+    let mut lower = vec![false; cols * rows];
     for cy in 0..rows {
         for cx in 0..cols {
             let mut bins = [0usize; 4];
@@ -183,6 +190,7 @@ pub fn edges(lum: &[f32], w: u32, h: u32, sx: u32, sy: u32, cell_aspect: f32) ->
                     if mag[i] <= strong {
                         continue;
                     }
+                    strength[cy * cols + cx] += mag[i];
                     let a = ang[i];
                     let bin = if !(22.5..157.5).contains(&a) {
                         0
@@ -209,10 +217,39 @@ pub fn edges(lum: &[f32], w: u32, h: u32, sx: u32, sy: u32, cell_aspect: f32) ->
             if (count as f32) < DOMINANCE * n as f32 {
                 continue;
             }
-            out[cy * cols + cx] = Some(match bin {
+            found[cy * cols + cx] = Some(bin);
+            lower[cy * cols + cx] = row_sum as f32 / n as f32 >= 0.6 * sy as f32;
+        }
+    }
+    // An edge spreads over the cells either side of it, more so with a
+    // thick outline, which has one on each side: a cell gives its edge up
+    // to a much stronger one across the line, so an outline is drawn one
+    // character wide. Stripes, edges side by side and as strong, all keep
+    // theirs.
+    let at = |x: isize, y: isize| {
+        if (0..cols as isize).contains(&x) && (0..rows as isize).contains(&y) {
+            strength[y as usize * cols + x as usize]
+        } else {
+            0.0
+        }
+    };
+    let mut out = vec![None; cols * rows];
+    for cy in 0..rows {
+        for cx in 0..cols {
+            let i = cy * cols + cx;
+            let Some(bin) = found[i] else { continue };
+            // A step across the line: sideways for `|`, up or down for
+            // `-`, and the diagonal crossing `/` or `\`.
+            let (ox, oy) = [(1, 0), (1, 1), (0, 1), (1, -1)][bin];
+            let (x, y) = (cx as isize, cy as isize);
+            let beside = at(x + ox, y + oy).max(at(x - ox, y - oy));
+            if strength[i] < KEEP * beside {
+                continue;
+            }
+            out[i] = Some(match bin {
                 0 => '|',
                 1 => '/',
-                2 if row_sum as f32 / n as f32 >= 0.6 * sy as f32 => '_',
+                2 if lower[i] => '_',
                 2 => '-',
                 _ => '\\',
             });

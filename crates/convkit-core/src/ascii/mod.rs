@@ -125,7 +125,7 @@ pub fn make(img: &Image, cols: u32, rows: u32, opts: &Options) -> Made {
     let cells = if opts.style == Style::Blocks && opts.colour {
         coloured_blocks(&grid, &shape, opts)
     } else {
-        let ink = ink(&grid, opts);
+        let ink = ink(&grid, opts, shape_floor(&opts.style));
         let mut cells = match &opts.style {
             Style::Ascii => {
                 let ramp: Vec<char> = RAMP.chars().collect();
@@ -162,10 +162,8 @@ pub fn make(img: &Image, cols: u32, rows: u32, opts: &Options) -> Made {
 /// is empty". On a picture with clear parts, what's opaque is the shape,
 /// so it never fades into the empty background: a shape of one flat
 /// colour (a logo) is drawn as a solid silhouette, and any other keeps
-/// its tones above a floor of ink.
-fn ink(grid: &Grid, opts: &Options) -> Vec<f32> {
-    /// The least ink an opaque sample takes beside clear ones.
-    const SHAPE_FLOOR: f32 = 0.25;
+/// its tones above `floor`.
+fn ink(grid: &Grid, opts: &Options, floor: f32) -> Vec<f32> {
     let mut lum: Vec<f32> = grid.rgb.iter().map(|&c| luminance(c)).collect();
     let toned = levels(&mut lum, &grid.alpha);
     let has_clear = grid.alpha.iter().any(|&a| a < 0.5);
@@ -187,12 +185,26 @@ fn ink(grid: &Grid, opts: &Options) -> Vec<f32> {
             let l = if toned { l } else { solid };
             let ink = opts.bg.ink(adjust(l, opts.contrast, opts.brightness));
             if toned {
-                SHAPE_FLOOR + (1.0 - SHAPE_FLOOR) * ink
+                floor + (1.0 - floor) * ink
             } else {
                 ink
             }
         })
         .collect()
+}
+
+/// The least ink an opaque sample takes beside clear ones: half way into
+/// the first character with any, so the darkest part of a shape is drawn
+/// as lightly as the style can, and not as `-`, which reads as a line.
+/// Braille, dithered, keeps a quarter: two dots of eight.
+fn shape_floor(style: &Style) -> f32 {
+    let tones = match style {
+        Style::Ascii => RAMP.chars().count(),
+        Style::Ramp(ramp) => ramp.len(),
+        Style::Blocks => SHADES.len(),
+        Style::Braille => return 0.25,
+    };
+    1.5 / tones as f32
 }
 
 /// The grid's cells and samples a cell.
@@ -514,6 +526,67 @@ mod tests {
             // `-` is also one of RAMP's tones, so only the edge-only
             // characters say an edge was drawn.
             assert!(!t.contains(['|', '/', '\\', '_']), "{t}");
+        }
+    }
+
+    #[test]
+    fn the_darkest_part_of_a_shape_takes_the_lightest_mark() {
+        // A shape on clear, its left half near black: drawn, but as lightly
+        // as the characters allow, so it doesn't pass for a line (`-`) or
+        // vanish with a short ramp.
+        let img = pic(200, 200, |x, y| {
+            if !(20..180).contains(&x) || !(20..180).contains(&y) {
+                [0, 0, 0, 0]
+            } else if x < 100 {
+                [20, 20, 20, 255]
+            } else {
+                [255; 4]
+            }
+        });
+        for (style, mark) in [
+            (Style::Ascii, '.'),
+            (Style::Blocks, '░'),
+            (Style::parse(" #").unwrap(), '#'),
+            (Style::parse(" ab").unwrap(), 'a'),
+        ] {
+            let art = make(&img, 20, 10, &opts(style, Bg::Dark, false)).art;
+            assert_eq!(
+                art.cells[(5 * 20 + 5) as usize].ch,
+                mark,
+                "\n{}",
+                art.text()
+            );
+        }
+    }
+
+    #[test]
+    fn a_thick_outline_is_one_edge_wide() {
+        // A dark band about a cell and a half across through a bright
+        // fill, like a cartoon's outline: one line of edge characters along
+        // it, not two or three side by side.
+        let edge = ['|', '/', '\\', '-', '_'];
+        let band = |inside: fn(u32, u32) -> bool| {
+            let img = pic(200, 200, move |x, y| {
+                if inside(x, y) {
+                    [40, 20, 70, 255]
+                } else {
+                    [240, 240, 240, 255]
+                }
+            });
+            make(&img, 20, 10, &opts(Style::Ascii, Bg::Dark, false)).art
+        };
+        let side_by_side = |line: String| {
+            let line: Vec<char> = line.chars().collect();
+            line.windows(2)
+                .any(|w| edge.contains(&w[0]) && edge.contains(&w[1]))
+        };
+        let upright = band(|x, _| (94..110).contains(&x));
+        for r in 0..upright.rows {
+            assert!(!side_by_side(row(&upright, r)), "\n{}", upright.text());
+        }
+        let flat = band(|_, y| (88..120).contains(&y));
+        for c in 0..flat.cols {
+            assert!(!side_by_side(col(&flat, c)), "\n{}", flat.text());
         }
     }
 
