@@ -102,19 +102,27 @@ pub fn adjust(v: f32, contrast: i32, brightness: i32) -> f32 {
 
 /// Whether the picture's shapes differ mostly in colour rather than
 /// brightness (a red parrot on green leaves), so styles that only see
-/// brightness may lose them. Compares how much colour and how much
-/// brightness change between neighbouring opaque samples.
+/// brightness may lose them. Over neighbouring opaque samples that differ
+/// noticeably, compares how much colour and how much brightness change.
+/// Only noticeable pairs count, so the answer doesn't depend on how fine
+/// the grid is, and a flat or gently shaded picture never qualifies.
 pub fn colour_only(grid: &Grid) -> bool {
+    const NOTICEABLE: f32 = 0.05;
     let (w, h) = (grid.w as usize, grid.h as usize);
-    let (mut sum_c, mut sum_l) = (0f32, 0f32);
+    let (mut sum_c, mut sum_l, mut pairs) = (0f32, 0f32, 0usize);
     let mut pair = |i: usize, j: usize| {
         if grid.alpha[i] < 0.5 || grid.alpha[j] < 0.5 {
             return;
         }
         let (a, b) = (grid.rgb[i], grid.rgb[j]);
-        let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
-        sum_c += d / 3f32.sqrt();
+        let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+            / 3f32.sqrt();
+        if d <= NOTICEABLE {
+            return;
+        }
+        sum_c += d;
         sum_l += (luminance(a) - luminance(b)).abs();
+        pairs += 1;
     };
     for y in 0..h {
         for x in 0..w {
@@ -127,8 +135,7 @@ pub fn colour_only(grid: &Grid) -> bool {
             }
         }
     }
-    let n = grid.alpha.iter().filter(|&&a| a >= 0.5).count();
-    n > 0 && sum_c > 2.5 * sum_l && sum_c / n as f32 > 0.01
+    pairs > 0 && sum_c > 2.5 * sum_l
 }
 
 #[cfg(test)]
