@@ -1,3 +1,4 @@
+pub mod ascii;
 pub mod backend;
 pub mod backend_overrides;
 pub mod budget;
