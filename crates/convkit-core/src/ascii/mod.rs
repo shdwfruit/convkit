@@ -6,6 +6,7 @@ pub mod art;
 pub mod grid;
 pub mod html;
 pub mod image;
+pub mod png;
 pub mod style;
 
 pub use art::{Art, Cell};
