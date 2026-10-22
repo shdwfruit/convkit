@@ -71,8 +71,8 @@ pub fn luminance(c: [f32; 3]) -> f32 {
 /// Stretches `v` so its opaque samples run from 0 (the 2nd percentile) to
 /// 1 (the 98th): the automatic contrast that keeps a photo from turning
 /// to grey mush. A flat picture, or one with almost nothing opaque, is
-/// left as it is.
-pub fn levels(v: &mut [f32], alpha: &[f32]) {
+/// left as it is. Returns whether it stretched.
+pub fn levels(v: &mut [f32], alpha: &[f32]) -> bool {
     let mut opaque: Vec<f32> = v
         .iter()
         .zip(alpha)
@@ -80,17 +80,18 @@ pub fn levels(v: &mut [f32], alpha: &[f32]) {
         .map(|(&x, _)| x)
         .collect();
     if opaque.len() < 2 {
-        return;
+        return false;
     }
     opaque.sort_by(f32::total_cmp);
     let at = |q: f32| opaque[((opaque.len() - 1) as f32 * q).round() as usize];
     let (lo, hi) = (at(0.02), at(0.98));
     if hi - lo < 1e-3 {
-        return;
+        return false;
     }
     for x in v.iter_mut() {
         *x = ((*x - lo) / (hi - lo)).clamp(0.0, 1.0);
     }
+    true
 }
 
 /// `--contrast` and `--brightness`, each -100 to 100, 0 leaving `v` as it

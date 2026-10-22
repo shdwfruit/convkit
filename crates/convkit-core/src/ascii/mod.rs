@@ -125,16 +125,11 @@ pub fn make(img: &Image, cols: u32, rows: u32, opts: &Options) -> Made {
     let cells = if opts.style == Style::Blocks && opts.colour {
         coloured_blocks(&grid, &shape, opts)
     } else {
-        let mut lum: Vec<f32> = grid.rgb.iter().map(|&c| luminance(c)).collect();
-        levels(&mut lum, &grid.alpha);
-        for v in &mut lum {
-            *v = adjust(*v, opts.contrast, opts.brightness);
-        }
-        let ink: Vec<f32> = lum.iter().map(|&l| opts.bg.ink(l)).collect();
+        let ink = ink(&grid, opts);
         let mut cells = match &opts.style {
             Style::Ascii => {
                 let ramp: Vec<char> = RAMP.chars().collect();
-                let marks = edges(&lum, cols * sx, rows * sy, sx, sy, opts.cell_aspect);
+                let marks = edges(&ink, cols * sx, rows * sy, sx, sy, opts.cell_aspect);
                 let mut cells = ramp_cells(&ink, &shape, &ramp);
                 for (cell, mark) in cells.iter_mut().zip(marks) {
                     if let Some(ch) = mark {
@@ -145,7 +140,7 @@ pub fn make(img: &Image, cols: u32, rows: u32, opts: &Options) -> Made {
             }
             Style::Ramp(ramp) => ramp_cells(&ink, &shape, ramp),
             Style::Blocks => ramp_cells(&ink, &shape, &SHADES),
-            Style::Braille => braille_cells(ink, &shape),
+            Style::Braille => braille_cells(ink, &grid.alpha, &shape),
         };
         if opts.colour {
             colour_cells(&mut cells, &grid, &shape, opts.bg);
@@ -160,6 +155,44 @@ pub fn make(img: &Image, cols: u32, rows: u32, opts: &Options) -> Made {
         art: Art { cols, rows, cells },
         notes,
     }
+}
+
+/// How much ink each sample takes, 0 to 1. A clear sample takes none,
+/// whatever `--contrast` and `--brightness` say: the spec's "transparent
+/// is empty". On a picture with clear parts, what's opaque is the shape,
+/// so it never fades into the empty background: a shape of one flat
+/// colour (a logo) is drawn as a solid silhouette, and any other keeps
+/// its tones above a floor of ink.
+fn ink(grid: &Grid, opts: &Options) -> Vec<f32> {
+    /// The least ink an opaque sample takes beside clear ones.
+    const SHAPE_FLOOR: f32 = 0.25;
+    let mut lum: Vec<f32> = grid.rgb.iter().map(|&c| luminance(c)).collect();
+    let toned = levels(&mut lum, &grid.alpha);
+    let has_clear = grid.alpha.iter().any(|&a| a < 0.5);
+    // A flat shape is drawn at full ink: the most brightness on a dark
+    // page, the least on a light one.
+    let solid = match opts.bg {
+        Bg::Dark => 1.0,
+        Bg::Light => 0.0,
+    };
+    lum.iter()
+        .zip(&grid.alpha)
+        .map(|(&l, &a)| {
+            if a < 0.5 {
+                return 0.0;
+            }
+            if !has_clear {
+                return opts.bg.ink(adjust(l, opts.contrast, opts.brightness));
+            }
+            let l = if toned { l } else { solid };
+            let ink = opts.bg.ink(adjust(l, opts.contrast, opts.brightness));
+            if toned {
+                SHAPE_FLOOR + (1.0 - SHAPE_FLOOR) * ink
+            } else {
+                ink
+            }
+        })
+        .collect()
 }
 
 /// The grid's cells and samples a cell.
@@ -208,12 +241,17 @@ fn ramp_cells(ink: &[f32], shape: &Shape, ramp: &[char]) -> Vec<Cell> {
         .collect()
 }
 
-/// Dots by Floyd-Steinberg dithering of the ink, eight a cell.
-fn braille_cells(mut ink: Vec<f32>, shape: &Shape) -> Vec<Cell> {
+/// Dots by Floyd-Steinberg dithering of the ink, eight a cell. A clear
+/// sample never gets a dot and passes no error on, so a dither doesn't
+/// spill into the empty background.
+fn braille_cells(mut ink: Vec<f32>, alpha: &[f32], shape: &Shape) -> Vec<Cell> {
     let (w, h) = ((shape.cols * 2) as usize, (shape.rows * 4) as usize);
     let mut on = vec![false; w * h];
     for y in 0..h {
         for x in 0..w {
+            if alpha[y * w + x] < 0.5 {
+                continue;
+            }
             let old = ink[y * w + x];
             let lit = old >= 0.5;
             on[y * w + x] = lit;
@@ -604,6 +642,65 @@ mod tests {
                 if !matches!(style, Style::Braille) {
                     assert_eq!(clear.text(), "\n".repeat(20));
                 }
+            }
+        }
+    }
+
+    fn blank(c: char) -> bool {
+        c == ' ' || c == '\u{2800}'
+    }
+
+    #[test]
+    fn clear_areas_stay_empty_under_touch_ups() {
+        let img = pic(80, 40, |x, _| if x < 40 { [255; 4] } else { [0; 4] });
+        for style in [
+            Style::Ascii,
+            Style::Blocks,
+            Style::Braille,
+            Style::Ramp(vec![' ', '#']),
+        ] {
+            for (contrast, brightness) in [(0, 60), (-50, 0), (-100, 100), (0, 0)] {
+                let o = Options {
+                    contrast,
+                    brightness,
+                    ..opts(style.clone(), Bg::Dark, false)
+                };
+                let art = make(&img, 20, 10, &o).art;
+                for r in 0..10 {
+                    let right: String = row(&art, r).chars().skip(11).collect();
+                    assert!(
+                        right.chars().all(blank),
+                        "{style:?} c{contrast} b{brightness}:\n{}",
+                        art.text()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_dark_logo_on_clear_shows() {
+        let logo = pic(80, 40, |x, y| {
+            if (20..60).contains(&x) && (10..30).contains(&y) {
+                [0x11, 0x11, 0x11, 255]
+            } else {
+                [0; 4]
+            }
+        });
+        for style in [Style::Ascii, Style::Braille, Style::Blocks] {
+            for bg in [Bg::Dark, Bg::Light] {
+                let art = make(&logo, 20, 10, &opts(style.clone(), bg, false)).art;
+                let inside: String = row(&art, 5).chars().skip(7).take(6).collect();
+                assert!(
+                    !inside.chars().any(blank),
+                    "{style:?} {bg:?}:\n{}",
+                    art.text()
+                );
+                assert!(
+                    row(&art, 0).chars().all(blank),
+                    "{style:?} {bg:?}:\n{}",
+                    art.text()
+                );
             }
         }
     }
