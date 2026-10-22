@@ -22,7 +22,7 @@ fn escape(s: &str) -> String {
 pub fn html(art: &Art, bg: Bg, title: &str) -> String {
     let page = hex(bg.page());
     let mut s = format!(
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>{}</title><style>\nbody{{margin:0;padding:24px;background:{page};color:{}}}\npre{{margin:0;font:12px/1.2 ui-monospace,\"SF Mono\",Menlo,Consolas,\"DejaVu Sans Mono\",monospace}}\n.b div{{display:flex;height:12px}}\n.b i{{display:block;width:6px;height:12px}}\n</style></head><body>\n",
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>{}</title><style>\nbody{{margin:0;padding:24px;background:{page};color:{}}}\npre{{margin:0;font:12px/1.2 ui-monospace,\"SF Mono\",Menlo,Consolas,\"DejaVu Sans Mono\",monospace}}\n.b div{{display:flex;height:12px}}\n.b i{{flex:none;display:block;width:6px;height:12px}}\n</style></head><body>\n",
         escape(title),
         hex(bg.text())
     );
@@ -161,5 +161,17 @@ mod tests {
         let page = html(&art(vec![red('x')]), Bg::Light, "t");
         assert!(!page.contains("http"), "{page}");
         assert!(page.contains("#ffffff"), "the light page: {page}");
+    }
+    /// A row wider than the window must scroll, not squeeze its cells
+    /// narrower than they are tall (the picture would be squished).
+    #[test]
+    fn html_block_cells_never_shrink() {
+        let cell = Cell {
+            ch: '▀',
+            fg: Some([255, 0, 0]),
+            bg: None,
+        };
+        let page = html(&art(vec![cell; 3]), Bg::Dark, "t");
+        assert!(page.contains(".b i{flex:none;"), "{page}");
     }
 }
