@@ -284,6 +284,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "unicode-normalization",
+ "unicode-width",
  "wild",
  "windows-sys 0.59.0",
 ]

@@ -3772,22 +3772,43 @@ fn ascii_tune_and_clipboard_conflict() {
         .stderr(contains("cannot be used with"));
 }
 
-/// Runs conv in a 90x30 pseudo-terminal in `dir`, typing each of `keys`
-/// after its pause in milliseconds, and returns all it wrote there.
+/// What to do to conv's pseudo-terminal.
 #[cfg(unix)]
-fn conv_in_pty(dir: &Path, args: &[&str], keys: &[(u64, &str)]) -> String {
+enum Pty {
+    /// Type these keys.
+    Type(&'static str),
+    /// Make the window this many columns and rows.
+    Size(u16, u16),
+}
+
+/// How a run in a pseudo-terminal went.
+#[cfg(unix)]
+struct PtyRun {
+    /// Everything conv wrote to the terminal.
+    out: String,
+    /// Whether it exited with 0.
+    ok: bool,
+    /// Whether the terminal had echo and line editing back afterwards.
+    restored: bool,
+}
+
+/// Runs conv in a 90x30 pseudo-terminal in `dir`, doing each step after
+/// its pause in milliseconds.
+#[cfg(unix)]
+fn conv_in_pty(dir: &Path, args: &[&str], steps: &[(u64, Pty)]) -> PtyRun {
     use std::io::{Read, Write};
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     let (mut master, mut slave) = (0, 0);
-    let mut size = libc::winsize {
-        ws_row: 30,
-        ws_col: 90,
+    let winsize = |cols: u16, rows: u16| libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    let mut size = winsize(90, 30);
     // SAFETY: openpty fills in the two ends of a new pseudo-terminal.
     let opened = unsafe {
         libc::openpty(
@@ -3806,6 +3827,8 @@ fn conv_in_pty(dir: &Path, args: &[&str], keys: &[(u64, &str)]) -> String {
             std::fs::File::from_raw_fd(slave),
         )
     };
+    // Kept to read the terminal's settings once conv has gone.
+    let check = slave.try_clone().unwrap();
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("conv"))
         .current_dir(dir)
         .args(args)
@@ -3829,13 +3852,25 @@ fn conv_in_pty(dir: &Path, args: &[&str], keys: &[(u64, &str)]) -> String {
             }
         })
     };
-    for (pause, text) in keys {
+    for (pause, step) in steps {
         std::thread::sleep(Duration::from_millis(*pause));
-        // Fails once conv has quit; what it did is checked after.
-        let _ = master.write_all(text.as_bytes());
+        match step {
+            // Fails once conv has quit; what it did is checked after.
+            Pty::Type(keys) => {
+                let _ = master.write_all(keys.as_bytes());
+            }
+            Pty::Size(cols, rows) => {
+                let size = winsize(*cols, *rows);
+                // SAFETY: sets the window size of the terminal held here.
+                unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) };
+            }
+        }
     }
     let until = Instant::now() + Duration::from_secs(20);
-    while child.try_wait().unwrap().is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if Instant::now() > until {
             let _ = child.kill();
             panic!(
@@ -3844,13 +3879,25 @@ fn conv_in_pty(dir: &Path, args: &[&str], keys: &[(u64, &str)]) -> String {
             );
         }
         std::thread::sleep(Duration::from_millis(50));
-    }
+    };
+    // SAFETY: a zeroed termios for tcgetattr to fill in from a live fd.
+    let restored = unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        libc::tcgetattr(check.as_raw_fd(), &mut t) == 0
+            && t.c_lflag & libc::ECHO != 0
+            && t.c_lflag & libc::ICANON != 0
+    };
+    drop(check);
     drop(master);
     // The reader ends when the terminal closes; don't wait on it forever.
     std::thread::sleep(Duration::from_millis(200));
     drop(reader);
     let out = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
-    out
+    PtyRun {
+        out,
+        ok: status.success(),
+        restored,
+    }
 }
 
 /// The command printed on quitting.
@@ -3869,12 +3916,16 @@ fn printed_command(out: &str) -> String {
 fn ascii_tune_prints_a_command_that_makes_what_it_wrote() {
     let dir = tempfile::tempdir().unwrap();
     ascii_logo(dir.path());
-    let out = conv_in_pty(
+    let run = conv_in_pty(
         dir.path(),
         &["ascii", "logo.svg", "-o", "out", "-i"],
-        &[(1500, "c"), (400, "w"), (1000, "q")],
+        &[
+            (1500, Pty::Type("c")),
+            (400, Pty::Type("w")),
+            (1000, Pty::Type("q")),
+        ],
     );
-    let command = printed_command(&out);
+    let command = printed_command(&run.out);
     assert!(command.contains("logo.svg .png -o out"), "{command}");
     let written = dir.path().join("out").join("logo-ascii.png");
     let first = std::fs::read(&written).unwrap();
@@ -3898,14 +3949,93 @@ fn ascii_tune_asks_before_replacing_even_when_keys_come_together() {
     ascii_logo(dir.path());
     let taken = dir.path().join("logo-ascii.txt");
     std::fs::write(&taken, "keep").unwrap();
-    let out = conv_in_pty(
+    let run = conv_in_pty(
         dir.path(),
         &["ascii", "logo.svg", "-i"],
-        &[(1500, "wy"), (800, "q"), (500, "q")],
+        &[
+            (1500, Pty::Type("wy")),
+            (800, Pty::Type("q")),
+            (500, Pty::Type("q")),
+        ],
     );
-    assert!(out.contains("replace it? y/n"), "{out}");
-    assert!(out.contains("kept logo-ascii.txt"), "{out}");
+    assert!(run.out.contains("replace it? y/n"), "{}", run.out);
+    assert!(run.out.contains("kept logo-ascii.txt"), "{}", run.out);
     assert_eq!(std::fs::read_to_string(&taken).unwrap(), "keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_survives_a_name_it_cant_write() {
+    // A folder named .txt where w would write: keys still work, and w
+    // says why it can't.
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    std::fs::create_dir(dir.path().join("logo-ascii.txt")).unwrap();
+    std::fs::create_dir(dir.path().join(".txt")).unwrap();
+    let run = conv_in_pty(
+        dir.path(),
+        &["ascii", "logo.svg", "-i"],
+        &[
+            (1500, Pty::Type("\x1b[D")),
+            (400, Pty::Type("w")),
+            (600, Pty::Type("q")),
+        ],
+    );
+    assert!(run.ok, "{}", run.out);
+    assert!(run.out.contains("To make it again"), "{}", run.out);
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_waits_for_a_bigger_window_and_gives_the_terminal_back() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let run = conv_in_pty(
+        dir.path(),
+        &["ascii", "logo.svg", "-i"],
+        &[
+            (1500, Pty::Size(20, 6)),
+            (800, Pty::Size(90, 30)),
+            (800, Pty::Type("\u{3}")),
+        ],
+    );
+    let small = run
+        .out
+        .find("needs a window")
+        .expect("the too-small message");
+    assert!(
+        run.out[small..].contains("q quit"),
+        "drawn again: {}",
+        run.out
+    );
+    assert!(run.ok && run.restored, "{}", run.out);
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_lists_each_file_once_with_its_notes() {
+    // An SVG with text, which conv can't draw: the note comes back at the
+    // end, and a file written twice is listed once.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("sign.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#fff"/><text y="50">hi</text></svg>"##,
+    )
+    .unwrap();
+    let run = conv_in_pty(
+        dir.path(),
+        &["ascii", "sign.svg", "-i"],
+        &[
+            (1500, Pty::Type("w")),
+            (600, Pty::Type("w")),
+            (600, Pty::Type("y")),
+            (600, Pty::Type("q")),
+        ],
+    );
+    let after = run.out.rsplit("\x1b[?1049l").next().unwrap();
+    // Each file's report ends with its full path.
+    assert_eq!(after.matches("sign-ascii.txt\r\n").count(), 1, "{after}");
+    assert!(after.contains("text is not drawn"), "{after}");
 }
 
 /// Needs a real ffmpeg. A photo tagged as rotated (EXIF orientation 6),

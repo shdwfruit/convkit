@@ -2,8 +2,9 @@
 //! status rows at the bottom. Built as one string, written in one go.
 
 use convkit_core::ascii::{self, Art, Bg, Fit};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::tune::Tune;
+use super::tune::{Tune, LEAST_WIDTH};
 use crate::ansi;
 
 /// Rows under the art: the settings, then the keys or a message.
@@ -21,15 +22,53 @@ const KEYS: [&str; 3] = [
 
 /// The widest art a `pic` (width, height) shows whole in a `window`
 /// (columns, rows) above the status rows, or `None` when the window is
-/// smaller than `LEAST`.
+/// smaller than `LEAST`. Never under `LEAST_WIDTH`, so a very tall
+/// picture can still be taller than the window.
 pub fn max_width(pic: (u32, u32), window: (u16, u16), cell_aspect: f32) -> Option<u32> {
     let (cols, rows) = window;
     if cols < LEAST.0 || rows < LEAST.1 {
         return None;
     }
-    let fit = Fit::Box(u32::from(cols), u32::from(rows - STATUS_ROWS));
-    let (width, _, _) = ascii::layout(pic.0, pic.1, fit, cell_aspect);
-    Some(width.max(super::tune::LEAST_WIDTH))
+    let room = u32::from(rows - STATUS_ROWS);
+    let rows_at = |w: u32| ascii::layout(pic.0, pic.1, Fit::Width(w), cell_aspect).1;
+    let (mut width, _, _) =
+        ascii::layout(pic.0, pic.1, Fit::Box(u32::from(cols), room), cell_aspect);
+    // The box's columns are rounded, which can give a row more than fits.
+    while width > LEAST_WIDTH && rows_at(width) > room {
+        width -= 1;
+    }
+    Some(width.max(LEAST_WIDTH))
+}
+
+/// `text` in at most `cols` columns of the screen: whole when it fits,
+/// otherwise its start and its end with "…" between, so a question keeps
+/// its "y/n" and the settings their last value.
+fn fit(text: &str, cols: usize) -> String {
+    if text.width() <= cols {
+        return text.to_string();
+    }
+    let Some(room) = cols.checked_sub(1) else {
+        return String::new();
+    };
+    let take = |chars: &mut dyn Iterator<Item = char>, budget: usize| {
+        let mut used = 0;
+        let mut kept = Vec::new();
+        for c in chars {
+            used += c.width().unwrap_or(0);
+            if used > budget {
+                break;
+            }
+            kept.push(c);
+        }
+        kept
+    };
+    let head = take(&mut text.chars(), room - room / 2);
+    let mut tail = take(&mut text.chars().rev(), room / 2);
+    tail.reverse();
+    head.into_iter()
+        .chain(std::iter::once('…'))
+        .chain(tail)
+        .collect()
 }
 
 /// The art on its page: every missing colour filled with the page's text
@@ -60,8 +99,14 @@ pub fn frame(art: &Art, tune: &Tune, name: &str, window: (u16, u16), truecolor: 
     }
     // Below the art, from the start of the next row.
     out.push_str(&format!("\x1b[{};1H\x1b[J", drawn + 1));
+    // Art taller than the window, from a very tall picture, says so.
+    let cut = if art.rows as usize > room {
+        format!(" (top {room} of {} rows)", art.rows)
+    } else {
+        String::new()
+    };
     let settings = format!(
-        "{name}  {}x{}  {}  {}  colour {}  contrast {}  brightness {}",
+        "{name}  {}x{}{cut}  {}  {}  colour {}  contrast {}  brightness {}",
         art.cols,
         art.rows,
         tune.style().name(),
@@ -75,13 +120,15 @@ pub fn frame(art: &Art, tune: &Tune, name: &str, window: (u16, u16), truecolor: 
     );
     let keys = KEYS
         .iter()
-        .find(|k| k.chars().count() <= usize::from(cols))
+        .find(|k| k.width() <= usize::from(cols))
         .unwrap_or(&KEYS[2]);
     let below = tune.message.as_deref().unwrap_or(keys);
     for (k, text) in [settings.as_str(), below].iter().enumerate() {
         let row = rows - STATUS_ROWS + 1 + k as u16;
-        let cut: String = text.chars().take(usize::from(cols)).collect();
-        out.push_str(&format!("\x1b[{row};1H\x1b[2K{cut}"));
+        out.push_str(&format!(
+            "\x1b[{row};1H\x1b[2K{}",
+            fit(text, usize::from(cols))
+        ));
     }
     out
 }
@@ -103,6 +150,7 @@ pub fn too_small(window: (u16, u16)) -> String {
 mod tests {
     use super::*;
     use convkit_core::ascii::{Cell, Style};
+    use unicode_width::UnicodeWidthStr;
 
     fn art(cols: u32, rows: u32) -> Art {
         Art {
@@ -210,6 +258,44 @@ mod tests {
                 "{cols}: {rows:?}"
             );
         }
+    }
+
+    #[test]
+    fn status_fits_by_screen_width() {
+        // Each of these characters takes two columns.
+        let name = "猫".repeat(20);
+        let rows = status_rows(&frame(&art(3, 2), &tune(), &name, (40, 12), true));
+        for row in rows {
+            assert!(UnicodeWidthStr::width(row.as_str()) <= 40, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_message_keeps_its_end() {
+        // The question's y/n stays when the name is too long to fit.
+        let mut t = tune();
+        t.message = Some(format!("{}.txt exists; replace it? y/n", "x".repeat(80)));
+        let rows = status_rows(&frame(&art(3, 2), &t, "cat.jpg", (40, 12), true));
+        assert!(
+            rows[1].ends_with("y/n") && rows[1].contains('…'),
+            "{rows:?}"
+        );
+        assert!(UnicodeWidthStr::width(rows[1].as_str()) <= 40, "{rows:?}");
+    }
+
+    #[test]
+    fn max_width_leaves_no_row_out() {
+        // Rounding the box's columns gave a tall picture one row too many.
+        let most = max_width((100, 300), (80, 24), 2.0).unwrap();
+        let (_, rows, _) = ascii::layout(100, 300, Fit::Width(most), 2.0);
+        assert!(rows <= 22, "{most} columns make {rows} rows");
+    }
+
+    #[test]
+    fn art_taller_than_the_window_says_so() {
+        let f = frame(&art(8, 34), &tune(), "cat.jpg", (80, 24), true);
+        let rows = status_rows(&f);
+        assert!(rows[0].contains("top 22 of 34 rows"), "{rows:?}");
     }
 
     #[test]

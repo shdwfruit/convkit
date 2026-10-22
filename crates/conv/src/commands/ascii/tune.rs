@@ -54,7 +54,9 @@ pub fn act(key: &Key) -> Act {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
     Redraw,
-    Write(PathBuf),
+    /// Write the art: where `w` writes (`None`, found by the session), or
+    /// a file the user has just said yes to replacing.
+    Write(Option<PathBuf>),
     Copy,
     Quit,
 }
@@ -80,9 +82,9 @@ pub struct Tune {
     pub asking: Option<PathBuf>,
     /// Whether what `w` writes can hold colour: not when it is a .txt.
     pub colour_allowed: bool,
-    /// Whether colour was set by hand with `o`, so a new style keeps it
-    /// instead of taking its own default.
-    colour_set: bool,
+    /// Whether colour was set by hand, with `o` or on the command line,
+    /// so a new style keeps it instead of taking its own default.
+    pub colour_set: bool,
 }
 
 impl Tune {
@@ -118,13 +120,12 @@ impl Tune {
         &self.styles[self.style]
     }
 
-    /// Applies `act`. `max_width` is the widest art the window shows, and
-    /// `target` the file `w` writes.
-    pub fn press(&mut self, act: Act, max_width: u32, target: &Path) -> Next {
+    /// Applies `act`. `max_width` is the widest art the window shows.
+    pub fn press(&mut self, act: Act, max_width: u32) -> Next {
         self.message = None;
         if let Some(path) = self.asking.take() {
             if act == Act::Yes {
-                return Next::Write(path);
+                return Next::Write(Some(path));
             }
             self.message = Some(format!("kept {}", name(&path)));
             return Next::Redraw;
@@ -159,7 +160,7 @@ impl Tune {
                 self.colour = !self.colour;
                 self.colour_set = true;
             }
-            Act::Write => return Next::Write(target.to_path_buf()),
+            Act::Write => return Next::Write(None),
             Act::Yes => return Next::Copy,
             Act::Quit => return Next::Quit,
             Act::Other => {}
@@ -219,9 +220,10 @@ pub fn command_line(tune: &Tune, how: &Invocation) -> String {
     words.push(format!("--width {}", tune.width));
     match tune.style() {
         Style::Ascii => {}
+        // Joined with `=`, so a ramp starting with `-` isn't read as a flag.
         Style::Ramp(chars) => {
             let ramp: String = chars.iter().collect();
-            words.push(format!("--chars {}", shell_quote(&ramp)));
+            words.push(format!("--chars={}", shell_quote(&ramp)));
         }
         style => words.push(format!("--chars {}", style.name())),
     }
@@ -252,7 +254,7 @@ mod tests {
     }
 
     fn press(t: &mut Tune, act: Act) -> Next {
-        t.press(act, 400, Path::new("cat-ascii.png"))
+        t.press(act, 400)
     }
 
     #[test]
@@ -290,7 +292,7 @@ mod tests {
         }
         assert_eq!(t.width, 8);
         for _ in 0..10 {
-            t.press(Act::Wider, 12, Path::new("a.png"));
+            t.press(Act::Wider, 12);
         }
         assert_eq!(t.width, 12);
     }
@@ -354,12 +356,19 @@ mod tests {
     }
 
     #[test]
-    fn w_writes_to_the_target() {
+    fn w_writes_and_a_yes_replaces() {
+        // Where w writes is found when it is pressed, not on every key.
         let mut t = tune();
-        assert_eq!(
-            press(&mut t, Act::Write),
-            Next::Write(PathBuf::from("cat-ascii.png"))
-        );
+        assert_eq!(press(&mut t, Act::Write), Next::Write(None));
+    }
+
+    #[test]
+    fn colour_given_on_the_command_line_sticks() {
+        // --no-color: blocks stay plain when c reaches them.
+        let mut t = tune();
+        t.colour_set = true;
+        press(&mut t, Act::NextStyle);
+        assert_eq!((t.style(), t.colour), (&Style::Blocks, false));
     }
 
     #[test]
@@ -367,7 +376,10 @@ mod tests {
         let mut t = tune();
         t.ask_to_replace(PathBuf::from("a.png"));
         assert_eq!(t.message.as_deref(), Some("a.png exists; replace it? y/n"));
-        assert_eq!(press(&mut t, Act::Yes), Next::Write(PathBuf::from("a.png")));
+        assert_eq!(
+            press(&mut t, Act::Yes),
+            Next::Write(Some(PathBuf::from("a.png")))
+        );
         assert_eq!(t.asking, None);
 
         t.ask_to_replace(PathBuf::from("a.png"));
@@ -445,11 +457,19 @@ mod tests {
         // Quoted the way this platform's shells take it.
         assert!(line.contains(&shell_quote("my cat.jpg")), "{line}");
         assert!(
-            line.contains(&format!("--chars {}", shell_quote(" .oO@"))),
+            line.contains(&format!("--chars={}", shell_quote(" .oO@"))),
             "{line}"
         );
         assert!(
             line.contains(' ') && line.matches(".oO@").count() == 1,
+            "{line}"
+        );
+
+        // A ramp starting with - joins its flag, or it reads as one.
+        t = Tune::new(60, Style::parse("-=+#").unwrap(), Bg::Dark, false, 0, 0);
+        let line = command_line(&t, &how);
+        assert!(
+            line.contains(&format!("--chars={}", shell_quote("-=+#"))),
             "{line}"
         );
 
