@@ -5,14 +5,14 @@
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use console::Key;
 use convkit_core::ascii::{self, Art, Fit, Image, Options, Style};
 use convkit_core::{registry, ConvError, ErrorCode, Format, Outcome};
 
 use super::frame::{self, max_width};
-use super::tune::{act, command_line, Invocation, Next, Tune, LEAST_WIDTH};
+use super::tune::{act, command_line, command_output, Invocation, Next, Tune, LEAST_WIDTH};
 use super::{
     cell_aspect, check_drawable, clipboard_art, colour_on, destination, discord_width,
     read_picture, write_art, Args, Shown,
@@ -112,6 +112,7 @@ fn session(
         args.brightness,
     );
     tune.message = message;
+    tune.colour_allowed = out_shown != Shown::Txt;
     let name = args
         .input
         .file_name()
@@ -119,20 +120,27 @@ fn session(
         .to_string_lossy()
         .into_owned();
 
-    let (tx, rx) = mpsc::channel::<Key>();
+    let (tx, rx) = mpsc::channel::<(Key, Instant)>();
     let mut screen = Screen::enter(false);
-    screen.read_keys(move |key, _| tx.send(key).is_ok());
+    screen.read_keys(move |key, at| tx.send((key, at)).is_ok());
 
     let mut written: Vec<Outcome> = Vec::new();
     let mut made: Option<(Made, Art)> = None;
     let mut drawn: Option<(u16, u16)> = None;
     let mut dirty = true;
+    // When a question reached the screen: only a key read after it answers.
+    let mut asked_at: Option<Instant> = None;
     'session: loop {
         let window = screen::size();
         if dirty || drawn != Some(window) {
             redraw(&img, &mut tune, &name, window, aspect, truecolor, &mut made);
             drawn = Some(window);
             dirty = false;
+            asked_at = match (&tune.asking, asked_at) {
+                (Some(_), None) => Some(Instant::now()),
+                (Some(_), shown) => shown,
+                (None, _) => None,
+            };
         }
         let first = match rx.recv_timeout(RESIZE_CHECK) {
             Ok(key) => key,
@@ -141,8 +149,12 @@ fn session(
         };
         // Every key already waiting is applied before the next redraw, so
         // a held arrow never leaves the art behind.
-        let keys: Vec<Key> = std::iter::once(first).chain(rx.try_iter()).collect();
-        for key in keys {
+        let keys: Vec<(Key, Instant)> = std::iter::once(first).chain(rx.try_iter()).collect();
+        for (key, at) in keys {
+            // Typed before the question was on screen, so not an answer.
+            if tune.asking.is_some() && asked_at.is_none_or(|shown| at < shown) {
+                continue;
+            }
             let most = max_width(pic, window, aspect).unwrap_or(tune.width);
             let target = match &out {
                 Some((path, _)) => path.clone(),
@@ -185,11 +197,19 @@ fn session(
             );
         }
     }
+    // The command makes what was written last, or OUT; otherwise it
+    // prints, and -o has nothing to do.
+    let output = command_output(args.output, written.last().map(|o| o.output.as_path()));
+    let shown = match (&out, written.last()) {
+        (Some((_, shown)), _) => *shown,
+        (None, Some(last)) => shown_for(&last.output, &None),
+        (None, None) => Shown::Terminal,
+    };
     let how = Invocation {
         input: args.input,
-        output: args.output,
-        outdir: args.outdir,
-        default_colour: colour_on(tune.style(), out_shown, false, false, no_color_env, false).0,
+        output: output.as_deref(),
+        outdir: args.outdir.filter(|_| output.is_some()),
+        default_colour: colour_on(tune.style(), shown, false, false, no_color_env, false).0,
     };
     println!("To make it again: {}", command_line(&tune, &how));
     Ok(())
@@ -280,7 +300,7 @@ fn copy(img: &Image, made: Option<&(Made, Art)>) -> String {
     };
     let text = clipboard_art(img, art, &m.opts).text();
     match clipboard::copy(&text) {
-        Ok(how) => clipboard::note(
+        Ok(how) => clipboard::short_note(
             text.chars().count(),
             discord_width(img.width, img.height, 2.0),
             &how,

@@ -58,7 +58,8 @@ console = { version = "0.15", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 unicode-normalization = "0.1"
 
-# conv trim holds the tty's mode for its whole session (see trim/term.rs).
+# conv trim and conv ascii -i hold the tty's mode for their whole session
+# (see screen.rs).
 # Already in the tree through several crates.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

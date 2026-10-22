@@ -78,6 +78,8 @@ pub struct Tune {
     pub message: Option<String>,
     /// The file a `y` would replace.
     pub asking: Option<PathBuf>,
+    /// Whether what `w` writes can hold colour: not when it is a .txt.
+    pub colour_allowed: bool,
     /// Whether colour was set by hand with `o`, so a new style keeps it
     /// instead of taking its own default.
     colour_set: bool,
@@ -107,6 +109,7 @@ impl Tune {
             colour,
             message: None,
             asking: None,
+            colour_allowed: true,
             colour_set: false,
         }
     }
@@ -139,7 +142,7 @@ impl Tune {
             Act::NextStyle => {
                 self.style = (self.style + 1) % self.styles.len();
                 if !self.colour_set {
-                    self.colour = *self.style() == Style::Blocks;
+                    self.colour = self.colour_allowed && *self.style() == Style::Blocks;
                 }
             }
             Act::FlipBg => {
@@ -147,6 +150,10 @@ impl Tune {
                     Bg::Dark => Bg::Light,
                     Bg::Light => Bg::Dark,
                 }
+            }
+            Act::ToggleColour if !self.colour_allowed => {
+                self.message =
+                    Some("a .txt can't hold colour; give a .png or .html to keep it".into());
             }
             Act::ToggleColour => {
                 self.colour = !self.colour;
@@ -183,6 +190,17 @@ pub struct Invocation<'a> {
     /// Whether the style the tuner ends on is in colour without `--color`
     /// where this command's art goes.
     pub default_colour: bool,
+}
+
+/// What the printed command writes: OUT as given; otherwise the bare
+/// extension of the last file `w` wrote, so the command makes that file
+/// again; otherwise nothing, and it prints the art.
+pub fn command_output(output: Option<&Path>, last_written: Option<&Path>) -> Option<PathBuf> {
+    if let Some(out) = output {
+        return Some(out.to_path_buf());
+    }
+    let ext = last_written?.extension()?;
+    Some(PathBuf::from(format!(".{}", ext.to_string_lossy())))
 }
 
 /// The `conv ascii` command that makes what the tuner shows: the input,
@@ -314,6 +332,19 @@ mod tests {
     }
 
     #[test]
+    fn a_txt_target_keeps_colour_off() {
+        // What w writes is plain, so the preview is too, and o says why.
+        let mut t = tune();
+        t.colour_allowed = false;
+        press(&mut t, Act::NextStyle);
+        assert_eq!((t.style(), t.colour), (&Style::Blocks, false));
+        press(&mut t, Act::ToggleColour);
+        assert!(!t.colour);
+        let said = t.message.clone().unwrap_or_default();
+        assert!(said.contains(".txt"), "{said}");
+    }
+
+    #[test]
     fn b_flips_the_background() {
         let mut t = tune();
         press(&mut t, Act::FlipBg);
@@ -359,6 +390,23 @@ mod tests {
         t.message = Some("wrote a.png".into());
         press(&mut t, Act::Wider);
         assert_eq!(t.message, None);
+    }
+
+    #[test]
+    fn the_command_writes_what_was_written() {
+        assert_eq!(
+            command_output(None, Some(Path::new("out/cat-ascii.png"))),
+            Some(PathBuf::from(".png"))
+        );
+        assert_eq!(
+            command_output(Some(Path::new("art.jpg")), Some(Path::new("art.jpg"))),
+            Some(PathBuf::from("art.jpg"))
+        );
+        assert_eq!(
+            command_output(Some(Path::new("art.jpg")), None),
+            Some(PathBuf::from("art.jpg"))
+        );
+        assert_eq!(command_output(None, None), None);
     }
 
     #[test]

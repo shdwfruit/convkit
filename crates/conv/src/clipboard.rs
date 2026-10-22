@@ -96,6 +96,23 @@ pub fn note(chars: usize, fits: u32, how: &Copied) -> String {
     s
 }
 
+/// `note` in one row of 80 or fewer, for `conv ascii -i`'s status row:
+/// the Discord limit first when it is passed, with the width that fits.
+pub fn short_note(chars: usize, fits: u32, how: &Copied) -> String {
+    let mut s = if chars + 8 > 2000 {
+        format!("copied {chars} characters, over Discord's 2,000; {fits} columns would fit")
+    } else {
+        format!("copied {chars} characters; paste it inside ``` to keep it lined up")
+    };
+    // That the terminal was asked matters less than the limit: only when
+    // there is room.
+    const VIA: &str = " (via the terminal)";
+    if *how == Copied::Osc52 && s.chars().count() + VIA.len() <= 80 {
+        s.push_str(VIA);
+    }
+    s
+}
+
 /// The Windows clipboard, as UTF-16: `clip.exe` would mangle UTF-8.
 #[cfg(windows)]
 mod windows {
@@ -154,6 +171,22 @@ mod tests {
     #[test]
     fn osc52_wraps_base64() {
         assert_eq!(osc52("hi"), "\x1b]52;c;aGk=\x07");
+    }
+
+    #[test]
+    fn a_short_note_leads_with_the_limit_and_fits_a_row() {
+        // The tuner has one row for it: the warning comes first.
+        let long = short_note(2500, 60, &Copied::Osc52);
+        assert!(
+            long.starts_with("copied 2500 characters, over Discord's 2,000"),
+            "{long}"
+        );
+        assert!(long.contains("60 columns"), "{long}");
+        let short = short_note(1500, 60, &Copied::Tool("pbcopy"));
+        assert!(short.contains("```") && !short.contains("2,000"), "{short}");
+        for note in [long, short, short_note(10, 60, &Copied::Osc52)] {
+            assert!(note.chars().count() <= 80, "{note}");
+        }
     }
 
     #[test]

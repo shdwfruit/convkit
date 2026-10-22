@@ -50,10 +50,16 @@ pub fn frame(art: &Art, tune: &Tune, name: &str, window: (u16, u16), truecolor: 
     let room = usize::from(rows.saturating_sub(STATUS_ROWS));
     let mut out = String::new();
     let painted = ansi::paint(&on_page(art, tune.bg), truecolor);
+    // Each row is cleared before it is written, never after: after a row
+    // as wide as the window the cursor waits on its last column, and an
+    // erase there would take that column in xterm-style terminals.
+    let mut drawn = 0;
     for (r, line) in painted.lines().take(room).enumerate() {
-        out.push_str(&format!("\x1b[{};1H{line}\x1b[0m\x1b[K", r + 1));
+        out.push_str(&format!("\x1b[{};1H\x1b[2K{line}\x1b[0m", r + 1));
+        drawn = r + 1;
     }
-    out.push_str("\x1b[J");
+    // Below the art, from the start of the next row.
+    out.push_str(&format!("\x1b[{};1H\x1b[J", drawn + 1));
     let settings = format!(
         "{name}  {}x{}  {}  {}  colour {}  contrast {}  brightness {}",
         art.cols,
@@ -117,11 +123,12 @@ mod tests {
         Tune::new(3, Style::Ascii, Bg::Dark, false, 0, 0)
     }
 
-    /// The text of each status row: what follows each `\x1b[2K`.
+    /// The text of the two status rows: what follows the last two
+    /// `\x1b[2K`.
     fn status_rows(frame: &str) -> Vec<String> {
-        frame
-            .split("\x1b[2K")
-            .skip(1)
+        let parts: Vec<&str> = frame.split("\x1b[2K").collect();
+        parts[parts.len().saturating_sub(2)..]
+            .iter()
             .map(|s| s.split('\x1b').next().unwrap_or("").to_string())
             .collect()
     }
@@ -163,6 +170,18 @@ mod tests {
         t.message = Some("wrote a.png".into());
         let rows = status_rows(&frame(&art(3, 2), &t, "cat.jpg", (100, 10), true));
         assert_eq!(rows[1], "wrote a.png");
+    }
+
+    #[test]
+    fn rows_are_cleared_before_they_are_written() {
+        // After a row as wide as the window the cursor waits on its last
+        // column, and an erase there takes that column in xterm-style
+        // terminals (Ghostty among them): clear first, never after.
+        let f = frame(&art(40, 2), &tune(), "cat.jpg", (40, 10), true);
+        assert!(f.starts_with("\x1b[1;1H\x1b[2K"), "{f:?}");
+        assert!(f.contains("\x1b[2;1H\x1b[2K"), "{f:?}");
+        assert!(!f.contains("\x1b[K"), "{f:?}");
+        assert!(f.contains("\x1b[3;1H\x1b[J"), "{f:?}");
     }
 
     #[test]

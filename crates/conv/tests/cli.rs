@@ -3710,6 +3710,142 @@ fn ascii_tune_and_clipboard_conflict() {
         .stderr(contains("cannot be used with"));
 }
 
+/// Runs conv in a 90x30 pseudo-terminal in `dir`, typing each of `keys`
+/// after its pause in milliseconds, and returns all it wrote there.
+#[cfg(unix)]
+fn conv_in_pty(dir: &Path, args: &[&str], keys: &[(u64, &str)]) -> String {
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let (mut master, mut slave) = (0, 0);
+    let mut size = libc::winsize {
+        ws_row: 30,
+        ws_col: 90,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: openpty fills in the two ends of a new pseudo-terminal.
+    let opened = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    assert_eq!(opened, 0, "openpty");
+    // SAFETY: both fds were just opened and are owned here alone.
+    let (mut master, slave) = unsafe {
+        (
+            std::fs::File::from_raw_fd(master),
+            std::fs::File::from_raw_fd(slave),
+        )
+    };
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("conv"))
+        .current_dir(dir)
+        .args(args)
+        .env("COLORTERM", "truecolor")
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave)
+        .spawn()
+        .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let seen = Arc::clone(&seen);
+        let mut master = master.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 65536];
+            while let Ok(n) = master.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                seen.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        })
+    };
+    for (pause, text) in keys {
+        std::thread::sleep(Duration::from_millis(*pause));
+        // Fails once conv has quit; what it did is checked after.
+        let _ = master.write_all(text.as_bytes());
+    }
+    let until = Instant::now() + Duration::from_secs(20);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > until {
+            let _ = child.kill();
+            panic!(
+                "conv didn't quit:\n{}",
+                String::from_utf8_lossy(&seen.lock().unwrap())
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(master);
+    // The reader ends when the terminal closes; don't wait on it forever.
+    std::thread::sleep(Duration::from_millis(200));
+    drop(reader);
+    let out = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+    out
+}
+
+/// The command printed on quitting.
+#[cfg(unix)]
+fn printed_command(out: &str) -> String {
+    out.split("To make it again: ")
+        .nth(1)
+        .and_then(|s| s.lines().next())
+        .unwrap_or_else(|| panic!("no command in:\n{out}"))
+        .trim()
+        .to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_prints_a_command_that_makes_what_it_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let out = conv_in_pty(
+        dir.path(),
+        &["ascii", "logo.svg", "-o", "out", "-i"],
+        &[(1500, "c"), (400, "w"), (1000, "q")],
+    );
+    let command = printed_command(&out);
+    assert!(command.contains("logo.svg .png -o out"), "{command}");
+    let written = dir.path().join("out").join("logo-ascii.png");
+    let first = std::fs::read(&written).unwrap();
+    std::fs::remove_file(&written).unwrap();
+    // The command's words are all plain here, so no shell is needed.
+    let words: Vec<&str> = command.split_whitespace().skip(1).collect();
+    conv()
+        .current_dir(dir.path())
+        .args(&words)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&written).unwrap(), first, "{command}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_asks_before_replacing_even_when_keys_come_together() {
+    // A `y` typed with the `w`, before the question was on screen, doesn't
+    // answer it; the `q` after it does, as no.
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let taken = dir.path().join("logo-ascii.txt");
+    std::fs::write(&taken, "keep").unwrap();
+    let out = conv_in_pty(
+        dir.path(),
+        &["ascii", "logo.svg", "-i"],
+        &[(1500, "wy"), (800, "q"), (500, "q")],
+    );
+    assert!(out.contains("replace it? y/n"), "{out}");
+    assert!(out.contains("kept logo-ascii.txt"), "{out}");
+    assert_eq!(std::fs::read_to_string(&taken).unwrap(), "keep");
+}
+
 /// Needs a real ffmpeg. A photo tagged as rotated (EXIF orientation 6),
 /// blue on the left of its stored pixels, is drawn upright: blue on top.
 #[test]
