@@ -30,6 +30,7 @@ use convkit_core::{
 use rayon::prelude::*;
 
 use crate::cli::{Cli, Command};
+use crate::screen::Screen;
 use crate::{batch, render};
 use draw::{Graphics, ImageBox, Info, Layout};
 use session::{Input, Outcome, Session};
@@ -233,9 +234,9 @@ fn interact(
     writing: &Writing,
 ) -> Outcome {
     let (tx, rx) = mpsc::channel::<Event>();
-    let mut screen = term::Screen::enter(graphics);
+    let mut screen = Screen::enter(graphics == Graphics::Kitty);
     let keys = tx.clone();
-    screen.read_keys(move |input, at| keys.send(Event::Key(input, at)).is_ok());
+    screen.read_keys(move |key, at| keys.send(Event::Key(term::input_for(&key), at)).is_ok());
     // Set when the session ends, so a worker stops spawning ffmpeg.
     let done = Arc::new(AtomicBool::new(false));
     let frames = source

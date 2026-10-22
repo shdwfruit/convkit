@@ -8,6 +8,7 @@ mod install_prompt;
 mod output;
 mod prompt;
 mod render;
+mod screen;
 mod trim;
 
 use clap::Parser;
