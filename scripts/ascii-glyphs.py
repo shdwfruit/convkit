@@ -72,7 +72,7 @@ def main() -> None:
         f"glyphs.png is drawn from JetBrains Mono {VERSION} Regular at {size} px "
         f"by scripts/ascii-glyphs.py, and is covered by the font's licence below.\n\n"
     )
-    (OUT / "glyphs-OFL.txt").write_text(note + licence)
+    (OUT / "JetBrainsMono-OFL.txt").write_text(note + licence)
     print(f"{len(chars)} glyphs at {size} px into {OUT / 'glyphs.png'}")
 
 

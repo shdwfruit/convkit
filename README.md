@@ -903,3 +903,9 @@ choice. convkit invokes ffmpeg, ImageMagick, LibreOffice, pandoc, and Typst
 as subprocesses; it does not link against, embed, or redistribute any of
 them, and each keeps its own license. `conv install` downloads official
 upstream builds straight from their publishers.
+
+`conv ascii` draws text in PNGs with glyphs from
+[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono), under the
+SIL Open Font License 1.1; the licence is in
+[JetBrainsMono-OFL.txt](crates/convkit-core/src/ascii/JetBrainsMono-OFL.txt)
+and in every release archive.

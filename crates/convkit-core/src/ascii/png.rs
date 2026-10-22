@@ -2,7 +2,7 @@
 //!
 //! ASCII characters come from a pre-drawn atlas of JetBrains Mono
 //! (`glyphs.png`, made by `scripts/ascii-glyphs.py`; licence in
-//! `glyphs-OFL.txt`), so drawing needs no font code. Blocks and braille
+//! `JetBrainsMono-OFL.txt`), so drawing needs no font code. Blocks and braille
 //! are drawn as shapes, crisp at any size and in no need of a font.
 
 use std::sync::LazyLock;
