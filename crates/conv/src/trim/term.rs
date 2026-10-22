@@ -18,8 +18,7 @@ use super::session::Input;
 /// and the reply goes astray under tmux.
 pub fn choose(choice: Option<&str>, env: &dyn Fn(&str) -> Option<String>) -> Graphics {
     let is = |var: &str, value: &str| env(var).is_some_and(|v| v == value);
-    let truecolor =
-        is("COLORTERM", "truecolor") || is("COLORTERM", "24bit") || env("WT_SESSION").is_some();
+    let truecolor = crate::ansi::truecolor(env);
     let blocks = Graphics::Blocks { truecolor };
     let sextants = Graphics::Sextants { truecolor };
     match choice {

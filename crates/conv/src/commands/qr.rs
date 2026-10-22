@@ -9,12 +9,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use convkit_core::qr::{self, Logo};
-use convkit_core::{exec, registry, ConvError, ErrorCode, Format, Outcome, Request, Tuning};
+use convkit_core::{registry, ConvError, ErrorCode, Format, Outcome};
 use serde_json::json;
 
 use crate::cli::{Cli, Command};
-use crate::commands::install;
-use crate::{input, install_prompt, render};
+use crate::{input, output, render};
 
 pub fn run(cli: &Cli) -> i32 {
     let Some(Command::Qr {
@@ -110,92 +109,16 @@ fn write(
     }
     let logo = logo.map(Logo::read).transpose()?;
     let code = qr::make(text, logo.as_ref(), size)?;
-    if let Some(dir) = outdir {
-        std::fs::create_dir_all(dir).map_err(|e| {
-            ConvError::new(
-                ErrorCode::InvalidInvocation,
-                format!("cannot create output directory {}: {e}", dir.display()),
-            )
-        })?;
-    }
+    output::ensure_dir(outdir)?;
     let mut outcome = match format {
-        Format::Svg => write_file(path, code.svg.as_bytes())?,
-        Format::Png => write_file(path, &code.png()?)?,
-        _ => convert_png(cli, &code.png()?, path, format, overwrite)?,
+        Format::Svg => output::write_file(path, code.svg.as_bytes())?,
+        Format::Png => output::write_file(path, &code.png()?)?,
+        _ => output::convert_png(cli, &code.png()?, path, format, overwrite)?,
     };
     let mut warnings = code.warnings(format);
     warnings.append(&mut outcome.warnings);
     outcome.warnings = warnings;
     Ok((outcome, code))
-}
-
-/// Writes `bytes` beside `path` and renames it into place, so a failed
-/// write never leaves half a file under the name asked for.
-fn write_file(path: &Path, bytes: &[u8]) -> Result<Outcome, ConvError> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = path.with_file_name(format!(".{name}.conv-{}", std::process::id()));
-    let failed = |e: std::io::Error| {
-        let _ = std::fs::remove_file(&temp);
-        ConvError::new(
-            ErrorCode::ConversionFailed,
-            format!("cannot write {}: {e}", path.display()),
-        )
-    };
-    std::fs::write(&temp, bytes).map_err(failed)?;
-    std::fs::rename(&temp, path).map_err(failed)?;
-    Ok(Outcome {
-        output: path.to_path_buf(),
-        bytes: bytes.len() as u64,
-        warnings: vec![],
-        notes: vec![],
-        backend_output: vec![],
-        backends: vec![],
-        remuxed: false,
-        elapsed_ms: 0,
-        sizing: None,
-        enlarged: None,
-        range: None,
-        speed: None,
-    })
-}
-
-/// Converts the drawn PNG to `format` as `conv qr.png out.FORMAT` would,
-/// offering to install a missing backend the same way.
-fn convert_png(
-    cli: &Cli,
-    png: &[u8],
-    path: &Path,
-    format: Format,
-    overwrite: bool,
-) -> Result<Outcome, ConvError> {
-    let temp = std::env::temp_dir().join(format!("conv-qr-{}.png", std::process::id()));
-    std::fs::write(&temp, png).map_err(|e| {
-        ConvError::new(
-            ErrorCode::ConversionFailed,
-            format!("cannot write {}: {e}", temp.display()),
-        )
-    })?;
-    let req = Request {
-        from: Format::Png,
-        to: format,
-        inputs: vec![temp.clone()],
-        output: path.to_path_buf(),
-        overwrite,
-        tuning: Tuning::default(),
-        allow_extreme: false,
-    };
-    let mut result = exec::run(&req, &cli.resolver(), &mut |_| {});
-    if let Err(e) = &result {
-        if let (ErrorCode::BackendMissing, Some(backend)) = (e.code, e.backend) {
-            if install_prompt::should_install(cli, backend)
-                && install::install_backend(cli, backend).is_ok()
-            {
-                result = exec::run(&req, &cli.resolver(), &mut |_| {});
-            }
-        }
-    }
-    let _ = std::fs::remove_file(&temp);
-    result
 }
 
 fn print(cli: &Cli, outcome: &Outcome, text: &str, code: &qr::Qr) {
