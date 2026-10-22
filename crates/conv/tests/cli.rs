@@ -3683,6 +3683,33 @@ fn ascii_refusals() {
     }
 }
 
+#[test]
+fn ascii_tune_needs_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    for extra in [&[][..], &["--json"][..]] {
+        conv()
+            .current_dir(dir.path())
+            .args(["ascii", "logo.svg", "-i"])
+            .args(extra)
+            .assert()
+            .code(2)
+            .stderr(contains("needs a terminal"));
+    }
+}
+
+#[test]
+fn ascii_tune_and_clipboard_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    conv()
+        .current_dir(dir.path())
+        .args(["ascii", "logo.svg", "-i", "--clipboard"])
+        .assert()
+        .code(2)
+        .stderr(contains("cannot be used with"));
+}
+
 /// Needs a real ffmpeg. A photo tagged as rotated (EXIF orientation 6),
 /// blue on the left of its stored pixels, is drawn upright: blue on top.
 #[test]

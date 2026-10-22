@@ -627,7 +627,13 @@ it here, sized to the window:
 conv ascii photo.jpg
 conv ascii photo.jpg --chars braille --clipboard
 conv ascii logo.png .png --chars blocks
+conv ascii photo.jpg -i
 ```
+
+`-i` opens a preview you change with keys: the arrows for width and
+contrast, `[` `]` for brightness, `c` for the style, `b` for the
+background, `o` for colour. `w` writes it, `y` copies it, and `q` quits
+and prints the command that makes it again.
 
 There are four styles. `ascii` (the default) picks characters by
 brightness and draws clear edges with `| / \ - _`. `blocks` puts two

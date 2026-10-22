@@ -410,7 +410,7 @@ fn paint(text: &str, style: Style, enabled: bool) -> String {
 /// file managers use (1024 B = "1 KB", not 1000) — kilobytes with no
 /// decimal place, megabytes and up with one. For example, 2161 KiB is
 /// 2.11 MiB, which this formula shows as "2.1 MB".
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;

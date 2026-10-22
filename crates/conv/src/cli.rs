@@ -299,7 +299,11 @@ most, like --chars \" .:oO@\".
 
 --bg says what the art will be shown on, so it doesn't look like a \
 negative there. --clipboard also copies the text; paste it inside ``` in \
-Discord, Slack or GitHub to keep it lined up.")]
+Discord, Slack or GitHub to keep it lined up.
+
+-i opens a preview: the arrows change the width and contrast, [ ] the \
+brightness, c the style, b the background, o colour; w writes, y copies, \
+and q quits and prints the command for what you made.")]
     Ascii {
         /// The picture: an image, a GIF or a video (its first frame).
         input: PathBuf,
@@ -352,6 +356,10 @@ Discord, Slack or GitHub to keep it lined up.")]
         /// Also copy the art as plain text.
         #[arg(long)]
         clipboard: bool,
+        /// Change the look with keys and see it as you go; prints the
+        /// command for it when you quit.
+        #[arg(short = 'i', long, conflicts_with = "clipboard")]
+        tune: bool,
         /// Overwrite the file if it exists.
         #[arg(short = 'y', long)]
         overwrite: bool,

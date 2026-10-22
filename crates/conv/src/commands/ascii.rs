@@ -17,10 +17,8 @@ use serde_json::json;
 use crate::cli::{Cli, Command};
 use crate::{ansi, clipboard, input, install_prompt, output, render};
 
-// Used by the session `conv ascii -i` runs, wired in with the flag.
-#[allow(dead_code)]
 mod frame;
-#[allow(dead_code)]
+mod session;
 mod tune;
 
 /// Where the art ends up, which decides its size, its cell shape and
@@ -55,6 +53,7 @@ struct Args<'a> {
     contrast: i32,
     brightness: i32,
     clipboard: bool,
+    tune: bool,
     overwrite: bool,
 }
 
@@ -72,6 +71,7 @@ pub fn run(cli: &Cli) -> i32 {
         contrast,
         brightness,
         clipboard,
+        tune,
         overwrite,
     }) = &cli.command
     else {
@@ -90,6 +90,7 @@ pub fn run(cli: &Cli) -> i32 {
         contrast: *contrast,
         brightness: *brightness,
         clipboard: *clipboard,
+        tune: *tune,
         overwrite: *overwrite,
     };
     match draw(cli, &args) {
@@ -105,16 +106,12 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
     let start = Instant::now();
     let style = Style::parse(args.chars)?;
     let format = source(args.input)?;
+    if args.tune {
+        return session::run(cli, args, style, format);
+    }
     let terminal = std::io::stdout().is_terminal() && !cli.json;
     let (path, shown) = destination(args.input, args.output, args.outdir, terminal)?;
-    if let (Shown::Png | Shown::Image(_), Style::Ramp(ramp)) = (shown, &style) {
-        if let Some(c) = ramp.iter().find(|&&c| !drawable(c)) {
-            return Err(ConvError::new(
-                ErrorCode::InvalidInvocation,
-                format!("a .png can draw ASCII, block and braille characters; \"{c}\" isn't one"),
-            ));
-        }
-    }
+    check_drawable(shown, &style)?;
     if let Some(path) = &path {
         if path.exists() && !args.overwrite {
             return Err(ConvError::new(
@@ -182,26 +179,45 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
     };
     output::ensure_dir(args.outdir)?;
     let title = args.input.file_name().unwrap_or_default().to_string_lossy();
-    let mut outcome = match shown {
-        Shown::Txt => output::write_file(&path, art.text().as_bytes())?,
-        Shown::Html => {
-            output::write_file(&path, ascii::html::html(&art, args.bg, &title).as_bytes())?
-        }
-        Shown::Png => output::write_file(&path, &ascii::png::png(&art, args.bg)?)?,
-        Shown::Image(f) => output::convert_png(
-            cli,
-            &ascii::png::png(&art, args.bg)?,
-            &path,
-            f,
-            args.overwrite,
-        )?,
-        Shown::Terminal | Shown::Pipe => unreachable!("a path is a file"),
-    };
+    let mut outcome = write_art(cli, &art, &path, shown, args.bg, &title, args.overwrite)?;
     outcome.elapsed_ms = start.elapsed().as_millis() as u64;
     notes.append(&mut outcome.warnings);
     outcome.warnings = notes;
     print_written(cli, &outcome, &art, &opts);
     Ok(())
+}
+
+/// Refuses a ramp a PNG can't draw when the art goes into a picture.
+fn check_drawable(shown: Shown, style: &Style) -> Result<(), ConvError> {
+    if let (Shown::Png | Shown::Image(_), Style::Ramp(ramp)) = (shown, style) {
+        if let Some(c) = ramp.iter().find(|&&c| !drawable(c)) {
+            return Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!("a .png can draw ASCII, block and braille characters; \"{c}\" isn't one"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Writes the art to `path` as `shown` says: text, a web page, a PNG, or a
+/// PNG converted to another picture format.
+fn write_art(
+    cli: &Cli,
+    art: &Art,
+    path: &Path,
+    shown: Shown,
+    bg: Bg,
+    title: &str,
+    overwrite: bool,
+) -> Result<Outcome, ConvError> {
+    match shown {
+        Shown::Txt => output::write_file(path, art.text().as_bytes()),
+        Shown::Html => output::write_file(path, ascii::html::html(art, bg, title).as_bytes()),
+        Shown::Png => output::write_file(path, &ascii::png::png(art, bg)?),
+        Shown::Image(f) => output::convert_png(cli, &ascii::png::png(art, bg)?, path, f, overwrite),
+        Shown::Terminal | Shown::Pipe => unreachable!("a path is a file"),
+    }
 }
 
 /// The art printed: plain or in the terminal's colours, notes on stderr,
