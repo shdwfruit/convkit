@@ -3809,14 +3809,15 @@ fn conv_in_pty(dir: &Path, args: &[&str], steps: &[(u64, Pty)]) -> PtyRun {
         ws_ypixel: 0,
     };
     let mut size = winsize(90, 30);
-    // SAFETY: openpty fills in the two ends of a new pseudo-terminal.
+    // SAFETY: openpty fills in the two ends of a new pseudo-terminal. The
+    // size is passed as a raw pointer: macOS takes it mutable, Linux const.
     let opened = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            &raw mut size,
         )
     };
     assert_eq!(opened, 0, "openpty");
