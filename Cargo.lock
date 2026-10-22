@@ -285,6 +285,7 @@ dependencies = [
  "tempfile",
  "unicode-normalization",
  "wild",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

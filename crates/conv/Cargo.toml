@@ -63,6 +63,11 @@ unicode-normalization = "0.1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# conv ascii --clipboard puts Unicode text on the Windows clipboard
+# (clip.exe mangles UTF-8). Already in the tree through several crates.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole"] }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

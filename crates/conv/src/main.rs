@@ -1,6 +1,7 @@
 mod ansi;
 mod batch;
 mod cli;
+mod clipboard;
 mod commands;
 mod input;
 mod install_prompt;

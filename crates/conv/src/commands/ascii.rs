@@ -15,7 +15,7 @@ use convkit_core::{frames, registry, Backend, ConvError, ErrorCode, Format, Kind
 use serde_json::json;
 
 use crate::cli::{Cli, Command};
-use crate::{ansi, input, install_prompt, output, render};
+use crate::{ansi, clipboard, input, install_prompt, output, render};
 
 /// Where the art ends up, which decides its size, its cell shape and
 /// whether it can be in colour.
@@ -48,6 +48,7 @@ struct Args<'a> {
     no_color: bool,
     contrast: i32,
     brightness: i32,
+    clipboard: bool,
     overwrite: bool,
 }
 
@@ -64,7 +65,7 @@ pub fn run(cli: &Cli) -> i32 {
         no_color,
         contrast,
         brightness,
-        clipboard: _,
+        clipboard,
         overwrite,
     }) = &cli.command
     else {
@@ -82,6 +83,7 @@ pub fn run(cli: &Cli) -> i32 {
         no_color: *no_color,
         contrast: *contrast,
         brightness: *brightness,
+        clipboard: *clipboard,
         overwrite: *overwrite,
     };
     match draw(cli, &args) {
@@ -159,6 +161,14 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
     let made = ascii::make(&img, cols, rows, &opts);
     notes.extend(made.notes);
     let art = made.art;
+    if args.clipboard {
+        let text = clipboard_art(&img, &art, &opts).text();
+        let chars = text.chars().count();
+        notes.push(match clipboard::copy(&text) {
+            Ok(how) => clipboard::note(chars, discord_width(img.width, img.height, 2.0), &how),
+            Err(e) => format!("couldn't copy it: {e}"),
+        });
+    }
 
     let Some(path) = path else {
         return print_art(cli, &art, &opts, notes);
@@ -239,6 +249,32 @@ fn print_written(cli: &Cli, outcome: &Outcome, art: &Art, opts: &Options) {
         "{}",
         render::conversion_notes_human("", outcome, &[], render::stderr_styled())
     );
+}
+
+/// The art as it goes on the clipboard: plain text, so coloured blocks
+/// (which are all `▀` without their colours) are drawn again as shades.
+fn clipboard_art(img: &Image, art: &Art, opts: &Options) -> Art {
+    if opts.style == Style::Blocks && opts.colour {
+        let plain = Options {
+            colour: false,
+            ..opts.clone()
+        };
+        return ascii::make(img, art.cols, art.rows, &plain).art;
+    }
+    art.clone()
+}
+
+/// The most columns whose art, inside ``` fences, fits one Discord
+/// message of 2,000 characters.
+fn discord_width(pic_w: u32, pic_h: u32, cell_aspect: f32) -> u32 {
+    let size = |c: u32| {
+        let (cols, rows, _) = ascii::layout(pic_w, pic_h, Fit::Width(c), cell_aspect);
+        cols * rows + rows + 8
+    };
+    (1..=ascii::MAX_SIDE_CELLS)
+        .take_while(|&c| size(c) <= 2000)
+        .last()
+        .unwrap_or(1)
 }
 
 /// What the input is: `None` for a file whose extension conv doesn't know,
@@ -607,5 +643,45 @@ mod tests {
             on(Style::Blocks, Terminal, false, false, false, true),
             (false, None)
         );
+    }
+    #[test]
+    fn discord_width_fits() {
+        let c = discord_width(400, 300, 2.0);
+        let size = |c: u32| {
+            let (cols, rows, _) = ascii::layout(400, 300, Fit::Width(c), 2.0);
+            cols * rows + rows + 8
+        };
+        assert!(size(c) <= 2000, "{c}");
+        assert!(size(c + 1) > 2000, "{c}");
+    }
+
+    #[test]
+    fn clipboard_text_is_plain_for_coloured_blocks() {
+        let img = Image {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                255, 0, 0, 255, 0, 0, 255, 255, 0, 255, 0, 255, 255, 255, 255, 255,
+            ],
+        };
+        let opts = Options {
+            style: Style::Blocks,
+            bg: Bg::Dark,
+            colour: true,
+            contrast: 0,
+            brightness: 0,
+            cell_aspect: 2.0,
+        };
+        let art = ascii::make(&img, 4, 2, &opts).art;
+        assert!(art.is_blocks());
+        let text = clipboard_art(&img, &art, &opts).text();
+        assert!(!text.contains('▀') && !text.contains('▄'), "{text}");
+        assert!(text.chars().any(|c| "░▒▓█".contains(c)), "{text}");
+        let plain = Options {
+            style: Style::Ascii,
+            ..opts
+        };
+        let art = ascii::make(&img, 4, 2, &plain).art;
+        assert_eq!(clipboard_art(&img, &art, &plain), art);
     }
 }
