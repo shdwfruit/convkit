@@ -106,6 +106,7 @@ conv clip.mp4 --speed 2          # play twice as fast
 conv trim talk.mp4               # find clips in the terminal and cut them
 conv qr "https://example.com"    # make a QR code, written as qr.png
 conv ascii photo.jpg             # print a picture as ASCII art
+conv changelog --since 0.5.1     # what's new since the version you had
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -823,6 +824,11 @@ running, alongside its version, so you never have to remember which. Plain
 `cargo install` already replaces an out-of-date copy in place — `--force` is
 only needed to rebuild a version you already have — and `brew upgrade`
 reports "already installed" when there is nothing to do.
+
+To see what's new, `conv changelog --since 0.5.1` lists what each version
+after the one you had added. `conv changelog` alone lists every version, and
+`conv changelog 0.5.0` just that one. It reads the changelog built into conv,
+so it works offline and matches the copy you are running.
 
 If `conv --version` still reports the old version after an upgrade, you have
 two copies on `PATH`; `conv update` reports the absolute path of the one that

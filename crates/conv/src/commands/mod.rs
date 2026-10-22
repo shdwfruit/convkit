@@ -1,5 +1,6 @@
 pub mod ascii;
 pub mod capabilities;
+pub mod changelog;
 pub mod convert;
 pub mod doctor;
 pub mod install;

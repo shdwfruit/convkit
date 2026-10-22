@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1 - unreleased
+
+### New
+
+- **`conv changelog` shows what each version added.** It lists every
+  version, newest first, from the changelog built into conv, so it works
+  offline. `conv changelog 0.5.0` shows one version, and `--since` with the
+  version you had shows what's new after an upgrade.
+
 ## 0.6.0 - 2026-10-23
 
 ### New
