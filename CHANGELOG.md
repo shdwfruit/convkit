@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.6.0 - unreleased
+
+### New
+
+- **ASCII art with `conv ascii`.** `conv ascii photo.jpg` prints a picture
+  as ASCII art, sized to the window, and `conv ascii photo.jpg .png` writes
+  it as a picture; `.txt`, `.html` and any picture format conv writes work
+  too. `--chars` picks the style: `ascii` (the default, with `| / \ - _`
+  along clear edges), `blocks` (two colours a character), `braille` (eight
+  dots a character, the most detail), or your own characters from least ink
+  to most, like `--chars " .:oO@"`. Blocks keep the picture's colours
+  wherever colour can show, and `--color` adds them to the other styles.
+  `--width`, `--height`, `--bg light`, `--contrast` and `--brightness`
+  shape it, and `--clipboard` copies the text for Discord, Slack or GitHub.
+  A transparent border is left out, and transparent parts stay empty.
+- **`conv ascii -i` tunes the art with keys.** The arrows change the width
+  and contrast, `[ ]` the brightness, `c` the style, `b` the background and
+  `o` colour, on a preview drawn on the background the art is made for. `w`
+  writes it, `y` copies it, and `q` prints the command that makes it again.
+- **QR codes with `conv qr`.** `conv qr "https://example.com"` writes
+  `qr.png`, or an SVG, JPG or other format by name. The text is in the code
+  itself, so it never expires. `--logo` puts a logo in the middle and
+  `--size` sets the size. conv reads the code back before writing it, and
+  writes nothing if it doesn't give back the exact text.
+- **`--speed` and `--shift-pitch`.** `conv lecture.mp4 --speed 1.5` writes
+  `lecture-1.5x.mp4`, for video, GIF and audio, from 0.01x to 100x. The
+  sound keeps its pitch unless `--shift-pitch` lets it move, like a tape.
+  Subtitles and chapters are dropped, with a note, since their times would
+  no longer match.
+
+### Fixed
+
+- **`-o` with a named output.** `conv a.png b.jpg -o out` wrote `b.jpg`
+  beside the input and left `out/` empty. It now writes `out/b.jpg`, and
+  `conv a.png .jpg -o out` writes `out/a.jpg`. A name with its own folder
+  plus `-o` is refused, since that gives two places to write.
+
 ## 0.5.1 - 2026-10-12
 
 ### New

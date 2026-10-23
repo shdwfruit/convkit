@@ -109,6 +109,46 @@ pub fn grab(ffmpeg: &Path, input: &Path, at_ms: u64, want: Want) -> Result<Pixel
     }
 }
 
+/// The ffmpeg argv for a still: the first frame, turned upright by ffmpeg
+/// (it applies a photo's EXIF orientation), no larger than `max_side` on
+/// either side and never enlarged, as an RGBA PNG so transparency comes
+/// through.
+pub fn still_args(input: &Path, max_side: u32) -> Vec<OsString> {
+    let mut args: Vec<OsString> = QUIET.iter().map(OsString::from).collect();
+    args.push("-i".into());
+    args.push(input.as_os_str().to_owned());
+    for a in ["-map", "0:v:0", "-frames:v", "1", "-vf"] {
+        args.push(a.into());
+    }
+    args.push(
+        format!(
+            "scale=w='min({max_side},iw)':h='min({max_side},ih)':force_original_aspect_ratio=decrease:flags=area,format=rgba"
+        )
+        .into(),
+    );
+    for a in ["-c:v", "png", "-f", "image2pipe", "pipe:1"] {
+        args.push(a.into());
+    }
+    args
+}
+
+/// Runs ffmpeg for a still and returns the PNG it wrote.
+pub fn still(ffmpeg: &Path, input: &Path, max_side: u32) -> Result<Vec<u8>> {
+    let child = spawn(ffmpeg, still_args(input, max_side))?;
+    let (data, stderr, ok) = drain(child)?;
+    if ok && data.starts_with(b"\x89PNG") {
+        return Ok(data);
+    }
+    Err(ConvError::new(
+        ErrorCode::ConversionFailed,
+        format!(
+            "ffmpeg could not read {}: {}",
+            input.display(),
+            stderr.trim()
+        ),
+    ))
+}
+
 /// Loudness is reported per bucket of this many milliseconds.
 pub const BUCKET_MS: u64 = 10;
 
@@ -325,6 +365,57 @@ mod tests {
             "{args:?}"
         );
         assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
+    }
+
+    #[test]
+    fn a_still_is_one_bounded_rgba_png() {
+        assert_eq!(
+            strs(still_args(Path::new("a.jpg"), 1600)),
+            [
+                "-v",
+                "error",
+                "-nostdin",
+                "-i",
+                "a.jpg",
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=w='min(1600,iw)':h='min(1600,ih)':force_original_aspect_ratio=decrease:flags=area,format=rgba",
+                "-c:v",
+                "png",
+                "-f",
+                "image2pipe",
+                "pipe:1"
+            ]
+        );
+    }
+
+    /// Needs a real ffmpeg. A phone photo tagged "rotated" (EXIF
+    /// orientation 6) is read upright: the fixture is 40x20 with its left
+    /// half blue, so upright it is 20x40, blue on top.
+    #[test]
+    #[ignore]
+    fn a_rotated_jpeg_comes_out_upright() {
+        let ffmpeg = crate::Resolver::new()
+            .resolve(crate::Backend::Ffmpeg)
+            .expect("this test needs ffmpeg")
+            .path;
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rotated.jpg");
+        let img = crate::ascii::decode_png(&still(&ffmpeg, &fixture, 1600).unwrap()).unwrap();
+        assert_eq!((img.width, img.height), (20, 40));
+        let px = |x: u32, y: u32| {
+            let i = ((y * img.width + x) * 4) as usize;
+            [img.rgba[i], img.rgba[i + 1], img.rgba[i + 2]]
+        };
+        let (top, bottom) = (px(10, 2), px(10, 37));
+        assert!(top[2] > 200 && top[0] < 50, "top is blue: {top:?}");
+        assert!(
+            bottom[0] > 200 && bottom[2] < 50,
+            "bottom is red: {bottom:?}"
+        );
     }
 
     #[test]

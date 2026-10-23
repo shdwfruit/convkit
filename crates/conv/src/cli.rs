@@ -285,6 +285,85 @@ of itself instead of 15%, so it still scans.")]
         #[arg(short = 'y', long)]
         overwrite: bool,
     },
+    /// Make ASCII art from a picture: `conv ascii photo.jpg` prints it here.
+    #[command(long_about = "\
+Turns a picture into ASCII art. Without OUT it prints it here, sized to \
+the window. With OUT it writes a .txt, .png, .html or any other picture \
+format conv writes, 100 characters wide unless --width or --height says \
+otherwise.
+
+Styles: ascii (characters by brightness, with | / \\ - _ on clear edges), \
+blocks (two colours a character where colour can show), braille (8 dots \
+a character, the most detail), or your own characters from least ink to \
+most, like --chars \" .:oO@\".
+
+--bg says what the art will be shown on, so it doesn't look like a \
+negative there. --clipboard also copies the text; paste it inside ``` in \
+Discord, Slack or GitHub to keep it lined up.
+
+-i opens a preview: the arrows change the width and contrast, [ ] the \
+brightness, c the style, b the background, o colour; w writes, y copies, \
+and q quits and prints the command for what you made.")]
+    Ascii {
+        /// The picture: an image, a GIF or a video (its first frame).
+        input: PathBuf,
+        /// The file to write (.txt, .png, .html, or another picture
+        /// format), or a bare `.ext` for NAME-ascii.EXT. Without it, the
+        /// art is printed.
+        output: Option<PathBuf>,
+        /// Write the file into this directory (created if missing). Alone,
+        /// it writes NAME-ascii.txt there.
+        #[arg(short = 'o', long)]
+        outdir: Option<PathBuf>,
+        /// Columns. [default: the window when printing, 100 otherwise]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=400))]
+        width: Option<u32>,
+        /// Rows. With --width, the art fits inside both.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=400))]
+        height: Option<u32>,
+        /// ascii, blocks, braille, or your own characters from least ink
+        /// to most, like " .:oO@".
+        #[arg(long, value_name = "STYLE", default_value = "ascii")]
+        chars: String,
+        /// What the art will be shown on.
+        #[arg(long, value_name = "BG", default_value = "dark", value_parser = ["dark", "light"])]
+        bg: String,
+        /// Keep the picture's colours (blocks do by default where colour
+        /// can show).
+        #[arg(long, overrides_with = "no_color")]
+        color: bool,
+        /// No colour, even for blocks.
+        #[arg(long, overrides_with = "color")]
+        no_color: bool,
+        /// More or less contrast, -100 to 100.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 0,
+            allow_hyphen_values = true,
+            value_parser = clap::value_parser!(i32).range(-100..=100)
+        )]
+        contrast: i32,
+        /// Brighter or darker, -100 to 100.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 0,
+            allow_hyphen_values = true,
+            value_parser = clap::value_parser!(i32).range(-100..=100)
+        )]
+        brightness: i32,
+        /// Also copy the art as plain text.
+        #[arg(long)]
+        clipboard: bool,
+        /// Change the look with keys and see it as you go; prints the
+        /// command for it when you quit.
+        #[arg(short = 'i', long, conflicts_with = "clipboard")]
+        tune: bool,
+        /// Overwrite the file if it exists.
+        #[arg(short = 'y', long)]
+        overwrite: bool,
+    },
     /// Download and verify a managed backend.
     Install { backend: String },
     /// List every supported conversion; with a FORMAT, show that format's

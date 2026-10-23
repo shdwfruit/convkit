@@ -105,6 +105,7 @@ conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 conv clip.mp4 --speed 2          # play twice as fast
 conv trim talk.mp4               # find clips in the terminal and cut them
 conv qr "https://example.com"    # make a QR code, written as qr.png
+conv ascii photo.jpg             # print a picture as ASCII art
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -617,6 +618,36 @@ Before writing anything, conv reads the code back and checks that it gives
 exactly your text. One code holds up to 2,331 characters, or 1,273 with a
 logo.
 
+## ASCII art
+
+`conv ascii` turns a picture into ASCII art. Without an output it prints
+it here, sized to the window:
+
+```console
+conv ascii photo.jpg
+conv ascii photo.jpg --chars braille --clipboard
+conv ascii logo.png .png --chars blocks
+conv ascii photo.jpg -i
+```
+
+`-i` opens a preview you change with keys: the arrows for width and
+contrast, `[` `]` for brightness, `c` for the style, `b` for the
+background, `o` for colour. `w` writes it, `y` copies it, and `q` quits
+and prints the command that makes it again.
+
+There are four styles. `ascii` (the default) picks characters by
+brightness and draws clear edges with `| / \ - _`. `blocks` puts two
+colours in each character. `braille` has 8 dots a character, the most
+detail. Or give your own characters from least ink to most:
+`--chars " .:oO@"`.
+
+Name a file to write `.txt`, `.png`, `.html` or any other picture format
+conv writes, 100 characters wide unless `--width` or `--height` says
+otherwise. A transparent border around the picture is left out, so the
+drawing fills that width. `--bg light` is for art shown on a light background, so it
+doesn't come out as a negative. `--clipboard` also copies the text; paste
+it inside ``` in Discord, Slack or GitHub to keep it lined up.
+
 ## Discovering formats and capabilities
 
 `conv capabilities` lists every registered pair and the backend(s) behind it:
@@ -879,3 +910,9 @@ choice. convkit invokes ffmpeg, ImageMagick, LibreOffice, pandoc, and Typst
 as subprocesses; it does not link against, embed, or redistribute any of
 them, and each keeps its own license. `conv install` downloads official
 upstream builds straight from their publishers.
+
+`conv ascii` draws text in PNGs with glyphs from
+[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono), under the
+SIL Open Font License 1.1; the licence is in
+[JetBrainsMono-OFL.txt](crates/convkit-core/src/ascii/JetBrainsMono-OFL.txt)
+and in every release archive.

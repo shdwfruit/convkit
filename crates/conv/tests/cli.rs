@@ -3549,3 +3549,538 @@ fn conv_trim_refuses_a_file_without_a_length() {
     assert!(stdout.contains("code=2"), "{stdout}");
     assert!(tty_given_back(&stdout), "{stdout}");
 }
+
+/// A 200x100 picture, white on its left half and transparent on its
+/// right: drawn by conv itself, so these tests need no backend.
+fn ascii_logo(dir: &Path) -> PathBuf {
+    let path = dir.join("logo.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect width="100" height="100" fill="#fff"/></svg>"##,
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn ascii_prints_plain_text_to_a_pipe() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["ascii", "logo.svg", "--width", "20"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    // The logo's right half is clear, so it is left out and the square
+    // fills all 20 columns.
+    assert_eq!(text, format!("{}\n", "@".repeat(20)).repeat(10), "{text}");
+}
+
+#[test]
+fn ascii_blocks_stay_plain_in_a_pipe_unless_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let run = |extra: &[&str]| {
+        let out = conv()
+            .current_dir(dir.path())
+            .args(["ascii", "logo.svg", "--width", "20", "--chars", "blocks"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert!(!run(&[]).contains('\x1b'));
+    assert!(run(&["--color"]).contains("\x1b[38;"));
+}
+
+#[test]
+fn ascii_writes_txt_png_and_html() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let ok = |args: &[&str]| {
+        conv()
+            .current_dir(dir.path())
+            .args(["ascii", "logo.svg", "--width", "20"])
+            .args(args)
+            .assert()
+            .success();
+    };
+    ok(&[".txt"]);
+    let txt = std::fs::read_to_string(dir.path().join("logo-ascii.txt")).unwrap();
+    assert!(txt.contains('@') && !txt.contains('\x1b'), "{txt}");
+    ok(&["out.png"]);
+    let png = std::fs::read(dir.path().join("out.png")).unwrap();
+    assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 20 * 18);
+    ok(&["out.html"]);
+    let html = std::fs::read_to_string(dir.path().join("out.html")).unwrap();
+    assert!(html.contains("<pre"), "{html}");
+}
+
+#[test]
+fn ascii_json_gives_text() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["ascii", "logo.svg", "--width", "20", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["results"][0]["rows"], 10);
+    assert_eq!(
+        v["results"][0]["text"].as_str().unwrap().lines().count(),
+        10
+    );
+}
+
+#[test]
+fn ascii_json_text_stays_plain_with_color() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let out = conv()
+        .current_dir(dir.path())
+        .args([
+            "ascii", "logo.svg", "--width", "20", "--chars", "blocks", "--color", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let text = v["results"][0]["text"].as_str().unwrap();
+    assert!(!text.contains('\x1b') && text.contains('█'), "{text}");
+    let warnings = v["results"][0]["warnings"].to_string();
+    assert!(warnings.contains("--json gives plain text"), "{warnings}");
+}
+
+#[test]
+fn ascii_color_into_txt_is_noted() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    conv()
+        .current_dir(dir.path())
+        .args(["ascii", "logo.svg", "out.txt", "--color"])
+        .assert()
+        .success()
+        .stdout(contains("can't hold colour"));
+    let txt = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
+    assert!(!txt.contains('\x1b'));
+}
+
+#[test]
+fn ascii_colour_only_note_fits_where_the_art_goes() {
+    // Red beside dark green: about as bright, so the plain styles lose it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("rg.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20"><rect width="20" height="20" fill="#ff0000"/><rect x="20" width="20" height="20" fill="#004c00"/></svg>"##,
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = conv()
+            .current_dir(dir.path())
+            .arg("ascii")
+            .arg("rg.svg")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    let plain = "a .png or .html with --color keeps the colours";
+    assert!(run(&["out.txt"]).contains(plain));
+    assert!(run(&["--json"]).contains(plain));
+    let piped = run(&[]);
+    assert!(
+        piped.contains("try --color") && !piped.contains(plain),
+        "{piped}"
+    );
+}
+
+#[test]
+fn ascii_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    std::fs::write(dir.path().join("taken.txt"), "x").unwrap();
+    for (args, says) in [
+        (&["ascii", "missing.jpg"][..], "no such file"),
+        (
+            &["ascii", "logo.svg", "--chars", "brail"],
+            "did you mean braille",
+        ),
+        (&["ascii", "logo.svg", "out.svg"], "conv ascii writes"),
+        (&["ascii", "logo.svg", "taken.txt"], "pass -y"),
+        (
+            &["ascii", "logo.svg", "--chars", " é", "out.png"],
+            "\"é\" (U+00E9) isn't one",
+        ),
+        // The format asked for, and an invisible character by its number.
+        (
+            &["ascii", "logo.svg", "--chars", " \u{200B}", "out.jpg"],
+            "a .jpg can draw",
+        ),
+        (
+            &["ascii", "logo.svg", "--chars", " \u{200B}", "out.jpg"],
+            "U+200B, an invisible character, isn't one",
+        ),
+    ] {
+        conv()
+            .current_dir(dir.path())
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(contains(says));
+    }
+}
+
+#[test]
+fn ascii_tune_needs_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    for extra in [&[][..], &["--json"][..]] {
+        conv()
+            .current_dir(dir.path())
+            .args(["ascii", "logo.svg", "-i"])
+            .args(extra)
+            .assert()
+            .code(2)
+            .stderr(contains("needs a terminal"));
+    }
+}
+
+#[test]
+fn ascii_tune_and_clipboard_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    conv()
+        .current_dir(dir.path())
+        .args(["ascii", "logo.svg", "-i", "--clipboard"])
+        .assert()
+        .code(2)
+        .stderr(contains("cannot be used with"));
+}
+
+/// What to do to conv's pseudo-terminal.
+#[cfg(unix)]
+enum Pty {
+    /// Type these keys.
+    Type(&'static str),
+    /// Make the window this many columns and rows.
+    Size(u16, u16),
+}
+
+/// How a run in a pseudo-terminal went.
+#[cfg(unix)]
+struct PtyRun {
+    /// Everything conv wrote to the terminal.
+    out: String,
+    /// Whether it exited with 0.
+    ok: bool,
+    /// Whether the terminal had echo and line editing back afterwards.
+    restored: bool,
+}
+
+/// Runs conv in a 90x30 pseudo-terminal in `dir`, doing each step after
+/// its pause in milliseconds.
+#[cfg(unix)]
+fn conv_in_pty(dir: &Path, args: &[&str], steps: &[(u64, Pty)]) -> PtyRun {
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let (mut master, mut slave) = (0, 0);
+    let winsize = |cols: u16, rows: u16| libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let mut size = winsize(90, 30);
+    // SAFETY: openpty fills in the two ends of a new pseudo-terminal. The
+    // size is passed as a raw pointer: macOS takes it mutable, Linux const.
+    let opened = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut size,
+        )
+    };
+    assert_eq!(opened, 0, "openpty");
+    // SAFETY: both fds were just opened and are owned here alone.
+    let (mut master, slave) = unsafe {
+        (
+            std::fs::File::from_raw_fd(master),
+            std::fs::File::from_raw_fd(slave),
+        )
+    };
+    // Kept to read the terminal's settings once conv has gone.
+    let check = slave.try_clone().unwrap();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("conv"))
+        .current_dir(dir)
+        .args(args)
+        .env("COLORTERM", "truecolor")
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave)
+        .spawn()
+        .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let seen = Arc::clone(&seen);
+        let mut master = master.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 65536];
+            while let Ok(n) = master.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                seen.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        })
+    };
+    for (pause, step) in steps {
+        std::thread::sleep(Duration::from_millis(*pause));
+        match step {
+            // Fails once conv has quit; what it did is checked after.
+            Pty::Type(keys) => {
+                let _ = master.write_all(keys.as_bytes());
+            }
+            Pty::Size(cols, rows) => {
+                let size = winsize(*cols, *rows);
+                // SAFETY: sets the window size of the terminal held here.
+                unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) };
+            }
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > until {
+            let _ = child.kill();
+            panic!(
+                "conv didn't quit:\n{}",
+                String::from_utf8_lossy(&seen.lock().unwrap())
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // SAFETY: a zeroed termios for tcgetattr to fill in from a live fd.
+    let restored = unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        libc::tcgetattr(check.as_raw_fd(), &mut t) == 0
+            && t.c_lflag & libc::ECHO != 0
+            && t.c_lflag & libc::ICANON != 0
+    };
+    drop(check);
+    drop(master);
+    // The reader ends when the terminal closes; don't wait on it forever.
+    std::thread::sleep(Duration::from_millis(200));
+    drop(reader);
+    let out = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+    PtyRun {
+        out,
+        ok: status.success(),
+        restored,
+    }
+}
+
+/// The command printed on quitting.
+#[cfg(unix)]
+fn printed_command(out: &str) -> String {
+    out.split("To make it again: ")
+        .nth(1)
+        .and_then(|s| s.lines().next())
+        .unwrap_or_else(|| panic!("no command in:\n{out}"))
+        .trim()
+        .to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_prints_a_command_that_makes_what_it_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let run = conv_in_pty(
+        dir.path(),
+        &["ascii", "logo.svg", "-o", "out", "-i"],
+        &[
+            (1500, Pty::Type("c")),
+            (400, Pty::Type("w")),
+            (1000, Pty::Type("q")),
+        ],
+    );
+    let command = printed_command(&run.out);
+    assert!(command.contains("logo.svg .png -o out"), "{command}");
+    let written = dir.path().join("out").join("logo-ascii.png");
+    let first = std::fs::read(&written).unwrap();
+    std::fs::remove_file(&written).unwrap();
+    // The command's words are all plain here, so no shell is needed.
+    let words: Vec<&str> = command.split_whitespace().skip(1).collect();
+    conv()
+        .current_dir(dir.path())
+        .args(&words)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&written).unwrap(), first, "{command}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_asks_before_replacing_even_when_keys_come_together() {
+    // A `y` typed with the `w`, before the question was on screen, doesn't
+    // answer it; the `q` after it does, as no.
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let taken = dir.path().join("logo-ascii.txt");
+    std::fs::write(&taken, "keep").unwrap();
+    let run = conv_in_pty(
+        dir.path(),
+        &["ascii", "logo.svg", "-i"],
+        &[
+            (1500, Pty::Type("wy")),
+            (800, Pty::Type("q")),
+            (500, Pty::Type("q")),
+        ],
+    );
+    assert!(run.out.contains("replace it? y/n"), "{}", run.out);
+    assert!(run.out.contains("kept logo-ascii.txt"), "{}", run.out);
+    assert_eq!(std::fs::read_to_string(&taken).unwrap(), "keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_survives_a_name_it_cant_write() {
+    // A folder named .txt where w would write: keys still work, and w
+    // says why it can't.
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    std::fs::create_dir(dir.path().join("logo-ascii.txt")).unwrap();
+    std::fs::create_dir(dir.path().join(".txt")).unwrap();
+    let run = conv_in_pty(
+        dir.path(),
+        &["ascii", "logo.svg", "-i"],
+        &[
+            (1500, Pty::Type("\x1b[D")),
+            (400, Pty::Type("w")),
+            (600, Pty::Type("q")),
+        ],
+    );
+    assert!(run.ok, "{}", run.out);
+    assert!(run.out.contains("To make it again"), "{}", run.out);
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_waits_for_a_bigger_window_and_gives_the_terminal_back() {
+    let dir = tempfile::tempdir().unwrap();
+    ascii_logo(dir.path());
+    let run = conv_in_pty(
+        dir.path(),
+        &["ascii", "logo.svg", "-i"],
+        &[
+            (1500, Pty::Size(20, 6)),
+            (800, Pty::Size(90, 30)),
+            (800, Pty::Type("\u{3}")),
+        ],
+    );
+    let small = run
+        .out
+        .find("needs a window")
+        .expect("the too-small message");
+    assert!(
+        run.out[small..].contains("q quit"),
+        "drawn again: {}",
+        run.out
+    );
+    assert!(run.ok && run.restored, "{}", run.out);
+}
+
+#[cfg(unix)]
+#[test]
+fn ascii_tune_lists_each_file_once_with_its_notes() {
+    // An SVG with text, which conv can't draw: the note comes back at the
+    // end, and a file written twice is listed once.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("sign.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#fff"/><text y="50">hi</text></svg>"##,
+    )
+    .unwrap();
+    let run = conv_in_pty(
+        dir.path(),
+        &["ascii", "sign.svg", "-i"],
+        &[
+            (1500, Pty::Type("w")),
+            (600, Pty::Type("w")),
+            (600, Pty::Type("y")),
+            (600, Pty::Type("q")),
+        ],
+    );
+    let after = run.out.rsplit("\x1b[?1049l").next().unwrap();
+    // Each file's report ends with its full path.
+    assert_eq!(after.matches("sign-ascii.txt\r\n").count(), 1, "{after}");
+    assert!(after.contains("text is not drawn"), "{after}");
+}
+
+/// Needs a real ffmpeg. A photo tagged as rotated (EXIF orientation 6),
+/// blue on the left of its stored pixels, is drawn upright: blue on top.
+#[test]
+#[ignore]
+fn ascii_reads_a_rotated_photo_upright() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rotated.jpg");
+    let out = conv()
+        .env_remove("COLORTERM")
+        .env_remove("WT_SESSION")
+        .arg("ascii")
+        .arg(&fixture)
+        .args(["--width", "10", "--chars", "blocks", "--color"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 10, "{text}");
+    assert!(lines[0].contains("38;5;21"), "{text:?}");
+    assert!(lines[9].contains("38;5;196"), "{text:?}");
+}
+
+/// Needs magick: an iPhone HEIC is a grid of tiles, and comes out whole
+/// (4032x3024 is 38 rows at 100 columns; one 512x512 tile would be 50).
+#[test]
+#[ignore]
+fn ascii_reads_heic() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/photo.heic");
+    let out = conv()
+        .arg("ascii")
+        .arg(&fixture)
+        .args(["--width", "100"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap().lines().count(), 38);
+}

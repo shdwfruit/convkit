@@ -50,6 +50,13 @@ base64 = "0.22"
 # conv trim reads keys with it, on macOS, Linux and Windows. Already in the
 # tree through indicatif.
 console = { version = "0.15", default-features = false }
+# conv ascii and conv qr keep a picture they hand to a backend in a folder
+# only this user can open, not under a guessable name in the shared temp
+# folder. Already in the tree as a dev-dependency.
+tempfile = "3"
+# conv ascii -i fits its status rows to the screen, where some characters
+# take two columns. Already in the tree through console.
+unicode-width = "0.2"
 
 # APFS resolves names normalization-insensitively (NFC and NFD spellings of
 # one stem land on one physical file), so the batch output-collision key
@@ -58,10 +65,16 @@ console = { version = "0.15", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 unicode-normalization = "0.1"
 
-# conv trim holds the tty's mode for its whole session (see trim/term.rs).
+# conv trim and conv ascii -i hold the tty's mode for their whole session
+# (see screen.rs).
 # Already in the tree through several crates.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# conv ascii --clipboard puts Unicode text on the Windows clipboard
+# (clip.exe mangles UTF-8). Already in the tree through several crates.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole"] }
 
 [dev-dependencies]
 assert_cmd = "2"

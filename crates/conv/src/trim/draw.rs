@@ -7,6 +7,7 @@ use convkit_core::frames::{dbfs, BUCKET_MS};
 use convkit_core::trim::format_time;
 
 use super::session::{Bar, Keeps, Session};
+use crate::ansi::{bg, fg, fg_params};
 
 /// How the picture is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,28 +51,6 @@ pub struct Info {
 
 fn goto(row: u16, col: u16) -> String {
     format!("\x1b[{row};{col}H")
-}
-
-/// The SGR parameters for text in colour `c`.
-fn fg_params(c: [u8; 3], truecolor: bool) -> String {
-    if truecolor {
-        format!("38;2;{};{};{}", c[0], c[1], c[2])
-    } else {
-        format!("38;5;{}", ansi256(c[0], c[1], c[2]))
-    }
-}
-
-fn fg(c: [u8; 3], truecolor: bool) -> String {
-    format!("\x1b[{}m", fg_params(c, truecolor))
-}
-
-fn bg(c: Option<[u8; 3]>, truecolor: bool) -> String {
-    match c {
-        // The default background, for the half of a cell with no pixel.
-        None => "\x1b[49m".to_string(),
-        Some(c) if truecolor => format!("\x1b[48;2;{};{};{}m", c[0], c[1], c[2]),
-        Some(c) => format!("\x1b[48;5;{}m", ansi256(c[0], c[1], c[2])),
-    }
 }
 
 /// The picture in half blocks: each `▀` is two pixels, the top one in the
@@ -188,34 +167,6 @@ pub fn sextants(px: &[u8], w: u32, h: u32, truecolor: bool, row: u16, col: u16) 
         s.push_str("\x1b[0m");
     }
     s
-}
-
-/// The xterm 256-colour index nearest an RGB colour: the 6x6x6 cube or the
-/// grey ramp, whichever is closer.
-pub fn ansi256(r: u8, g: u8, b: u8) -> u8 {
-    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-    let level = |v: u8| {
-        (0..6)
-            .min_by_key(|&i| (i32::from(LEVELS[i]) - i32::from(v)).abs())
-            .expect("six levels")
-    };
-    let (ri, gi, bi) = (level(r), level(g), level(b));
-    let dist = |c: [u8; 3]| {
-        [r, g, b]
-            .iter()
-            .zip(c)
-            .map(|(&a, b)| (i32::from(a) - i32::from(b)).pow(2))
-            .sum::<i32>()
-    };
-    let cube = dist([LEVELS[ri], LEVELS[gi], LEVELS[bi]]);
-    let mean = (u16::from(r) + u16::from(g) + u16::from(b)) / 3;
-    let step = (mean.saturating_sub(8) / 10).min(23) as u8;
-    let grey_value = 8 + 10 * step;
-    if dist([grey_value; 3]) < cube {
-        232 + step
-    } else {
-        16 + 36 * ri as u8 + 6 * gi as u8 + bi as u8
-    }
 }
 
 /// kitty's largest chunk of base64 per escape sequence.
@@ -681,15 +632,6 @@ mod tests {
     fn a_picture_that_does_not_fill_its_last_cells_still_draws() {
         let s = sextants(&[1, 2, 3], 1, 1, true, 1, 1);
         assert!(s.contains("\x1b[38;2;1;2;3m\x1b[48;2;1;2;3m█"), "{s:?}");
-    }
-
-    #[test]
-    fn ansi256_picks_the_nearest_cube_or_grey() {
-        assert_eq!(ansi256(0, 0, 0), 16);
-        assert_eq!(ansi256(255, 255, 255), 231);
-        assert_eq!(ansi256(255, 0, 0), 196);
-        assert_eq!(ansi256(128, 128, 128), 244);
-        assert_eq!(ansi256(0, 135, 255), 33);
     }
 
     #[test]

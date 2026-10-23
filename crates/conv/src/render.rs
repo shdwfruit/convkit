@@ -43,7 +43,7 @@ fn is_bare_safe(c: char) -> bool {
 ///   containing `$` interpolates under PowerShell and one containing `%VAR%`
 ///   expands under cmd.exe. Neither appears in anything convkit generates,
 ///   only in a path a user chose.
-fn shell_quote(token: &str) -> String {
+pub(crate) fn shell_quote(token: &str) -> String {
     if !token.is_empty() && token.chars().all(is_bare_safe) {
         return token.to_string();
     }
@@ -381,6 +381,15 @@ fn yellow_bold() -> Style {
     AnsiColor::Yellow.on_default().bold()
 }
 
+/// Notes about a result that was printed rather than written, for stderr:
+/// one dim `note  ...` line each, as under a written file's result line.
+pub fn notes_human(notes: &[String], styled: bool) -> String {
+    notes
+        .iter()
+        .map(|n| format!("{}\n", paint(&format!("note  {n}"), dim(), styled)))
+        .collect()
+}
+
 fn dim() -> Style {
     Style::new().dimmed()
 }
@@ -401,7 +410,7 @@ fn paint(text: &str, style: Style, enabled: bool) -> String {
 /// file managers use (1024 B = "1 KB", not 1000) — kilobytes with no
 /// decimal place, megabytes and up with one. For example, 2161 KiB is
 /// 2.11 MiB, which this formula shows as "2.1 MB".
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;
