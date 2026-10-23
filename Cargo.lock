@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "convkit"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anstyle",
  "anstyle-query",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "convkit-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64",
  "flate2",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "convkit-diff"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clap",
  "convkit-core",
