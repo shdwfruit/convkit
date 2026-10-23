@@ -364,6 +364,19 @@ and q quits and prints the command for what you made.")]
         #[arg(short = 'y', long)]
         overwrite: bool,
     },
+    /// Show what each version of conv added.
+    #[command(long_about = "\
+Shows what each version of conv added, newest first, from the changelog \
+built into this copy, so it works offline. Give a version to see just that \
+one, or --since with the version you had to see what's new after an \
+upgrade.")]
+    Changelog {
+        /// One version to show, like 0.5.0.
+        version: Option<String>,
+        /// Show the versions after this one, like the one you upgraded from.
+        #[arg(long, value_name = "VERSION", conflicts_with = "version")]
+        since: Option<String>,
+    },
     /// Download and verify a managed backend.
     Install { backend: String },
     /// List every supported conversion; with a FORMAT, show that format's

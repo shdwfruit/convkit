@@ -4084,3 +4084,34 @@ fn ascii_reads_heic() {
     );
     assert_eq!(String::from_utf8(out.stdout).unwrap().lines().count(), 38);
 }
+
+#[test]
+fn changelog_shows_a_version_and_what_came_after() {
+    let text = |args: &[&str]| {
+        let out = conv().arg("changelog").args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let one = text(&["0.5.1"]);
+    assert!(one.starts_with("## 0.5.1 - 2026-10-12"), "{one}");
+    assert!(
+        one.contains("Opus and Ogg") && !one.contains("## 0.5.0"),
+        "{one}"
+    );
+    let since = text(&["--since", "0.5.0"]);
+    assert!(
+        since.contains("## 0.5.1") && !since.contains("## 0.5.0"),
+        "{since}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text(&["0.5.0", "--json"])).unwrap();
+    assert_eq!(v["results"][0]["version"], "0.5.0");
+    conv()
+        .args(["changelog", "9.9.9"])
+        .assert()
+        .code(2)
+        .stderr(contains("has no 9.9.9"));
+}

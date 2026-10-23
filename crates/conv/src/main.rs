@@ -39,6 +39,10 @@ fn main() {
         Some(cli::Command::Capabilities { ref format }) => {
             commands::capabilities::run(&cli, format.as_deref())
         }
+        Some(cli::Command::Changelog {
+            ref version,
+            ref since,
+        }) => commands::changelog::run(&cli, version.as_deref(), since.as_deref()),
         Some(cli::Command::Install { backend }) => commands::install::run(&cli, backend),
         Some(cli::Command::Scan { paths }) => commands::scan::run(&cli, paths),
         Some(cli::Command::Update { check }) => commands::update::run(&cli, *check),
