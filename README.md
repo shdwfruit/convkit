@@ -573,6 +573,10 @@ down shows each frame for longer, so slow motion is only as smooth as the
 source was, and a note says so. Subtitles and chapters are left out, since
 their times would no longer match, and a note says that too.
 
+A GIF stays a GIF at its own size, with each frame shown for its new
+length. Browsers play a GIF no faster than 50 fps, so a GIF sped past that
+drops frames to keep its speed, and a note says so.
+
 Naming works as it does for a cut: one file keeps its format and gets the
 speed in its name, and a batch writes into a folder named after it
 (`2x/lecture.mp4`). Name an output to change the format as well. `--start`
