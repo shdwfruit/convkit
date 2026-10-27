@@ -15,7 +15,7 @@ use convkit_core::{frames, registry, Backend, ConvError, ErrorCode, Format, Kind
 use serde_json::json;
 
 use crate::cli::{Cli, Command};
-use crate::{ansi, clipboard, input, install_prompt, output, render};
+use crate::{ansi, clipboard, input, install_prompt, output, paste, render};
 
 mod frame;
 mod session;
@@ -85,7 +85,7 @@ pub fn run(cli: &Cli) -> i32 {
         (true, Some(out)) if output.is_none() => (None, Some(out.clone())),
         _ => (input.clone(), output.clone()),
     };
-    let pasted = match paste.then(pasted_picture).transpose() {
+    let pasted = match paste.then(|| paste::one("conv ascii")).transpose() {
         Ok(p) => p,
         Err(e) => {
             render::print_error(cli.json, &e);
@@ -94,7 +94,7 @@ pub fn run(cli: &Cli) -> i32 {
     };
     // The folder a pasted picture is in lives until the art is made.
     let input = match (&pasted, &named) {
-        (Some((path, _)), _) => path.clone(),
+        (Some(p), _) => p.path.clone(),
         (None, Some(path)) => path.clone(),
         (None, None) => unreachable!("clap requires the picture without --paste"),
     };
@@ -212,35 +212,6 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
     outcome.warnings = notes;
     print_written(cli, &outcome, &art, &opts);
     Ok(())
-}
-
-/// The picture on the clipboard, as a file: one copied file as it is, or
-/// a copied picture written as clipboard.EXT into a folder kept until the
-/// art is made.
-fn pasted_picture() -> Result<(PathBuf, Option<tempfile::TempDir>), ConvError> {
-    let refused = |m: String| ConvError::new(ErrorCode::InvalidInvocation, m);
-    match clipboard::get().map_err(|e| refused(format!("couldn't paste: {e}")))? {
-        clipboard::Got::Files(files) => match files.as_slice() {
-            [one] => Ok((one.clone(), None)),
-            many => Err(refused(format!(
-                "the clipboard holds {} files; conv ascii takes one picture",
-                many.len()
-            ))),
-        },
-        clipboard::Got::Picture { format, bytes } => {
-            let folder = tempfile::Builder::new()
-                .prefix("conv-paste")
-                .tempdir()
-                .map_err(|e| refused(format!("couldn't make a folder for the picture: {e}")))?;
-            let path = folder.path().join(format!("clipboard.{}", format.ext()));
-            std::fs::write(&path, bytes)
-                .map_err(|e| refused(format!("couldn't keep the pasted picture: {e}")))?;
-            Ok((path, Some(folder)))
-        }
-        clipboard::Got::Text(_) => Err(refused(
-            "the clipboard holds text, not a picture".to_string(),
-        )),
-    }
 }
 
 /// A note when `--bg light` changes nothing: coloured blocks keep the

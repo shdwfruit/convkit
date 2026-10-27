@@ -14,6 +14,7 @@ use crate::commands::install;
 use crate::input;
 use crate::install_prompt;
 use crate::output;
+use crate::paste::{self, PASTED};
 use crate::prompt::{self, Gate};
 use crate::render;
 
@@ -81,7 +82,7 @@ enum Pasted {
 
 fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
     let refused = |message: String| ConvError::new(ErrorCode::InvalidInvocation, message);
-    let got = clipboard::get().map_err(|e| refused(format!("couldn't paste: {e}")))?;
+    let got = paste::get()?;
     let mut run = cli.clone();
     run.paste = false;
     let (format, bytes) = match got {
@@ -162,13 +163,7 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
         output::ensure_dir(cli.outdir.as_deref())?;
         return Ok(Pasted::Saved(Box::new(output::write_file(&path, &bytes)?)));
     }
-    let folder = tempfile::Builder::new()
-        .prefix("conv-paste")
-        .tempdir()
-        .map_err(|e| refused(format!("couldn't make a folder for the picture: {e}")))?;
-    let input = folder.path().join(&name);
-    std::fs::write(&input, &bytes)
-        .map_err(|e| refused(format!("couldn't keep the pasted picture: {e}")))?;
+    let kept = paste::keep(format, &bytes)?;
     // Written here, not beside the picture in its passing folder; a named
     // output already says where it goes.
     let derived = cli
@@ -178,10 +173,10 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
     if cli.outdir.is_none() && derived {
         run.outdir = Some(PathBuf::from("."));
     }
-    run.paths = std::iter::once(input)
+    run.paths = std::iter::once(kept.path.clone())
         .chain(cli.paths.iter().cloned())
         .collect();
-    Ok(Pasted::Inputs(Box::new(run), Some(folder)))
+    Ok(Pasted::Inputs(Box::new(run), kept.folder))
 }
 
 /// How `--copy` went.
@@ -228,10 +223,6 @@ pub(crate) fn copy_outputs(outputs: &[PathBuf]) -> CopyReport {
         },
     }
 }
-
-/// How a pasted picture is named in messages, rather than by the passing
-/// folder it is converted from.
-const PASTED: &str = "the pasted picture";
 
 /// `e` with the pasted picture's passing path, in either spelling (macOS
 /// gives /var as /private/var), named as `PASTED`.
