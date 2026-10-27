@@ -31,7 +31,7 @@ use rayon::prelude::*;
 
 use crate::cli::{Cli, Command};
 use crate::screen::Screen;
-use crate::{batch, render};
+use crate::{batch, paste, render};
 use draw::{Graphics, ImageBox, Info, Layout};
 use session::{Input, Outcome, Session};
 
@@ -45,6 +45,7 @@ enum Event {
 pub fn run(cli: &Cli) -> i32 {
     let Some(Command::Trim {
         file,
+        paste,
         to,
         outdir,
         overwrite,
@@ -54,10 +55,28 @@ pub fn run(cli: &Cli) -> i32 {
     else {
         unreachable!("main dispatches only Command::Trim here");
     };
+    let pasted = match paste.then(|| paste::one("conv trim")).transpose() {
+        Ok(p) => p,
+        Err(e) => {
+            render::print_error(cli.json, &e);
+            return e.code.exit_code();
+        }
+    };
+    let file = match (&pasted, file) {
+        (Some(p), _) => p.path.clone(),
+        (None, Some(f)) => f.clone(),
+        (None, None) => unreachable!("clap requires the file without --paste"),
+    };
+    // A pasted GIF has no folder of its own: its clips are written here.
+    let here = PathBuf::from(".");
+    let outdir = match (outdir.as_deref(), &pasted) {
+        (None, Some(p)) if p.homeless() => Some(here.as_path()),
+        (dir, _) => dir,
+    };
     let args = Args {
-        file,
+        file: &file,
         to: to.as_deref(),
-        outdir: outdir.as_deref(),
+        outdir,
         overwrite: *overwrite,
         dry_run: *dry_run,
         graphics: graphics.as_deref(),
