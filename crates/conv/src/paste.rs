@@ -75,14 +75,3 @@ pub fn from(got: Got, command: &str) -> Result<Pasted, ConvError> {
         )),
     }
 }
-
-/// Every file on the clipboard, or the copied picture as one.
-pub fn all() -> Result<(Vec<PathBuf>, Option<Pasted>), ConvError> {
-    match get()? {
-        Got::Files(files) => Ok((files, None)),
-        got => {
-            let one = from(got, "")?;
-            Ok((vec![one.path.clone()], Some(one)))
-        }
-    }
-}
