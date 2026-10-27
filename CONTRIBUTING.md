@@ -18,6 +18,12 @@ $ ./target/debug/conv clip.mp4 clip.gif --dry-run
 `--dry-run` prints the backend command without running it, so you can work
 on most of conv without ffmpeg, ImageMagick, LibreOffice or pandoc installed.
 
+To try a branch from any terminal, `scripts/dev-install.sh` builds it and
+installs it as `conv-BRANCH` in `~/.local/bin` (`feat/copy-paste` becomes
+`conv-copy-paste`), next to your released `conv`. Its `--version` names the
+branch and commit it was built from. `scripts/dev-install.sh --clean`
+removes the builds of branches that were merged or deleted.
+
 ## Tests
 
 ```console
