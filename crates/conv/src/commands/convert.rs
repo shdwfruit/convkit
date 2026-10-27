@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use convkit_core::{
-    plan, probe, registry, sized, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe,
-    Outcome, Resolver, Tuning,
+    plan, probe, registry, sized, AvailableBackends, Backend, ConvError, ErrorCode, Format,
+    MediaProbe, Outcome, Resolver, Tuning,
 };
 use serde_json::json;
 
@@ -33,10 +33,12 @@ pub fn run(cli: &Cli) -> i32 {
                 .then(|| copy_outputs(std::slice::from_ref(&outcome.output)));
             if cli.json {
                 let mut v = render::outcome_json(&outcome);
+                v["input"] = json!(PASTED);
+                let mut envelope = json!({ "ok": true, "results": [v] });
                 if let Some(c) = &copied {
-                    v["clipboard"] = c.json();
+                    envelope["clipboard"] = c.json();
                 }
-                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
             } else {
                 if !cli.quiet {
                     print!(
@@ -47,6 +49,15 @@ pub fn run(cli: &Cli) -> i32 {
                 if let Some(c) = &copied {
                     c.print(cli);
                 }
+            }
+            0
+        }
+        Ok(Pasted::DryRun(path, bytes)) => {
+            if cli.json {
+                let v = json!({ "dry_run": true, "input": PASTED, "output": path, "bytes": bytes });
+                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+            } else {
+                println!("would save {PASTED} as {} ({bytes} bytes)", path.display());
             }
             0
         }
@@ -64,6 +75,8 @@ enum Pasted {
     Inputs(Box<Cli>, Option<tempfile::TempDir>),
     /// A picture saved as it was: `conv --paste` with nothing to convert.
     Saved(Box<convkit_core::Outcome>),
+    /// What `Saved` would write, under --dry-run: the path and its size.
+    DryRun(PathBuf, usize),
 }
 
 fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
@@ -107,17 +120,44 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
         Got::Picture { format, bytes } => (format, bytes),
     };
     let name = format!("clipboard.{}", format.ext());
-    let nothing_asked = cli.paths.is_empty()
-        && cli.to.is_none()
-        && !input::keeps_own_format(cli)
-        && cli.tuning() == Tuning::default();
-    if nothing_asked {
-        let path = input::in_outdir(Path::new(&name), cli.outdir.as_deref())?;
+    // What was asked for: a named output, a bare `.ext`, `--to`, or nothing.
+    let named = cli
+        .paths
+        .first()
+        .filter(|p| !input::is_extension_shorthand(p));
+    let target = match (named, cli.paths.first(), cli.to.as_deref()) {
+        (Some(p), _, _) => Format::from_path(p),
+        (None, Some(ext), _) => Format::from_path(Path::new(&format!("x{}", ext.display()))),
+        (None, None, Some(to)) => Format::from_ext(to),
+        (None, None, None) => None,
+    };
+    let plain = !input::keeps_own_format(cli) && cli.tuning() == Tuning::default();
+    if target.is_none() && cli.paths.is_empty() && cli.to.is_none() && !plain {
+        return Err(ConvError {
+            code: ErrorCode::InvalidInvocation,
+            message: "say what to make of the pasted picture".to_string(),
+            backend: None,
+            remediation: Some(convkit_core::Remediation {
+                managed: None,
+                manual: Some("e.g. `conv --paste .jpg --resize 50%`".to_string()),
+            }),
+        });
+    }
+    // Nothing to change: the picture is saved as it came, under the name
+    // asked for or as clipboard.EXT.
+    if plain && target.is_none_or(|t| t == format) {
+        let path = match named {
+            Some(p) => input::in_outdir(p, cli.outdir.as_deref())?,
+            None => input::in_outdir(Path::new(&name), cli.outdir.as_deref())?,
+        };
         if path.exists() && !cli.overwrite {
             return Err(ConvError::new(
                 ErrorCode::OutputExists,
                 format!("{} exists; pass -y to overwrite", path.display()),
             ));
+        }
+        if cli.dry_run {
+            return Ok(Pasted::DryRun(path, bytes.len()));
         }
         output::ensure_dir(cli.outdir.as_deref())?;
         return Ok(Pasted::Saved(Box::new(output::write_file(&path, &bytes)?)));
@@ -193,13 +233,29 @@ pub(crate) fn copy_outputs(outputs: &[PathBuf]) -> CopyReport {
 /// folder it is converted from.
 const PASTED: &str = "the pasted picture";
 
-/// `e` with the pasted picture's passing path named as `PASTED`.
+/// `e` with the pasted picture's passing path, in either spelling (macOS
+/// gives /var as /private/var), named as `PASTED`.
 fn tidied(e: &ConvError, pasted: Option<&Path>) -> ConvError {
     let mut e = e.clone();
     if let Some(p) = pasted {
-        e.message = e.message.replace(&p.display().to_string(), PASTED);
+        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        for spelling in [real, p.to_path_buf()] {
+            e.message = e.message.replace(&spelling.display().to_string(), PASTED);
+        }
     }
     e
+}
+
+/// Warnings already shown, keyed as the results will be: by `PASTED` for
+/// the pasted picture.
+fn renamed(shown: Vec<(PathBuf, String)>, pasted: Option<&Path>) -> Vec<(PathBuf, String)> {
+    match pasted {
+        Some(_) => shown
+            .into_iter()
+            .map(|(_, w)| (PathBuf::from(PASTED), w))
+            .collect(),
+        None => shown,
+    }
 }
 
 /// Runs a conversion. `pasted` is the passing path of a picture `--paste`
@@ -218,7 +274,7 @@ fn convert(cli: &Cli, pasted: Option<&Path>) -> i32 {
     }
 
     let (allow_extreme, mut shown) = match confirm_extreme(&jobs, cli) {
-        Ok(c) => (c.allowed || cli.yes, c.shown),
+        Ok(c) => (c.allowed || cli.yes, renamed(c.shown, pasted)),
         Err(e) => {
             render::print_error(cli.json, &tidied(&e, pasted));
             return e.code.exit_code();
@@ -264,7 +320,7 @@ fn convert(cli: &Cli, pasted: Option<&Path>) -> i32 {
                     } else {
                         match confirm_extreme(&retry_jobs, cli) {
                             Ok(c) => {
-                                shown.extend(c.shown);
+                                shown.extend(renamed(c.shown, pasted));
                                 c.allowed
                             }
                             Err(e) => {

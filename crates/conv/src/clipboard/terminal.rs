@@ -6,8 +6,15 @@
 //! The escapes are built and read by pure functions, tested below; `Tty`
 //! does the talking, on unix only.
 
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
+use base64::engine::DecodePaddingMode;
 use base64::Engine;
+
+/// Reads base64 with or without its padding, as terminals may send either.
+const LENIENT: GeneralPurpose = GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+);
 
 /// The most raw bytes in one packet, which the protocol sets.
 const CHUNK: usize = 4096;
@@ -123,13 +130,13 @@ fn parse(body: &[u8]) -> Option<Packet> {
         kind: String::new(),
         status: None,
         mime: None,
-        payload: STANDARD.decode(payload).ok()?,
+        payload: LENIENT.decode(payload).ok()?,
     };
     for pair in meta.split(':') {
         match pair.split_once('=') {
             Some(("type", v)) => p.kind = v.to_string(),
             Some(("status", v)) => p.status = Some(v.to_string()),
-            Some(("mime", v)) => p.mime = Some(String::from_utf8(STANDARD.decode(v).ok()?).ok()?),
+            Some(("mime", v)) => p.mime = Some(String::from_utf8(LENIENT.decode(v).ok()?).ok()?),
             _ => {}
         }
     }
@@ -210,7 +217,7 @@ pub fn explain(code: &str) -> String {
 }
 
 #[cfg(unix)]
-pub use tty::Tty;
+pub use tty::{Answer, Tty};
 
 #[cfg(unix)]
 mod tty {
@@ -241,7 +248,10 @@ mod tty {
                     return None;
                 }
                 let saved = t;
-                t.c_lflag &= !(libc::ECHO | libc::ICANON);
+                // Signals off too: a Ctrl-C while waiting on the terminal
+                // arrives as a byte, so the mode is put back before conv
+                // stops, rather than left without echo.
+                t.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG);
                 t.c_cc[libc::VMIN] = 0;
                 t.c_cc[libc::VTIME] = 0;
                 if libc::tcsetattr(fd, libc::TCSANOW, &t) != 0 {
@@ -256,29 +266,42 @@ mod tty {
             self.file.write_all(s.as_bytes()).is_ok() && self.file.flush().is_ok()
         }
 
-        /// Reads what the terminal sends until `done` says it has enough or
-        /// `wait` passes, whichever is first.
+        /// Reads what the terminal sends until `done` says it has enough,
+        /// `wait` passes, or the user presses Ctrl-C, whichever is first.
         pub fn answer<T>(
             &mut self,
             wait: Duration,
             mut done: impl FnMut(&mut Vec<u8>) -> Option<T>,
-        ) -> Option<T> {
+        ) -> Answer<T> {
             let until = Instant::now() + wait;
             let mut buf = Vec::new();
             let mut chunk = [0u8; 65536];
             loop {
                 let left = until.saturating_duration_since(Instant::now());
                 if left.is_zero() {
-                    return None;
+                    return Answer::TimedOut;
                 }
-                let mut fd = libc::pollfd {
-                    fd: self.file.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
+                // select, not poll: macOS's poll doesn't take a tty.
+                let fd = self.file.as_raw_fd();
+                let mut timeout = libc::timeval {
+                    tv_sec: left.as_secs() as libc::time_t,
+                    tv_usec: left.subsec_micros() as libc::suseconds_t,
                 };
-                let ms = left.as_millis().min(i32::MAX as u128) as i32;
-                // SAFETY: one pollfd, valid for the call.
-                if unsafe { libc::poll(&mut fd, 1, ms) } <= 0 {
+                // SAFETY: an fd_set zeroed then filled with one open fd,
+                // and a timeval, both valid for the call.
+                let ready = unsafe {
+                    let mut set: libc::fd_set = std::mem::zeroed();
+                    libc::FD_ZERO(&mut set);
+                    libc::FD_SET(fd, &mut set);
+                    libc::select(
+                        fd + 1,
+                        &mut set,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut timeout,
+                    )
+                };
+                if ready <= 0 {
                     continue;
                 }
                 // SAFETY: reads into a buffer of the length given.
@@ -289,21 +312,37 @@ mod tty {
                         chunk.len(),
                     )
                 };
+                // The terminal hung up.
                 if n <= 0 {
-                    continue;
+                    return Answer::TimedOut;
                 }
-                buf.extend_from_slice(&chunk[..n as usize]);
+                let got = &chunk[..n as usize];
+                // Ctrl-C, not inside an answer (base64 never holds it).
+                if got.contains(&0x03) {
+                    return Answer::Stopped;
+                }
+                buf.extend_from_slice(got);
                 if let Some(t) = done(&mut buf) {
-                    return Some(t);
+                    return Answer::Got(t);
                 }
             }
         }
     }
 
+    /// How waiting on the terminal ended.
+    pub enum Answer<T> {
+        Got(T),
+        TimedOut,
+        /// The user pressed Ctrl-C.
+        Stopped,
+    }
+
     impl Drop for Tty {
         fn drop(&mut self) {
-            // SAFETY: restores the termios read from this same fd.
+            // SAFETY: restores the termios read from this same fd. An
+            // answer half read is dropped, not left for the shell.
             unsafe {
+                libc::tcflush(self.file.as_raw_fd(), libc::TCIFLUSH);
                 libc::tcsetattr(self.file.as_raw_fd(), libc::TCSANOW, &self.saved);
             }
         }
@@ -362,6 +401,14 @@ mod tests {
         assert_eq!(packets[1].mime.as_deref(), Some("image/png"));
         assert_eq!(packets[1].payload, b"abc");
         assert!(buf.starts_with(b"\x1b]5522;type=read:sta"));
+    }
+
+    #[test]
+    fn unpadded_base64_is_read_too() {
+        let mut buf = b"\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;YWI\x1b\\".to_vec();
+        let packets = take_packets(&mut buf);
+        assert_eq!(packets[0].mime.as_deref(), Some("image/png"));
+        assert_eq!(packets[0].payload, b"ab");
     }
 
     #[test]

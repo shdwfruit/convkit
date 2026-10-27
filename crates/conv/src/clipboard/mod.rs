@@ -94,8 +94,12 @@ pub fn put_for(outputs: &[PathBuf]) -> Result<Put, String> {
     let format = Format::from_path(one);
     match format {
         Some(Format::Md | Format::Csv | Format::Html) => {
-            let text = std::fs::read_to_string(one)
-                .map_err(|e| format!("couldn't read {}: {e}", one.display()))?;
+            let bytes =
+                std::fs::read(one).map_err(|e| format!("couldn't read {}: {e}", one.display()))?;
+            // Not UTF-8 (a csv from an old spreadsheet): the file itself.
+            let Ok(text) = String::from_utf8(bytes) else {
+                return Ok(Put::Files(vec![one.clone()]));
+            };
             Ok(Put::Text {
                 file: one.clone(),
                 text,
@@ -148,10 +152,23 @@ pub fn put(put: &Put) -> Result<Copied, String> {
 /// Takes what the clipboard holds, the same ways round as `put`. Text
 /// that names files is those files.
 pub fn get() -> Result<Got, String> {
-    get_any().map(|got| match got {
+    let got = get_any().map(|got| match got {
         Got::Text(text) => files_in_text(&text).map_or(Got::Text(text), Got::Files),
         got => got,
-    })
+    })?;
+    if let Got::Files(files) = &got {
+        if let Some(missing) = files.iter().find(|f| !f.exists()) {
+            let mut why = format!(
+                "the clipboard names {}, which isn't here",
+                missing.display()
+            );
+            if over_ssh() {
+                why.push_str("; files copied on your computer can't be pasted over SSH");
+            }
+            return Err(why);
+        }
+    }
+    Ok(got)
 }
 
 fn get_any() -> Result<Got, String> {
@@ -252,22 +269,26 @@ fn put_through_terminal(put: &Put) -> Option<Result<Copied, String>> {
     if !tty.send(&terminal::write_escapes(&items)) {
         return None;
     }
-    let answer = tty.answer(Duration::from_secs(5), |buf| {
+    // Long enough for a terminal that asks first (kitty can), so its
+    // answer isn't left for the shell to read.
+    let answer = tty.answer(Duration::from_secs(60), |buf| {
         terminal::write_result(&terminal::take_packets(buf))
     });
     Some(match answer {
-        Some(Ok(())) => Ok(Copied::Terminal { confirmed: true }),
-        Some(Err(code)) => Err(terminal::explain(&code)),
-        None => Ok(Copied::Terminal { confirmed: false }),
+        terminal::Answer::Got(Ok(())) => Ok(Copied::Terminal { confirmed: true }),
+        terminal::Answer::Got(Err(code)) => Err(terminal::explain(&code)),
+        terminal::Answer::TimedOut => Ok(Copied::Terminal { confirmed: false }),
+        terminal::Answer::Stopped => Err("stopped".to_string()),
     })
 }
 
 #[cfg(unix)]
 fn terminal_supported(tty: &mut terminal::Tty) -> bool {
     tty.send(terminal::SUPPORT_QUERY)
-        && tty
-            .answer(Duration::from_secs(1), |buf| terminal::supported_from(buf))
-            .unwrap_or(false)
+        && matches!(
+            tty.answer(Duration::from_secs(3), |buf| terminal::supported_from(buf)),
+            terminal::Answer::Got(true)
+        )
 }
 
 #[cfg(unix)]
@@ -290,19 +311,23 @@ fn get_through_terminal() -> Option<Result<Got, String>> {
             },
         );
         match answer {
-            Some(terminal::Read::Done(items)) => Ok(items),
-            Some(terminal::Read::Refused(code)) => Err(terminal::explain(&code)),
+            terminal::Answer::Got(terminal::Read::Done(items)) => Ok(items),
+            terminal::Answer::Got(terminal::Read::Refused(code)) => Err(terminal::explain(&code)),
+            terminal::Answer::Stopped => Err("stopped".to_string()),
             _ => Err("the terminal didn't answer".to_string()),
         }
     };
     let result = (|| {
         let types = terminal::types_listed(&read(&["."])?);
-        let want = if let Some((_, mime)) = best_picture(&types, |p| p.1) {
-            mime.to_string()
-        } else if types.iter().any(|t| t == "text/uri-list") {
+        // Files first, as on the system clipboard: a copied file can come
+        // with a picture of its icon.
+        let text = types.iter().find(|t| t.starts_with("text/plain"));
+        let want = if types.iter().any(|t| t == "text/uri-list") {
             "text/uri-list".to_string()
-        } else if types.iter().any(|t| t.starts_with("text/plain")) {
-            "text/plain".to_string()
+        } else if let Some((_, mime)) = best_picture(&types, |p| p.1) {
+            mime.to_string()
+        } else if let Some(text) = text {
+            text.clone()
         } else {
             return Err("the clipboard holds no picture, files or text".to_string());
         };
@@ -311,7 +336,8 @@ fn get_through_terminal() -> Option<Result<Got, String>> {
             .into_iter()
             .find(|(m, _)| *m == want)
             .map(|(_, b)| b)
-            .unwrap_or_default();
+            .filter(|b| !b.is_empty())
+            .ok_or_else(|| "the terminal sent nothing".to_string())?;
         Ok(got_from(&want, bytes))
     })();
     Some(result)
@@ -358,6 +384,15 @@ pub fn files_in_text(text: &str) -> Option<Vec<PathBuf>> {
         .map(|l| {
             path_of_uri(l).unwrap_or_else(|| {
                 let unquoted = l.trim_matches(|c| c == '\'' || c == '"');
+                // A path dropped into a shell: `My\ File.png`.
+                let unescaped;
+                let unquoted =
+                    if cfg!(unix) && unquoted.contains('\\') && !Path::new(unquoted).exists() {
+                        unescaped = unescape_shell(unquoted);
+                        unescaped.as_str()
+                    } else {
+                        unquoted
+                    };
                 match unquoted.strip_prefix("~/") {
                     Some(rest) => std::env::var_os("HOME")
                         .map(|h| PathBuf::from(h).join(rest))
@@ -368,6 +403,19 @@ pub fn files_in_text(text: &str) -> Option<Vec<PathBuf>> {
         })
         .collect();
     files.iter().all(|f| f.is_file()).then_some(files)
+}
+
+/// `My\ File\(1\).png` -> `My File(1).png`.
+fn unescape_shell(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `file:///a%20b.png` -> `/a b.png`.
@@ -860,6 +908,10 @@ mod tests {
         assert_eq!(files_in_text(&quoted), Some(vec![a.clone()]));
         let link = format!("{}\r\n", uri_of_path(&a));
         assert_eq!(files_in_text(&link), Some(vec![a.clone()]));
+        if cfg!(unix) {
+            let escaped = format!("{}\n", a.display()).replace(' ', "\\ ");
+            assert_eq!(files_in_text(&escaped), Some(vec![a.clone()]));
+        }
         let mixed = format!("{}\nhello", a.display());
         assert_eq!(files_in_text(&mixed), None);
         assert_eq!(files_in_text("  \n"), None);
