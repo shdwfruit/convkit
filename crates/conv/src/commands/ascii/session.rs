@@ -231,6 +231,7 @@ fn session(
         input: args.input,
         output: output.as_deref(),
         outdir: args.outdir.filter(|_| output.is_some()),
+        pasted: args.pasted,
         default_colour: colour_on(tune.style(), shown, false, false, no_color_env, false).0,
     };
     println!("To make it again: {}", command_line(&tune, &how));

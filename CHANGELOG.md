@@ -21,7 +21,8 @@
   beside themselves. `conv --paste` alone saves a copied picture as it is.
   `--copy` puts the result on the clipboard, a picture as the picture and
   its file, an md, csv or html file as its text, and anything else as the
-  file. `conv qr` takes `--copy` too. Over SSH both go through the
+  file. `conv qr` takes `--copy` too, and `conv ascii --paste` makes art
+  from a copied picture. Over SSH both go through the
   terminal, in kitty and Ghostty 1.4 or later.
 
 ## 0.6.2 - 2026-11-03
