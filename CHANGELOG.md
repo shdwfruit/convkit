@@ -15,6 +15,14 @@
   all five platforms, checks its SHA-256, and installs it as a folder. The
   Linux build needs glibc 2.34 or newer. `--qpdf-path` and `CONVKIT_QPDF`
   point conv at another copy.
+- **`--paste` and `--copy`.** `conv --paste .jpg` converts the picture or
+  the files on the clipboard: a screenshot is written here as
+  `clipboard.jpg`, and files copied in Finder or Explorer are converted
+  beside themselves. `conv --paste` alone saves a copied picture as it is.
+  `--copy` puts the result on the clipboard, a picture as the picture and
+  its file, an md, csv or html file as its text, and anything else as the
+  file. `conv qr` takes `--copy` too. Over SSH both go through the
+  terminal, in kitty and Ghostty 1.4 or later.
 
 ## 0.6.2 - 2026-11-03
 
