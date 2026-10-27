@@ -3296,7 +3296,7 @@ fn conv_trim_refuses_what_it_cannot_cut_before_anything_else() {
             "conv trim cuts video and audio; photo.png is a still image",
         ));
     conv()
-        .args(["trim", "anim.gif"])
+        .args(["trim", "old.avi"])
         .assert()
         .code(2)
         .stderr(contains("add --to mp4"));

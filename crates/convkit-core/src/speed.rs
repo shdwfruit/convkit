@@ -143,8 +143,9 @@ pub struct Retime {
     pub speed: Speed,
     /// The audio filters, for `-af`; `None` when the output has no sound.
     pub audio: Option<String>,
-    /// The source's frame rate, `n/d`, which a picture target is held to
-    /// when nothing else sets one (`VideoChainSpec::compose`). Left to
+    /// The source's frame rate, `n/d`, which a video target is held to
+    /// when nothing else sets one (`VideoChainSpec::compose`); for a GIF,
+    /// `GIF_MAX_FPS` when the new speed would pass it. Left to
     /// itself, ffmpeg repeats the frames of a slowed mp4 on 6.1 but shows
     /// each one longer on 9.0, and in mkv and webm on both, and it writes
     /// one frame too many when speeding up. `None` for a target with no
@@ -174,6 +175,10 @@ pub struct Retimed {
 /// The sample rate the sound is brought to when the source's own could not
 /// be read: Opus's own, and the most common rate in video.
 const FALLBACK_RATE: u32 = 48_000;
+
+/// The fastest a GIF plays: a frame lasts a whole number of hundredths of a
+/// second, and browsers show one that asks for less than two for ten.
+const GIF_MAX_FPS: u32 = 50;
 
 /// Refuses a speed change on a pair with no timeline, then resolves it
 /// against `probe`, the source as it stands after any cut. The one entry
@@ -239,17 +244,45 @@ pub fn retime(
             "{what} left out, since their times would not follow the new speed."
         ));
     }
-    if speed.slows() && (video_target || to == Format::Gif) && probe.video_streams > 0 {
+    if speed.slows() && video_target && probe.video_streams > 0 {
         notes.push(format!(
             "Video slowed to {} repeats frames rather than making new ones, so its motion \
              is less smooth than the source's.",
             speed.suffix()
         ));
     }
-    let rate = probe
-        .frame_rate
-        .filter(|_| video_target || to == Format::Gif)
-        .map(|(n, d)| format!("{n}/{d}"));
+    if speed.slows() && to == Format::Gif && probe.video_streams > 0 {
+        notes.push(format!(
+            "GIF slowed to {} shows each frame for longer rather than making new ones, so \
+             its motion is less smooth than the source's.",
+            speed.suffix()
+        ));
+    }
+    let rate = if to == Format::Gif {
+        // A GIF times each frame on its own, so a slowed one just shows
+        // each frame for longer. Sped up, it is held to the fastest rate
+        // browsers play: they show a frame meant for under 2/100 s for
+        // 10/100 s, so a fast GIF would come out slower than its source.
+        let fast = probe.frame_rate.is_some_and(|(n, d)| {
+            u64::from(n) * u64::from(speed.thousandths)
+                > u64::from(GIF_MAX_FPS) * 1000 * u64::from(d)
+        });
+        // Only a GIF source keeps its rate by default; any other is capped
+        // at 15 fps by `TO_GIF_CHAIN` before this could bind.
+        if fast && from == Format::Gif {
+            notes.push(format!(
+                "Sped up to {}, the GIF would play faster than {GIF_MAX_FPS} fps, the most \
+                 browsers show, so some frames were dropped to keep its speed.",
+                speed.suffix()
+            ));
+        }
+        fast.then(|| GIF_MAX_FPS.to_string())
+    } else {
+        probe
+            .frame_rate
+            .filter(|_| video_target)
+            .map(|(n, d)| format!("{n}/{d}"))
+    };
     let mut scaled = probe.clone();
     scaled.duration_ms = probe.duration_ms.map(|d| speed.scale(d));
     scaled.size_bytes = probe.size_bytes.map(|b| speed.scale(b));
@@ -510,22 +543,14 @@ mod tests {
         assert!(r.notes.is_empty(), "{:?}", r.notes);
     }
 
-    /// The output keeps the source's rate, so a picture target is held to
+    /// The output keeps the source's rate, so a video target is held to
     /// it: ffmpeg otherwise keeps every frame of a slowed mp4 on 9.0 but
     /// repeats them on 6.1, and writes a frame too many when speeding up.
     #[test]
     fn a_picture_target_is_held_to_the_sources_frame_rate() {
-        let ntsc = MediaProbe {
-            frame_rate: Some((30_000, 1001)),
-            ..clip()
-        };
         assert_eq!(
             at(Format::Mp4, "2", false, &clip()).retime.rate.as_deref(),
             Some("30/1")
-        );
-        assert_eq!(
-            at(Format::Gif, "2", false, &ntsc).retime.rate.as_deref(),
-            Some("30000/1001")
         );
         assert_eq!(at(Format::M4a, "2", false, &clip()).retime.rate, None);
         let unread = MediaProbe {
@@ -533,6 +558,41 @@ mod tests {
             ..clip()
         };
         assert_eq!(at(Format::Mp4, "2", false, &unread).retime.rate, None);
+    }
+
+    /// A GIF holds each frame for as long as it says, so it is only held
+    /// to a rate where the new speed would pass the fastest browsers play.
+    #[test]
+    fn a_gif_is_held_to_fifty_fps_only_past_it() {
+        let gif = MediaProbe {
+            frame_rate: Some((25, 1)),
+            ..clip()
+        };
+        let gif_at = |speed| {
+            retime(
+                Format::Gif,
+                Format::Gif,
+                sp(speed),
+                false,
+                false,
+                Some(&gif),
+                Path::new("a.gif"),
+            )
+            .unwrap()
+        };
+        let slowed = gif_at("0.5");
+        assert_eq!(slowed.retime.rate, None);
+        assert!(slowed.notes[0].starts_with("GIF slowed to 0.5x shows each frame"));
+        assert_eq!(gif_at("2").retime.rate, None);
+        let fast = gif_at("3");
+        assert_eq!(fast.retime.rate.as_deref(), Some("50"));
+        assert_eq!(
+            fast.notes,
+            [
+                "Sped up to 3x, the GIF would play faster than 50 fps, the most browsers \
+              show, so some frames were dropped to keep its speed."
+            ]
+        );
     }
 
     #[test]
@@ -656,7 +716,13 @@ mod tests {
         let note = "Video slowed to 0.5x repeats frames rather than making new ones, so its \
                     motion is less smooth than the source's.";
         assert_eq!(at(Format::Mp4, "0.5", false, &clip()).notes, [note]);
-        assert_eq!(at(Format::Gif, "0.5", false, &clip()).notes, [note]);
+        assert_eq!(
+            at(Format::Gif, "0.5", false, &clip()).notes,
+            [
+                "GIF slowed to 0.5x shows each frame for longer rather than making new ones, \
+              so its motion is less smooth than the source's."
+            ]
+        );
         assert!(at(Format::M4a, "0.5", false, &clip()).notes.is_empty());
         assert!(at(Format::Mp4, "2", false, &clip()).notes.is_empty());
     }
