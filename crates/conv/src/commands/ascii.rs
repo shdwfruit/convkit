@@ -55,6 +55,8 @@ struct Args<'a> {
     clipboard: bool,
     tune: bool,
     overwrite: bool,
+    /// The input is a picture taken from the clipboard.
+    pasted: bool,
 }
 
 pub fn run(cli: &Cli) -> i32 {
@@ -71,14 +73,33 @@ pub fn run(cli: &Cli) -> i32 {
         contrast,
         brightness,
         clipboard,
+        paste,
         tune,
         overwrite,
     }) = &cli.command
     else {
         unreachable!("main dispatches only Command::Ascii here");
     };
+    // With --paste the one path given is OUT.
+    let (named, output) = match (*paste, input) {
+        (true, Some(out)) if output.is_none() => (None, Some(out.clone())),
+        _ => (input.clone(), output.clone()),
+    };
+    let pasted = match paste.then(pasted_picture).transpose() {
+        Ok(p) => p,
+        Err(e) => {
+            render::print_error(cli.json, &e);
+            return e.code.exit_code();
+        }
+    };
+    // The folder a pasted picture is in lives until the art is made.
+    let input = match (&pasted, &named) {
+        (Some((path, _)), _) => path.clone(),
+        (None, Some(path)) => path.clone(),
+        (None, None) => unreachable!("clap requires the picture without --paste"),
+    };
     let args = Args {
-        input,
+        input: &input,
         output: output.as_deref(),
         outdir: outdir.as_deref(),
         width: *width,
@@ -92,6 +113,7 @@ pub fn run(cli: &Cli) -> i32 {
         clipboard: *clipboard,
         tune: *tune,
         overwrite: *overwrite,
+        pasted: *paste,
     };
     match draw(cli, &args) {
         Ok(()) => 0,
@@ -190,6 +212,35 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
     outcome.warnings = notes;
     print_written(cli, &outcome, &art, &opts);
     Ok(())
+}
+
+/// The picture on the clipboard, as a file: one copied file as it is, or
+/// a copied picture written as clipboard.EXT into a folder kept until the
+/// art is made.
+fn pasted_picture() -> Result<(PathBuf, Option<tempfile::TempDir>), ConvError> {
+    let refused = |m: String| ConvError::new(ErrorCode::InvalidInvocation, m);
+    match clipboard::get().map_err(|e| refused(format!("couldn't paste: {e}")))? {
+        clipboard::Got::Files(files) => match files.as_slice() {
+            [one] => Ok((one.clone(), None)),
+            many => Err(refused(format!(
+                "the clipboard holds {} files; conv ascii takes one picture",
+                many.len()
+            ))),
+        },
+        clipboard::Got::Picture { format, bytes } => {
+            let folder = tempfile::Builder::new()
+                .prefix("conv-paste")
+                .tempdir()
+                .map_err(|e| refused(format!("couldn't make a folder for the picture: {e}")))?;
+            let path = folder.path().join(format!("clipboard.{}", format.ext()));
+            std::fs::write(&path, bytes)
+                .map_err(|e| refused(format!("couldn't keep the pasted picture: {e}")))?;
+            Ok((path, Some(folder)))
+        }
+        clipboard::Got::Text(_) => Err(refused(
+            "the clipboard holds text, not a picture".to_string(),
+        )),
+    }
 }
 
 /// A note when `--bg light` changes nothing: coloured blocks keep the

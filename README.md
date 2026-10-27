@@ -604,7 +604,8 @@ conv --paste --to jpg --copy      # convert what's on the clipboard, in place
 A copied picture goes on the clipboard as the picture and as its file, so
 it pastes into an editor or as an attachment. Other results, and several
 at once, are copied as files. `conv qr` takes `--copy` too, and in
-`conv ascii` it's the same as `--clipboard`.
+`conv ascii` it's the same as `--clipboard`. `conv ascii --paste -i` tunes
+art from a copied picture.
 
 Over SSH the server's clipboard is no use, so conv goes through the
 terminal with kitty's clipboard protocol, which kitty and Ghostty 1.4 or

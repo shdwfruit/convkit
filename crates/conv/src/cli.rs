@@ -326,7 +326,8 @@ brightness, c the style, b the background, o colour; w writes, y copies, \
 and q quits and prints the command for what you made.")]
     Ascii {
         /// The picture: an image, a GIF or a video (its first frame).
-        input: PathBuf,
+        #[arg(required_unless_present = "paste")]
+        input: Option<PathBuf>,
         /// The file to write (.txt, .png, .html, or another picture
         /// format), or a bare `.ext` for NAME-ascii.EXT. Without it, the
         /// art is printed.
@@ -376,6 +377,10 @@ and q quits and prints the command for what you made.")]
         /// Also copy the art as plain text.
         #[arg(long, visible_alias = "copy")]
         clipboard: bool,
+        /// Take the picture from the clipboard: a copied picture, or one
+        /// copied file. The one path given is then OUT.
+        #[arg(long)]
+        paste: bool,
         /// Change the look with keys and see it as you go; prints the
         /// command for it when you quit.
         #[arg(short = 'i', long, conflicts_with = "clipboard")]
