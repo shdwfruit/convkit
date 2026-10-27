@@ -98,17 +98,9 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
                         .into_owned(),
                     many => format!("{} files", many.len()),
                 };
-                return Err(ConvError {
-                    code: ErrorCode::InvalidInvocation,
-                    message: format!("the clipboard holds {held}; say what to make of it"),
-                    backend: None,
-                    remediation: Some(convkit_core::Remediation {
-                        managed: None,
-                        manual: Some(
-                            "e.g. `conv --paste .png` or `conv --paste --to png`".to_string(),
-                        ),
-                    }),
-                });
+                let formats: Vec<Option<Format>> =
+                    files.iter().map(|f| Format::from_path(f)).collect();
+                return Err(say_what(&held, &formats));
             }
             run.paths = files.into_iter().chain(cli.paths.iter().cloned()).collect();
             return Ok(Pasted::Inputs(Box::new(run), None));
@@ -134,15 +126,8 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
     };
     let plain = !input::keeps_own_format(cli) && cli.tuning() == Tuning::default();
     if target.is_none() && cli.paths.is_empty() && cli.to.is_none() && !plain {
-        return Err(ConvError {
-            code: ErrorCode::InvalidInvocation,
-            message: "say what to make of the pasted picture".to_string(),
-            backend: None,
-            remediation: Some(convkit_core::Remediation {
-                managed: None,
-                manual: Some("e.g. `conv --paste .jpg --resize 50%`".to_string()),
-            }),
-        });
+        let held = format!("a {} picture", format.ext().to_uppercase());
+        return Err(say_what(&held, &[Some(format)]));
     }
     // Nothing to change: the picture is saved as it came, under the name
     // asked for or as clipboard.EXT.
@@ -177,6 +162,63 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
         .chain(cli.paths.iter().cloned())
         .collect();
     Ok(Pasted::Inputs(Box::new(run), kept.folder))
+}
+
+/// The refusal when `--paste` was given nothing to make: what the
+/// clipboard's `formats` can all become, and the command typed again with
+/// one of them.
+fn say_what(held: &str, formats: &[Option<Format>]) -> ConvError {
+    let pairs = registry::all_pairs();
+    let can = |from: &Option<Format>| -> Vec<Format> {
+        from.map(|f| pairs.iter().filter(|p| p.0 == f).map(|p| p.1).collect())
+            .unwrap_or_default()
+    };
+    let mut targets = formats.first().map(can).unwrap_or_default();
+    for f in formats.iter().skip(1) {
+        let theirs = can(f);
+        targets.retain(|t| theirs.contains(t));
+    }
+    let Some(example) = [
+        Format::Jpg,
+        Format::Png,
+        Format::Mp4,
+        Format::Mp3,
+        Format::Pdf,
+    ]
+    .into_iter()
+    .find(|f| targets.contains(f))
+    .or(targets.first().copied()) else {
+        let why = if formats.len() > 1 {
+            "conv can't make them all into one format"
+        } else {
+            "conv can't convert it"
+        };
+        return ConvError::new(
+            ErrorCode::UnsupportedPair,
+            format!("the clipboard holds {held}, and {why}"),
+        );
+    };
+    let list: Vec<&str> = targets.iter().map(|t| t.ext()).collect();
+    let typed: Vec<String> = typed_args()
+        .into_iter()
+        .map(|a| if a.contains(' ') { format!("'{a}'") } else { a })
+        .collect();
+    ConvError {
+        code: ErrorCode::InvalidInvocation,
+        message: format!(
+            "the clipboard holds {held}, which can become {}; say which",
+            list.join(", ")
+        ),
+        backend: None,
+        remediation: Some(convkit_core::Remediation {
+            managed: None,
+            manual: Some(format!(
+                "e.g. `conv {} .{}`",
+                typed.join(" "),
+                example.ext()
+            )),
+        }),
+    }
 }
 
 /// How `--copy` went.
@@ -917,6 +959,25 @@ fn exit_code_for<T>(results: &[Result<T, ConvError>]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paste_with_no_target_lists_what_it_can_become() {
+        let e = say_what("clip.mov", &[Some(Format::Mov)]);
+        assert!(e.message.contains("which can become mp4"), "{}", e.message);
+        let hint = e.remediation.unwrap().manual.unwrap();
+        assert!(hint.ends_with(" .mp4`"), "{hint}");
+        // Several files: only what they can all become.
+        let e = say_what("2 files", &[Some(Format::Png), Some(Format::Heic)]);
+        assert!(
+            e.message.contains("jpg") && !e.message.contains("heic,"),
+            "{}",
+            e.message
+        );
+        // Nothing in common.
+        let e = say_what("2 files", &[Some(Format::Mov), Some(Format::Docx)]);
+        assert_eq!(e.code, ErrorCode::UnsupportedPair);
+        assert!(e.message.contains("can't make them all into one format"));
+    }
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
