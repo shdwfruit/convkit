@@ -13,6 +13,7 @@ use convkit_core::{registry, ConvError, ErrorCode, Format, Outcome};
 use serde_json::json;
 
 use crate::cli::{Cli, Command};
+use crate::commands::convert;
 use crate::{input, output, render};
 
 pub fn run(cli: &Cli) -> i32 {
@@ -23,6 +24,7 @@ pub fn run(cli: &Cli) -> i32 {
         logo,
         size,
         overwrite,
+        copy,
     }) = &cli.command
     else {
         unreachable!("qr::run is only called for `conv qr`");
@@ -43,7 +45,8 @@ pub fn run(cli: &Cli) -> i32 {
     match made {
         Ok((mut outcome, qr)) => {
             outcome.elapsed_ms = start.elapsed().as_millis() as u64;
-            print(cli, &outcome, text, &qr);
+            let copied = copy.then(|| convert::copy_outputs(std::slice::from_ref(&outcome.output)));
+            print(cli, &outcome, text, &qr, copied.as_ref());
             0
         }
         Err(e) => {
@@ -121,7 +124,13 @@ fn write(
     Ok((outcome, code))
 }
 
-fn print(cli: &Cli, outcome: &Outcome, text: &str, code: &qr::Qr) {
+fn print(
+    cli: &Cli,
+    outcome: &Outcome,
+    text: &str,
+    code: &qr::Qr,
+    copied: Option<&convert::CopyReport>,
+) {
     if cli.json {
         let mut v = render::outcome_json(outcome);
         v["qr"] = json!({
@@ -130,7 +139,10 @@ fn print(cli: &Cli, outcome: &Outcome, text: &str, code: &qr::Qr) {
             "version": code.version,
             "error_correction": code.error_correction,
         });
-        let envelope = json!({ "ok": true, "results": [v] });
+        let mut envelope = json!({ "ok": true, "results": [v] });
+        if let Some(c) = copied {
+            envelope["clipboard"] = c.json();
+        }
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
         return;
     }
@@ -144,6 +156,9 @@ fn print(cli: &Cli, outcome: &Outcome, text: &str, code: &qr::Qr) {
         "{}",
         render::conversion_notes_human("", outcome, &[], render::stderr_styled())
     );
+    if let Some(c) = copied {
+        c.print(cli);
+    }
 }
 
 #[cfg(test)]

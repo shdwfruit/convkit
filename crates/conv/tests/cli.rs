@@ -4115,3 +4115,59 @@ fn changelog_shows_a_version_and_what_came_after() {
         .code(2)
         .stderr(contains("has no 9.9.9"));
 }
+
+#[test]
+fn paste_takes_at_most_the_output() {
+    conv()
+        .args(["--paste", "a.png", "b.jpg"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "--paste takes the input from the clipboard; give at most the output's name or .ext",
+        ));
+}
+
+/// Linux CI has no display, so no clipboard; the copy is reported, and the
+/// file it was asked about is still written.
+#[cfg(target_os = "linux")]
+#[test]
+fn copy_without_a_clipboard_warns_and_still_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    conv()
+        .current_dir(dir.path())
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["qr", "hi", "--copy"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "warning  couldn't copy to the clipboard: no clipboard here",
+        ));
+    assert!(dir.path().join("qr.png").is_file());
+    let out = conv()
+        .current_dir(dir.path())
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["qr", "hi", "-y", "--copy", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["clipboard"]["ok"], false);
+    assert_eq!(v["ok"], true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn paste_without_a_clipboard_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    conv()
+        .current_dir(dir.path())
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["--paste", ".png"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "couldn't paste: no clipboard here",
+        ));
+}
