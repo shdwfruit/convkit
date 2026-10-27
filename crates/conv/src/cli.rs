@@ -435,9 +435,6 @@ Files convkit does not recognise are listed with `--` rather than hidden, so an 
     Scan {
         /// Files or directories to list. Defaults to the current directory.
         paths: Vec<std::path::PathBuf>,
-        /// List the files copied to the clipboard, or a copied picture.
-        #[arg(long, conflicts_with = "paths")]
-        paste: bool,
     },
     /// Update managed backends to the versions this convkit pins.
     #[command(long_about = "\

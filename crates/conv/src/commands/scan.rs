@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::cli::Cli;
 use crate::input::{expand_globs, natural_cmp};
-use crate::{paste, render};
+use crate::render;
 
 /// One row of the listing: a file, and what convkit could turn it into.
 struct Row {
@@ -43,19 +43,8 @@ struct Row {
 /// keeps its answer honest about what it actually checked -- this reports
 /// what the *registry* supports, not what this machine can currently run,
 /// which is `conv doctor`'s question.
-pub fn run(cli: &Cli, paths: &[PathBuf], paste: bool) -> i32 {
-    // A copied picture is kept in a passing folder while it is listed.
-    let (pasted, _picture) = match paste.then(paste::all).transpose() {
-        Ok(Some((files, picture))) => (Some(files), picture),
-        Ok(None) => (None, None),
-        Err(e) => {
-            render::print_error(cli.json, &e);
-            return e.code.exit_code();
-        }
-    };
-    let roots: Vec<PathBuf> = if let Some(files) = pasted {
-        files
-    } else if paths.is_empty() {
+pub fn run(cli: &Cli, paths: &[PathBuf]) -> i32 {
+    let roots: Vec<PathBuf> = if paths.is_empty() {
         vec![PathBuf::from(".")]
     } else {
         // Every positional here is an input -- there is no output slot to

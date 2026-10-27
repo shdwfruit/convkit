@@ -11,7 +11,7 @@
   `--copy` puts the result on the clipboard, a picture as the picture and
   its file, an md, csv or html file as its text, and anything else as the
   file. `conv qr` takes `--copy` too. `--paste` works wherever conv takes
-  a file: `conv ascii`, `conv trim`, `conv scan`, and `conv qr`, where a
+  a file: `conv ascii`, `conv trim`, and `conv qr`, where a
   copied link is what the code holds and a copied picture is the logo. Over SSH both go through the
   terminal, in kitty and Ghostty 1.4 or later.
 

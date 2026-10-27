@@ -4118,7 +4118,6 @@ fn changelog_shows_a_version_and_what_came_after() {
 
 #[test]
 fn paste_stands_in_for_the_file_a_command_takes() {
-    conv().args(["scan", "--paste", "a.png"]).assert().code(2);
     conv().args(["trim", "--paste", "a.mp4"]).assert().code(2);
     // Without --paste the file is still required.
     conv().args(["trim"]).assert().code(2);

@@ -606,8 +606,7 @@ it pastes into an editor or as an attachment. Other results, and several
 at once, are copied as files. `conv qr` takes `--copy` too, and in
 `conv ascii` it's the same as `--clipboard`. `--paste` works wherever conv
 takes a file: `conv ascii --paste -i` tunes art from a copied picture,
-`conv trim --paste` cuts a copied video, `conv scan --paste` lists what
-the copied files can become, and `conv qr --paste` makes a code of a
+`conv trim --paste` cuts a copied video, and `conv qr --paste` makes a code of a
 copied link (or takes a copied picture as the logo).
 
 Over SSH the server's clipboard is no use, so conv goes through the

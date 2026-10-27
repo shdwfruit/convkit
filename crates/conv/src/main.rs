@@ -45,7 +45,7 @@ fn main() {
             ref since,
         }) => commands::changelog::run(&cli, version.as_deref(), since.as_deref()),
         Some(cli::Command::Install { backend }) => commands::install::run(&cli, backend),
-        Some(cli::Command::Scan { paths, paste }) => commands::scan::run(&cli, paths, *paste),
+        Some(cli::Command::Scan { paths }) => commands::scan::run(&cli, paths),
         Some(cli::Command::Update { check }) => commands::update::run(&cli, *check),
         Some(cli::Command::Qr { .. }) => commands::qr::run(&cli),
         Some(cli::Command::Ascii { .. }) => commands::ascii::run(&cli),
