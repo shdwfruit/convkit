@@ -132,6 +132,8 @@ mod tests {
             duration: None,
             speed: None,
             shift_pitch: false,
+            copy: false,
+            paste: false,
             yes,
             no_install,
             outdir: None,

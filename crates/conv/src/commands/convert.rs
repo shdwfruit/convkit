@@ -2,36 +2,317 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use convkit_core::{
-    plan, probe, registry, sized, AvailableBackends, Backend, ConvError, ErrorCode, MediaProbe,
-    Outcome, Resolver, Tuning,
+    plan, probe, registry, sized, AvailableBackends, Backend, ConvError, ErrorCode, Format,
+    MediaProbe, Outcome, Resolver, Tuning,
 };
 use serde_json::json;
 
 use crate::batch;
 use crate::cli::Cli;
+use crate::clipboard::{self, Got};
 use crate::commands::install;
 use crate::input;
 use crate::install_prompt;
+use crate::output;
+use crate::paste::{self, PASTED};
 use crate::prompt::{self, Gate};
 use crate::render;
 
 pub fn run(cli: &Cli) -> i32 {
-    let jobs = match input::plan_jobs(cli) {
-        Ok(jobs) => jobs,
+    if !cli.paste {
+        return convert(cli, None);
+    }
+    match pasted(cli) {
+        // The folder holding a pasted picture lives until the run is over.
+        Ok(Pasted::Inputs(run, folder)) => {
+            let picture = folder.as_ref().map(|_| run.paths[0].clone());
+            convert(&run, picture.as_deref())
+        }
+        Ok(Pasted::Saved(outcome)) => {
+            let copied = cli
+                .copy
+                .then(|| copy_outputs(std::slice::from_ref(&outcome.output)));
+            if cli.json {
+                let mut v = render::outcome_json(&outcome);
+                v["input"] = json!(PASTED);
+                let mut envelope = json!({ "ok": true, "results": [v] });
+                if let Some(c) = &copied {
+                    envelope["clipboard"] = c.json();
+                }
+                println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+            } else {
+                if !cli.quiet {
+                    print!(
+                        "{}",
+                        render::conversion_success_human(&outcome, render::stdout_styled())
+                    );
+                }
+                if let Some(c) = &copied {
+                    c.print(cli);
+                }
+            }
+            0
+        }
+        Ok(Pasted::DryRun(path, bytes)) => {
+            if cli.json {
+                let v = json!({ "dry_run": true, "input": PASTED, "output": path, "bytes": bytes });
+                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+            } else {
+                println!("would save {PASTED} as {} ({bytes} bytes)", path.display());
+            }
+            0
+        }
         Err(e) => {
             render::print_error(cli.json, &e);
+            e.code.exit_code()
+        }
+    }
+}
+
+/// What `--paste` made of the clipboard.
+enum Pasted {
+    /// The run to do, with the clipboard's files or picture as its inputs,
+    /// and the folder a pasted picture was put in.
+    Inputs(Box<Cli>, Option<tempfile::TempDir>),
+    /// A picture saved as it was: `conv --paste` with nothing to convert.
+    Saved(Box<convkit_core::Outcome>),
+    /// What `Saved` would write, under --dry-run: the path and its size.
+    DryRun(PathBuf, usize),
+}
+
+fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
+    let refused = |message: String| ConvError::new(ErrorCode::InvalidInvocation, message);
+    let got = paste::get()?;
+    let mut run = cli.clone();
+    run.paste = false;
+    let (format, bytes) = match got {
+        Got::Files(files) => {
+            let nothing_asked =
+                cli.paths.is_empty() && cli.to.is_none() && !input::keeps_own_format(cli);
+            if nothing_asked {
+                let held = match files.as_slice() {
+                    [one] => one
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    many => format!("{} files", many.len()),
+                };
+                let formats: Vec<Option<Format>> =
+                    files.iter().map(|f| Format::from_path(f)).collect();
+                return Err(say_what(&held, &formats));
+            }
+            run.paths = files.into_iter().chain(cli.paths.iter().cloned()).collect();
+            return Ok(Pasted::Inputs(Box::new(run), None));
+        }
+        Got::Text(_) => {
+            return Err(refused(
+                "the clipboard holds text, not a picture or files".to_string(),
+            ))
+        }
+        Got::Picture { format, bytes } => (format, bytes),
+    };
+    let name = format!("clipboard.{}", format.ext());
+    // What was asked for: a named output, a bare `.ext`, `--to`, or nothing.
+    let named = cli
+        .paths
+        .first()
+        .filter(|p| !input::is_extension_shorthand(p));
+    let target = match (named, cli.paths.first(), cli.to.as_deref()) {
+        (Some(p), _, _) => Format::from_path(p),
+        (None, Some(ext), _) => Format::from_path(Path::new(&format!("x{}", ext.display()))),
+        (None, None, Some(to)) => Format::from_ext(to),
+        (None, None, None) => None,
+    };
+    let plain = !input::keeps_own_format(cli) && cli.tuning() == Tuning::default();
+    // A flag that keeps the format (`--max-size`, `--resize` alone, ...)
+    // makes a lone input a whole job; any other knob needs a target.
+    let keeps = input::keeps_own_format(cli);
+    if target.is_none() && cli.paths.is_empty() && cli.to.is_none() && !keeps && !plain {
+        let held = format!("a {} picture", format.ext().to_uppercase());
+        return Err(say_what(&held, &[Some(format)]));
+    }
+    // Nothing to change: the picture is saved as it came, under the name
+    // asked for or as clipboard.EXT.
+    if plain && target.is_none_or(|t| t == format) {
+        let path = match named {
+            Some(p) => input::in_outdir(p, cli.outdir.as_deref())?,
+            None => input::in_outdir(Path::new(&name), cli.outdir.as_deref())?,
+        };
+        if path.exists() && !cli.overwrite {
+            return Err(ConvError::new(
+                ErrorCode::OutputExists,
+                format!("{} exists; pass -y to overwrite", path.display()),
+            ));
+        }
+        if cli.dry_run {
+            return Ok(Pasted::DryRun(path, bytes.len()));
+        }
+        output::ensure_dir(cli.outdir.as_deref())?;
+        return Ok(Pasted::Saved(Box::new(output::write_file(&path, &bytes)?)));
+    }
+    let kept = paste::keep(format, &bytes)?;
+    run.paths = std::iter::once(kept.path.clone())
+        .chain(cli.paths.iter().cloned())
+        .collect();
+    Ok(Pasted::Inputs(Box::new(run), kept.folder))
+}
+
+/// The refusal when `--paste` was given nothing to make: what the
+/// clipboard's `formats` can all become, and the command typed again with
+/// one of them.
+fn say_what(held: &str, formats: &[Option<Format>]) -> ConvError {
+    let pairs = registry::all_pairs();
+    let can = |from: &Option<Format>| -> Vec<Format> {
+        from.map(|f| pairs.iter().filter(|p| p.0 == f).map(|p| p.1).collect())
+            .unwrap_or_default()
+    };
+    let mut targets = formats.first().map(can).unwrap_or_default();
+    for f in formats.iter().skip(1) {
+        let theirs = can(f);
+        targets.retain(|t| theirs.contains(t));
+    }
+    let Some(example) = [
+        Format::Jpg,
+        Format::Png,
+        Format::Mp4,
+        Format::Mp3,
+        Format::Pdf,
+    ]
+    .into_iter()
+    .find(|f| targets.contains(f))
+    .or(targets.first().copied()) else {
+        let why = if formats.len() > 1 {
+            "conv can't make them all into one format"
+        } else {
+            "conv can't convert it"
+        };
+        return ConvError::new(
+            ErrorCode::UnsupportedPair,
+            format!("the clipboard holds {held}, and {why}"),
+        );
+    };
+    let list: Vec<&str> = targets.iter().map(|t| t.ext()).collect();
+    let typed: Vec<String> = typed_args()
+        .into_iter()
+        .map(|a| if a.contains(' ') { format!("'{a}'") } else { a })
+        .collect();
+    ConvError {
+        code: ErrorCode::InvalidInvocation,
+        message: format!(
+            "the clipboard holds {held}, which can become {}; say which",
+            list.join(", ")
+        ),
+        backend: None,
+        remediation: Some(convkit_core::Remediation {
+            managed: None,
+            manual: Some(format!(
+                "e.g. `conv {} .{}`",
+                typed.join(" "),
+                example.ext()
+            )),
+        }),
+    }
+}
+
+/// How `--copy` went.
+pub(crate) struct CopyReport {
+    ok: bool,
+    message: String,
+}
+
+impl CopyReport {
+    pub(crate) fn json(&self) -> serde_json::Value {
+        json!({ "ok": self.ok, "message": self.message })
+    }
+
+    /// On stderr: a failure even under --quiet, as the file was written
+    /// but what was asked for didn't all happen.
+    pub(crate) fn print(&self, cli: &Cli) {
+        if !self.ok {
+            let line = format!("warning  {}", self.message);
+            eprintln!("{}", render::paint_warning(&line, render::stderr_styled()));
+        } else if !cli.quiet {
+            eprintln!("{}", self.message);
+        }
+    }
+}
+
+pub(crate) fn copy_outputs(outputs: &[PathBuf]) -> CopyReport {
+    let put = match clipboard::put_for(outputs) {
+        Ok(put) => put,
+        Err(e) => {
+            return CopyReport {
+                ok: false,
+                message: format!("couldn't copy it: {e}"),
+            }
+        }
+    };
+    match clipboard::put(&put) {
+        Ok(how) => CopyReport {
+            ok: true,
+            message: clipboard::copied_note(&put, &how),
+        },
+        Err(e) => CopyReport {
+            ok: false,
+            message: format!("couldn't copy to the clipboard: {e}"),
+        },
+    }
+}
+
+/// `e` with the pasted picture's passing path, in either spelling (macOS
+/// gives /var as /private/var), named as `PASTED`.
+fn tidied(e: &ConvError, pasted: Option<&Path>) -> ConvError {
+    let mut e = e.clone();
+    if let Some(p) = pasted {
+        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        for spelling in [real, p.to_path_buf()] {
+            e.message = e.message.replace(&spelling.display().to_string(), PASTED);
+        }
+    }
+    e
+}
+
+/// Warnings already shown, keyed as the results will be: by `PASTED` for
+/// the pasted picture.
+fn renamed(shown: Vec<(PathBuf, String)>, pasted: Option<&Path>) -> Vec<(PathBuf, String)> {
+    match pasted {
+        Some(_) => shown
+            .into_iter()
+            .map(|(_, w)| (PathBuf::from(PASTED), w))
+            .collect(),
+        None => shown,
+    }
+}
+
+/// Runs a conversion. `pasted` is the passing path of a picture `--paste`
+/// took from the clipboard.
+fn convert(cli: &Cli, pasted: Option<&Path>) -> i32 {
+    let mut jobs = match input::plan_jobs(cli) {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            render::print_error(cli.json, &tidied(&e, pasted));
             return e.code.exit_code();
         }
     };
+    // Nothing is written into a pasted picture's passing folder: what would
+    // go beside it goes here, named as it would have been there.
+    if let Some(folder) = pasted.and_then(Path::parent) {
+        for job in &mut jobs {
+            if job.output.starts_with(folder) {
+                job.output = PathBuf::from(job.output.file_name().unwrap_or_default());
+            }
+        }
+    }
 
     if cli.dry_run {
         return dry_run(&jobs, cli);
     }
 
     let (allow_extreme, mut shown) = match confirm_extreme(&jobs, cli) {
-        Ok(c) => (c.allowed || cli.yes, c.shown),
+        Ok(c) => (c.allowed || cli.yes, renamed(c.shown, pasted)),
         Err(e) => {
-            render::print_error(cli.json, &e);
+            render::print_error(cli.json, &tidied(&e, pasted));
             return e.code.exit_code();
         }
     };
@@ -75,12 +356,12 @@ pub fn run(cli: &Cli) -> i32 {
                     } else {
                         match confirm_extreme(&retry_jobs, cli) {
                             Ok(c) => {
-                                shown.extend(c.shown);
+                                shown.extend(renamed(c.shown, pasted));
                                 c.allowed
                             }
                             Err(e) => {
-                                render::print_error(cli.json, &e);
-                                print_results(&results, cli, elapsed, &shown);
+                                render::print_error(cli.json, &tidied(&e, pasted));
+                                print_results(&results, cli, elapsed, &shown, None);
                                 return e.code.exit_code();
                             }
                         }
@@ -104,14 +385,27 @@ pub fn run(cli: &Cli) -> i32 {
                     // either": report that failure too, but leave
                     // `results`/`code` exactly as the original
                     // `backend_missing` failure already reported them.
-                    render::print_error(cli.json, &e);
+                    render::print_error(cli.json, &tidied(&e, pasted));
                     elapsed += redo_start.elapsed();
                 }
             }
         }
     }
 
-    print_results(&results, cli, elapsed, &shown);
+    if let Some(picture) = pasted {
+        for r in &mut results {
+            r.input = PathBuf::from(PASTED);
+            if let Err(e) = &mut r.result {
+                *e = tidied(e, Some(picture));
+            }
+        }
+    }
+    let outputs: Vec<PathBuf> = results
+        .iter()
+        .filter_map(|r| r.result.as_ref().ok().map(|o| o.output.clone()))
+        .collect();
+    let copied = (cli.copy && !outputs.is_empty()).then(|| copy_outputs(&outputs));
+    print_results(&results, cli, elapsed, &shown, copied.as_ref());
     code
 }
 
@@ -532,6 +826,20 @@ fn print_results(
     cli: &Cli,
     elapsed: Duration,
     shown: &[(PathBuf, String)],
+    copied: Option<&CopyReport>,
+) {
+    print_each(results, cli, elapsed, shown, copied);
+    if let (false, Some(c)) = (cli.json, copied) {
+        c.print(cli);
+    }
+}
+
+fn print_each(
+    results: &[batch::JobResult],
+    cli: &Cli,
+    elapsed: Duration,
+    shown: &[(PathBuf, String)],
+    copied: Option<&CopyReport>,
 ) {
     if cli.json {
         let arr: Vec<serde_json::Value> = results
@@ -546,7 +854,10 @@ fn print_results(
             })
             .collect();
         let ok = results.iter().all(|r| r.result.is_ok());
-        let envelope = json!({ "ok": ok, "results": arr });
+        let mut envelope = json!({ "ok": ok, "results": arr });
+        if let Some(c) = copied {
+            envelope["clipboard"] = c.json();
+        }
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
         return;
     }
@@ -651,6 +962,25 @@ fn exit_code_for<T>(results: &[Result<T, ConvError>]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paste_with_no_target_lists_what_it_can_become() {
+        let e = say_what("clip.mov", &[Some(Format::Mov)]);
+        assert!(e.message.contains("which can become mp4"), "{}", e.message);
+        let hint = e.remediation.unwrap().manual.unwrap();
+        assert!(hint.ends_with(" .mp4`"), "{hint}");
+        // Several files: only what they can all become.
+        let e = say_what("2 files", &[Some(Format::Png), Some(Format::Heic)]);
+        assert!(
+            e.message.contains("jpg") && !e.message.contains("heic,"),
+            "{}",
+            e.message
+        );
+        // Nothing in common.
+        let e = say_what("2 files", &[Some(Format::Mov), Some(Format::Docx)]);
+        assert_eq!(e.code, ErrorCode::UnsupportedPair);
+        assert!(e.message.contains("can't make them all into one format"));
+    }
     use std::io::Write;
     use std::path::{Path, PathBuf};
 

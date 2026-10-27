@@ -150,6 +150,23 @@ pub struct Cli {
     #[arg(long, requires = "speed")]
     pub shift_pitch: bool,
 
+    /// Copy what was written to the clipboard, ready to paste: a picture
+    /// as itself (and its file), an md, csv or html file as its text, and
+    /// anything else, or several outputs, as the files. Over SSH it goes
+    /// through the terminal, which takes only a picture or text.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long)]
+    pub copy: bool,
+
+    /// Take the input from the clipboard: files copied in Finder, Explorer
+    /// or a file manager, or a copied picture or screenshot, which is
+    /// converted into this folder as clipboard.EXT. `conv --paste .jpg`,
+    /// `conv --paste --to webp`, or `conv --paste` alone to save a copied
+    /// picture as it is. Any other path is the output.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long)]
+    pub paste: bool,
+
     /// Assume yes to every prompt: installing a missing backend, or
     /// converting an extreme --max-size target or a large --upscale. For a script that wants
     /// either without a terminal to answer. Contradicts `--no-install`,
@@ -221,7 +238,11 @@ named for its range: talk-1m02s-1m10s.mp4, and w asks before it \
 replaces a file already there.")]
     Trim {
         /// The video or audio file to cut.
-        file: PathBuf,
+        #[arg(required_unless_present = "paste")]
+        file: Option<PathBuf>,
+        /// Cut the file copied to the clipboard.
+        #[arg(long, conflicts_with = "file")]
+        paste: bool,
         /// Write the clips with a picture in this format (an audio format
         /// keeps only the sound).
         #[arg(long)]
@@ -262,7 +283,8 @@ fifth of the code's width, and the code is made to survive losing 30% \
 of itself instead of 15%, so it still scans.")]
     Qr {
         /// What the code holds: a link or any text.
-        text: String,
+        #[arg(required_unless_present = "paste")]
+        text: Option<String>,
         /// The file to write, or a bare `.ext` for qr.EXT (`.svg`). Without
         /// it, conv writes qr.png.
         output: Option<PathBuf>,
@@ -284,6 +306,14 @@ of itself instead of 15%, so it still scans.")]
         /// Overwrite the file if it exists.
         #[arg(short = 'y', long)]
         overwrite: bool,
+        /// Also copy the code to the clipboard, ready to paste.
+        #[arg(long)]
+        copy: bool,
+        /// Take from the clipboard what it holds: copied text or a link is
+        /// what the code holds (the one path given is then OUT), and a
+        /// copied picture or file is the logo.
+        #[arg(long)]
+        paste: bool,
     },
     /// Make ASCII art from a picture: `conv ascii photo.jpg` prints it here.
     #[command(long_about = "\
@@ -306,7 +336,8 @@ brightness, c the style, b the background, o colour; w writes, y copies, \
 and q quits and prints the command for what you made.")]
     Ascii {
         /// The picture: an image, a GIF or a video (its first frame).
-        input: PathBuf,
+        #[arg(required_unless_present = "paste")]
+        input: Option<PathBuf>,
         /// The file to write (.txt, .png, .html, or another picture
         /// format), or a bare `.ext` for NAME-ascii.EXT. Without it, the
         /// art is printed.
@@ -354,8 +385,12 @@ and q quits and prints the command for what you made.")]
         )]
         brightness: i32,
         /// Also copy the art as plain text.
-        #[arg(long)]
+        #[arg(long, visible_alias = "copy")]
         clipboard: bool,
+        /// Take the picture from the clipboard: a copied picture, or one
+        /// copied file. The one path given is then OUT.
+        #[arg(long)]
+        paste: bool,
         /// Change the look with keys and see it as you go; prints the
         /// command for it when you quit.
         #[arg(short = 'i', long, conflicts_with = "clipboard")]
@@ -574,6 +609,12 @@ impl Cli {
     /// contradiction is a usage error before anything runs, like clap's
     /// own.
     pub fn check(&self) -> Result<(), String> {
+        if self.paste && self.paths.len() > 1 {
+            return Err(
+                "--paste takes the input from the clipboard; give at most the output's name or .ext"
+                    .to_string(),
+            );
+        }
         self.range().map(|_| ())
     }
 
@@ -628,6 +669,8 @@ mod tests {
             duration: None,
             speed: None,
             shift_pitch: false,
+            copy: false,
+            paste: false,
             yes: false,
             no_install: false,
             outdir: None,

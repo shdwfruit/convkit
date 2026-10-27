@@ -398,6 +398,11 @@ fn dim() -> Style {
 /// every styled fragment below funnels through, so "not a real terminal"
 /// reliably means plain ASCII with no escape codes anywhere, not just in
 /// the places a reviewer happened to check.
+/// A `warning  ...` line in the colour the other warnings have.
+pub fn paint_warning(line: &str, styled: bool) -> String {
+    paint(line, yellow_bold(), styled)
+}
+
 fn paint(text: &str, style: Style, enabled: bool) -> String {
     if enabled {
         format!("{}{text}{}", style.render(), style.render_reset())

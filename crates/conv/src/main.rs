@@ -6,6 +6,7 @@ mod commands;
 mod input;
 mod install_prompt;
 mod output;
+mod paste;
 mod prompt;
 mod render;
 mod screen;
