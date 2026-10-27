@@ -125,7 +125,10 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
         (None, None, None) => None,
     };
     let plain = !input::keeps_own_format(cli) && cli.tuning() == Tuning::default();
-    if target.is_none() && cli.paths.is_empty() && cli.to.is_none() && !plain {
+    // A flag that keeps the format (`--max-size`, `--resize` alone, ...)
+    // makes a lone input a whole job; any other knob needs a target.
+    let keeps = input::keeps_own_format(cli);
+    if target.is_none() && cli.paths.is_empty() && cli.to.is_none() && !keeps && !plain {
         let held = format!("a {} picture", format.ext().to_uppercase());
         return Err(say_what(&held, &[Some(format)]));
     }
@@ -149,15 +152,6 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
         return Ok(Pasted::Saved(Box::new(output::write_file(&path, &bytes)?)));
     }
     let kept = paste::keep(format, &bytes)?;
-    // Written here, not beside the picture in its passing folder; a named
-    // output already says where it goes.
-    let derived = cli
-        .paths
-        .first()
-        .is_none_or(|p| input::is_extension_shorthand(p));
-    if cli.outdir.is_none() && derived {
-        run.outdir = Some(PathBuf::from("."));
-    }
     run.paths = std::iter::once(kept.path.clone())
         .chain(cli.paths.iter().cloned())
         .collect();
@@ -294,13 +288,22 @@ fn renamed(shown: Vec<(PathBuf, String)>, pasted: Option<&Path>) -> Vec<(PathBuf
 /// Runs a conversion. `pasted` is the passing path of a picture `--paste`
 /// took from the clipboard.
 fn convert(cli: &Cli, pasted: Option<&Path>) -> i32 {
-    let jobs = match input::plan_jobs(cli) {
+    let mut jobs = match input::plan_jobs(cli) {
         Ok(jobs) => jobs,
         Err(e) => {
             render::print_error(cli.json, &tidied(&e, pasted));
             return e.code.exit_code();
         }
     };
+    // Nothing is written into a pasted picture's passing folder: what would
+    // go beside it goes here, named as it would have been there.
+    if let Some(folder) = pasted.and_then(Path::parent) {
+        for job in &mut jobs {
+            if job.output.starts_with(folder) {
+                job.output = PathBuf::from(job.output.file_name().unwrap_or_default());
+            }
+        }
+    }
 
     if cli.dry_run {
         return dry_run(&jobs, cli);

@@ -421,15 +421,15 @@ impl OwnFormat {
     }
 }
 
-/// `conv clip.mp4 --max-size 10mb`, `conv talk.mp4 --start 1:02` or
-/// `conv photo.jpg --strip-metadata`: the input's own format, beside the
-/// input (or in `-o`); `name_own_format_outputs` adds the suffix.
 /// Whether a flag makes a lone input keep its format (`--max-size`,
 /// `--strip-metadata`, a range, `--speed`), so a lone input is a whole job.
 pub(crate) fn keeps_own_format(cli: &Cli) -> bool {
     OwnFormat::of(cli).is_some()
 }
 
+/// `conv clip.mp4 --max-size 10mb`, `conv talk.mp4 --start 1:02` or
+/// `conv photo.jpg --strip-metadata`: the input's own format, beside the
+/// input (or in `-o`); `name_own_format_outputs` adds the suffix.
 fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Result<Job, ConvError> {
     let from = format_of(input)?;
     if !own.sized && !own.timed {
