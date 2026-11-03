@@ -12,6 +12,9 @@ use convkit_core::{Format, Kind};
 
 #[cfg(target_os = "macos")]
 mod macos;
+// Only unix talks to the terminal (`Tty`); elsewhere the module is here
+// for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub mod terminal;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod unix;
@@ -24,7 +27,8 @@ pub enum Copied {
     /// By asking the terminal (OSC 52), which can't say whether it did.
     Osc52,
     /// By the terminal, through kitty's clipboard protocol; `confirmed`
-    /// when it said it had.
+    /// when it said it had. Unix only.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Terminal { confirmed: bool },
 }
 
@@ -74,6 +78,7 @@ pub fn mime_of(format: Format) -> Option<&'static str> {
 
 /// The most wanted picture among the clipboard's `types`, whose names
 /// `name` picks from a `PICTURES` row (MIME type or identifier).
+#[cfg_attr(windows, allow(dead_code))]
 pub fn best_picture(
     types: &[String],
     name: fn(&(Format, &'static str, &'static str)) -> &'static str,
@@ -228,6 +233,7 @@ fn system_get() -> Option<Result<Got, String>> {
 
 /// The largest copy sent through the terminal: the protocol has every
 /// terminal take 64 MB, and base64 makes it a third bigger on the way.
+#[cfg(unix)]
 const TERMINAL_MAX: u64 = 48 * 1024 * 1024;
 
 /// `None` when the terminal can't take it: no terminal, or one that
@@ -354,6 +360,7 @@ fn get_through_terminal() -> Option<Result<Got, String>> {
 }
 
 /// What data of type `mime` is: a picture, a list of files, or text.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn got_from(mime: &str, bytes: Vec<u8>) -> Got {
     if let Some(p) = PICTURES.iter().find(|p| p.1.eq_ignore_ascii_case(mime)) {
         return Got::Picture { format: p.0, bytes };
