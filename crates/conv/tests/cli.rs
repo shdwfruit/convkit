@@ -4697,3 +4697,357 @@ fn paste_without_a_clipboard_says_so() {
             "couldn't paste: no clipboard here",
         ));
 }
+
+/// A 200x100 "screenshot", a dark bar over a light page, that conv draws
+/// itself at 2x, so these tests need no backend.
+fn screenshot(dir: &Path) -> PathBuf {
+    let path = dir.join("shot.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="#fafafa"/><rect width="200" height="20" fill="#202020"/></svg>"##,
+    )
+    .unwrap();
+    path
+}
+
+/// A PNG's width, height and colour type, from its header.
+fn png_header(path: &Path) -> (u32, u32, u8) {
+    let png = std::fs::read(path).unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{}", path.display());
+    let word = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    (word(16), word(20), png[25])
+}
+
+#[test]
+fn beautify_writes_a_png_beside_the_screenshot_at_its_scale() {
+    let dir = tempfile::tempdir().unwrap();
+    screenshot(dir.path());
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["beautify", "shot.svg"])
+        .assert()
+        .success()
+        .stdout(contains("shot-beautified.png"));
+    // Drawn at 2x (400x200), with 9% of its size as padding on each side.
+    let (w, h, colour) = png_header(&dir.path().join("shot-beautified.png"));
+    assert_eq!((w, h), (400 + 2 * 25, 200 + 2 * 25));
+    assert_eq!(colour, 2, "an opaque result is RGB");
+    // It doesn't replace what is there without -y.
+    conv()
+        .current_dir(dir.path())
+        .args(["beautify", "shot.svg"])
+        .assert()
+        .code(2)
+        .stderr(contains("pass -y"));
+    conv()
+        .current_dir(dir.path())
+        .args([
+            "beautify",
+            "shot.svg",
+            "-y",
+            "--bg",
+            "transparent",
+            "--padding",
+            "10",
+        ])
+        .assert()
+        .success();
+    let (w, _, colour) = png_header(&dir.path().join("shot-beautified.png"));
+    assert_eq!(w, 400 + 2 * 20, "points are doubled at 2x");
+    assert_eq!(colour, 6, "a transparent background keeps alpha");
+}
+
+#[test]
+fn beautify_paths_work_as_in_a_conversion() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("pics")).unwrap();
+    std::fs::write(
+        dir.path().join("pics/shot.svg"),
+        std::fs::read(screenshot(dir.path())).unwrap(),
+    )
+    .unwrap();
+    let ok = |args: &[&str]| {
+        conv()
+            .current_dir(dir.path())
+            .arg("beautify")
+            .args(args)
+            .assert()
+            .success();
+    };
+    ok(&["pics/shot.svg"]);
+    assert!(dir.path().join("pics/shot-beautified.png").is_file());
+    ok(&["pics/shot.svg", "post.png"]);
+    assert!(dir.path().join("post.png").is_file());
+    ok(&["pics/shot.svg", "-o", "out"]);
+    assert!(dir.path().join("out/shot-beautified.png").is_file());
+}
+
+#[test]
+fn beautify_dry_run_says_what_it_would_write() {
+    let dir = tempfile::tempdir().unwrap();
+    screenshot(dir.path());
+    conv()
+        .current_dir(dir.path())
+        .args(["beautify", "shot.svg", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains(
+            "would write shot-beautified.png: 450x250 at 2x, on aurora, 25 px padding, 4 px corners, shadow",
+        ));
+    let out = conv()
+        .current_dir(dir.path())
+        .args([
+            "beautify",
+            "shot.svg",
+            "--dry-run",
+            "--json",
+            "--bg",
+            "#112233",
+            "--radius",
+            "0",
+            "--no-shadow",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["beautify"]["background"], "#112233");
+    assert_eq!(v["beautify"]["radius"], 0);
+    assert_eq!(v["beautify"]["shadow"], false);
+    assert_eq!(v["beautify"]["scale"], 2);
+    assert!(!dir.path().join("shot-beautified.png").exists());
+}
+
+#[test]
+fn beautify_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    screenshot(dir.path());
+    std::fs::write(dir.path().join("notes.md"), "# hi").unwrap();
+    for (args, says) in [
+        (&["beautify", "missing.png"][..], "no such file"),
+        (&["beautify", "notes.md"], "reads pictures"),
+        (
+            &["beautify", "shot.svg", "out.svg"],
+            "cannot be written as .svg",
+        ),
+        (
+            &["beautify", "shot.svg", "out.mp4"],
+            "cannot be written as .mp4",
+        ),
+        (
+            &["beautify", "shot.svg", "--bg", "purple"],
+            "aurora, sunset",
+        ),
+    ] {
+        conv()
+            .current_dir(dir.path())
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(contains(says));
+    }
+}
+
+/// Another format is converted from the PNG, so with no ImageMagick conv
+/// says what's missing, as a conversion does, and writes nothing.
+#[test]
+fn beautify_into_jpg_needs_imagemagick() {
+    let dir = tempfile::tempdir().unwrap();
+    screenshot(dir.path());
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["beautify", "shot.svg", ".jpg", "--no-install"])
+        .assert()
+        .code(3)
+        .stderr(contains("magick"));
+    assert!(!dir.path().join("shot-beautified.jpg").exists());
+}
+
+/// Two flat colours conv reads itself: a quarter red and three quarters
+/// blue.
+fn two_colours(dir: &Path) -> PathBuf {
+    let path = dir.join("flag.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="10" shape-rendering="crispEdges"><rect width="40" height="10" fill="#1428c8"/><rect width="10" height="10" fill="#dc1e1e"/></svg>"##,
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn colors_prints_the_palette_plainly_into_a_pipe() {
+    let dir = tempfile::tempdir().unwrap();
+    two_colours(dir.path());
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let out = cmd
+        .current_dir(dir.path())
+        .args(["colors", "flag.svg"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "#1428c8  rgb(20, 40, 200)  hsl(233, 82%, 43%)   75%\n\
+         #dc1e1e  rgb(220, 30, 30)  hsl(0, 76%, 49%)     25%\n"
+    );
+}
+
+#[test]
+fn colors_reads_a_picture_piped_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let svg = std::fs::read(two_colours(dir.path())).unwrap();
+    for args in [&["colors", "-"][..], &["colors"]] {
+        conv()
+            .args(args)
+            .write_stdin(svg.clone())
+            .assert()
+            .success()
+            .stdout(contains("#1428c8"));
+    }
+}
+
+#[test]
+fn colors_at_a_pixel_and_as_code_and_json() {
+    let dir = tempfile::tempdir().unwrap();
+    two_colours(dir.path());
+    // An SVG is read at its own size, 40x10.
+    conv()
+        .current_dir(dir.path())
+        .args(["colors", "flag.svg", "--at", "5,5"])
+        .assert()
+        .success()
+        .stdout("#dc1e1e  rgb(220, 30, 30)  hsl(0, 76%, 49%)\n");
+    conv()
+        .current_dir(dir.path())
+        .args(["colors", "flag.svg", "--at", "40,0"])
+        .assert()
+        .code(2)
+        .stderr(contains("outside the picture, which is 40x10"));
+    conv()
+        .current_dir(dir.path())
+        .args(["colors", "flag.svg", "--code", "css"])
+        .assert()
+        .success()
+        .stdout(
+            ":root {\n  --palette-1: #1428c8; /* 75% */\n  --palette-2: #dc1e1e; /* 25% */\n}\n",
+        );
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["colors", "flag.svg", "--json", "--code", "swiftui"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["width"], 40);
+    assert_eq!(v["colors"][0]["hex"], "#1428c8");
+    assert_eq!(v["colors"][0]["rgb"], serde_json::json!([20, 40, 200]));
+    assert_eq!(v["colors"][0]["share"], 0.75);
+    assert_eq!(v["code"]["language"], "swiftui");
+    assert!(v["code"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("static let palette1"));
+}
+
+#[test]
+fn colors_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    two_colours(dir.path());
+    std::fs::write(dir.path().join("notes.md"), "# hi").unwrap();
+    for (args, says) in [
+        (&["colors", "missing.png"][..], "no such file"),
+        (&["colors", "notes.md"], "reads pictures"),
+        (&["colors", "flag.svg", "--at", "5"], "expected X,Y"),
+        (
+            &["colors", "flag.svg", "--code", "scss"],
+            "css, swiftui, tailwind",
+        ),
+        (&["colors", "flag.svg", "-n", "40"], "40"),
+    ] {
+        conv()
+            .current_dir(dir.path())
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(contains(says));
+    }
+}
+
+/// The command that reads a password is shown, never run: nothing here
+/// can answer the keychain's prompt.
+#[test]
+fn wifi_dry_run_shows_the_command_that_reads_the_password() {
+    let program = if cfg!(target_os = "macos") {
+        "/usr/bin/security find-generic-password -D 'AirPort network password' -a 'Cafe Guest' -w"
+    } else if cfg!(windows) {
+        "wlan show profile name=\"Cafe Guest\" key=clear"
+    } else {
+        "nmcli --escape no --show-secrets --get-values"
+    };
+    conv()
+        .args(["wifi", "Cafe Guest", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains(program));
+    let out = conv()
+        .args([
+            "wifi",
+            "Cafe Guest",
+            "--dry-run",
+            "--qr",
+            ".svg",
+            "-o",
+            "codes",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["network"], "Cafe Guest");
+    assert_eq!(
+        v["output"].as_str().map(Path::new),
+        Some(Path::new("codes").join("Cafe Guest-wifi.svg").as_path())
+    );
+}
+
+#[test]
+fn wifi_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Home-wifi.png"), "x").unwrap();
+    for (args, says) in [
+        // A name after --qr is taken for the file, and caught.
+        (
+            &["wifi", "--qr", "Cafe Guest", "--dry-run"][..],
+            "put it before --qr",
+        ),
+        (
+            &["wifi", "Home", "--qr", "code.mp3", "--dry-run"],
+            "cannot be written as .mp3",
+        ),
+        (&["wifi", "Home", "--qr", "--dry-run"], "pass -y"),
+        (&["wifi", "--list", "--qr"], "cannot be used with"),
+        (
+            &["wifi", "Home", "--qr", "--show-password"],
+            "cannot be used with",
+        ),
+        (&["wifi", "Home", "-o", "codes"], "--qr"),
+        (&["qr", "--wifi", "--paste"], "cannot be used with"),
+    ] {
+        conv()
+            .current_dir(dir.path())
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(contains(says));
+    }
+}

@@ -14,7 +14,7 @@ use serde_json::json;
 
 use crate::cli::{Cli, Command};
 use crate::clipboard::Got;
-use crate::commands::convert;
+use crate::commands::{convert, wifi};
 use crate::{input, output, paste, render};
 
 pub fn run(cli: &Cli) -> i32 {
@@ -27,10 +27,23 @@ pub fn run(cli: &Cli) -> i32 {
         overwrite,
         copy,
         paste,
+        wifi,
     }) = &cli.command
     else {
         unreachable!("qr::run is only called for `conv qr`");
     };
+    if *wifi {
+        return join_code(
+            cli,
+            text.as_deref(),
+            output.as_deref(),
+            outdir.as_deref(),
+            logo.as_deref(),
+            *size,
+            *overwrite,
+            *copy,
+        );
+    }
     let pasted = match paste.then(|| pasted(text.as_deref(), output.as_deref(), logo.as_deref())) {
         Some(Ok(p)) => Some(p),
         Some(Err(e)) => {
@@ -53,7 +66,7 @@ pub fn run(cli: &Cli) -> i32 {
         ),
     };
     let start = Instant::now();
-    let made = output_path(output, outdir.as_deref()).and_then(|(path, format)| {
+    let made = output_path(output, outdir.as_deref(), "qr").and_then(|(path, format)| {
         write(
             cli,
             text,
@@ -69,7 +82,7 @@ pub fn run(cli: &Cli) -> i32 {
         Ok((mut outcome, qr)) => {
             outcome.elapsed_ms = start.elapsed().as_millis() as u64;
             let copied = copy.then(|| convert::copy_outputs(std::slice::from_ref(&outcome.output)));
-            print(cli, &outcome, text, &qr, copied.as_ref());
+            print(cli, &outcome, Shown::Text(text), &qr, copied.as_ref());
             0
         }
         Err(e) => {
@@ -77,6 +90,68 @@ pub fn run(cli: &Cli) -> i32 {
             e.code.exit_code()
         }
     }
+}
+
+/// `conv qr --wifi [NAME]`: a code that joins a saved network, as `conv
+/// wifi NAME --qr` makes, with conv qr's own --size and --logo.
+#[allow(clippy::too_many_arguments)]
+fn join_code(
+    cli: &Cli,
+    name: Option<&str>,
+    output: Option<&Path>,
+    outdir: Option<&Path>,
+    logo: Option<&Path>,
+    size: Option<u32>,
+    overwrite: bool,
+    copy: bool,
+) -> i32 {
+    let start = Instant::now();
+    let made = wifi::network(cli, name, |name| {
+        let (path, format) = output_path(output, outdir, &wifi::qr_stem(name))?;
+        if path.exists() && !overwrite {
+            return Err(ConvError::new(
+                ErrorCode::OutputExists,
+                format!("{} exists; pass -y to overwrite", path.display()),
+            ));
+        }
+        Ok((path, format))
+    })
+    .and_then(|(network, (path, format))| {
+        let text = network.join_text()?;
+        let (outcome, qr) = write(
+            cli,
+            &text,
+            &path,
+            format,
+            outdir,
+            logo,
+            size.unwrap_or(qr::DEFAULT_SIZE),
+            overwrite,
+        )?;
+        Ok((network, outcome, qr))
+    });
+    match made {
+        Ok((network, mut outcome, qr)) => {
+            outcome.elapsed_ms = start.elapsed().as_millis() as u64;
+            let mut notes = network.notes.clone();
+            notes.append(&mut outcome.warnings);
+            outcome.warnings = notes;
+            let copied = copy.then(|| convert::copy_outputs(std::slice::from_ref(&outcome.output)));
+            print(cli, &outcome, Shown::Wifi(&network), &qr, copied.as_ref());
+            0
+        }
+        Err(e) => {
+            render::print_error(cli.json, &e);
+            e.code.exit_code()
+        }
+    }
+}
+
+/// What a code holds, as `--json` shows it: the text, or for a Wi-Fi code
+/// the network, never its password.
+pub(crate) enum Shown<'a> {
+    Text(&'a str),
+    Wifi(&'a convkit_core::wifi::Network),
 }
 
 /// What `--paste` found for the code.
@@ -124,25 +199,29 @@ fn pasted(
     }
 }
 
-/// The file to write and its format: OUT as typed, `qr.EXT` for a bare
-/// `.ext`, or `qr.png`, inside `-o`'s directory when one is given.
-fn output_path(
+/// The file to write and its format: OUT as typed, `STEM.EXT` for a bare
+/// `.ext`, or `STEM.png` (`qr.png`), inside `-o`'s directory when one is
+/// given.
+pub(crate) fn output_path(
     output: Option<&Path>,
     outdir: Option<&Path>,
+    stem: &str,
 ) -> Result<(PathBuf, Format), ConvError> {
     let name = match output {
-        None => PathBuf::from("qr.png"),
+        None => PathBuf::from(format!("{stem}.png")),
         Some(p) if p.is_dir() => {
             return Err(ConvError::new(
                 ErrorCode::InvalidInvocation,
                 format!(
-                    "{} is a directory; to write qr.png into it, pass -o {}",
+                    "{} is a directory; to write {stem}.png into it, pass -o {}",
                     p.display(),
                     p.display()
                 ),
             ))
         }
-        Some(p) if input::is_extension_shorthand(p) => PathBuf::from(format!("qr{}", p.display())),
+        Some(p) if input::is_extension_shorthand(p) => {
+            PathBuf::from(format!("{stem}{}", p.display()))
+        }
         Some(p) => p.to_path_buf(),
     };
     let path = input::in_outdir(&name, outdir)?;
@@ -162,7 +241,7 @@ fn output_path(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write(
+pub(crate) fn write(
     cli: &Cli,
     text: &str,
     path: &Path,
@@ -192,21 +271,24 @@ fn write(
     Ok((outcome, code))
 }
 
-fn print(
+pub(crate) fn print(
     cli: &Cli,
     outcome: &Outcome,
-    text: &str,
+    shown: Shown,
     code: &qr::Qr,
     copied: Option<&convert::CopyReport>,
 ) {
     if cli.json {
         let mut v = render::outcome_json(outcome);
         v["qr"] = json!({
-            "text": text,
             "size": code.size,
             "version": code.version,
             "error_correction": code.error_correction,
         });
+        match shown {
+            Shown::Text(text) => v["qr"]["text"] = json!(text),
+            Shown::Wifi(network) => v["wifi"] = wifi::network_json(network, false),
+        }
         let mut envelope = json!({ "ok": true, "results": [v] });
         if let Some(c) = copied {
             envelope["clipboard"] = c.json();
@@ -237,7 +319,7 @@ mod tests {
         output: Option<&str>,
         outdir: Option<&str>,
     ) -> Result<(PathBuf, Format), ConvError> {
-        output_path(output.map(Path::new), outdir.map(Path::new))
+        output_path(output.map(Path::new), outdir.map(Path::new), "qr")
     }
 
     #[test]
@@ -289,7 +371,7 @@ mod tests {
     #[test]
     fn an_existing_directory_as_out_points_at_dash_o() {
         let dir = tempfile::tempdir().unwrap();
-        let e = output_path(Some(dir.path()), None).unwrap_err();
+        let e = output_path(Some(dir.path()), None, "qr").unwrap_err();
         assert!(e.message.contains("pass -o"), "{}", e.message);
     }
 
