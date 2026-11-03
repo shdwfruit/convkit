@@ -84,6 +84,9 @@ pub struct PdfPlan {
     /// The note that a password-protected input's output is not, which a
     /// lock takes back.
     unlocked_note: Option<String>,
+    /// The note that an input's restrictions are dropped, which a lock with
+    /// restrictions of its own takes back: its note says what is off.
+    restricted_note: Option<String>,
     /// What the outputs are called in a note: `out.pdf`, `The split files`.
     what: String,
 }
@@ -113,6 +116,7 @@ impl PdfPlan {
             repaired: false,
             lock: None,
             unlocked_note: None,
+            restricted_note: None,
             what,
         }
     }
@@ -138,9 +142,12 @@ impl PdfPlan {
     /// the file with it, but Apple's PDF engine, so Preview and Safari,
     /// accepts no such password at all.
     pub fn set_lock(&mut self, lock: Lock) {
-        if let Some(note) = self.unlocked_note.take() {
-            self.notes.retain(|n| n != &note);
+        let restricts = !lock.restrict.is_empty();
+        let mut gone: Vec<String> = self.unlocked_note.take().into_iter().collect();
+        if restricts {
+            gone.extend(self.restricted_note.take());
         }
+        self.notes.retain(|n| !gone.contains(n));
         if let Some(note) = lock.note(&self.what) {
             self.notes.push(note);
         }
@@ -165,6 +172,31 @@ impl PdfPlan {
                 | PdfJob::Pages { password, .. }
                 | PdfJob::Rewrite { password, .. } => password.is_some(),
             }
+    }
+
+    /// Every argument that carries a password, as qpdf would echo it back in
+    /// an error, with what to show instead.
+    pub(crate) fn secret_args(&self) -> Vec<(String, String)> {
+        let mut v = Vec::new();
+        let mut add = |p: &Password| {
+            v.push((password_arg(p, true), password_arg(p, false)));
+        };
+        match &self.job {
+            PdfJob::Merge { passwords, .. } => passwords.iter().flatten().for_each(&mut add),
+            PdfJob::SplitPages { password, .. }
+            | PdfJob::SplitRanges { password, .. }
+            | PdfJob::Pages { password, .. }
+            | PdfJob::Rewrite { password, .. } => password.iter().for_each(&mut add),
+        }
+        if let Some(lock) = &self.lock {
+            v.extend(
+                lock.args(true)
+                    .into_iter()
+                    .zip(lock.args(false))
+                    .filter(|(a, b)| a != b),
+            );
+        }
+        v
     }
 
     /// qpdf's arguments for each call, writing the final outputs: what
@@ -416,8 +448,9 @@ pub(crate) fn source_notes(plan: &mut PdfPlan, info: &PdfInfo, subject: &str, pl
         ("does", "isn't", "it")
     };
     if info.restricted {
-        plan.notes
-            .push(restricted_note(&name, &format!("{subject} {does} not")));
+        let note = restricted_note(&name, &format!("{subject} {does} not"));
+        plan.notes.push(note.clone());
+        plan.restricted_note = Some(note);
     }
     if info.locked() {
         let note = unlocked_note(&name, &format!("{subject} {isnt}"), it);
@@ -467,10 +500,9 @@ pub fn merge_plan(infos: &[PdfInfo], output: &Path) -> Result<PdfPlan> {
     }
     let restricted = names_where(infos, |i| i.restricted);
     if !restricted.is_empty() {
-        plan.notes.push(restricted_note(
-            &restricted,
-            &format!("{out_name} does not"),
-        ));
+        let note = restricted_note(&restricted, &format!("{out_name} does not"));
+        plan.notes.push(note.clone());
+        plan.restricted_note = Some(note);
     }
     let locked = names_where(infos, PdfInfo::locked);
     if !locked.is_empty() {
@@ -1209,6 +1241,35 @@ mod tests {
                 "--",
                 "report-3-4.pdf"
             ])
+        );
+    }
+
+    #[test]
+    fn a_restricted_lock_replaces_the_note_that_restrictions_were_dropped() {
+        let source = with(info("r.pdf", 1), |i| {
+            i.encrypted = true;
+            i.restricted = true;
+        });
+        let mut plan = rewrite_plan(&source, Path::new("r-locked.pdf"), Rewrite::Lock).unwrap();
+        plan.set_lock(lock("pw"));
+        assert_eq!(
+            plan.notes,
+            vec!["r.pdf restricts printing, copying or editing; r-locked.pdf does not."],
+            "without restrictions of its own, the lock drops them"
+        );
+        let mut plan = rewrite_plan(&source, Path::new("r-locked.pdf"), Rewrite::Lock).unwrap();
+        plan.set_lock(
+            Lock::new(
+                Password::new("pw").unwrap(),
+                &[crate::pdf::Restriction::Print],
+            )
+            .unwrap(),
+        );
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+        assert!(
+            plan.notes[0].contains("turns off printing"),
+            "{:?}",
+            plan.notes
         );
     }
 

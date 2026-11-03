@@ -4992,6 +4992,13 @@ fn an_unlock_batch_asks_once_and_skips_what_has_no_password() {
         );
     }
     assert!(!docs.join("unlocked/plain.pdf").exists());
+    // A batch of one still says what it did.
+    conv()
+        .current_dir(&docs)
+        .args(["plain.pdf", "--to", "pdf", "--unlock"])
+        .assert()
+        .success()
+        .stdout(contains("OK 0 unlocked - 1 skipped - 0 failed"));
 }
 
 #[test]

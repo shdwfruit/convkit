@@ -67,6 +67,18 @@ pub fn run(
             ));
         }
     }
+    if plan.lock.is_some() && !can_lock(&qpdf.version) {
+        return Err(ConvError {
+            remediation: Some(crate::error::Remediation {
+                managed: Some("conv install qpdf".to_string()),
+                manual: None,
+            }),
+            ..qpdf_error(format!(
+                "locking a PDF needs qpdf 11.7 or newer, and this one is {}",
+                qpdf.version
+            ))
+        });
+    }
     let dest_dir = plan
         .outputs
         .first()
@@ -79,6 +91,7 @@ pub fn run(
     let commands = plan.commands_into(Some(&scratch), true);
     let shown = plan.commands_into(Some(&scratch), false);
     let secret = plan.has_secrets();
+    let secrets = plan.secret_args();
     // A relative --qpdf-path would resolve against the scratch folder once
     // the command runs there.
     let program = if plan.runs_in_scratch() {
@@ -107,7 +120,9 @@ pub fn run(
                 format!("failed to run {}: {e}", qpdf.path.display()),
             )
         })?;
-        let report = String::from_utf8_lossy(&out.stderr).into_owned();
+        // qpdf repeats an argument it refuses, so a password it was given
+        // is taken out of what it said before anyone sees it.
+        let report = redact(&String::from_utf8_lossy(&out.stderr), &secrets);
         if !report.trim().is_empty() {
             let tail = exec::tail_str(&report, REPORT_CAP).to_string();
             on_event(Event::StepReport {
@@ -180,6 +195,28 @@ pub fn run(
         backend_output,
         version: qpdf.version.clone(),
     })
+}
+
+/// Whether the qpdf at `version` takes the `--user-password=` and
+/// `--owner-password=` options a lock uses: 11.7 added them. A version conv
+/// cannot read is let through, for qpdf to say.
+pub(crate) fn can_lock(version: &str) -> bool {
+    let mut parts = version.split('.').map(|p| p.parse::<u32>());
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= (11, 7),
+        _ => true,
+    }
+}
+
+/// `text` with each `(secret, shown)` argument replaced, longest first.
+pub(crate) fn redact(text: &str, secrets: &[(String, String)]) -> String {
+    let mut pairs: Vec<&(String, String)> = secrets.iter().collect();
+    pairs.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    let mut out = text.to_string();
+    for (from, to) in pairs {
+        out = out.replace(from.as_str(), to);
+    }
+    out
 }
 
 /// A conversion failure attributed to qpdf.
@@ -485,6 +522,75 @@ mod tests {
         assert_eq!(lines[..2], ["--decrypt", "--password=s3cret"]);
         assert_eq!(spawned[1], "--password=<password>");
         assert!(dir.path().join("out.pdf").is_file());
+    }
+
+    #[test]
+    fn locking_needs_qpdf_11_7() {
+        assert!(can_lock("12.4.2") && can_lock("11.7.0") && can_lock("11.10"));
+        assert!(!can_lock("11.6.4") && !can_lock("10.6.3"));
+        assert!(can_lock("stub"), "an unreadable version is left to qpdf");
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = crate::pdf::plan::rewrite_plan(
+            &info(&dir.path().join("a.pdf"), 1),
+            &dir.path().join("a-locked.pdf"),
+            crate::pdf::Rewrite::Lock,
+        )
+        .unwrap();
+        plan.set_lock(
+            crate::pdf::Lock::new(crate::pdf::Password::new("pw").unwrap(), &[]).unwrap(),
+        );
+        let mut old = missing_qpdf();
+        old.version = "11.3.0".into();
+        let e = run(&plan, &old, false, &mut |_| {}).unwrap_err();
+        assert_eq!(
+            e.message,
+            "locking a PDF needs qpdf 11.7 or newer, and this one is 11.3.0"
+        );
+        assert_eq!(
+            e.remediation.unwrap().managed.as_deref(),
+            Some("conv install qpdf")
+        );
+    }
+
+    /// An old qpdf repeats the option it refuses, password and all.
+    #[cfg(unix)]
+    #[test]
+    fn qpdfs_own_words_never_carry_a_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.pdf");
+        std::fs::write(&input, b"%PDF").unwrap();
+        let mut source = info(&input, 1);
+        source.encrypted = true;
+        source.password = Some(crate::pdf::Password::new("old-secret").unwrap());
+        let mut plan = crate::pdf::plan::rewrite_plan(
+            &source,
+            &dir.path().join("out.pdf"),
+            crate::pdf::Rewrite::Lock,
+        )
+        .unwrap();
+        plan.set_lock(
+            crate::pdf::Lock::new(crate::pdf::Password::new("new-secret").unwrap(), &[]).unwrap(),
+        );
+        let (_stub_dir, qpdf) = stub_qpdf(
+            "while read line; do echo \"qpdf: unrecognized argument $line\" >&2; done; exit 2",
+        );
+
+        let mut reports = Vec::new();
+        let e = run(&plan, &qpdf, false, &mut |e| {
+            if let Event::StepReport { report, .. } = e {
+                reports.push(report);
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            e.message,
+            "qpdf failed: unrecognized argument --password=<password>"
+        );
+        let said = reports.join("");
+        assert!(!said.contains("secret"), "{said}");
+        assert!(said.contains("--user-password=<new password>"), "{said}");
     }
 
     #[test]

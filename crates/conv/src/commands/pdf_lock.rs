@@ -358,7 +358,13 @@ pub fn run(cli: &Cli) -> i32 {
     };
 
     // Every locked input is opened, and asked for, before the new password.
-    let mut opener = Opener::from_env();
+    let mut opener = match Opener::from_env() {
+        Ok(o) => o,
+        Err(e) => {
+            render::print_error(cli.json, &e);
+            return e.code.exit_code();
+        }
+    };
     let mut plans: Vec<(Job, Fate<PdfPlan>)> = jobs
         .into_iter()
         .map(|job| {
@@ -420,7 +426,7 @@ pub fn run(cli: &Cli) -> i32 {
             (job, fate)
         })
         .collect();
-    report(cli, &way, done, start, &subject)
+    report(cli, &way, batch, done, start, &subject)
 }
 
 /// Runs one plan, making its folder first.
@@ -504,6 +510,7 @@ fn exit_code<'a>(errors: impl Iterator<Item = Option<&'a ConvError>>) -> i32 {
 fn report(
     cli: &Cli,
     way: &Way,
+    batch: bool,
     done: Vec<(Job, Fate<PdfOutcome>)>,
     start: Instant,
     subject: &dyn Fn(&Job) -> serde_json::Value,
@@ -518,10 +525,11 @@ fn report(
         .flat_map(|o| o.outputs.iter().map(|w| w.path.clone()))
         .collect();
     let code = exit_code(done.iter().map(|(_, f)| f.error()));
-    if let [(job, fate)] = done.as_slice() {
+    // One file outside a batch reads like a conversion. It is never
+    // skipped: with nothing to do, it is refused instead.
+    if let ([(job, fate)], false) = (done.as_slice(), batch) {
         match fate {
             Fate::Done(o) => pdf_support::print_success(cli, subject(job), o, elapsed),
-            // A lone file is never skipped: it is refused instead.
             Fate::Skipped(_) => {}
             Fate::Failed(e) => {
                 pdf_support::print_failure(cli, subject(job), &name_of(&job.input), e, false);

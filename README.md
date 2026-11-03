@@ -782,7 +782,7 @@ asks once.
 Naming works as it does for `--strip-metadata`: one file gets `-locked` or
 `-unlocked` in its name, a named output is written as named, and `conv
 ./statements --to pdf --unlock` writes into an `unlocked` folder, leaving
-out files that had no password.
+out files with nothing to unlock.
 
 ## Copy and paste
 

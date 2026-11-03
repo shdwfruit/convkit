@@ -44,7 +44,10 @@ pub fn run(cli: &Cli, args: &MergeArgs) -> i32 {
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
 
-    let mut opener = Opener::from_env();
+    let mut opener = match Opener::from_env() {
+        Ok(o) => o,
+        Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
+    };
     let planned = pdf::plan_merge(&qpdf.path, &inputs, &output, &mut |p, wrong| {
         opener.next(p, wrong)
     })

@@ -108,12 +108,15 @@ pub struct Opener<'a> {
 
 impl Opener<'static> {
     /// Reads CONVKIT_PASSWORD, and asks on the terminal when there is one.
-    pub fn from_env() -> Opener<'static> {
-        Opener::new(
-            env_password().and_then(|p| Password::new(p).ok()),
+    /// A CONVKIT_PASSWORD that can't be a password is refused, rather than
+    /// passed over for an error that says to set it.
+    pub fn from_env() -> Result<Opener<'static>, ConvError> {
+        let env = env_password().map(Password::new).transpose()?;
+        Ok(Opener::new(
+            env,
             prompt::is_interactive_session(),
             ask_hidden,
-        )
+        ))
     }
 }
 

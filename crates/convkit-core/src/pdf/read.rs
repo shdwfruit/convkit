@@ -110,12 +110,12 @@ pub fn read(qpdf: &Path, input: &Path, password: Option<&Password>) -> Result<Pd
             format!("failed to run {}: {e}", qpdf.display()),
         )
     })?;
-    let mut info = parse_read(
-        input,
-        out.status.code(),
-        &out.stdout,
-        &String::from_utf8_lossy(&out.stderr),
-    )?;
+    let secrets: Vec<(String, String)> = password
+        .map(|p| (password_arg(p, true), password_arg(p, false)))
+        .into_iter()
+        .collect();
+    let stderr = super::run::redact(&String::from_utf8_lossy(&out.stderr), &secrets);
+    let mut info = parse_read(input, out.status.code(), &out.stdout, &stderr)?;
     info.password = password.cloned();
     Ok(info)
 }

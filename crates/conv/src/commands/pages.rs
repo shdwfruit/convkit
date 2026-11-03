@@ -36,7 +36,10 @@ pub fn run(cli: &Cli, args: &PagesArgs) -> i32 {
         Ok(q) => q,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
-    let mut opener = Opener::from_env();
+    let mut opener = match Opener::from_env() {
+        Ok(o) => o,
+        Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
+    };
     let planned = pdf::plan_pages(
         &qpdf.path,
         &input,
@@ -147,11 +150,23 @@ fn check_args(args: &PagesArgs) -> Result<(PathBuf, PageEdit, Option<PathBuf>), 
         }
         _ => None,
     };
-    let count = expanded.len() + words.iter().filter(|w| looks_like_a_file(w)).count();
+    // `conv pages *.pdf --rotate right` with two PDFs reads as an input
+    // and an output: the second, existing one is never written over, even
+    // with -y.
+    let taken = output.as_ref().filter(|o| words.is_empty() && o.is_file());
+    let count = expanded.len()
+        + words.iter().filter(|w| looks_like_a_file(w)).count()
+        + usize::from(taken.is_some());
     if count > 1 {
-        return Err(invalid(format!(
-            "pages takes one PDF; got {count}. Run it once per file."
-        )));
+        let mut message = format!("pages takes one PDF; got {count}. Run it once per file");
+        if let Some(o) = taken {
+            message.push_str(&format!(
+                ", or remove {} to write the result there",
+                o.display()
+            ));
+        }
+        message.push('.');
+        return Err(invalid(message));
     }
     let input = expanded
         .into_iter()
@@ -289,6 +304,29 @@ mod tests {
             "{}",
             e.message
         );
+    }
+
+    #[test]
+    fn an_existing_pdf_as_the_only_word_is_a_second_input_not_the_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.pdf"), dir.path().join("b.pdf"));
+        std::fs::write(&a, b"%PDF").unwrap();
+        std::fs::write(&b, b"%PDF").unwrap();
+        let mut glob = args(a.to_str().unwrap(), &[b.to_str().unwrap()]);
+        glob.rotate = vec!["right".into()];
+        glob.overwrite = true;
+        let e = check_args(&glob).unwrap_err();
+        assert_eq!(
+            e.message,
+            format!(
+                "pages takes one PDF; got 2. Run it once per file, or remove {} to write \
+                 the result there.",
+                b.display()
+            )
+        );
+        // With pages before it, an existing file is the output, as named.
+        let named = args(a.to_str().unwrap(), &["1", b.to_str().unwrap()]);
+        assert_eq!(check_args(&named).unwrap().2, Some(b));
     }
 
     #[test]
