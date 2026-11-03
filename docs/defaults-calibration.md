@@ -336,7 +336,8 @@ other format, but cannot produce one -- consistent with the earlier
 finding in "Fixtures" below that ffmpeg's own builds have no HEIC encoder
 or muxer either. With no HEIC encoder anywhere in this project's
 toolchain, the committed fixture above is the real, full-size photo as
-supplied -- not a shrunk or re-saved copy.
+supplied -- not a shrunk or re-saved copy. (Homebrew's ImageMagick has
+since gained a HEIC writer; see "HEIC output" below.)
 
 `heic_to_jpg_preserves_orientation_and_stays_reasonably_sized` (§7) is no
 longer gated on a missing fixture: `tests/fixtures/photo.heic` is
@@ -1353,3 +1354,47 @@ Export writes values, not the text cells display: `1234.5` formatted
 Dates and percentages keep their format either way. Token 12 `0` writes
 the first sheet in tab order even when the workbook was saved with another
 sheet active, as `<name>.csv`.
+
+## HEIC output (`HEIC_QUALITY`)
+
+Measured 2026-10-16 with Homebrew's ImageMagick 7.1.2-30 (libheif 1.23.2,
+x265 4.3). The source is `tests/fixtures/photo.heic` made a JPEG at quality
+92 (2,647,248 B), then written back as HEIC at each quality. The
+distance is ImageMagick's `compare -metric SSIM` against that JPEG (its
+DSSIM, lower is closer):
+
+```
+magick photo.jpg[0] -auto-orient -quality "$q" "q$q.heic"
+magick compare -metric SSIM photo.jpg "q$q.heic" null:
+```
+
+| Quality | x265 CRF | Size | DSSIM |
+|---|---|---|---|
+| 92 | 4 | 4,313,209 B | 0.00043 |
+| 75 | 12.5 | 2,691,129 B | 0.00109 |
+| 60 | 20 | 1,587,362 B | 0.00326 |
+| 50 | 25 | 997,353 B | 0.00769 |
+| JPEG at 85, for scale | -- | 2,196,372 B | 0.00620 |
+
+libheif's x265 encoder sets CRF to `50 - quality/2`, so JPEG's 92 asks for
+a near-lossless HEVC encode and a file larger than the JPEG it came from.
+60 lands at the size the phone wrote the original (1,623,213 B), and closer
+to the JPEG than a JPEG at quality 85 is. A 500x400 crop viewed at 100%
+showed no visible difference from the source at 60 or 50.
+
+What the writer keeps, read back with `magick identify`, `heif-info` and
+`sips`: the EXIF (GPS included) and the colour profile (Display P3), and
+`--strip-metadata` removes the EXIF and keeps the profile. A JPEG with
+Orientation 6 comes out upright with no rotation in the HEIC, since
+`-auto-orient` has turned the pixels and ImageMagick passes the result's
+orientation to libheif. Alpha is kept. A multi-frame source writes one
+image per frame into the file, of which viewers show only the first, so
+the recipe takes the first frame, as the jpg one does.
+
+ImageMagick 6 and 7 register a HEIC writer only when libheif has an HEVC
+encoder. Without one the write fails with "no encode delegate for this
+image format `HEIC'", which conv reports as the missing encoder. Debian and
+Ubuntu ship it as `libheif-plugin-x265`, Fedora not at all (RPM Fusion's
+`libheif-freeworld` adds it), and ImageMagick's Windows build is made
+without x265 (its libheif config defines the AOM encoder and the libde265
+decoder only).

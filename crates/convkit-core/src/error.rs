@@ -173,7 +173,42 @@ pub fn manual_hint_for(backend: Backend) -> String {
         .unwrap_or_else(|| backend.download_hint().to_string())
 }
 
+/// How to get an ImageMagick that writes HEIC, for whichever package
+/// manager is on `PATH`. Debian and Ubuntu split libheif's x265 encoder into
+/// its own package; Fedora leaves it to RPM Fusion; ImageMagick's Windows
+/// build has no HEVC encoder at all, so there the fix is another format.
+/// Homebrew's and Arch's libheif include it already.
+pub(crate) fn heic_encoder_hint(pm: Option<PackageManager>) -> &'static str {
+    match pm {
+        Some(PackageManager::Apt) => "sudo apt-get install libheif-plugin-x265",
+        Some(PackageManager::Dnf) => "enable RPM Fusion, then sudo dnf install libheif-freeworld",
+        Some(PackageManager::Winget | PackageManager::Choco | PackageManager::Scoop) => {
+            "--to avif or --to jpg instead (ImageMagick's Windows build has no HEVC encoder)"
+        }
+        Some(PackageManager::Brew) => "brew reinstall libheif imagemagick",
+        Some(PackageManager::Pacman) => "sudo pacman -S libheif x265",
+        None => "install an ImageMagick whose libheif includes the x265 encoder",
+    }
+}
+
 impl ConvError {
+    /// ImageMagick can read HEIC through libheif but found no HEVC encoder
+    /// there, so it registered no HEIC writer and said only "no encode
+    /// delegate". A conversion failure, not a missing backend: `magick`
+    /// itself is installed and does everything else.
+    pub fn heic_encoder_missing() -> ConvError {
+        ConvError {
+            code: ErrorCode::ConversionFailed,
+            message: "this ImageMagick cannot write HEIC: its libheif has no HEVC encoder"
+                .to_string(),
+            backend: Some(Backend::Magick),
+            remediation: Some(Remediation {
+                managed: None,
+                manual: Some(heic_encoder_hint(PackageManager::detect()).to_string()),
+            }),
+        }
+    }
+
     /// A required backend could not be resolved anywhere. `remediation.managed`
     /// is only offered when `manifest::has_managed_build(backend)` is true —
     /// that is, when a `conv install <backend>` would actually succeed on
@@ -276,6 +311,29 @@ impl ConvError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each package manager is pointed at the package that adds libheif's
+    /// HEVC encoder, or told plainly that its build has none.
+    #[test]
+    fn a_missing_hevc_encoder_names_the_package_that_adds_it() {
+        assert_eq!(
+            heic_encoder_hint(Some(PackageManager::Apt)),
+            "sudo apt-get install libheif-plugin-x265"
+        );
+        assert!(heic_encoder_hint(Some(PackageManager::Dnf)).contains("libheif-freeworld"));
+        for pm in [
+            PackageManager::Winget,
+            PackageManager::Choco,
+            PackageManager::Scoop,
+        ] {
+            assert!(heic_encoder_hint(Some(pm)).contains("--to avif"), "{pm:?}");
+        }
+        assert!(!heic_encoder_hint(None).is_empty());
+        let e = ConvError::heic_encoder_missing();
+        assert_eq!(e.code, ErrorCode::ConversionFailed);
+        assert_eq!(e.backend, Some(Backend::Magick));
+        assert!(e.remediation.and_then(|r| r.manual).is_some());
+    }
 
     #[test]
     fn backend_missing_never_leaves_remediation_empty() {
