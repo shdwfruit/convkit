@@ -613,8 +613,9 @@ pub fn pdf_plan_json(plan: &convkit_core::pdf::PdfPlan) -> serde_json::Value {
         "commands": commands,
         "warnings": plan.notes,
         "notes": plan.warnings,
+        "locked": plan.lock.is_some(),
     });
-    if plan.is_merge() {
+    if plan.writes_one_file() {
         v["output"] = json!(plan.outputs[0].path);
         v["pages"] = json!(plan.outputs[0].pages.len());
     } else {
@@ -640,6 +641,7 @@ pub fn pdf_plan_json(plan: &convkit_core::pdf::PdfPlan) -> serde_json::Value {
 ///
 /// One output reads like a conversion (its pages, its path). Several are
 /// listed by name up to three, else first ... last, with their folder.
+/// Outputs locked with a password say so after their pages.
 pub fn pdf_success_human(
     o: &convkit_core::pdf::PdfOutcome,
     elapsed: Duration,
@@ -667,6 +669,9 @@ pub fn pdf_success_human(
             (vec![listed, format!("{} files", many.len())], folder)
         }
     };
+    if o.locked {
+        fields.push("locked".to_string());
+    }
     fields.push(convkit_core::size::human(total));
     fields.push(human_elapsed(elapsed));
 
@@ -706,8 +711,9 @@ pub fn pdf_outcome_json(o: &convkit_core::pdf::PdfOutcome, elapsed: Duration) ->
         "warnings": o.notes,
         "notes": o.warnings,
         "backend_output": o.backend_output,
+        "locked": o.locked,
     });
-    if o.merge {
+    if o.one_file {
         v["output"] = json!(o.outputs[0].path);
         v["pages"] = json!(o.outputs[0].pages.len());
     } else {
@@ -718,6 +724,40 @@ pub fn pdf_outcome_json(o: &convkit_core::pdf::PdfOutcome, elapsed: Duration) ->
             .collect();
     }
     v
+}
+
+/// A batch of PDFs locked or unlocked in place, in `batch_summary_human`'s
+/// shape with the verb for what was done: `OK 3 locked - 0 skipped - 0
+/// failed - 0.2s` and the folder of one of them.
+pub fn pdf_batch_summary_human(
+    done: &str,
+    counts: (usize, usize, usize),
+    elapsed: Duration,
+    sample: Option<&Path>,
+    styled: bool,
+) -> String {
+    let (ok, skipped, failed) = counts;
+    let sep = if styled { " \u{b7} " } else { " - " };
+    let fields = [
+        format!("{ok} {done}"),
+        format!("{skipped} skipped"),
+        format!("{failed} failed"),
+        human_elapsed(elapsed),
+    ];
+    let glyph = match (failed, styled) {
+        (0, true) => paint("\u{2713}", green_bold(), true),
+        (0, false) => "OK".to_string(),
+        (_, true) => paint("\u{2717}", red_bold(), true),
+        (_, false) => "FAIL".to_string(),
+    };
+    let mut s = format!("{glyph} {}\n", fields.join(sep));
+    if let Some(dir) = sample
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        s.push_str(&format!("  {}\n", absolute_display(dir)));
+    }
+    s
 }
 
 /// Renders a whole batch's outcome as one summary line plus one location
@@ -1367,7 +1407,7 @@ mod tests {
 
     // --- merge and split ---
 
-    use convkit_core::pdf::{PdfJob, PdfOutcome, PdfPlan, PlannedOutput, WrittenOutput};
+    use convkit_core::pdf::{PdfInfo, PdfOutcome, WrittenOutput};
 
     fn written(path: &str, pages: Vec<u32>, bytes: u64) -> WrittenOutput {
         WrittenOutput {
@@ -1380,6 +1420,8 @@ mod tests {
     fn outcome(merge: bool, outputs: Vec<WrittenOutput>) -> PdfOutcome {
         PdfOutcome {
             merge,
+            one_file: merge,
+            locked: false,
             outputs,
             notes: vec!["A note.".into()],
             warnings: vec!["A warning.".into()],
@@ -1439,6 +1481,41 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_output_says_so_on_its_line_and_in_json() {
+        let mut o = outcome(true, vec![written("r-locked.pdf", vec![1, 2], 2048)]);
+        o.locked = true;
+        assert!(
+            pdf_success_human(&o, Duration::ZERO, false)
+                .starts_with("OK r-locked.pdf - 2 pages - locked - 2 KB - "),
+            "{}",
+            pdf_success_human(&o, Duration::ZERO, false)
+        );
+        assert_eq!(pdf_outcome_json(&o, Duration::ZERO)["locked"], true);
+    }
+
+    #[test]
+    fn a_lock_batch_sums_up_with_its_own_verb() {
+        let s = pdf_batch_summary_human(
+            "locked",
+            (3, 1, 0),
+            Duration::from_millis(200),
+            Some(Path::new("docs/locked/a.pdf")),
+            false,
+        );
+        let mut lines = s.lines();
+        assert_eq!(
+            lines.next(),
+            Some("OK 3 locked - 1 skipped - 0 failed - 0.2s")
+        );
+        assert!(lines.next().unwrap().ends_with("locked"));
+        let s = pdf_batch_summary_human("unlocked", (1, 0, 2), Duration::ZERO, None, false);
+        assert!(
+            s.starts_with("FAIL 1 unlocked - 0 skipped - 2 failed"),
+            "{s}"
+        );
+    }
+
+    #[test]
     fn pdf_warnings_go_to_their_own_lines() {
         let o = outcome(true, vec![written("out.pdf", vec![1], 1)]);
         assert_eq!(pdf_warnings_human(&o, false), "warning  A warning.\n");
@@ -1491,19 +1568,23 @@ mod tests {
 
     #[test]
     fn a_pdf_dry_run_prints_pasteable_qpdf_lines_then_warnings_and_notes() {
-        let plan = PdfPlan {
-            job: PdfJob::Merge {
-                inputs: vec!["a b.pdf".into(), "c.pdf".into()],
-                output: "out.pdf".into(),
-            },
-            outputs: vec![PlannedOutput {
-                path: "out.pdf".into(),
-                pages: vec![1, 2],
-            }],
-            notes: vec!["N.".into()],
-            warnings: vec!["W.".into()],
-            repaired: false,
+        let info = |path: &str| PdfInfo {
+            path: path.into(),
+            pages: 1,
+            has_bookmarks: false,
+            bookmarked_pages: vec![],
+            encrypted: false,
+            restricted: false,
+            password: None,
+            damaged: false,
         };
+        let mut plan = convkit_core::pdf::plan::merge_plan(
+            &[info("a b.pdf"), info("c.pdf")],
+            Path::new("out.pdf"),
+        )
+        .unwrap();
+        plan.notes = vec!["N.".into()];
+        plan.warnings = vec!["W.".into()];
         // `shell_quote` uses single quotes on POSIX and double quotes on Windows.
         let quoted = if cfg!(windows) {
             "\"a b.pdf\""

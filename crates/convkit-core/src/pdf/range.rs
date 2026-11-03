@@ -1,6 +1,6 @@
-//! Page ranges for `conv split`: what the user typed, `z` resolved against
-//! a real page count, and which pages a set of ranges leaves out or
-//! repeats.
+//! Page ranges for `conv split` and `conv pages`: what the user typed, `z`
+//! resolved against a real page count, and which pages a set of ranges
+//! leaves out or repeats.
 
 use crate::error::{ConvError, ErrorCode, Result};
 
@@ -63,6 +63,24 @@ pub fn parse_range(text: &str) -> Result<PageRange> {
         end,
         text: text.to_string(),
     })
+}
+
+/// Parses a comma list of ranges, as `--delete 4,6-7` and `conv pages`
+/// take them: `4,6-7` is `4` and `6-7`. Each item is a range `parse_range`
+/// reads; an empty item (`1,,3`, `3,`) is refused with the whole list.
+pub fn parse_list(text: &str) -> Result<Vec<PageRange>> {
+    text.split(',')
+        .map(|item| match item {
+            "" => Err(ConvError::new(
+                ErrorCode::InvalidInvocation,
+                format!(
+                    "`{text}` is not a page list; separate pages (5), spans (1-3) and z \
+                     for the last page (11-z) with commas, as in 1-3,5"
+                ),
+            )),
+            item => parse_range(item),
+        })
+        .collect()
 }
 
 impl PageRange {
@@ -143,6 +161,34 @@ pub fn spans(pages: &[u32]) -> String {
         i += 1;
     }
     join_and(&parts)
+}
+
+/// Pages in the order given, as runs: `[3, 1, 2, 5, 6, 7]` is `3`, `1-2`
+/// and `5-7`, and `[5, 4, 3]` is `5-3`, as a reversed range is written.
+pub fn ordered_runs(pages: &[u32]) -> Vec<String> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < pages.len() {
+        let start = pages[i];
+        let mut j = i;
+        let step = match pages.get(i + 1) {
+            Some(&next) if next == start + 1 => Some(1i64),
+            Some(&next) if start > 0 && next == start - 1 => Some(-1i64),
+            _ => None,
+        };
+        if let Some(step) = step {
+            while j + 1 < pages.len() && i64::from(pages[j + 1]) == i64::from(pages[j]) + step {
+                j += 1;
+            }
+        }
+        runs.push(if j == i {
+            start.to_string()
+        } else {
+            format!("{start}-{}", pages[j])
+        });
+        i = j + 1;
+    }
+    runs
 }
 
 /// `a`, `a and b`, `a, b and c`.
@@ -256,6 +302,43 @@ mod tests {
         assert_eq!(spans(&[11, 12]), "11-12");
         assert_eq!(spans(&[1, 5, 6, 7, 8, 9, 10, 11, 12]), "1 and 5-12");
         assert_eq!(spans(&[1, 4, 9, 10, 11, 12]), "1, 4 and 9-12");
+    }
+
+    #[test]
+    fn a_list_is_ranges_between_commas() {
+        let texts = |l: &str| -> Vec<String> {
+            parse_list(l).unwrap().into_iter().map(|r| r.text).collect()
+        };
+        assert_eq!(texts("4"), vec!["4"]);
+        assert_eq!(texts("4,6-7"), vec!["4", "6-7"]);
+        assert_eq!(texts("11-z,1"), vec!["11-z", "1"]);
+        for bad in ["", "1,,3", "3,", ",3"] {
+            let e = parse_list(bad).unwrap_err();
+            assert!(
+                e.message
+                    .starts_with(&format!("`{bad}` is not a page list")),
+                "{bad}"
+            );
+        }
+        let e = parse_list("1,x").unwrap_err();
+        assert!(
+            e.message.starts_with("`x` is not a page range"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn ordered_runs_keep_the_order_and_both_directions() {
+        let r = |p: &[u32]| ordered_runs(p).join(" ");
+        assert_eq!(r(&[]), "");
+        assert_eq!(r(&[1, 2, 3]), "1-3");
+        assert_eq!(r(&[3, 1, 2, 5, 6, 7]), "3 1-2 5-7");
+        assert_eq!(r(&[5, 4, 3]), "5-3");
+        assert_eq!(r(&[1, 1, 1]), "1 1 1");
+        assert_eq!(r(&[1, 2, 1]), "1-2 1");
+        assert_eq!(r(&[1, 3, 5]), "1 3 5");
+        assert_eq!(r(&[2, 1, 2, 3]), "2-1 2-3");
     }
 
     #[test]

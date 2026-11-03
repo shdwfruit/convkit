@@ -1,5 +1,7 @@
-//! What `conv merge` and `conv split` share: finding qpdf (offering to
-//! install it), `-v` output, and printing a plan, a result or a failure.
+//! What `conv merge`, `conv split`, `conv pages` and a PDF's `--password`
+//! and `--unlock` share: finding qpdf (offering to install it), the lock
+//! `--password` asks for, `-v` output, and printing a plan, a result or a
+//! failure.
 
 use std::time::Duration;
 
@@ -7,10 +9,25 @@ use convkit_core::pdf::{PdfOutcome, PdfPlan};
 use convkit_core::{Backend, ConvError, ErrorCode, Event, ResolvedBackend};
 use serde_json::json;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, LockArgs};
 use crate::commands::install;
 use crate::install_prompt;
+use crate::password;
 use crate::render;
+
+/// `plan`, locked as `--password` asks, once every input is open. `what`
+/// names the output in the question: `out.pdf`, `the split files`.
+pub(crate) fn locked(
+    mut plan: PdfPlan,
+    lock: &LockArgs,
+    what: &str,
+    dry_run: bool,
+) -> Result<PdfPlan, ConvError> {
+    if let Some(lock) = password::lock_for(lock.password, &lock.restrict, what, dry_run)? {
+        plan.set_lock(lock);
+    }
+    Ok(plan)
+}
 
 /// qpdf, resolved the usual way. When it is missing and `offer_install` is
 /// set, the same install prompt a conversion gives (`--yes` installs,

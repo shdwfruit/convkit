@@ -1,22 +1,32 @@
-//! PDF merge and split (`conv merge`, `conv split`), run on qpdf.
+//! PDF merge, split, page edits and passwords (`conv merge`, `conv
+//! split`, `conv pages`, `--password`, `--unlock`), run on qpdf.
 //!
 //! qpdf rewrites a PDF's structure and never re-renders a page, so text,
 //! links and images come through untouched. This module reads the inputs,
 //! plans the qpdf calls together with the notes and warnings a person
 //! should see, and runs them through a scratch folder so a failure leaves
-//! nothing behind. Like the rest of convkit-core, it never prints.
+//! nothing behind. Like the rest of convkit-core, it never prints, and it
+//! never asks for a password itself: the caller passes `AskPassword`.
 
+pub mod lock;
+pub mod pages;
 pub mod plan;
 pub mod range;
 pub mod read;
 pub mod run;
 
-pub use plan::{plan_merge, plan_split, PdfJob, PdfPlan, PlannedOutput};
-pub use range::{parse_range, PageRange};
-pub use read::PdfInfo;
+pub use lock::{Lock, Password, Restriction, PASSWORD_ENV};
+pub use pages::{plan_pages, PageEdit};
+pub use plan::{plan_merge, plan_rewrite, plan_split, PdfJob, PdfPlan, PlannedOutput, Rewrite};
+pub use range::{parse_list, parse_range, PageRange};
+pub use read::{open, AskPassword, PdfInfo};
 pub use run::{run, PdfOutcome, WrittenOutput};
 
+use std::io::Write;
 use std::path::Path;
+use std::process::{Output, Stdio};
+
+use crate::procutil::backend_command;
 
 /// A path's file name for messages, or the whole path when it has none.
 pub(crate) fn display_name(p: &Path) -> String {
@@ -52,6 +62,47 @@ pub(crate) fn qpdf_reason(stderr: &str) -> String {
         .last()
         .map(|l| l.to_string())
         .unwrap_or_else(|| "qpdf exited with an error".to_string())
+}
+
+/// Runs qpdf with `argv`. With `secret` set (some argument holds a
+/// password) the arguments go to qpdf on its standard input, as `qpdf @-`
+/// reads them, one per line, so no password is ever on a command line
+/// another user could read in the process list. `cwd` is where it runs.
+pub(crate) fn qpdf_output(
+    qpdf: &Path,
+    argv: &[String],
+    secret: bool,
+    cwd: Option<&Path>,
+) -> std::io::Result<Output> {
+    let mut cmd = backend_command(qpdf);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    if !secret {
+        return cmd.args(argv).output();
+    }
+    if argv.iter().any(|a| a.contains(['\n', '\r'])) {
+        return Err(std::io::Error::other(
+            "a file name with a line break can't be passed to qpdf with a password",
+        ));
+    }
+    let mut child = cmd
+        .arg("@-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut lines = argv.join("\n");
+    lines.push('\n');
+    // qpdf reads every argument before it writes anything, but a thread
+    // keeps a full pipe from ever deadlocking the two of us.
+    let mut stdin = child.stdin.take().expect("piped");
+    let writer = std::thread::spawn(move || stdin.write_all(lines.as_bytes()));
+    let out = child.wait_with_output()?;
+    // A qpdf that stopped early closed its end; its exit status and stderr
+    // say why, which a broken pipe here would only hide.
+    let _ = writer.join();
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -9,9 +9,16 @@ use serde_json::json;
 use crate::cli::{Cli, MergeArgs};
 use crate::commands::pdf_support;
 use crate::input;
+use crate::password::{self, Opener};
 use crate::render;
 
 pub fn run(cli: &Cli, args: &MergeArgs) -> i32 {
+    let typed = args.lock.password.then(|| args.paths.last()).flatten();
+    if let Some(last) = typed.filter(|p| Format::from_path(p).is_none() && !p.exists()) {
+        let e = password::typed_after_the_flag(&last.display().to_string());
+        render::print_error(cli.json, &e);
+        return e.code.exit_code();
+    }
     let (inputs, output) = match split_paths(&args.paths) {
         Ok(p) => p,
         Err(e) => {
@@ -37,7 +44,12 @@ pub fn run(cli: &Cli, args: &MergeArgs) -> i32 {
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
 
-    let plan = match pdf::plan_merge(&qpdf.path, &inputs, &output) {
+    let mut opener = Opener::from_env();
+    let planned = pdf::plan_merge(&qpdf.path, &inputs, &output, &mut |p, wrong| {
+        opener.next(p, wrong)
+    })
+    .and_then(|plan| pdf_support::locked(plan, &args.lock, &header, args.dry_run));
+    let plan = match planned {
         Ok(p) => p,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };

@@ -14,8 +14,9 @@ pub enum Backend {
     /// relocatable binary on every platform this manifest covers, so —
     /// unlike `Soffice` — it is managed.
     Typst,
-    /// qpdf, which merges and splits PDFs by rewriting their structure
-    /// (`conv merge`, `conv split`). Its upstream builds are a program plus
+    /// qpdf, which merges, splits, edits the pages of and locks PDFs by
+    /// rewriting their structure (`conv merge`, `conv split`, `conv pages`,
+    /// `--password`, `--unlock`). Its upstream builds are a program plus
     /// shared libraries, so it installs as a folder; see `ManagedLayout`.
     Qpdf,
     /// macOS's own speech engine, which reads text aloud into a file

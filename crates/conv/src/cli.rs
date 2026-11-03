@@ -182,6 +182,34 @@ pub struct Cli {
     #[arg(long, value_name = "WPM", value_parser = parse_rate)]
     pub rate: Option<u16>,
 
+    /// Lock a PDF with a password (AES-256), written as NAME-locked.pdf, or
+    /// into a locked folder with --to pdf. conv asks for it twice without
+    /// showing it, or reads CONVKIT_PASSWORD; it never takes one on the
+    /// command line, where it would stay in your shell history.
+    // A flag, not an option with a value, for exactly that reason. Not
+    // `global` -- see `dry_run`'s comment.
+    #[arg(long)]
+    pub password: bool,
+
+    /// Write a copy of a PDF without its password and restrictions, as
+    /// NAME-unlocked.pdf, or into an unlocked folder with --to pdf. conv
+    /// asks for the password when the PDF needs one, or reads
+    /// CONVKIT_PASSWORD.
+    #[arg(long, conflicts_with = "password")]
+    pub unlock: bool,
+
+    /// With --password, turn off printing, copying or editing for whoever
+    /// opens it, e.g. --restrict print,copy. PDF apps honour this, though
+    /// nothing forces them to.
+    #[arg(
+        long,
+        value_name = "WHAT",
+        value_delimiter = ',',
+        value_parser = parse_restriction,
+        requires = "password"
+    )]
+    pub restrict: Vec<convkit_core::pdf::Restriction>,
+
     /// Copy what was written to the clipboard, ready to paste: a picture
     /// as itself (and its file), an md, csv, html, txt, json, yaml or toml
     /// file as its text, and anything else, or several outputs, as the
@@ -778,7 +806,10 @@ before p10).
 qpdf does the work, rewriting the files' structure rather than re-rendering \
 pages, so text stays selectable and links keep working. The first file's \
 bookmarks are kept; later files' bookmarks and every file's permission \
-restrictions are not, and conv prints a note when that happens.")]
+restrictions are not, and conv prints a note when that happens.
+
+A PDF that needs a password to open is asked for it, or opened with \
+CONVKIT_PASSWORD. --password locks the merged file.")]
     Merge(MergeArgs),
 
     /// Split a PDF into one file per page, or one per page range.
@@ -791,8 +822,25 @@ input, or into -o DIR.
 
 Pages no range covers are left out with a warning, and a page in more than \
 one range is written to each, with a note. A range past the last page is \
-refused before anything is written.")]
+refused before anything is written. A locked PDF is asked for its \
+password, and --password locks every file written.")]
     Split(SplitArgs),
+
+    /// Keep, reorder, delete and turn a PDF's pages: `conv pages report.pdf 3 1-2 5-z`.
+    #[command(long_about = "\
+Writes one PDF from another's pages: the PAGES listed, in that order, \
+without the --delete pages, turned by --rotate. A page is a number (5), a \
+span (1-3), z for the last page (11-z), or a reversed span (5-1); give \
+several with spaces or commas, and repeat a page to repeat it. With no \
+PAGES, every page is kept. Every page number is the input's own, in all \
+three places.
+
+The file is named after the input and its pages -- report-1-3.pdf, \
+report-3_1-2_5-12.pdf, and -rotated when pages turn -- next to the input or \
+in -o DIR. Name it yourself as the last argument (out.pdf). The input's \
+bookmarks, links and metadata are kept; conv says when a bookmark led to a \
+page that is gone.")]
+    Pages(PagesArgs),
 
     /// The text and developer tools: base64, hash, uuid, jwt, time, link,
     /// count, case, chars, lorem and diff.
@@ -866,6 +914,72 @@ pub struct MergeArgs {
     /// Show the qpdf command as it runs, and qpdf's own output.
     #[arg(short = 'v', long)]
     pub verbose: bool,
+
+    #[command(flatten)]
+    pub lock: LockArgs,
+}
+
+/// `--password` and `--restrict` for a PDF command, meaning what they mean
+/// on a PDF kept as a PDF: lock what it writes.
+#[derive(Args, Debug, Clone, Default)]
+pub struct LockArgs {
+    /// Lock what it writes with a password (AES-256). conv asks for it
+    /// twice without showing it, or reads CONVKIT_PASSWORD.
+    #[arg(long)]
+    pub password: bool,
+
+    /// With --password, turn off printing, copying or editing for whoever
+    /// opens it, e.g. --restrict print,copy.
+    #[arg(
+        long,
+        value_name = "WHAT",
+        value_delimiter = ',',
+        value_parser = parse_restriction,
+        requires = "password"
+    )]
+    pub restrict: Vec<convkit_core::pdf::Restriction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PagesArgs {
+    /// The PDF.
+    #[arg(value_name = "PDF")]
+    pub input: PathBuf,
+
+    /// The pages to keep, in the order to write them: 5, 1-3, 11-z (z is
+    /// the last page), 5-1 (reversed), or several with commas (1-3,5).
+    /// Last, optionally, the file to write (out.pdf).
+    #[arg(value_name = "PAGES")]
+    pub pages: Vec<String>,
+
+    /// Leave these pages out: --delete 4,6-7.
+    #[arg(long, value_name = "PAGES")]
+    pub delete: Vec<String>,
+
+    /// Turn pages: right (clockwise), left or 180 turns every page, and
+    /// right:2,4 only those. Repeat it for different turns.
+    // `allow_hyphen_values` so `--rotate -90:2` is a turn, not a flag.
+    #[arg(long, value_name = "TURN[:PAGES]", allow_hyphen_values = true)]
+    pub rotate: Vec<String>,
+
+    /// Write the file into this folder (created if missing).
+    #[arg(short = 'o', long, value_name = "DIR")]
+    pub outdir: Option<PathBuf>,
+
+    /// Overwrite the file if it exists.
+    #[arg(short = 'y', long)]
+    pub overwrite: bool,
+
+    /// Print the qpdf command instead of running it.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Show the qpdf command as it runs, and qpdf's own output.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+
+    #[command(flatten)]
+    pub lock: LockArgs,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -894,6 +1008,9 @@ pub struct SplitArgs {
     /// Show each qpdf command as it runs, and qpdf's own output.
     #[arg(short = 'v', long)]
     pub verbose: bool,
+
+    #[command(flatten)]
+    pub lock: LockArgs,
 }
 
 /// A dimension past this is not a size any real raster or frame reaches --
@@ -1013,6 +1130,10 @@ fn parse_point(s: &str) -> Result<(u32, u32), String> {
     let (x, y) = s.split_once(',').ok_or_else(bad)?;
     let n = |t: &str| t.trim().parse::<u32>().map_err(|_| bad());
     Ok((n(x)?, n(y)?))
+}
+
+fn parse_restriction(s: &str) -> Result<convkit_core::pdf::Restriction, String> {
+    convkit_core::pdf::Restriction::parse(s)
 }
 
 fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
@@ -1137,6 +1258,9 @@ mod tests {
             rotate: None,
             voice: None,
             rate: None,
+            password: false,
+            unlock: false,
+            restrict: vec![],
             copy: false,
             paste: false,
             yes: false,

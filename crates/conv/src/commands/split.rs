@@ -10,6 +10,7 @@ use serde_json::json;
 use crate::cli::{Cli, SplitArgs};
 use crate::commands::pdf_support;
 use crate::input;
+use crate::password::{self, Opener};
 use crate::render;
 
 pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
@@ -36,7 +37,16 @@ pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
         Ok(q) => q,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
-    let plan = match pdf::plan_split(&qpdf.path, &input, &ranges, args.outdir.as_deref()) {
+    let mut opener = Opener::from_env();
+    let planned = pdf::plan_split(
+        &qpdf.path,
+        &input,
+        &ranges,
+        args.outdir.as_deref(),
+        &mut |p, wrong| opener.next(p, wrong),
+    )
+    .and_then(|plan| pdf_support::locked(plan, &args.lock, "the split files", args.dry_run));
+    let plan = match planned {
         Ok(p) => p,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
@@ -109,6 +119,15 @@ fn check_args(args: &SplitArgs) -> Result<(PathBuf, Vec<PageRange>), ConvError> 
             format!("split takes a PDF file; {} is not one", name_of(&input)),
         ));
     }
+    if args.lock.password {
+        if let Some(typed) = args
+            .ranges
+            .iter()
+            .find(|r| pdf::parse_range(r).is_err() && !Path::new(r).exists())
+        {
+            return Err(password::typed_after_the_flag(typed));
+        }
+    }
     let ranges = args
         .ranges
         .iter()
@@ -129,6 +148,7 @@ mod tests {
             overwrite: false,
             dry_run: false,
             verbose: false,
+            lock: Default::default(),
         }
     }
 
@@ -157,6 +177,19 @@ mod tests {
             e.message,
             "split takes one PDF; got 3. Run it once per file."
         );
+    }
+
+    #[test]
+    fn a_password_typed_after_the_flag_is_called_out() {
+        let mut a = args("report.pdf", &["1-3", "hunter2"]);
+        a.lock.password = true;
+        let e = check_args(&a).unwrap_err();
+        assert!(
+            e.message.starts_with("--password takes no value"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("hunter2 is not a file"), "{}", e.message);
     }
 
     #[test]

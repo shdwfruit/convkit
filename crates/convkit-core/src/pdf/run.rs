@@ -3,12 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use super::display_name;
-use super::plan::{PdfJob, PdfPlan};
+use super::plan::PdfPlan;
 use super::range::join_and;
+use super::{display_name, qpdf_output};
 use crate::error::{ConvError, ErrorCode, Result};
 use crate::exec::{self, BackendOutput, Event};
-use crate::procutil::backend_command;
 use crate::resolve::ResolvedBackend;
 use crate::{winpath, Backend};
 
@@ -20,10 +19,14 @@ pub struct WrittenOutput {
     pub bytes: u64,
 }
 
-/// A finished merge or split.
+/// A finished merge, split, page edit or rewrite.
 #[derive(Debug, Clone)]
 pub struct PdfOutcome {
     pub merge: bool,
+    /// Writes one file (a merge, a page edit, a rewrite), not a split.
+    pub one_file: bool,
+    /// The outputs are locked with a password.
+    pub locked: bool,
     pub outputs: Vec<WrittenOutput>,
     /// Printed as `note` lines; JSON `warnings`.
     pub notes: Vec<String>,
@@ -40,7 +43,9 @@ const REPORT_CAP: usize = 16 * 1024;
 /// exists (unless `overwrite`) or names a reserved Windows device. Every
 /// call writes into one scratch folder beside the outputs, which is removed
 /// on every exit path; outputs move into place only after all calls have
-/// succeeded and every output is non-empty.
+/// succeeded and every output is non-empty. A call that carries a password
+/// hands qpdf its arguments on standard input (see `qpdf_output`), and
+/// `StepSpawned` shows it with the passwords as placeholders.
 pub fn run(
     plan: &PdfPlan,
     qpdf: &ResolvedBackend,
@@ -71,7 +76,9 @@ pub fn run(
     let scratch = exec::make_scratch_dir(dest_dir)?;
     let _guard = exec::ScratchGuard::new(scratch.clone());
 
-    let commands = plan.commands_into(Some(&scratch));
+    let commands = plan.commands_into(Some(&scratch), true);
+    let shown = plan.commands_into(Some(&scratch), false);
+    let secret = plan.has_secrets();
     // A relative --qpdf-path would resolve against the scratch folder once
     // the command runs there.
     let program = if plan.runs_in_scratch() {
@@ -82,23 +89,19 @@ pub fn run(
     let total = commands.len();
     let mut backend_output = Vec::new();
     let mut qpdf_warned = false;
-    for (index, argv) in commands.iter().enumerate() {
+    for (index, (argv, shown)) in commands.iter().zip(shown).enumerate() {
         on_event(Event::StepStarted {
             index,
             total,
             backend: Backend::Qpdf,
         });
-        let mut cmd = backend_command(&program);
-        cmd.args(argv);
-        if plan.runs_in_scratch() {
-            cmd.current_dir(&scratch);
-        }
         on_event(Event::StepSpawned {
             index,
             program: program.clone(),
-            argv: argv.clone(),
+            argv: shown,
         });
-        let out = cmd.output().map_err(|e| {
+        let cwd = plan.runs_in_scratch().then_some(scratch.as_path());
+        let out = qpdf_output(&program, argv, secret, cwd).map_err(|e| {
             ConvError::new(
                 ErrorCode::ConversionFailed,
                 format!("failed to run {}: {e}", qpdf.path.display()),
@@ -159,16 +162,18 @@ pub fn run(
 
     let mut warnings = plan.warnings.clone();
     if qpdf_warned && !plan.repaired {
-        warnings.push(match &plan.job {
-            PdfJob::Merge { output, .. } => format!(
+        warnings.push(match plan.outputs.as_slice() {
+            [one] => format!(
                 "qpdf reported problems while writing {}; check it.",
-                display_name(output)
+                display_name(&one.path)
             ),
             _ => "qpdf reported problems while writing the split files; check them.".to_string(),
         });
     }
     Ok(PdfOutcome {
         merge: plan.is_merge(),
+        one_file: plan.writes_one_file(),
+        locked: plan.lock.is_some(),
         outputs,
         notes: plan.notes.clone(),
         warnings,
@@ -261,7 +266,10 @@ mod tests {
             path: path.to_path_buf(),
             pages,
             has_bookmarks: false,
+            bookmarked_pages: vec![],
+            encrypted: false,
             restricted: false,
+            password: None,
             damaged: false,
         }
     }
@@ -432,6 +440,51 @@ mod tests {
         );
         assert_eq!(o.backend_output.len(), 1);
         assert!(o.backend_output[0].stderr.contains("something odd"));
+    }
+
+    /// A password reaches qpdf on its standard input, never as an argument,
+    /// and `-v` shows only the placeholder.
+    #[cfg(unix)]
+    #[test]
+    fn a_password_goes_to_qpdf_on_stdin_and_never_on_its_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.pdf");
+        std::fs::write(&input, b"%PDF").unwrap();
+        let mut source = info(&input, 1);
+        source.encrypted = true;
+        source.password = Some(crate::pdf::Password::new("s3cret").unwrap());
+        let plan = crate::pdf::plan::rewrite_plan(
+            &source,
+            &dir.path().join("out.pdf"),
+            crate::pdf::Rewrite::Unlock,
+        )
+        .unwrap();
+        let log = dir.path().join("log");
+        // Records its arguments and stdin, then writes the last line it read
+        // (the output) the way qpdf would.
+        let (_stub_dir, qpdf) = stub_qpdf(&format!(
+            "echo \"$@\" > '{log}.args'\n\
+             cat > '{log}.stdin'\n\
+             last=$(tail -n 1 '{log}.stdin')\n\
+             printf '%%PDF-stub' > \"$last\"",
+            log = log.display()
+        ));
+        let mut spawned = Vec::new();
+
+        run(&plan, &qpdf, false, &mut |e| {
+            if let Event::StepSpawned { argv, .. } = e {
+                spawned = argv;
+            }
+        })
+        .unwrap();
+
+        let args = std::fs::read_to_string(format!("{}.args", log.display())).unwrap();
+        assert_eq!(args.trim(), "@-");
+        let stdin = std::fs::read_to_string(format!("{}.stdin", log.display())).unwrap();
+        let lines: Vec<&str> = stdin.lines().collect();
+        assert_eq!(lines[..2], ["--decrypt", "--password=s3cret"]);
+        assert_eq!(spawned[1], "--password=<password>");
+        assert!(dir.path().join("out.pdf").is_file());
     }
 
     #[test]
