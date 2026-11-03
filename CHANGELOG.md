@@ -39,6 +39,20 @@
   with a warning. Both run on qpdf, so text and links come through untouched.
   The merged file keeps the first file's bookmarks only, and permission
   restrictions are dropped; conv notes both when they apply.
+- **`conv pages` picks, reorders, deletes and turns a PDF's pages.**
+  `conv pages report.pdf 3 1-2 5-z` writes those pages in that order, as
+  `report-3_1-2_5-12.pdf`. `--delete 4,6-7` leaves pages out, and
+  `--rotate right:2,4` turns them (`--rotate right` turns them all). Page
+  numbers always mean the input's pages. Bookmarks, links and metadata
+  stay, and conv notes a bookmark that now goes nowhere.
+- **Passwords on PDFs.** `conv report.pdf --password` writes
+  `report-locked.pdf`, locked with AES-256 and a password asked twice
+  without showing it; `--restrict print,copy,edit` turns those off as well.
+  `--unlock` writes a copy without the password, and a `--to pdf` batch of
+  either writes into a `locked` or `unlocked` folder. `merge`, `split` and
+  `pages` open locked PDFs too, asking for the password or reading
+  `CONVKIT_PASSWORD`, and `--password` locks what they write. A password
+  never goes on qpdf's command line.
 - **qpdf is a managed backend.** `conv install qpdf` downloads qpdf 12.4.2 for
   all five platforms, checks its SHA-256, and installs it as a folder. The
   Linux build needs glibc 2.34 or newer. `--qpdf-path` and `CONVKIT_QPDF`
