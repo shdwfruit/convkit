@@ -201,6 +201,12 @@
   first, so `--rotate right --flip h` flips the turned picture. A JPEG, MP4
   or MOV whose tag mirrored it is fixed by resetting the tag, with nothing
   re-encoded.
+- **Clean up the sound with `--denoise`.** `conv talk.mp4 --denoise` takes
+  background noise and mains hum out of a voice recording, podcast or
+  phone video, offline, with no model to download. A video keeps its
+  picture as it is, and only the sound is re-encoded. `--denoise=strong`
+  takes more off a very noisy recording, at some cost to the voice. One
+  file is written as `talk-denoised.mp4`, and a batch into `denoised/`.
 
 ### Changed
 

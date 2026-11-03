@@ -133,6 +133,7 @@ mod tests {
             duration: None,
             speed: None,
             shift_pitch: false,
+            denoise: None,
             rotate: None,
             voice: None,
             rate: None,

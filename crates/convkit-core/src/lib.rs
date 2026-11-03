@@ -5,6 +5,7 @@ pub mod beautify;
 pub mod budget;
 pub mod crop;
 pub mod data;
+pub mod denoise;
 pub mod error;
 pub mod exec;
 mod exif;

@@ -59,6 +59,10 @@ pub struct Tuning {
     /// Let the pitch move with `speed`, as a tape played fast does, rather
     /// than keep it.
     pub shift_pitch: bool,
+    /// Take background noise and hum out of the sound (`--denoise`), at
+    /// this strength. Checked against the probe by `denoise::resolve`; the
+    /// chain reaches argv through `ResolvedVideo::denoise`.
+    pub denoise: Option<crate::denoise::Strength>,
     /// A turn of the picture as it is shown (`--rotate`). Decided against
     /// the probe's orientation by `plan::build_tuned`; a turn of the pixels
     /// reaches argv through `ResolvedVideo::turn`.
@@ -111,6 +115,7 @@ impl Tuning {
             && !self.mute
             && !self.shift_pitch
             && self.speed.is_none()
+            && self.denoise.is_none()
             && self.rotate.is_none()
             && self.crop.is_none()
             && self.audio.is_none()
@@ -336,8 +341,9 @@ pub enum Arg {
     /// `trim::Cut::input_args`. A step with this slot also gets the cut's
     /// output options just before its `Output` (`trim::Cut::output_args`).
     Trim,
-    /// `-af` and the audio filters: a speed change's (`speed::Retime`), then
-    /// the recipe's own, when it authors one (libopus's channel layouts).
+    /// `-af` and the audio filters: `--denoise`'s and a speed change's
+    /// (`ResolvedVideo::audio_filter`), then the recipe's own, when it
+    /// authors one (libopus's channel layouts).
     /// Renders nothing when there is neither, keeping untuned argv
     /// byte-identical to the static table. One slot rather than a filter
     /// per knob for the reason `VideoChain` is one: a second `-af` replaces
@@ -581,8 +587,8 @@ impl Step {
                     }
                 }
                 Arg::AudioFilter(own) => {
-                    let speed = video.speed.as_ref().and_then(|r| r.audio.as_deref());
-                    let chain: Vec<&str> = speed.into_iter().chain(*own).collect();
+                    let ours = video.audio_filter();
+                    let chain: Vec<&str> = ours.as_deref().into_iter().chain(*own).collect();
                     if !chain.is_empty() {
                         argv.push("-af".to_string());
                         argv.push(chain.join(","));
@@ -1003,6 +1009,7 @@ mod tests {
             mute: false,
             speed: None,
             shift_pitch: false,
+            denoise: None,
             rotate: None,
             voice: None,
             rate: None,
@@ -1291,6 +1298,24 @@ mod tests {
             ["-af", "atempo=2,aformat=channel_layouts=stereo"]
         );
         assert_eq!(render(BARE, &silent), ["-i", "in.mp4", "out.m4a"]);
+        // The noise comes out of the sound as recorded, then it is retimed,
+        // and the recipe's own filter still comes last.
+        let cleaned = ResolvedVideo {
+            denoise: Some("highpass=f=80"),
+            ..fast
+        };
+        assert_eq!(
+            render(LAYOUT, &cleaned)[2..4],
+            [
+                "-af",
+                "highpass=f=80,atempo=2,aformat=channel_layouts=stereo"
+            ]
+        );
+        let alone = ResolvedVideo {
+            denoise: Some("highpass=f=80"),
+            ..ResolvedVideo::default()
+        };
+        assert_eq!(render(BARE, &alone)[2..4], ["-af", "highpass=f=80"]);
     }
 
     #[test]

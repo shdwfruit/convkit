@@ -186,6 +186,7 @@ fn other_knobs(t: &Tuning) -> Vec<&'static str> {
         (t.strip_metadata, "--strip-metadata"),
         (t.range.is_some(), "--start/--end/--duration"),
         (t.speed.is_some(), "--speed"),
+        (t.denoise.is_some(), "--denoise"),
         (t.rotate.is_some(), "--rotate"),
         (t.flip.is_some(), "--flip"),
         (t.crop.is_some(), "--crop"),
@@ -966,6 +967,7 @@ pub(crate) fn run(
         crop: None,
         audio: None,
         subtitles: None,
+        denoise: None,
     };
 
     // A file already under its target is copied as it is, as video is.
@@ -1164,6 +1166,7 @@ fn plan_with(
         crop: None,
         audio: None,
         subtitles: None,
+        denoise: None,
     }
 }
 

@@ -13,11 +13,12 @@ use convkit_core::{Resolver, Tuning};
 pub struct Cli {
     /// Input paths, then optionally an output path or a bare `.ext`. With
     /// `--max-size`, `--compress`, `--strip-metadata`,
-    /// `--start`/`--end`/`--duration`, `--speed`, `--rotate`, `--flip` or
-    /// `--crop`, a lone input keeps its format and is written as
+    /// `--start`/`--end`/`--duration`, `--speed`, `--denoise`, `--rotate`,
+    /// `--flip` or `--crop`, a lone input keeps its format and is written as
     /// NAME-SUFFIX.EXT (`clip.mp4` -> `clip-10mb.mp4`, `scan-compressed.pdf`,
     /// `photo-stripped.jpg`, `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`,
-    /// `photo-rotated.jpg`, `photo-flipped.jpg`, `photo-cropped.jpg`).
+    /// `talk-denoised.mp4`, `photo-rotated.jpg`, `photo-flipped.jpg`,
+    /// `photo-cropped.jpg`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -165,6 +166,25 @@ pub struct Cli {
     /// when sped up, lower when slowed down. Adds -pitched to the name.
     #[arg(long, requires = "speed")]
     pub shift_pitch: bool,
+
+    /// Take background noise and mains hum out of the sound, for voice
+    /// recordings, podcasts and phone videos. --denoise=strong takes more
+    /// off a loud floor, at some cost to the voice. Video and audio
+    /// targets; a video keeps its picture as it is where the target holds
+    /// it, and only the sound is re-encoded. A lone input keeps its format:
+    /// talk.mp4 -> talk-denoised.mp4; a --to batch writes into a denoised
+    /// folder, e.g. denoised/talk.mp4, unless -o is given.
+    // `require_equals` so a bare `--denoise` never swallows the path after
+    // it as a strength. Not `global` -- see `dry_run`'s comment.
+    #[arg(
+        long,
+        value_name = "STRENGTH",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "normal",
+        value_parser = parse_denoise
+    )]
+    pub denoise: Option<convkit_core::denoise::Strength>,
 
     /// Turn the picture as it is shown: right (90 degrees clockwise), left
     /// or 180. The picture itself is turned, so it shows the same way in
@@ -1275,6 +1295,10 @@ fn parse_speed(s: &str) -> Result<convkit_core::speed::Speed, String> {
     convkit_core::speed::parse(s)
 }
 
+fn parse_denoise(s: &str) -> Result<convkit_core::denoise::Strength, String> {
+    convkit_core::denoise::parse(s)
+}
+
 fn parse_rotate(s: &str) -> Result<convkit_core::rotate::Turn, String> {
     convkit_core::rotate::parse(s)
 }
@@ -1359,6 +1383,7 @@ impl Cli {
             mute: false,
             speed: self.speed,
             shift_pitch: self.shift_pitch,
+            denoise: self.denoise,
             rotate: self.rotate,
             voice: self.voice.clone(),
             rate: self.rate,
@@ -1407,6 +1432,15 @@ impl Cli {
                 "--paste takes the input from the clipboard; give at most the output's name or .ext"
                     .to_string(),
             );
+        }
+        // `--denoise strong` reads as a bare flag and a path named strong.
+        let strength = |p: &PathBuf| {
+            !p.exists()
+                && p.to_str()
+                    .is_some_and(|s| convkit_core::denoise::parse(s).is_ok())
+        };
+        if self.denoise.is_some() && self.paths.iter().any(strength) {
+            return Err("give a strength with an equals sign: --denoise=strong".to_string());
         }
         self.range().map(|_| ())
     }
@@ -1464,6 +1498,7 @@ mod tests {
             duration: None,
             speed: None,
             shift_pitch: false,
+            denoise: None,
             rotate: None,
             voice: None,
             rate: None,
@@ -1599,6 +1634,31 @@ mod tests {
     fn shift_pitch_needs_a_speed() {
         let e = Cli::try_parse_from(["conv", "a.mp4", "--shift-pitch"]).unwrap_err();
         assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn a_bare_denoise_is_the_default_strength_and_takes_no_path() {
+        use convkit_core::denoise::Strength;
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--denoise", "b.m4a"]).unwrap();
+        assert_eq!(c.tuning().denoise, Some(Strength::Normal));
+        assert_eq!(c.paths, [PathBuf::from("a.mp4"), PathBuf::from("b.m4a")]);
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--denoise=strong"]).unwrap();
+        assert_eq!(c.tuning().denoise, Some(Strength::Strong));
+        let c = Cli::try_parse_from(["conv", "a.mp4"]).unwrap();
+        assert_eq!(c.tuning().denoise, None);
+        let e = Cli::try_parse_from(["conv", "a.mp4", "--denoise=max"]).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn a_strength_given_without_an_equals_sign_fails_the_check() {
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--denoise", "strong"]).unwrap();
+        assert_eq!(
+            c.check().unwrap_err(),
+            "give a strength with an equals sign: --denoise=strong"
+        );
+        let c = Cli::try_parse_from(["conv", "a.mp4", "--denoise"]).unwrap();
+        assert_eq!(c.check(), Ok(()));
     }
 
     #[test]

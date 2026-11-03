@@ -131,6 +131,10 @@ pub struct ConversionPlan {
     /// `sizing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<crate::speed::SpeedReport>,
+    /// The strength a `--denoise` conversion cleans the sound at. Skipped
+    /// when absent, like `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denoise: Option<crate::denoise::Strength>,
     /// The turn or flip a `--rotate` or `--flip` conversion makes, and how.
     /// One made `By::Tag`
     /// is the executor's to make, after any steps: it resets the output's
@@ -295,13 +299,13 @@ pub fn build_tuned(
     // A file stripped, turned or resized into its own format: no registry
     // pair covers it, so it is planned here, as `--max-size` plans its own
     // (above). A clip is not a copy of the whole file, so a range takes the
-    // cut's path below, which strips as it cuts, and so does a speed change.
-    // So does a video whose pixels turn or that is resized, which is
-    // re-encoded there.
-    let timed = tuning.range.is_some() || tuning.speed.is_some();
+    // cut's path below, which strips as it cuts, and so does a speed change,
+    // and sound that is denoised. So does a video whose pixels turn or that
+    // is resized, which is re-encoded there.
+    let reworked = tuning.range.is_some() || tuning.speed.is_some() || tuning.denoise.is_some();
     let video_resized = tuning.resize.is_some() && crate::sized::is_video_target(to);
-    let reencoded = timed || video_resized;
-    if from == to && !timed && rewrites_in_place(from, probe, tuning) {
+    let reencoded = reworked || video_resized;
+    if from == to && !reworked && rewrites_in_place(from, probe, tuning) {
         return in_place(from, inputs, output, probe, tuning);
     }
 
@@ -344,6 +348,12 @@ pub fn build_tuned(
     let probe = retimed.as_ref().map(|r| &r.probe).or(probe);
     let speed = retimed.as_ref().map(|r| r.report.clone());
     clip_notes.extend(retimed.iter().flat_map(|r| r.notes.iter().cloned()));
+    // The noise is taken out of the clip's sound, ahead of any speed change.
+    let denoise = tuning
+        .denoise
+        .map(|d| crate::denoise::resolve(from, to, d, tuning.mute, probe, &inputs[0]))
+        .transpose()?;
+    clip_notes.extend(denoise.map(|_| crate::denoise::VOICE_NOTE.to_string()));
     // Everything after a turn plans against the turned picture.
     let turned = change
         .zip(probe)
@@ -379,6 +389,7 @@ pub fn build_tuned(
     let mut resolved = crate::video::resolve(tuning, probe, target_for(to));
     resolved.cut = cut;
     resolved.speed = retimed.as_ref().map(|r| r.retime.clone());
+    resolved.denoise = denoise;
     resolved.turn = change;
     resolved.crop = cropped.as_ref().and_then(|c| c.rect);
     resolved.soundtrack = sound.map(|s| s.soundtrack);
@@ -405,9 +416,9 @@ pub fn build_tuned(
     // supported at all); these only change *how* an already-supported pair
     // runs when a probe is in hand.
     if let Some(p) = probe {
-        // A format cut, retimed, turned or resized into itself is no
-        // registered pair, so it reaches the probe-aware paths by its range,
-        // speed, turn or size instead.
+        // A format cut, retimed, denoised, turned or resized into itself is
+        // no registered pair, so it reaches the probe-aware paths by its
+        // range, speed, denoise, turn or size instead.
         let same_format = from == to
             && (reencoded
                 || change.is_some()
@@ -492,8 +503,19 @@ pub fn build_tuned(
                 })
             } else {
                 media::stream_mapped_invocation(from, to, p, strip, &resolved, &inputs[0], output)
-                    .map(|m| (m, true))
+                    .map(|mut m| {
+                        // Only the sound is filtered: say that it, and
+                        // nothing else, was re-encoded.
+                        m.warnings
+                            .extend(resolved.denoise.map(|_| crate::denoise::reencoded_note(to)));
+                        (m, true)
+                    })
                     .or_else(|| {
+                        // Sound that is denoised is filtered, which a copy
+                        // cannot do: the static recipe filters it.
+                        if resolved.denoise.is_some() {
+                            return None;
+                        }
                         media::audio_copy_invocation(
                             from,
                             to,
@@ -550,6 +572,7 @@ pub fn build_tuned(
                     enlarged: resolved.enlarged.clone(),
                     range,
                     speed,
+                    denoise: tuning.denoise,
                     rotation,
                     pages: None,
                     crop,
@@ -633,6 +656,7 @@ pub fn build_tuned(
         enlarged: resolved.enlarged.clone(),
         range,
         speed,
+        denoise: tuning.denoise,
         rotation,
         pages: None,
         crop,
@@ -665,6 +689,11 @@ fn built_in(
             "--speed",
             tuning.speed.is_some(),
             "it retimes video, GIF and audio",
+        ),
+        (
+            "--denoise",
+            tuning.denoise.is_some(),
+            "it cleans up the sound of video and audio",
         ),
     ];
     if let Some((flag, _, why)) = timed.into_iter().find(|(_, given, _)| *given) {
@@ -702,6 +731,7 @@ fn built_in(
         crop: None,
         audio: None,
         subtitles: None,
+        denoise: None,
     })
 }
 
@@ -730,6 +760,7 @@ fn not_for_speech(tuning: &Tuning) -> Option<&'static str> {
         ("--start, --end and --duration", tuning.range.is_some()),
         ("--speed", tuning.speed.is_some()),
         ("--shift-pitch", tuning.shift_pitch),
+        ("--denoise", tuning.denoise.is_some()),
         ("--rotate", tuning.rotate.is_some()),
         ("--flip", tuning.flip.is_some()),
         ("--crop", tuning.crop.is_some()),
@@ -827,6 +858,7 @@ pub fn build_speech(
         crop: None,
         audio: None,
         subtitles: None,
+        denoise: None,
     })
 }
 
@@ -1232,6 +1264,7 @@ fn in_place(
         crop: crop_report,
         audio: None,
         subtitles: None,
+        denoise: None,
     })
 }
 
@@ -3390,6 +3423,7 @@ mod tests {
             audio: None,
             subtitles: None,
             flip: None,
+            denoise: None,
         }
     }
 
@@ -6511,5 +6545,242 @@ mod tests {
             turn: Some(crate::rotate::Turn::Right),
             flip: None,
         })
+    }
+
+    // --- Denoise: --denoise -----------------------------------------------
+
+    fn denoised(strength: crate::denoise::Strength) -> Tuning {
+        Tuning {
+            denoise: Some(strength),
+            ..Tuning::default()
+        }
+    }
+
+    const NORMAL: crate::denoise::Strength = crate::denoise::Strength::Normal;
+
+    /// Only the sound is filtered, so a video into its own format keeps its
+    /// picture as a copy, and says what was re-encoded instead.
+    #[test]
+    fn a_video_denoised_into_its_own_format_copies_the_picture() {
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &denoised(NORMAL), &clip_probe(60));
+        let argv = &plan.steps[0].argv;
+        assert!(has(argv, ["-c:v", "copy"]), "{argv:?}");
+        assert!(has(argv, ["-c:a", "aac"]), "{argv:?}");
+        assert_eq!(value(argv, "-af"), crate::denoise::NORMAL_CHAIN);
+        assert!(!argv.iter().any(|a| a == "-sn"), "subtitles stay: {argv:?}");
+        assert_eq!(
+            plan.warnings,
+            [
+                crate::denoise::reencoded_note(Format::Mp4),
+                crate::denoise::VOICE_NOTE.to_string()
+            ]
+        );
+        assert_eq!(plan.denoise, Some(NORMAL));
+        assert_eq!(
+            serde_json::to_value(&plan).unwrap()["denoise"],
+            serde_json::json!("normal")
+        );
+    }
+
+    #[test]
+    fn a_container_change_that_would_copy_still_copies_the_picture() {
+        let plan = sped_plan(Format::Mkv, Format::Mp4, &denoised(NORMAL), &clip_probe(60));
+        let argv = &plan.steps[0].argv;
+        assert!(has(argv, ["-c:v", "copy"]), "{argv:?}");
+        assert!(!has(argv, ["-c:a", "copy"]), "{argv:?}");
+        assert_eq!(value(argv, "-af"), crate::denoise::NORMAL_CHAIN);
+    }
+
+    /// Sound the target holds as it is would be copied out of the video;
+    /// denoised, it is filtered by the static recipe instead.
+    #[test]
+    fn sound_that_would_be_copied_out_is_filtered() {
+        let plan = sped_plan(Format::Mp4, Format::M4a, &denoised(NORMAL), &clip_probe(60));
+        let argv = &plan.steps[0].argv;
+        assert!(!has(argv, ["-c:a", "copy"]), "{argv:?}");
+        assert!(has(argv, ["-c:a", "aac"]), "{argv:?}");
+        assert_eq!(value(argv, "-af"), crate::denoise::NORMAL_CHAIN);
+        let audio = MediaProbe {
+            video_codec: None,
+            video_streams: 0,
+            ..clip_probe(60)
+        };
+        let plan = sped_plan(Format::Mp3, Format::Mp3, &denoised(NORMAL), &audio);
+        let argv = &plan.steps[0].argv;
+        assert!(has(argv, ["-c:a", "libmp3lame"]), "{argv:?}");
+        assert_eq!(value(argv, "-af"), crate::denoise::NORMAL_CHAIN);
+        assert_eq!(plan.warnings, [crate::denoise::VOICE_NOTE]);
+    }
+
+    #[test]
+    fn strong_takes_more_off_a_louder_floor() {
+        let t = denoised(crate::denoise::Strength::Strong);
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(60));
+        assert_eq!(
+            value(&plan.steps[0].argv, "-af"),
+            crate::denoise::STRONG_CHAIN
+        );
+    }
+
+    /// The noise is taken out of the sound as recorded, then it is retimed;
+    /// the speed change re-encodes the picture as it always does.
+    #[test]
+    fn a_speed_change_retimes_the_sound_after_it_is_denoised() {
+        let t = Tuning {
+            denoise: Some(NORMAL),
+            ..sped("2")
+        };
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(600));
+        let argv = &plan.steps[0].argv;
+        assert_eq!(
+            value(argv, "-af"),
+            format!("{},atempo=2", crate::denoise::NORMAL_CHAIN)
+        );
+        assert!(value(argv, "-vf").starts_with("setpts=PTS/2,"), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "copy"), "{argv:?}");
+        assert!(
+            !plan
+                .warnings
+                .contains(&crate::denoise::reencoded_note(Format::Mp4)),
+            "the picture is re-encoded too: {:?}",
+            plan.warnings
+        );
+        let plan = sped_plan(Format::Mp4, Format::M4a, &t, &clip_probe(600));
+        assert_eq!(
+            value(&plan.steps[0].argv, "-af"),
+            format!("{},atempo=2", crate::denoise::NORMAL_CHAIN)
+        );
+    }
+
+    /// A cut is an input option, so the chain cleans only the clip; one
+    /// from the start copies the picture still.
+    #[test]
+    fn a_cut_is_made_before_the_sound_is_denoised() {
+        let t = Tuning {
+            denoise: Some(NORMAL),
+            ..ranged(Some("1:00"), Some("1:10"))
+        };
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(600));
+        let argv = &plan.steps[0].argv;
+        assert_eq!(&argv[..4], ["-ss", "60", "-t", "10"], "{argv:?}");
+        assert_eq!(value(argv, "-af"), crate::denoise::NORMAL_CHAIN);
+        assert!(plan.range.is_some() && plan.denoise.is_some());
+        let t = Tuning {
+            denoise: Some(NORMAL),
+            ..ranged(None, Some("1:10"))
+        };
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(600));
+        let argv = &plan.steps[0].argv;
+        assert!(has(argv, ["-c:v", "copy"]), "{argv:?}");
+        assert_eq!(value(argv, "-af"), crate::denoise::NORMAL_CHAIN);
+    }
+
+    #[test]
+    fn a_webm_target_denoises_ahead_of_the_opus_channel_layouts() {
+        let plan = sped_plan(
+            Format::Mp4,
+            Format::Webm,
+            &denoised(NORMAL),
+            &clip_probe(60),
+        );
+        let af = value(&plan.steps[0].argv, "-af");
+        assert_eq!(
+            af,
+            format!(
+                "{},{}",
+                crate::denoise::NORMAL_CHAIN,
+                registry::OPUS_CHANNEL_LAYOUTS
+            )
+        );
+    }
+
+    #[test]
+    fn a_denoised_file_stripped_into_its_own_format_is_filtered_not_copied() {
+        let t = Tuning {
+            strip_metadata: true,
+            ..denoised(NORMAL)
+        };
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(60));
+        let argv = &plan.steps[0].argv;
+        assert_eq!(value(argv, "-af"), crate::denoise::NORMAL_CHAIN);
+        assert!(has(argv, ["-map_metadata", "-1"]), "{argv:?}");
+        assert!(has(argv, ["-c:v", "copy"]), "{argv:?}");
+    }
+
+    #[test]
+    fn denoising_is_refused_where_there_is_no_sound() {
+        let silent = MediaProbe {
+            audio_codecs: Vec::new(),
+            ..clip_probe(60)
+        };
+        let refused = |from: Format, to: Format, probe: Option<&MediaProbe>| {
+            let input = p(&format!("in.{}", from.ext()));
+            let output = format!("out.{}", to.ext());
+            build_tuned(
+                from,
+                to,
+                &[input],
+                Path::new(&output),
+                probe,
+                None,
+                &denoised(NORMAL),
+            )
+            .unwrap_err()
+            .message
+        };
+        assert_eq!(
+            refused(Format::Mp4, Format::Mp4, Some(&silent)),
+            "--denoise cleans up the sound, and in.mp4 has none"
+        );
+        assert!(refused(Format::Mp4, Format::Gif, Some(&clip_probe(60)))
+            .starts_with("--denoise does not apply to mp4 -> gif"));
+        assert!(refused(Format::Png, Format::Jpg, None)
+            .starts_with("--denoise does not apply to png -> jpg: jpg is a still image"));
+        let muted = Tuning {
+            mute: true,
+            ..denoised(NORMAL)
+        };
+        let e = build_tuned(
+            Format::Mp4,
+            Format::Mp4,
+            &[p("in.mp4")],
+            Path::new("out.mp4"),
+            Some(&clip_probe(60)),
+            None,
+            &muted,
+        )
+        .unwrap_err();
+        assert!(
+            e.message.contains("a silent clip has none"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// A sized conversion filters the sound in both its remux and its
+    /// encode, and never byte-copies a file whose sound it cleans.
+    #[test]
+    fn a_sized_conversion_denoises_its_sound() {
+        let t = Tuning {
+            max_size: Some(crate::size::parse("100mb").unwrap()),
+            ..denoised(NORMAL)
+        };
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(60));
+        assert!(!plan.steps.is_empty(), "never a byte copy");
+        let argv = &plan.steps[0].argv;
+        assert!(has(argv, ["-c:v", "copy"]), "{argv:?}");
+        assert_eq!(value(argv, "-af"), crate::denoise::NORMAL_CHAIN);
+        assert_eq!(plan.denoise, Some(NORMAL));
+        let t = Tuning {
+            max_size: Some(crate::size::parse("2mb").unwrap()),
+            ..denoised(NORMAL)
+        };
+        let plan = sped_plan(Format::Mp4, Format::Mp4, &t, &clip_probe(60));
+        let pass2 = &plan.steps[1].argv;
+        assert!(has(pass2, ["-c:v", "libx264"]), "{pass2:?}");
+        assert_eq!(value(pass2, "-af"), crate::denoise::NORMAL_CHAIN);
+        assert!(plan
+            .warnings
+            .contains(&crate::denoise::VOICE_NOTE.to_string()));
     }
 }

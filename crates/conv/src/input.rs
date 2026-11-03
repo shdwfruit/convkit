@@ -324,7 +324,8 @@ fn is_image_merge(paths: &[PathBuf]) -> bool {
 /// A run that can keep the input's own format: `--max-size`, which sizes a
 /// video into its own container; a range (`--start`, `--end`,
 /// `--duration`) or `--speed`, which cut or retime video and audio into
-/// their own format; `--rotate`, `--flip` and `--crop`, which turn, mirror
+/// their own format; `--denoise`, which cleans the sound of video and
+/// audio into their own format; `--rotate`, `--flip` and `--crop`, which turn, mirror
 /// and crop most image and video files into their own format;
 /// `--strip-metadata`, which
 /// strips most image, video and audio files into their own format; or
@@ -346,6 +347,8 @@ struct OwnFormat {
     compressed: bool,
     /// Cut or retimed: either needs a timeline.
     timed: bool,
+    /// Denoised: needs sound.
+    denoised: bool,
     /// The turn and flip, when either was asked for.
     change: Option<convkit_core::rotate::Change>,
     cropped: bool,
@@ -357,15 +360,16 @@ struct OwnFormat {
     /// `--resize` alone, which keeps what `registry::resize_in_place` does.
     resized: bool,
     /// The flag, for messages: the range's first flag, else `--speed`, else
-    /// the size's, else `--rotate`, else `--flip`, else `--crop`.
+    /// the size's, else `--denoise`, else `--rotate`, else `--flip`, else
+    /// `--crop`.
     flag: &'static str,
     /// What it does to each file, and what the result is called.
     verb: &'static str,
     done: &'static str,
-    /// Added to a derived name: the range, the speed, the turn, the flip, the
-    /// crop and the size, in the order they happen
-    /// (`1m02s-1m10s-2x-rotated-5mb`, `rotated-flipped-cropped`); `rotated`,
-    /// `flipped` or `cropped`, with the `--resize` geometry after it when that names the size
+    /// Added to a derived name: the range, the speed, the denoise, the turn,
+    /// the flip, the crop and the size, in the order they happen
+    /// (`1m02s-1m10s-2x-denoised-rotated-5mb`, `rotated-flipped-cropped`);
+    /// `denoised`, `rotated`, `flipped` or `cropped`, with the `--resize` geometry after it when that names the size
     /// (`rotated-50pct`); `stripped`; or the `--resize` geometry alone
     /// (`50pct`).
     suffix: String,
@@ -381,6 +385,8 @@ impl OwnFormat {
             true => format!("{}-pitched", s.suffix()),
             false => s.suffix(),
         });
+        let denoised = cli.denoise.is_some();
+        let clean = cli.denoise.map(|d| d.suffix().to_string());
         let change = cli.tuning().change();
         let turn = change.map(|c| {
             [c.turn.map(|_| "rotated"), c.flip.map(|_| "flipped")]
@@ -407,7 +413,7 @@ impl OwnFormat {
                 (None, _) => ("--speed", "speed up", "sped-up"),
             };
             let cut = range.as_ref().map(convkit_core::trim::name_suffix);
-            let parts: Vec<String> = [cut, speed, turn, crop, subs, sound, size.clone()]
+            let parts: Vec<String> = [cut, speed, clean, turn, crop, subs, sound, size.clone()]
                 .into_iter()
                 .flatten()
                 .collect();
@@ -415,6 +421,7 @@ impl OwnFormat {
                 sized: size.is_some(),
                 compressed: cli.compress,
                 timed: true,
+                denoised,
                 change,
                 cropped,
                 sounded,
@@ -428,7 +435,7 @@ impl OwnFormat {
             });
         }
         if let Some(size) = size {
-            let parts: Vec<String> = [turn, crop, subs, sound, Some(size)]
+            let parts: Vec<String> = [clean, turn, crop, subs, sound, Some(size)]
                 .into_iter()
                 .flatten()
                 .collect();
@@ -436,6 +443,7 @@ impl OwnFormat {
                 sized: true,
                 compressed: cli.compress,
                 timed: false,
+                denoised,
                 change,
                 cropped,
                 sounded,
@@ -453,6 +461,7 @@ impl OwnFormat {
                 sized: false,
                 compressed: true,
                 timed: false,
+                denoised,
                 change,
                 cropped,
                 sounded,
@@ -469,12 +478,14 @@ impl OwnFormat {
         // turn goes after it in the name. With `--to` the suffix names a
         // batch's folder, where `--resize` stays a tuning flag.
         let geometry = cli.resize.as_deref().filter(|_| cli.to.is_none());
-        if change.is_some() || cropped || sounded || subtitled {
-            let parts: Vec<String> = [turn, crop, subs, sound, geometry.map(resize_suffix)]
+        if denoised || change.is_some() || cropped || sounded || subtitled {
+            let parts: Vec<String> = [clean, turn, crop, subs, sound, geometry.map(resize_suffix)]
                 .into_iter()
                 .flatten()
                 .collect();
-            let (flag, verb, done) = if let Some(c) = change {
+            let (flag, verb, done) = if denoised {
+                ("--denoise", "denoise", "denoised")
+            } else if let Some(c) = change {
                 match c.turn {
                     Some(_) => (c.flag(), "rotate", "rotated"),
                     None => (c.flag(), "flip", "flipped"),
@@ -492,6 +503,7 @@ impl OwnFormat {
                 sized: false,
                 compressed: false,
                 timed: false,
+                denoised,
                 change,
                 cropped,
                 sounded,
@@ -509,6 +521,7 @@ impl OwnFormat {
                 sized: false,
                 compressed: false,
                 timed: false,
+                denoised: false,
                 change: None,
                 cropped: false,
                 sounded: false,
@@ -526,6 +539,7 @@ impl OwnFormat {
             sized: false,
             compressed: false,
             timed: false,
+            denoised: false,
             change: None,
             cropped: false,
             sounded: false,
@@ -550,10 +564,16 @@ impl OwnFormat {
             && (!self.cropped || convkit_core::crop::in_place(f).is_ok())
             && (!self.sounded || convkit_core::soundtrack::in_place(f).is_ok())
             && (!self.subtitled || convkit_core::subtitles::in_place(f).is_ok());
+        let cleanable = !self.denoised || convkit_core::denoise::takes_denoise(f, f);
         if self.sized || self.timed {
             (!self.sized || convkit_core::sized::is_sized_target(f))
                 && (!self.timed || convkit_core::registry::takes_range(f, f))
                 && turnable
+                && cleanable
+        } else if self.denoised {
+            // ffmpeg writes it, and strips any format it cleans, so a strip
+            // asks nothing more of it.
+            turnable && cleanable
         } else if self.resized {
             convkit_core::registry::resize_in_place(f).is_ok()
         } else {
@@ -573,6 +593,18 @@ impl OwnFormat {
                 f.ext()
             )),
             _ if self.sized || self.timed => Ok("mp4"),
+            // A video with no recipe into itself (avi) cleans up into mp4;
+            // anything else has no sound to clean.
+            Some(f) if self.denoised && !convkit_core::denoise::takes_denoise(f, f) => {
+                if convkit_core::denoise::takes_denoise(f, Format::Mp4) {
+                    Ok("mp4")
+                } else {
+                    Err(format!(
+                        "--denoise cleans up the sound of video and audio, and {} files have none",
+                        f.ext()
+                    ))
+                }
+            }
             // A format the turn cannot keep says the turn's fix; one it can,
             // the strip's, which is what refused it.
             Some(f)
@@ -674,7 +706,8 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
         if own.subtitled {
             convkit_core::subtitles::in_place(from).map_err(invalid)?;
         }
-        if own.stripped {
+        // ffmpeg strips any format it cleans up.
+        if own.stripped && !own.denoised {
             convkit_core::metadata::in_place(from).map_err(invalid)?;
         }
         if own.resized {
@@ -694,6 +727,23 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
         } else {
             format!(
                 "--max-size applies to video and PDF; {} is neither",
+                input.display()
+            )
+        };
+        return Err(ConvError::new(ErrorCode::InvalidInvocation, message));
+    }
+    if own.denoised && !convkit_core::denoise::takes_denoise(from, from) {
+        // avi has sound but no recipe into itself, as for a cut.
+        let message = if convkit_core::denoise::takes_denoise(from, Format::Mp4) {
+            format!(
+                "--denoise keeps {}'s own format, and conv cannot write {} into itself; \
+                 add --to mp4",
+                input.display(),
+                from.ext()
+            )
+        } else {
+            format!(
+                "--denoise cleans up the sound of video and audio; {} has no sound",
                 input.display()
             )
         };
@@ -1965,6 +2015,7 @@ mod tests {
             mix: None,
             subtitles: None,
             flip: None,
+            denoise: None,
             copy: false,
             paste: false,
             yes: false,
@@ -2302,6 +2353,94 @@ mod tests {
             ),
         ] {
             let e = plan_jobs(&sped("2", v(&[input]), None, None)).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation);
+            assert_eq!(e.message, want);
+        }
+    }
+
+    fn cleaned(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+        let mut c = cli_for(paths, to, outdir);
+        c.denoise = Some(convkit_core::denoise::Strength::Normal);
+        c
+    }
+
+    #[test]
+    fn a_single_path_denoised_keeps_its_format_and_says_so_in_its_name() {
+        let jobs = plan_jobs(&cleaned(v(&["talk.mp4"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("talk-denoised.mp4"));
+        assert_eq!((jobs[0].from, jobs[0].to), (Format::Mp4, Format::Mp4));
+        let mut c = cleaned(v(&["memo.m4a"]), None, None);
+        c.denoise = Some(convkit_core::denoise::Strength::Strong);
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("memo-denoised-strong.m4a")
+        );
+        // A converted output keeps the name it was given.
+        let jobs = plan_jobs(&cleaned(v(&["talk.mp4", ".mp3"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("talk.mp3"));
+    }
+
+    #[test]
+    fn a_denoise_goes_in_the_name_after_a_speed_and_before_a_turn_and_a_size() {
+        let mut c = sped("2", v(&["clip.mp4"]), None, None);
+        c.denoise = Some(convkit_core::denoise::Strength::Normal);
+        assert_eq!(plan_jobs(&c).unwrap()[0].output, p("clip-2x-denoised.mp4"));
+        let mut c = cleaned(v(&["clip.mp4"]), None, None);
+        c.rotate = Some(convkit_core::rotate::Turn::Right);
+        c.max_size = Some(convkit_core::size::parse("10mb").unwrap());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("clip-denoised-rotated-10mb.mp4")
+        );
+        let mut c = cleaned(v(&["clip.mp4"]), None, None);
+        c.strip_metadata = true;
+        assert_eq!(plan_jobs(&c).unwrap()[0].output, p("clip-denoised.mp4"));
+    }
+
+    #[test]
+    fn a_denoise_batch_writes_into_a_denoised_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.mp4"), dir.path().join("b.mov"));
+        let jobs = plan_jobs(&cleaned(vec![a, b], Some("mp4"), None)).unwrap();
+        assert_eq!(
+            under(dir.path(), &jobs),
+            ["denoised/a.mp4", "denoised/b.mp4"]
+        );
+        assert!(dir.path().join("denoised").is_dir());
+    }
+
+    /// Like a strip, a denoise written into another folder keeps its name.
+    #[test]
+    fn a_denoise_into_another_folder_keeps_the_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("clean");
+        let jobs = plan_jobs(&cleaned(
+            vec![dir.path().join("talk.mp4")],
+            None,
+            Some(out.clone()),
+        ))
+        .unwrap();
+        assert_eq!(jobs[0].output, out.join("talk.mp4"));
+    }
+
+    #[test]
+    fn a_lone_avi_or_still_cannot_be_denoised_into_itself_and_says_what_to_do() {
+        for (input, want) in [
+            (
+                "old.avi",
+                "--denoise keeps old.avi's own format, and conv cannot write avi into \
+                 itself; add --to mp4",
+            ),
+            (
+                "photo.png",
+                "--denoise cleans up the sound of video and audio; photo.png has no sound",
+            ),
+            (
+                "anim.gif",
+                "--denoise cleans up the sound of video and audio; anim.gif has no sound",
+            ),
+        ] {
+            let e = plan_jobs(&cleaned(v(&[input]), None, None)).unwrap_err();
             assert_eq!(e.code, ErrorCode::InvalidInvocation);
             assert_eq!(e.message, want);
         }

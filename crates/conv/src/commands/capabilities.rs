@@ -159,6 +159,10 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
         push_flag(&mut flags, "--audio");
         push_flag(&mut flags, "--mix");
     }
+    // Sound is filtered wherever a recipe carries an audio filter slot.
+    if has(|a| matches!(a, Arg::AudioFilter(_))) {
+        push_flag(&mut flags, "--denoise");
+    }
     // --max-size is a policy over a whole video conversion rather than a
     // slot in one recipe, so it is keyed on the target, not scanned.
     if convkit_core::sized::is_video_target(to) {

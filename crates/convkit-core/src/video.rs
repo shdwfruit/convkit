@@ -106,6 +106,9 @@ pub struct ResolvedVideo {
     /// The speed change resolved against the source, when one was given.
     /// Carried here for the same reason as `cut`.
     pub speed: Option<crate::speed::Retime>,
+    /// `--denoise`'s audio filters (`denoise::resolve`), when the output has
+    /// sound to clean. Carried here for the same reason as `cut`.
+    pub denoise: Option<&'static str>,
     /// A turn or flip of the pixels (`--rotate`, `--flip`): ffmpeg's
     /// `transpose`, `hflip` and `vflip` in the filter chain, ImageMagick's
     /// `-rotate`, `-flop` and `-flip` (`Arg::Rotate`). Set wherever a change
@@ -144,6 +147,16 @@ pub struct ResolvedVideo {
     /// The voice `Arg::Voice` names, chosen by `speech::choose`. `None`
     /// reads with the system's own.
     pub voice: Option<String>,
+}
+
+impl ResolvedVideo {
+    /// The audio filters conv adds: the noise taken out first, from the
+    /// sound as it was recorded, then the speed change.
+    pub fn audio_filter(&self) -> Option<String> {
+        let speed = self.speed.as_ref().and_then(|r| r.audio.as_deref());
+        let chain: Vec<&str> = self.denoise.into_iter().chain(speed).collect();
+        (!chain.is_empty()).then(|| chain.join(","))
+    }
 }
 
 /// Parses a user frame rate (`24`, `29.97`, `30000/1001`) into a float for

@@ -1625,6 +1625,7 @@ mod tests {
                 enlarged: None,
                 range: None,
                 speed: None,
+                denoise: None,
                 rotation: None,
                 pages: None,
                 crop: None,
