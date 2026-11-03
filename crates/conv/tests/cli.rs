@@ -1689,6 +1689,59 @@ fn dry_run_of_a_photo_whose_tag_the_turn_undoes_runs_nothing() {
     assert!(stdout.contains("-auto-orient -rotate 90"), "{stdout}");
 }
 
+/// `--flip` is listed beside `--rotate`, and not on sound.
+#[test]
+fn capabilities_lists_flip_where_there_is_a_picture() {
+    let assert = conv().args(["capabilities", "mp4"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let gif = stdout.lines().find(|l| l.contains("mp4 -> gif")).unwrap();
+    assert!(gif.contains("--flip"), "{stdout}");
+    let m4a = stdout.lines().find(|l| l.contains("mp4 -> m4a")).unwrap();
+    assert!(!m4a.contains("--flip"), "{stdout}");
+}
+
+/// A dry run of a flip that undoes a mirrored tag shows no command; any
+/// other flip is made after the turn, on the picture as shown.
+#[test]
+fn dry_run_of_a_flip_shows_the_tag_or_the_turn_then_the_flip() {
+    let dir = tempfile::tempdir().unwrap();
+    let photo = dir.path().join("selfie.jpg");
+    std::fs::write(&photo, tagged_jpeg(2)).unwrap();
+    let assert = conv()
+        .args(["--dry-run", "--flip", "h"])
+        .arg(&photo)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("only its orientation tag changed"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("magick"), "{stdout}");
+
+    let assert = conv()
+        .args(["--dry-run", "--rotate", "right", "--flip", "horizontal"])
+        .arg(&photo)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("-auto-orient -rotate 90 -flop"), "{stdout}");
+    assert!(stdout.contains("selfie-rotated-flipped.jpg"), "{stdout}");
+}
+
+#[test]
+fn a_flip_that_is_not_a_direction_is_a_usage_error() {
+    let assert = conv()
+        .args(["a.jpg", "--flip", "diagonal"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("expected horizontal or vertical (h or v)"),
+        "{stderr}"
+    );
+}
+
 /// The headers of a JPEG whose EXIF tag shows it as `tag`, then the start of
 /// a scan: enough for conv to read the tag, not a picture.
 fn tagged_jpeg(tag: u8) -> Vec<u8> {

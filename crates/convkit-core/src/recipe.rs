@@ -91,9 +91,17 @@ pub struct Tuning {
     /// before planning by `subtitles::attach`; it reaches the filter chain
     /// through `ResolvedVideo::subtitles`.
     pub subtitles: Option<std::path::PathBuf>,
+    /// A mirror of the picture as it is shown (`--flip`), after any turn.
+    /// Decided and carried as `rotate` is, through `ResolvedVideo::turn`.
+    pub flip: Option<crate::rotate::Flip>,
 }
 
 impl Tuning {
+    /// The turn and flip asked for (`--rotate`, `--flip`), if either was.
+    pub fn change(&self) -> Option<crate::rotate::Change> {
+        crate::rotate::Change::of(self)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.dpi.is_none()
             && self.pages.is_none()
@@ -107,6 +115,7 @@ impl Tuning {
             && self.crop.is_none()
             && self.audio.is_none()
             && self.subtitles.is_none()
+            && self.flip.is_none()
             && self.range.is_none()
             && self.resize.is_none()
             && self.quality.is_none()
@@ -223,9 +232,10 @@ impl VideoChainSpec {
             .speed
             .as_ref()
             .map_or_else(String::new, |r| format!("{},", r.speed.setpts()));
-        // A turn comes before any size: `--resize` fits the turned picture.
-        if let Some(turn) = resolved.turn {
-            out.push_str(turn.filter());
+        // A turn or flip comes before any size: `--resize` fits the turned
+        // picture.
+        if let Some(change) = resolved.turn {
+            out.push_str(&change.filter());
             out.push(',');
         }
         // A crop is of the picture as it is shown, turned, and comes before
@@ -300,11 +310,12 @@ pub enum Arg {
     TuneResize,
     /// `-colors <n>` when `--colors` was given; renders nothing otherwise.
     TuneColors,
-    /// `-rotate <degrees>` for a turn of the pixels (`ResolvedVideo::turn`),
-    /// then `-crop WxH+X+Y +repage` for a crop (`ResolvedVideo::crop`);
-    /// renders nothing otherwise. Authored on ImageMagick steps only, right
-    /// after `-auto-orient`, so the turn and the crop are of the picture as
-    /// it is shown and every knob after them sees the changed picture.
+    /// `-rotate <degrees>`, then `-flop` or `-flip`, for a turn or flip of
+    /// the pixels (`ResolvedVideo::turn`), then `-crop WxH+X+Y +repage` for
+    /// a crop (`ResolvedVideo::crop`); renders nothing otherwise. Authored
+    /// on ImageMagick steps only, right after `-auto-orient`, so the change
+    /// and the crop are of the picture as it is shown and every knob after
+    /// them sees the changed picture.
     Rotate,
     /// `--strip-metadata`'s arguments for this step's backend when the flag
     /// was given (`metadata::MAGICK_STRIP` or `metadata::ffmpeg_args`);
@@ -541,9 +552,8 @@ impl Step {
                     }
                 }
                 Arg::Rotate => {
-                    if let Some(turn) = video.turn {
-                        argv.push("-rotate".to_string());
-                        argv.push(turn.degrees().to_string());
+                    if let Some(change) = video.turn {
+                        argv.extend(change.magick_args().into_iter().map(String::from));
                     }
                     // The crop is of the turned picture (`crop::Rect`).
                     if let Some(rect) = video.crop {
@@ -1002,6 +1012,7 @@ mod tests {
             crop: None,
             audio: None,
             subtitles: None,
+            flip: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],

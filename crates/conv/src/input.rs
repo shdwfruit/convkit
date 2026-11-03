@@ -324,18 +324,19 @@ fn is_image_merge(paths: &[PathBuf]) -> bool {
 /// A run that can keep the input's own format: `--max-size`, which sizes a
 /// video into its own container; a range (`--start`, `--end`,
 /// `--duration`) or `--speed`, which cut or retime video and audio into
-/// their own format; `--rotate` and `--crop`, which turn and crop most
-/// image and video files into their own format; `--strip-metadata`, which
+/// their own format; `--rotate`, `--flip` and `--crop`, which turn, mirror
+/// and crop most image and video files into their own format;
+/// `--strip-metadata`, which
 /// strips most image, video and audio files into their own format; or
 /// `--resize` as the only one of these and with no `--to`, which resizes a
 /// picture or a video into its own format. A derived output that would land
 /// on its input is named NAME-SUFFIX.EXT. With a range, a speed or a size,
 /// their rules and name apply: they are the narrower, and each one given
-/// must keep the format. A turn or a crop adds its name to theirs, and each
-/// format kept must also be one it can turn or crop. A turn or crop with
-/// `--resize` and no `--to` names the size after them,
-/// `photo-rotated-cropped-50pct.jpg`, since the picture is resized once
-/// turned and cropped. Otherwise, with `--strip-metadata`, or with `--to`,
+/// must keep the format. A turn, flip or crop adds its name to theirs, and
+/// each format kept must also be one it can turn, flip or crop. A turn,
+/// flip or crop with `--resize` and no `--to` names the size after them,
+/// `photo-rotated-flipped-cropped-50pct.jpg`, since the picture is resized
+/// once turned, flipped and cropped. Otherwise, with `--strip-metadata`, or with `--to`,
 /// `--resize` only tunes the conversion; a file already in the `--to`
 /// format is then resized beside the original as NAME-50pct.EXT instead of
 /// being written over itself.
@@ -345,7 +346,8 @@ struct OwnFormat {
     compressed: bool,
     /// Cut or retimed: either needs a timeline.
     timed: bool,
-    turned: bool,
+    /// The turn and flip, when either was asked for.
+    change: Option<convkit_core::rotate::Change>,
     cropped: bool,
     /// A new sound (`--audio`) or burned-in subtitles (`--subtitles`):
     /// what only a video kept as a video takes (or, for subtitles, a GIF).
@@ -355,15 +357,15 @@ struct OwnFormat {
     /// `--resize` alone, which keeps what `registry::resize_in_place` does.
     resized: bool,
     /// The flag, for messages: the range's first flag, else `--speed`, else
-    /// the size's, else `--rotate`, else `--crop`.
+    /// the size's, else `--rotate`, else `--flip`, else `--crop`.
     flag: &'static str,
     /// What it does to each file, and what the result is called.
     verb: &'static str,
     done: &'static str,
-    /// Added to a derived name: the range, the speed, the turn, the crop and
-    /// the size, in the order they happen (`1m02s-1m10s-2x-rotated-5mb`,
-    /// `rotated-cropped`); `rotated` or `cropped`,
-    /// with the `--resize` geometry after it when that names the size
+    /// Added to a derived name: the range, the speed, the turn, the flip, the
+    /// crop and the size, in the order they happen
+    /// (`1m02s-1m10s-2x-rotated-5mb`, `rotated-flipped-cropped`); `rotated`,
+    /// `flipped` or `cropped`, with the `--resize` geometry after it when that names the size
     /// (`rotated-50pct`); `stripped`; or the `--resize` geometry alone
     /// (`50pct`).
     suffix: String,
@@ -379,8 +381,14 @@ impl OwnFormat {
             true => format!("{}-pitched", s.suffix()),
             false => s.suffix(),
         });
-        let turned = cli.rotate.is_some();
-        let turn = turned.then(|| "rotated".to_string());
+        let change = cli.tuning().change();
+        let turn = change.map(|c| {
+            [c.turn.map(|_| "rotated"), c.flip.map(|_| "flipped")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("-")
+        });
         // A crop is of the turned picture, so it is named after the turn.
         let cropped = cli.crop.is_some();
         let crop = cropped.then(|| "cropped".to_string());
@@ -407,7 +415,7 @@ impl OwnFormat {
                 sized: size.is_some(),
                 compressed: cli.compress,
                 timed: true,
-                turned,
+                change,
                 cropped,
                 sounded,
                 subtitled,
@@ -428,7 +436,7 @@ impl OwnFormat {
                 sized: true,
                 compressed: cli.compress,
                 timed: false,
-                turned,
+                change,
                 cropped,
                 sounded,
                 subtitled,
@@ -445,7 +453,7 @@ impl OwnFormat {
                 sized: false,
                 compressed: true,
                 timed: false,
-                turned,
+                change,
                 cropped,
                 sounded,
                 subtitled,
@@ -461,13 +469,16 @@ impl OwnFormat {
         // turn goes after it in the name. With `--to` the suffix names a
         // batch's folder, where `--resize` stays a tuning flag.
         let geometry = cli.resize.as_deref().filter(|_| cli.to.is_none());
-        if turned || cropped || sounded || subtitled {
+        if change.is_some() || cropped || sounded || subtitled {
             let parts: Vec<String> = [turn, crop, subs, sound, geometry.map(resize_suffix)]
                 .into_iter()
                 .flatten()
                 .collect();
-            let (flag, verb, done) = if turned {
-                ("--rotate", "rotate", "rotated")
+            let (flag, verb, done) = if let Some(c) = change {
+                match c.turn {
+                    Some(_) => (c.flag(), "rotate", "rotated"),
+                    None => (c.flag(), "flip", "flipped"),
+                }
             } else if cropped {
                 ("--crop", "crop", "cropped")
             } else if subtitled {
@@ -481,7 +492,7 @@ impl OwnFormat {
                 sized: false,
                 compressed: false,
                 timed: false,
-                turned,
+                change,
                 cropped,
                 sounded,
                 subtitled,
@@ -498,7 +509,7 @@ impl OwnFormat {
                 sized: false,
                 compressed: false,
                 timed: false,
-                turned: false,
+                change: None,
                 cropped: false,
                 sounded: false,
                 subtitled: false,
@@ -515,7 +526,7 @@ impl OwnFormat {
             sized: false,
             compressed: false,
             timed: false,
-            turned: false,
+            change: None,
             cropped: false,
             sounded: false,
             subtitled: false,
@@ -533,7 +544,9 @@ impl OwnFormat {
         if self.compressed {
             return f == Format::Pdf;
         }
-        let turnable = (!self.turned || convkit_core::rotate::in_place(f).is_ok())
+        let turnable = self
+            .change
+            .is_none_or(|c| convkit_core::rotate::in_place(f, c).is_ok())
             && (!self.cropped || convkit_core::crop::in_place(f).is_ok())
             && (!self.sounded || convkit_core::soundtrack::in_place(f).is_ok())
             && (!self.subtitled || convkit_core::subtitles::in_place(f).is_ok());
@@ -562,10 +575,19 @@ impl OwnFormat {
             _ if self.sized || self.timed => Ok("mp4"),
             // A format the turn cannot keep says the turn's fix; one it can,
             // the strip's, which is what refused it.
-            Some(f) if self.turned && convkit_core::rotate::in_place(f).is_err() => {
+            Some(f)
+                if self
+                    .change
+                    .is_some_and(|c| convkit_core::rotate::in_place(f, c).is_err()) =>
+            {
+                let change = self.change.expect("checked above");
                 convkit_core::rotate::target_for(f)
                     .map(|to| to.ext())
-                    .ok_or_else(|| convkit_core::rotate::in_place(f).err().unwrap_or_default())
+                    .ok_or_else(|| {
+                        convkit_core::rotate::in_place(f, change)
+                            .err()
+                            .unwrap_or_default()
+                    })
             }
             Some(f) if self.sounded && convkit_core::soundtrack::in_place(f).is_err() => {
                 match f.kind() {
@@ -640,8 +662,8 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
         return Err(convkit_core::pdf::compress::not_a_pdf(input));
     }
     if !own.sized && !own.timed && !own.compressed {
-        if own.turned {
-            convkit_core::rotate::in_place(from).map_err(invalid)?;
+        if let Some(c) = own.change {
+            convkit_core::rotate::in_place(from, c).map_err(invalid)?;
         }
         if own.cropped {
             convkit_core::crop::in_place(from).map_err(invalid)?;
@@ -1942,6 +1964,7 @@ mod tests {
             audio: None,
             mix: None,
             subtitles: None,
+            flip: None,
             copy: false,
             paste: false,
             yes: false,
@@ -3371,6 +3394,101 @@ mod tests {
         assert_eq!(
             plan_jobs(&c).unwrap_err().message,
             "conv cannot keep avi files as avi; add --to mp4 to burn the subtitles in"
+        );
+    }
+
+    // --- --flip --------------------------------------------------------------
+
+    fn flipped(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+        let mut c = cli_for(paths, to, outdir);
+        c.flip = Some(convkit_core::rotate::Flip::Horizontal);
+        c
+    }
+
+    #[test]
+    fn a_lone_path_flipped_keeps_its_format_and_gains_a_suffix() {
+        for (name, out) in [
+            ("IMG_0042.jpg", "IMG_0042-flipped.jpg"),
+            ("clip.MOV", "clip-flipped.MOV"),
+            ("anim.gif", "anim-flipped.gif"),
+        ] {
+            let jobs = plan_jobs(&flipped(v(&[name]), None, None)).unwrap();
+            assert_eq!(jobs[0].output, p(out), "{name}");
+            assert_eq!(jobs[0].from, jobs[0].to, "{name}");
+        }
+        let mut c = flipped(v(&["photo.jpg"]), None, None);
+        c.rotate = Some(convkit_core::rotate::Turn::Right);
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("photo-rotated-flipped.jpg")
+        );
+    }
+
+    #[test]
+    fn a_flip_goes_in_the_name_after_the_turn_and_before_a_size() {
+        let mut c = cut(v(&["talk.mp4"]), None, None);
+        c.speed = Some(convkit_core::speed::parse("2").unwrap());
+        c.rotate = Some(convkit_core::rotate::Turn::Left);
+        c.flip = Some(convkit_core::rotate::Flip::Vertical);
+        c.max_size = Some(convkit_core::size::parse("5mb").unwrap());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("talk-1m02s-1m10s-2x-rotated-flipped-5mb.mp4")
+        );
+        let mut c = flipped(v(&["clip.mp4"]), None, None);
+        c.max_size = Some(convkit_core::size::parse("10mb").unwrap());
+        assert_eq!(plan_jobs(&c).unwrap()[0].output, p("clip-flipped-10mb.mp4"));
+    }
+
+    #[test]
+    fn a_flipped_batch_writes_into_a_flipped_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.jpg"), dir.path().join("b.heic"));
+        let jobs = plan_jobs(&flipped(vec![a.clone(), b.clone()], Some("jpg"), None)).unwrap();
+        assert_eq!(under(dir.path(), &jobs), ["flipped/a.jpg", "flipped/b.jpg"]);
+        let mut c = flipped(vec![a, b], Some("png"), None);
+        c.rotate = Some(convkit_core::rotate::Turn::Half);
+        let jobs = plan_jobs(&c).unwrap();
+        assert_eq!(
+            under(dir.path(), &jobs),
+            ["rotated-flipped/a.png", "rotated-flipped/b.png"]
+        );
+    }
+
+    #[test]
+    fn a_lone_file_that_cannot_be_flipped_into_itself_says_what_to_do() {
+        for (input, want) in [
+            (
+                "clip.avi",
+                "conv cannot keep avi files as avi; add --to mp4 to flip them",
+            ),
+            (
+                "song.mp3",
+                "--flip does not apply to mp3 -> mp3: it flips images, video and GIFs",
+            ),
+        ] {
+            let e = plan_jobs(&flipped(v(&[input]), None, None)).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation, "{input}");
+            assert_eq!(e.message, want, "{input}");
+        }
+    }
+
+    #[test]
+    fn two_files_flipped_without_to_are_refused_with_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.jpg"), dir.path().join("b.jpg"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+        let e = plan_jobs(&flipped(vec![a, b], None, None)).unwrap_err();
+        assert!(
+            e.message.contains("add --to jpg to flip each one"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.contains("to write a flipped copy there"),
+            "{}",
+            e.message
         );
     }
 }

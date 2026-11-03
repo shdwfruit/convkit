@@ -180,8 +180,8 @@ struct Prepared<'a> {
     /// The speed change, carried into every pass. Never copied.
     retime: Option<crate::speed::Retime>,
     speed: Option<crate::speed::SpeedReport>,
-    /// The turn (`--rotate`), carried into every pass.
-    turn: Option<crate::rotate::Turn>,
+    /// The turn and flip (`--rotate`, `--flip`), carried into every pass.
+    turn: Option<crate::rotate::Change>,
     /// Whether the turn brings the picture back to the way it is stored, so
     /// that a copy into mp4 or mov makes it with its note reset. Any other
     /// turn is of the pixels, and never copied.
@@ -223,11 +223,10 @@ pub(crate) fn plan(
         && p.subtitles.is_none()
         && (p.turn.is_none() || p.retag)
         && p.cut.is_none_or(|c| c.why_not_copied(&p.probe).is_none());
-    let copied_rotation = p.turn.map(|turn| crate::rotate::RotationReport {
-        turn,
-        by: crate::rotate::By::Tag,
-    });
-    let tag_note = p.turn.map(|_| crate::rotate::TAG_NOTE.to_string());
+    let copied_rotation = p
+        .turn
+        .map(|c| crate::rotate::RotationReport::new(c, crate::rotate::By::Tag));
+    let tag_note = p.turn.map(crate::rotate::tag_note);
     if !caps_bind && copy_ok && p.probe.size_bytes.is_some_and(|b| b <= max.bytes) {
         // A byte copy carries every tag along, so a stripped file is
         // remuxed instead, which clears them.
@@ -468,12 +467,11 @@ fn prepare<'a>(
     };
     // A turn back to the stored picture is copied into mp4 or mov with its
     // note reset; any other is planned against the turned picture.
-    let retag = tuning
-        .rotate
-        .is_some_and(|t| crate::rotate::undoes_note(t, Some(&probe)))
+    let change = tuning.change();
+    let retag = change.is_some_and(|c| crate::rotate::undoes_note(c, Some(&probe)))
         && matches!(to, Format::Mp4 | Format::Mov);
-    let probe = match tuning.rotate {
-        Some(t) => crate::rotate::turned_probe(t, &probe),
+    let probe = match change {
+        Some(c) => crate::rotate::turned_probe(c, &probe),
         None => probe,
     };
     // And a crop against the turned picture; the budget sizes what it kept.
@@ -544,7 +542,7 @@ fn prepare<'a>(
         range,
         retime,
         speed,
-        turn: tuning.rotate,
+        turn: change,
         retag,
         crop,
         crop_report,
@@ -636,8 +634,8 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
     }
     warnings.extend(p.clip_notes.iter().cloned());
     // A turn the tag alone could make is encoded here for the size's sake.
-    if p.turn.is_some() && !p.retag {
-        warnings.push(crate::rotate::VIDEO_NOTE.to_string());
+    if let Some(c) = p.turn.filter(|_| !p.retag) {
+        warnings.push(crate::rotate::video_note(c));
     }
     if choice.extreme {
         sizing.warning = Some(extreme_sentence(&p.src, &sizing, &choice));
@@ -670,10 +668,9 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         enlarged: None,
         range: p.range.clone(),
         speed: p.speed.clone(),
-        rotation: p.turn.map(|turn| crate::rotate::RotationReport {
-            turn,
-            by: crate::rotate::By::Pixels,
-        }),
+        rotation: p
+            .turn
+            .map(|c| crate::rotate::RotationReport::new(c, crate::rotate::By::Pixels)),
         pages: None,
         crop: p.crop_report.clone(),
         audio: None,

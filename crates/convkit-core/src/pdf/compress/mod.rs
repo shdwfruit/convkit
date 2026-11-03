@@ -187,6 +187,7 @@ fn other_knobs(t: &Tuning) -> Vec<&'static str> {
         (t.range.is_some(), "--start/--end/--duration"),
         (t.speed.is_some(), "--speed"),
         (t.rotate.is_some(), "--rotate"),
+        (t.flip.is_some(), "--flip"),
         (t.crop.is_some(), "--crop"),
         (t.audio.is_some(), "--audio"),
         (t.subtitles.is_some(), "--subtitles"),

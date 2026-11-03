@@ -71,7 +71,12 @@ pub fn pick<'a>(
     version: Option<&str>,
     since: Option<&str>,
 ) -> Result<Vec<&'a Release<'a>>, ConvError> {
-    let newest = all.first().map_or("", |r| r.version);
+    // The newest numbered version: an `## Unreleased` section above it is
+    // no version to compare against or name.
+    let newest = all
+        .iter()
+        .find(|r| key(r.version).is_some())
+        .map_or("", |r| r.version);
     let oldest = all.last().map_or("", |r| r.version);
     let invalid = |m: String| ConvError::new(ErrorCode::InvalidInvocation, m);
     let parse =
@@ -233,6 +238,14 @@ mod tests {
         let e = pick(&all, Some("9.9.9"), None).unwrap_err();
         assert!(e.message.contains("0.4.0 to 0.5.1"), "{}", e.message);
         assert!(e.message.contains(ONLINE), "{}", e.message);
+        let e = pick(&all, None, Some("soon")).unwrap_err();
+        assert!(e.message.contains("like 0.5.1"), "{}", e.message);
+        // Work not yet released is listed first, and named as no version.
+        let ahead = SAMPLE.replacen("## 0.5.1", "## Unreleased\n\n- Soon.\n\n## 0.5.1", 1);
+        let all = releases(&ahead);
+        assert_eq!(all[0].version, "Unreleased");
+        let e = pick(&all, Some("9.9.9"), None).unwrap_err();
+        assert!(e.message.contains("0.4.0 to 0.5.1"), "{}", e.message);
         let e = pick(&all, None, Some("soon")).unwrap_err();
         assert!(e.message.contains("like 0.5.1"), "{}", e.message);
     }

@@ -5884,3 +5884,335 @@ fn right_to_left_subtitles_draw_into_a_gif() {
     assert!(bright_pixels(&frame_rgb(&out, 1.5)) > 100);
     assert!(bright_pixels(&frame_rgb(&out, 0.5)) < 20);
 }
+
+// --- --flip ---------------------------------------------------------------
+
+fn flipped(flip: convkit_core::rotate::Flip) -> Tuning {
+    Tuning {
+        flip: Some(flip),
+        ..Tuning::default()
+    }
+}
+
+/// A 160x90 picture, blue with a red top-left quarter, so both a turn and
+/// a flip can be read off where the red went.
+fn corner(dir: &tempfile::TempDir, out: &str) -> PathBuf {
+    synth_image(
+        dir,
+        &[
+            "-size",
+            "160x90",
+            "xc:blue",
+            "-fill",
+            "red",
+            "-draw",
+            "rectangle 0,0 79,44",
+        ],
+        out,
+    )
+}
+
+/// Which quarter of a picture, as it is shown, is red: `top-left`,
+/// `top-right`, `bottom-left` or `bottom-right`. Read from the colour of a
+/// pixel in the middle of each quarter.
+fn red_corner(path: &Path) -> &'static str {
+    let probe = "%[fx:p{w/4,h/4}.r>0.5],%[fx:p{w*3/4,h/4}.r>0.5],\
+                 %[fx:p{w/4,h*3/4}.r>0.5],%[fx:p{w*3/4,h*3/4}.r>0.5]";
+    let shown = format!("{}[0]", path.display());
+    let out = Command::new(magick())
+        .args([shown.as_str(), "-auto-orient", "-format", probe, "info:"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ImageMagick: {e}"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "1,0,0,0" => "top-left",
+        "0,1,0,0" => "top-right",
+        "0,0,1,0" => "bottom-left",
+        "0,0,0,1" => "bottom-right",
+        other => panic!("no one red corner in {}: {other}", path.display()),
+    }
+}
+
+/// The width and height of a picture as it is shown.
+fn shown_dimensions(path: &Path) -> (u32, u32) {
+    let shown = format!("{}[0]", path.display());
+    let out = Command::new(magick())
+        .args([shown.as_str(), "-auto-orient", "-format", "%w %h", "info:"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (w, h) = text.trim().split_once(' ').unwrap();
+    (w.parse().unwrap(), h.parse().unwrap())
+}
+
+/// Two seconds of the `corner` picture as video, at 30 fps, with sound.
+fn corner_video(dir: &tempfile::TempDir, out: &str) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let path = dir.path().join(out);
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "color=blue:size=160x90:rate=30:duration=2,\
+             drawbox=x=0:y=0:w=80:h=45:color=red:t=fill",
+        ])
+        .args(["-f", "lavfi", "-i", "sine=duration=2"])
+        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+        .arg(&path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        result.status.success(),
+        "building {out} failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    path
+}
+
+/// Writes a display matrix that mirrors the picture left to right into the
+/// first track header, as `turn_note` writes a turn.
+fn mirror_note(path: &Path) {
+    const ONE: i32 = 0x10000;
+    let mut bytes = std::fs::read(path).unwrap();
+    let at = bytes.windows(4).position(|w| w == b"tkhd").unwrap() + 4;
+    let times = if bytes[at] == 1 { 32 } else { 20 };
+    let m = at + 4 + times + 16;
+    let mirror = [-ONE, 0, 0, 0, ONE, 0, 0, 0, 1 << 30];
+    for (i, v) in mirror.iter().enumerate() {
+        bytes[m + i * 4..m + i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A flip moves the pixels: the red corner crosses to the other side, the
+/// size stays, and the tag says the picture is shown as stored.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_photo_is_flipped_by_its_pixels() {
+    use convkit_core::rotate::{By, Flip, Turn};
+    let dir = tmp();
+    for (tag, rotate, flip, want, size) in [
+        (None, None, Flip::Horizontal, "top-right", (160, 90)),
+        (None, None, Flip::Vertical, "bottom-left", (160, 90)),
+        // The turn first: red goes top right, then the mirror brings it
+        // back to the left, on a picture now standing up.
+        (
+            None,
+            Some(Turn::Right),
+            Flip::Horizontal,
+            "top-left",
+            (90, 160),
+        ),
+        (
+            None,
+            Some(Turn::Right),
+            Flip::Vertical,
+            "bottom-right",
+            (90, 160),
+        ),
+        (
+            None,
+            Some(Turn::Half),
+            Flip::Horizontal,
+            "bottom-left",
+            (160, 90),
+        ),
+        // Shown a quarter right already, red is top right; the flip is of
+        // the picture as shown.
+        (Some(6), None, Flip::Horizontal, "top-left", (90, 160)),
+        (
+            Some(6),
+            Some(Turn::Left),
+            Flip::Vertical,
+            "bottom-left",
+            (160, 90),
+        ),
+    ] {
+        let photo = corner(&dir, "photo.jpg");
+        if let Some(tag) = tag {
+            tag_jpeg(&photo, tag);
+        }
+        let out = dir.path().join(format!("{tag:?}-{rotate:?}-{flip:?}.jpg"));
+        let t = Tuning {
+            rotate,
+            ..flipped(flip)
+        };
+        let outcome = convert_tuned(&photo, &out, &t).unwrap();
+        let case = format!("{tag:?} {rotate:?} {flip:?}");
+        assert_eq!(by(&outcome), By::Pixels, "{case}");
+        assert_eq!(red_corner(&out), want, "{case}");
+        assert_eq!(shown_dimensions(&out), size, "{case}");
+        assert!(
+            matches!(
+                identify_format(&out, "%[orientation]").as_str(),
+                "TopLeft" | "Undefined"
+            ),
+            "{case}"
+        );
+    }
+}
+
+/// A picture its tag shows mirrored is flipped back by the tag alone: one
+/// byte changes.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_photo_mirrored_by_its_tag_is_fixed_by_the_tag_alone() {
+    use convkit_core::rotate::{By, Flip, Turn};
+    let dir = tmp();
+    for (tag, rotate, flip) in [
+        (2, None, Flip::Horizontal),
+        (4, None, Flip::Vertical),
+        (5, Some(Turn::Right), Flip::Horizontal),
+        (7, Some(Turn::Left), Flip::Horizontal),
+    ] {
+        let photo = corner(&dir, &format!("IMG_{tag}.jpg"));
+        tag_jpeg(&photo, tag);
+        // Shown otherwise than stored: 5 keeps red top left, but stands
+        // the picture up.
+        assert_ne!(
+            (red_corner(&photo), shown_dimensions(&photo)),
+            ("top-left", (160, 90)),
+            "{tag}"
+        );
+        let out = dir.path().join(format!("IMG_{tag}-flipped.jpg"));
+        let t = Tuning {
+            rotate,
+            ..flipped(flip)
+        };
+        let outcome = convert_tuned(&photo, &out, &t).unwrap();
+        assert_eq!(by(&outcome), By::Tag, "{tag}");
+        assert!(outcome.backends.is_empty(), "{:?}", outcome.backends);
+        assert_eq!(differing(&photo, &out), 1, "{tag}");
+        assert_eq!(identify_format(&out, "%[orientation]"), "TopLeft");
+        assert_eq!(red_corner(&out), "top-left", "{tag}");
+    }
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn png_gif_and_converted_pictures_are_flipped() {
+    use convkit_core::rotate::Flip;
+    let dir = tmp();
+    let png = corner(&dir, "scan.png");
+    let out = dir.path().join("scan-flipped.png");
+    convert_tuned(&png, &out, &flipped(Flip::Vertical)).unwrap();
+    assert_eq!(red_corner(&out), "bottom-left");
+
+    let webp = dir.path().join("scan.webp");
+    convert_tuned(&png, &webp, &flipped(Flip::Horizontal)).unwrap();
+    assert_eq!(red_corner(&webp), "top-right");
+
+    let gif = synth_image(
+        &dir,
+        &[
+            "-delay",
+            "10",
+            "(",
+            &png.to_string_lossy(),
+            ")",
+            "(",
+            &png.to_string_lossy(),
+            ")",
+            "-loop",
+            "0",
+        ],
+        "anim.gif",
+    );
+    let out = dir.path().join("anim-flipped.gif");
+    convert_tuned(&gif, &out, &flipped(Flip::Horizontal)).unwrap();
+    let frames = run_identify(
+        &magick(),
+        &["-format", "%W %H %T\n", &out.to_string_lossy()],
+    );
+    assert_eq!(
+        frames.lines().collect::<Vec<_>>(),
+        ["160 90 10", "160 90 10"]
+    );
+    assert_eq!(red_corner(&out), "top-right");
+}
+
+/// A video is re-encoded flipped. A phone video with a rotation note is
+/// flipped as it is shown: the note is applied first, then the flip, and
+/// no note is left.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_video_is_reencoded_flipped_as_it_is_shown() {
+    use convkit_core::rotate::{By, Flip, Turn};
+    let dir = tmp();
+    let mov = corner_video(&dir, "clip.mov");
+    for (to, flip, want) in [
+        ("mov", Flip::Horizontal, "top-right"),
+        ("mp4", Flip::Vertical, "bottom-left"),
+        ("mkv", Flip::Horizontal, "top-right"),
+        ("webm", Flip::Vertical, "bottom-left"),
+        ("gif", Flip::Horizontal, "top-right"),
+    ] {
+        let out = dir.path().join(format!("clip-flipped.{to}"));
+        let outcome = convert_tuned(&mov, &out, &flipped(flip)).unwrap();
+        assert_eq!(by(&outcome), By::Pixels, "{to}");
+        let shown = if to == "gif" {
+            out.clone()
+        } else {
+            first_frame(&out)
+        };
+        assert_eq!(red_corner(&shown), want, "{to}");
+        if to != "gif" {
+            assert_eq!(probe_media(&out).rotation, None, "{to}");
+        }
+    }
+
+    let phone = corner_video(&dir, "IMG_4.mov");
+    turn_note(&phone);
+    assert_eq!(red_corner(&first_frame(&phone)), "top-right");
+    let out = dir.path().join("IMG_4-flipped.mov");
+    let outcome = convert_tuned(&phone, &out, &flipped(Flip::Horizontal)).unwrap();
+    assert_eq!(by(&outcome), By::Pixels);
+    let p = probe_media(&out);
+    assert_eq!(p.rotation, None);
+    assert_eq!((p.width, p.height), (Some(90), Some(160)));
+    assert_eq!(red_corner(&first_frame(&out)), "top-left");
+    // Turned left and flipped, the phone video lies down again, upside
+    // down from how it was stored.
+    let out = dir.path().join("IMG_4-rotated-flipped.mp4");
+    let t = Tuning {
+        rotate: Some(Turn::Left),
+        ..flipped(Flip::Vertical)
+    };
+    convert_tuned(&phone, &out, &t).unwrap();
+    let p = probe_media(&out);
+    assert_eq!((p.width, p.height, p.rotation), (Some(160), Some(90), None));
+    assert_eq!(red_corner(&first_frame(&out)), "bottom-left");
+}
+
+/// A video whose display matrix mirrors it: flipped back, only the matrix
+/// is reset; flipped the other way, ffmpeg applies the mirror and the flip
+/// turns it upside down.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_video_mirrored_by_its_note_is_fixed_without_reencoding() {
+    use convkit_core::rotate::{By, Flip};
+    let dir = tmp();
+    let mov = corner_video(&dir, "mirror.mov");
+    mirror_note(&mov);
+
+    let out = dir.path().join("mirror-flipped.mov");
+    let outcome = convert_tuned(&mov, &out, &flipped(Flip::Horizontal)).unwrap();
+    assert_eq!(by(&outcome), By::Tag);
+    assert!(outcome.backends.is_empty(), "{:?}", outcome.backends);
+    assert!(differing(&mov, &out) <= 36);
+    assert_eq!(red_corner(&first_frame(&out)), "top-left");
+
+    let out = dir.path().join("mirror-vertical.mp4");
+    let outcome = convert_tuned(&mov, &out, &flipped(Flip::Vertical)).unwrap();
+    assert_eq!(by(&outcome), By::Pixels);
+    assert_eq!(probe_media(&out).rotation, None);
+    assert_eq!(red_corner(&first_frame(&out)), "bottom-right");
+}

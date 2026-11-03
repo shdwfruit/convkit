@@ -147,6 +147,7 @@ mod tests {
             subtitles: None,
             copy: false,
             paste: false,
+            flip: None,
             yes,
             no_install,
             outdir: None,

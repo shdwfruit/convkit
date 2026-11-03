@@ -262,7 +262,7 @@ fn pixels((w, h): (u32, u32), sizing: &Sizing) -> (u32, u32) {
 /// Refuses a flag that does nothing to a PDF's pages, naming why.
 fn refuse_flags(to: Format, tuning: &Tuning) -> Result<()> {
     let pair = format!("pdf -> {}", to.ext());
-    let refused: [(&str, bool, &str); 13] = [
+    let refused: [(&str, bool, &str); 14] = [
         (
             "--upscale",
             tuning.upscale,
@@ -299,6 +299,11 @@ fn refuse_flags(to: Format, tuning: &Tuning) -> Result<()> {
             "--rotate",
             tuning.rotate.is_some(),
             "it turns photos and video, not PDF pages",
+        ),
+        (
+            "--flip",
+            tuning.flip.is_some(),
+            "it mirrors photos and video, not PDF pages",
         ),
         (
             "--crop",
