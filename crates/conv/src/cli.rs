@@ -600,6 +600,11 @@ Pages no range covers are left out with a warning, and a page in more than \
 one range is written to each, with a note. A range past the last page is \
 refused before anything is written.")]
     Split(SplitArgs),
+
+    /// The text and developer tools: base64, hash, uuid, jwt, time, link,
+    /// count, case, chars, lorem and diff.
+    #[command(flatten)]
+    Tools(crate::commands::tools::Tool),
 }
 
 #[derive(Args, Debug, Clone)]

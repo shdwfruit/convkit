@@ -268,6 +268,26 @@ pub(crate) fn copy_outputs(outputs: &[PathBuf]) -> CopyReport {
     }
 }
 
+/// `--copy` for a result that is text rather than a file, as the text
+/// tools (`conv hash`, `conv base64` and the rest) give.
+pub(crate) fn copy_text(text: &str) -> CopyReport {
+    let put = clipboard::Put::Text {
+        file: PathBuf::new(),
+        text: text.to_string(),
+        html: false,
+    };
+    match clipboard::put(&put) {
+        Ok(how) => CopyReport {
+            ok: true,
+            message: clipboard::copied_note(&put, &how),
+        },
+        Err(e) => CopyReport {
+            ok: false,
+            message: format!("couldn't copy to the clipboard: {e}"),
+        },
+    }
+}
+
 /// `e` with the pasted picture's passing path, in either spelling (macOS
 /// gives /var as /private/var), named as `PASTED`.
 fn tidied(e: &ConvError, pasted: Option<&Path>) -> ConvError {

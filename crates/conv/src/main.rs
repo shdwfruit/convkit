@@ -52,6 +52,7 @@ fn main() {
         Some(cli::Command::Ascii { .. }) => commands::ascii::run(&cli),
         Some(cli::Command::Merge(args)) => commands::merge::run(&cli, args),
         Some(cli::Command::Split(args)) => commands::split::run(&cli, args),
+        Some(cli::Command::Tools(tool)) => commands::tools::run(&cli, tool),
     };
     std::process::exit(code);
 }
