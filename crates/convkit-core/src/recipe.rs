@@ -89,6 +89,9 @@ pub enum ScaleStyle {
     /// yuv420p constraint at all. (`h=-2` appears in only one of the four
     /// geometry forms, so it cannot be the reason.)
     CappedLanczos { default_width: &'static str },
+    /// A GIF kept at its own width: lanczos for a `--resize`, and no cap
+    /// without one.
+    Lanczos,
 }
 
 /// The parts of one `-vf` value, so it can be composed at render time.
@@ -135,7 +138,7 @@ impl VideoChainSpec {
         match (&resolved.scale, &self.scale) {
             // A user width must not silently downgrade the resampler the
             // recipe chose.
-            (Some(s), ScaleStyle::CappedLanczos { .. }) => {
+            (Some(s), ScaleStyle::CappedLanczos { .. } | ScaleStyle::Lanczos) => {
                 out.push_str(s);
                 out.push_str(":flags=lanczos,");
             }
@@ -150,7 +153,7 @@ impl VideoChainSpec {
                     r"scale=w=min({default_width}\,iw):h=-2:flags=lanczos,"
                 ));
             }
-            (None, ScaleStyle::Guarded) => {}
+            (None, ScaleStyle::Guarded | ScaleStyle::Lanczos) => {}
         }
         out.push_str(self.tail);
         out

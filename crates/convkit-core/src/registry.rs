@@ -526,6 +526,15 @@ pub const TO_GIF_CHAIN: VideoChainSpec = VideoChainSpec {
     tail: GIF_TAIL,
 };
 
+/// A GIF cut or retimed into itself: `TO_GIF_CHAIN` without its caps, so
+/// the frames keep the source's size and timing.
+pub const GIF_TO_GIF_CHAIN: VideoChainSpec = VideoChainSpec {
+    prefix: "",
+    fps: None,
+    scale: ScaleStyle::Lanczos,
+    tail: GIF_TAIL,
+};
+
 /// `TO_GIF_CHAIN` with an HDR->SDR mapping prefixed: convert the source's
 /// BT.2020 PQ/HLG signal to BT.709 with perceptual intent, then run the
 /// ordinary GIF chain. Without this, HDR code values are written straight
@@ -809,6 +818,33 @@ const TO_GIF: Recipe = Recipe {
             Arg::Input,
             Arg::Lit("-vf"),
             Arg::VideoChain(&TO_GIF_CHAIN),
+            Arg::Lit("-loop"),
+            Arg::Lit("0"),
+            Arg::StripMetadata,
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[GIF_BUFFER_NOTE],
+};
+
+/// What a GIF cut or retimed into itself runs: `TO_GIF` with
+/// `GIF_TO_GIF_CHAIN`. A new palette is built from frames that already fit
+/// one, so the colours come back as they were. With no `fps=` in the chain
+/// ffmpeg times frames in the source's own rate, so a GIF sped up to 2x
+/// lost every other frame (6.1 and 9.0 alike); a GIF's own unit, 1/100 s,
+/// keeps each one.
+const GIF_TO_GIF: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Trim,
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-vf"),
+            Arg::VideoChain(&GIF_TO_GIF_CHAIN),
+            Arg::Lit("-enc_time_base:v"),
+            Arg::Lit("1/100"),
             Arg::Lit("-loop"),
             Arg::Lit("0"),
             Arg::StripMetadata,
@@ -1938,10 +1974,11 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
 /// recipe any other source of the same family uses to reach it. Only ever
 /// consulted for a range. Without one, converting a file into its own
 /// format is no conversion at all, which is why these pairs are not in the
-/// table. GIF has none: its recipe caps the result at 15 fps and 640 px, so
-/// cutting one into itself would also shrink it.
+/// table. GIF has its own: the recipe into GIF caps the result at 15 fps
+/// and 640 px, so cutting one into itself with it would also shrink it.
 pub fn same_format_recipe(f: Format) -> Option<Recipe> {
     match f {
+        Format::Gif => Some(GIF_TO_GIF),
         Format::Mp4 => Some(VIDEO_TO_MP4),
         Format::Mov => Some(VIDEO_TO_MOV),
         Format::Mkv => Some(VIDEO_TO_MKV),
@@ -3504,10 +3541,11 @@ mod tests {
             Format::M4a,
             Format::Wav,
             Format::Flac,
+            Format::Gif,
         ] {
             assert!(takes_range(f, f), "{f:?} into itself");
         }
-        for f in [Format::Gif, Format::Avi, Format::Png, Format::Pdf] {
+        for f in [Format::Avi, Format::Png, Format::Pdf] {
             assert!(!takes_range(f, f), "{f:?} into itself");
         }
     }
@@ -3554,6 +3592,7 @@ mod tests {
             Format::Flac,
             Format::Opus,
             Format::Ogg,
+            Format::Gif,
         ]
         .map(|f| (f, f, same_format_recipe(f).unwrap()));
         let pairs = all_pairs()

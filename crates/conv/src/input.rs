@@ -449,9 +449,8 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
         return Err(ConvError::new(ErrorCode::InvalidInvocation, message));
     }
     if own.timed && !convkit_core::registry::takes_range(from, from) {
-        // gif and avi have a timeline but no recipe into themselves: a GIF
-        // would be re-paletted at 15 fps and 640 px, and avi is never a
-        // target. Both cut and change speed fine into mp4.
+        // avi has a timeline but no recipe into itself: it is never a
+        // target. It cuts and changes speed fine into mp4.
         let flag = own.flag;
         let media = matches!(from.kind(), Kind::Video | Kind::Audio) || from == Format::Gif;
         let message = match (media, flag) {
@@ -1789,13 +1788,8 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_gif_or_avi_cannot_be_cut_into_itself_and_says_what_to_do() {
+    fn a_lone_avi_cannot_be_cut_into_itself_and_says_what_to_do() {
         for (input, want) in [
-            (
-                "anim.gif",
-                "--start keeps anim.gif's own format, and gif is not one it can cut into \
-                 itself; add --to mp4",
-            ),
             (
                 "old.avi",
                 "--start keeps old.avi's own format, and avi is not one it can cut into \
@@ -1882,6 +1876,15 @@ mod tests {
         assert_eq!(jobs[0].output, out.join("clip-2x.mp4"));
     }
 
+    /// A GIF keeps its format, at its own size and frame timing.
+    #[test]
+    fn a_lone_gif_is_sped_or_cut_into_itself() {
+        let jobs = plan_jobs(&sped("0.5", v(&["anim.gif"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("anim-0.5x.gif"));
+        let jobs = plan_jobs(&cut(v(&["anim.gif"]), None, None)).unwrap();
+        assert_eq!(jobs[0].output, p("anim-1m02s-1m10s.gif"));
+    }
+
     #[test]
     fn a_speed_batch_writes_into_a_folder_named_after_the_speed() {
         let dir = tempfile::tempdir().unwrap();
@@ -1892,11 +1895,11 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_gif_or_still_cannot_be_sped_into_itself_and_says_what_to_do() {
+    fn a_lone_avi_or_still_cannot_be_sped_into_itself_and_says_what_to_do() {
         for (input, want) in [
             (
-                "anim.gif",
-                "--speed keeps anim.gif's own format, and conv cannot write gif into \
+                "old.avi",
+                "--speed keeps old.avi's own format, and conv cannot write avi into \
                  itself; add --to mp4",
             ),
             (

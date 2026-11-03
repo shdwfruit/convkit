@@ -78,7 +78,7 @@ pub fn targets(input: &Path, from: Format, to: Option<Format>) -> Result<Target,
         }
         Some(t) if registry::takes_range(from, t) => t,
         Some(t) => return Err(ConvError::unsupported_pair(from, t)),
-        // gif and avi have a timeline but no recipe into themselves.
+        // avi has a timeline but no recipe into itself.
         None if registry::takes_range(from, from) => from,
         None => {
             return Err(refuse(format!(
@@ -274,10 +274,6 @@ mod tests {
         assert_eq!(
             refused("report.pdf", None),
             "conv trim cuts video and audio; report.pdf is a document"
-        );
-        assert_eq!(
-            refused("anim.gif", None),
-            "conv trim keeps anim.gif's own format, and gif can't be cut into itself; add --to mp4"
         );
         assert_eq!(
             refused("old.avi", None),
