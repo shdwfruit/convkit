@@ -38,8 +38,19 @@ private let sameFormatTuning: Set<String> = [
     "--max-size", "--strip-metadata", "--start", "--end", "--speed", "--shift-pitch",
 ]
 
+/// The app's state: which tool is showing, the conv in use, and Convert's own state.
 @Observable
 final class AppModel {
+    var tool: Tool = .convert
+    let qr = QRModel()
+    let ascii = AsciiModel()
+    /// Subcommands the conv in use offers, from its --help.
+    private(set) var subcommands: Set<String> = []
+
+    var availableTools: [Tool] {
+        Tool.allCases.filter { $0.subcommand.map(subcommands.contains) ?? true }
+    }
+
     var files: [FileItem] = []
 
     // Options. Empty string means "no flag".
@@ -86,12 +97,43 @@ final class AppModel {
             return
         }
         convURL = url
+        qr.conv = url
+        ascii.conv = url
         setupProblem = nil
         if let out = try? await Conv.run(url, ["--version"]) {
             convVersion = String(decoding: out.stdout, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        if let out = try? await Conv.run(url, ["--help"]) {
+            subcommands = Self.parseSubcommands(String(decoding: out.stdout, as: UTF8.self))
+        }
+        if !availableTools.contains(tool) { tool = .convert }
         await refreshTargets()
+    }
+
+    /// The names under "Commands:" in conv's help.
+    static func parseSubcommands(_ help: String) -> Set<String> {
+        var names: Set<String> = []
+        var inCommands = false
+        for line in help.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("Commands:") { inCommands = true; continue }
+            guard inCommands else { continue }
+            guard line.hasPrefix("  ") else { break }
+            if let name = line.split(separator: " ").first { names.insert(String(name)) }
+        }
+        return names
+    }
+
+    /// Files from Finder or the Dock go to ASCII Art when it's showing a lone picture's tool,
+    /// otherwise to Convert.
+    @MainActor
+    func open(_ urls: [URL]) {
+        if tool == .ascii, urls.count == 1 {
+            ascii.input = urls[0]
+        } else {
+            tool = .convert
+            add(urls)
+        }
     }
 
     // MARK: Files

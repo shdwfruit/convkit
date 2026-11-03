@@ -54,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Finder's Open With, or files dropped on the Dock icon.
     func application(_ application: NSApplication, open urls: [URL]) {
         if connected {
-            Task { @MainActor in model.add(urls) }
+            Task { @MainActor in model.open(urls) }
         } else {
             pending += urls
         }
@@ -65,14 +65,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showWindow() {
         if window == nil {
-            let host = NSHostingController(rootView: ContentView().environment(model))
+            let host = NSHostingController(rootView: RootView().environment(model))
             host.sceneBridgingOptions = [.toolbars, .title]
             let w = NSWindow(contentViewController: host)
             w.title = "ConvKit"
             w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             w.toolbarStyle = .unified
-            w.setContentSize(NSSize(width: 900, height: 580))
-            w.contentMinSize = NSSize(width: 820, height: 520)
+            w.setContentSize(NSSize(width: 1080, height: 640))
+            w.contentMinSize = NSSize(width: 960, height: 540)
             w.setFrameAutosaveName("ConvKitMain")
             w.isReleasedWhenClosed = false
             w.center()
@@ -91,6 +91,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
                 guard kv.count == 2 else { continue }
                 switch kv[0] {
+                case "tool": model.tool = Tool(rawValue: kv[1]) ?? .convert
+                case "qrText": model.qr.text = kv[1]; model.qr.changed()
+                case "asciiInput": model.ascii.input = URL(fileURLWithPath: kv[1]); model.ascii.changed()
+                case "asciiStyle": model.ascii.style = kv[1]; model.ascii.changed()
+                case "asciiWidth": model.ascii.width = Double(kv[1]) ?? 100; model.ascii.changed()
                 case "format": model.format = kv[1]
                 case "maxSize": model.maxSize = kv[1]
                 case "resize": model.resize = kv[1]
@@ -109,7 +114,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let wait = Double(env["CONVKIT_WAIT"] ?? "") ?? 6
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [self] in
-            var dump = "conv: \(model.convURL?.path ?? "-") \(model.convVersion)\ntargets: \(model.targets)\n"
+            var dump = "conv: \(model.convURL?.path ?? "-") \(model.convVersion)\ntools: \(model.availableTools.map(\.rawValue)) showing \(model.tool.rawValue)\ntargets: \(model.targets)\n"
+            dump += "qr: preview=\(model.qr.preview?.size as Any) info=\(model.qr.info) problem=\(model.qr.problem ?? "-")\n"
+            dump += "ascii: problem=\(model.ascii.problem ?? "-") warnings=\(model.ascii.warnings) art:\n\(model.ascii.art.split(separator: "\n").prefix(6).joined(separator: "\n"))\n"
             for f in model.files {
                 dump += "\(f.url.lastPathComponent) -> \(f.plannedOutput?.lastPathComponent ?? "-") problem=\(f.problem ?? "-") warnings=\(f.warnings) status=\(f.status)\n"
             }

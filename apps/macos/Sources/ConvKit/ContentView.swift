@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct ContentView: View {
+struct ConvertView: View {
     @Environment(AppModel.self) private var model
     @State private var dropHover = false
 
@@ -13,6 +13,7 @@ struct ContentView: View {
             OptionsView()
                 .frame(minWidth: 300, idealWidth: 330, maxWidth: 400)
         }
+        .navigationTitle("Convert")
         .toolbar { toolbar }
         .onChange(of: optionsKey) { model.optionsChanged() }
     }

@@ -1,8 +1,15 @@
 # ConvKit for Mac (prototype)
 
-A SwiftUI window for conv. Drop files in, pick what you want, press Convert.
+A SwiftUI toolkit for conv. The sidebar has a tool for each job:
 
-It runs the `conv` binary and doesn't copy any of conv's rules. Formats come
+- Convert: drop files in, pick what you want, press Convert.
+- QR Code: type a link or text, see the code conv made and checked, save or copy it.
+- ASCII Art: drop a picture, GIF or video, tune the look, copy the text or save it.
+
+A tool only shows when your conv has the command behind it, so new conv
+commands can get a tool without breaking older installs.
+
+The app runs the `conv` binary and doesn't copy any of conv's rules. In Convert, formats come
 from `conv capabilities`. The name of each new file, and any problem, come
 from `conv --dry-run --json` as you change options. Conversions run with
 `--json`.
