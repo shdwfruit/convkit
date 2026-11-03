@@ -119,6 +119,9 @@ conv data.json .yaml             # JSON, YAML, TOML and CSV, converted with no b
 conv fmt data.json               # pretty-print and check JSON, YAML or TOML
 conv notes.txt .m4a              # read a text aloud into a sound file
 conv speak "Hello" hello.m4a     # read the words given aloud
+conv beautify shot.png           # a screenshot on a gradient, ready to post
+conv colors photo.jpg            # the main colours of a picture
+conv wifi --qr                   # a QR code that joins your Wi-Fi
 conv changelog --since 0.5.1     # what's new since the version you had
 conv hash a.iso --check 3f2a...  # does the download match?
 conv link --paste --copy         # the copied link, without its tracking
@@ -768,6 +771,9 @@ Before writing anything, conv reads the code back and checks that it gives
 exactly your text. One code holds up to 2,331 characters, or 1,273 with a
 logo.
 
+`conv qr --wifi Home` makes a code that joins a saved Wi-Fi network, with
+the password read from the system; see [Wi-Fi passwords](#wi-fi-passwords).
+
 ## ASCII art
 
 `conv ascii` turns a picture into ASCII art. Without an output it prints
@@ -993,6 +999,93 @@ robotic; for a natural voice anywhere, install
 [voice](https://huggingface.co/rhasspy/piper-voices) and pass its file:
 `--voice en_US-lessac-medium.onnx`. A long text is read whole; `say` reads
 about six times faster than it plays.
+
+## Beautifying screenshots
+
+`conv beautify` sets a screenshot on a background with padding, rounded
+corners and a soft shadow, the way screenshot sites do, without uploading
+it:
+
+```console
+$ conv beautify shot.png
+OK shot-beautified.png - 839 KB - 0.3s
+  /home/user/Pictures/shot-beautified.png
+```
+
+From a screenshot on the clipboard to a picture ready to paste into a post:
+
+```console
+conv beautify --paste --copy
+```
+
+`--bg` picks the background: `aurora` (the default), `sunset`, `candy`,
+`ocean`, `mint`, `night`, `transparent`, a colour like `'#1e1e2e'`, or
+colours joined by commas for a gradient of your own. `--padding` and
+`--radius` take points, `--radius 0` keeps the corners square, and
+`--no-shadow` leaves the shadow out. Left alone, they grow with the
+screenshot, so a small crop and a whole screen look alike.
+
+The screenshot is copied pixel for pixel, never scaled, so a 2x (Retina)
+screenshot stays sharp. The PNG keeps its colour profile and pixel density,
+and points are doubled on a 2x screenshot. A picture whose corners are
+already clear, like a macOS window captured with its shadow, keeps its own
+shape unless `--radius` or `--shadow` says otherwise. The result is a PNG
+beside the input; name another picture format to have it converted, which
+needs ImageMagick.
+
+## Colours from a picture
+
+`conv colors` prints a picture's main colours, the most common first, with
+the share of the picture each covers:
+
+```console
+$ conv colors photo.jpg
+#1f2a44  rgb(31, 42, 68)     hsl(222, 37%, 19%)   41%
+#e8c39e  rgb(232, 195, 158)  hsl(30, 61%, 76%)    23%
+...
+```
+
+A terminal that shows colour also gets a swatch of each. Colours a person
+would call the same count as one, so a logo with two colours gives two.
+`-n` asks for up to 16, and `--at 120,45` gives the colour of one pixel,
+counted from the top-left corner as the picture is shown, a phone photo's
+EXIF turn included.
+
+`--code` writes them as code: `css` (custom properties), `swiftui`,
+`tailwind` (Tailwind 4's `@theme`) or `tailwind3` (`tailwind.config.js`).
+`--copy` puts the result on the clipboard, `--json` prints it as JSON, and
+`-` or a pipe reads a picture piped in. conv reads PNG, JPG, GIF, WebP and
+SVG itself; HEIC, AVIF, TIFF and the rest go through ImageMagick.
+
+## Wi-Fi passwords
+
+`conv wifi` shows the password of a Wi-Fi network this computer has saved,
+and `--qr` makes a code that joins it, for a guest to scan:
+
+```console
+$ conv wifi Home
+network   Home
+security  WPA/WPA2/WPA3
+password  correct-horse-battery
+$ conv wifi Home --qr
+OK Home-wifi.png - 4 KB - 0.1s
+  /home/user/Home-wifi.png
+```
+
+Without a name, conv uses the network this computer is on. macOS doesn't
+tell programs which one that is without Location access, so there conv
+lists the saved networks and asks. `conv wifi --list` lists them too.
+
+On macOS the password is in the keychain, and macOS asks for your password
+before it shares it; conv says so before the prompt appears. Windows is
+read with `netsh` and Linux with NetworkManager's `nmcli`.
+
+The password is printed only to a terminal. Into a pipe, a file or `--json`
+it goes only with `--show-password`, so it doesn't land in a log by
+accident; `--copy` puts it on the clipboard instead. `--qr` takes a file
+name or a bare extension like `--qr .svg`, and `conv qr --wifi Home` makes
+the same code with `conv qr`'s `--size` and `--logo`. A network where each
+person signs in with their own account (WPA Enterprise) has no code to make.
 
 ## Discovering formats and capabilities
 
