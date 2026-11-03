@@ -1452,3 +1452,165 @@ up to 200 evenly spaced cells of each run of cells sharing a format, so a
 A sheet wider than its page gets the page style's "fit width to 1 page"
 (`ScaleToPagesX = 1`, `ScaleToPagesY = 0`). LibreOffice never enlarges for
 it: a narrow sheet sharing that page style printed pixel-identical.
+
+## Compress PDF
+
+Measured 2026-11-03 on an Apple M2 (8 cores, 8 GiB, macOS 26.6.2) with
+qpdf 12.4.2, the release build of conv (lopdf 0.45.0, jpeg-decoder 0.3.2,
+jpeg-encoder 0.7.1, fast_image_resize 6.1.0), poppler 22.12.0, PDF.js
+6.5.438 and macOS PDFKit.
+
+`--compress` (`crates/convkit-core/src/pdf/compress/`) walks every page's
+content to find how large each image is drawn, then applies three rules,
+each kept only if it saves what it must:
+
+- an image drawn above 225 dpi goes to 150 dpi (Lanczos3), written as a
+  JPEG at quality 80; a lossless image stays lossless unless it passes the
+  photo test below;
+- a JPEG whose luma table says it was saved above quality 85 is saved again
+  at 80, kept at 80% of its size or less;
+- a lossless image of at least 40,000 pixels becomes a JPEG at 80 if that
+  is under half its size and its luma SSIM against the original is at
+  least 0.95. That turns a deck's photos stored as PNG into JPEGs and keeps
+  its screenshots lossless.
+
+An image's resolution is the lowest it is drawn at, so an image drawn both
+small and large keeps the pixels the large drawing needs. 1-bit (CCITT,
+JBIG2, masks), JPEG 2000, 16-bit, Indexed, Lab, Separation and DeviceN
+images are left alone. CMYK is re-encoded only as a JPEG with Adobe's
+marker, as CMYK (YCCK, 2x2 chroma), never converted to RGB.
+
+### Corpus
+
+The spike's two rounds, rebuilt with `corpus.sh <dir> scans` from the
+design notes: seven PDFs of every kind, then seven real scanner outputs.
+
+| File | What it is | Size |
+|---|---|---|
+| `phone-scan` | six phone photos of receipts and a letter, packed into a PDF | 14.70 MB |
+| `photos-conv` | three of those photos through `conv a.jpg b.jpg c.jpg out.pdf` | 8.00 MB |
+| `deck-cs231n-1`, `-2` | Stanford lecture slides, 48 and 61 pages | 16.99, 5.55 MB |
+| `paper-attention` | arXiv 1706.03762 | 2.22 MB |
+| `form-fw9` | IRS W-9, 23 form fields, tagged | 0.14 MB |
+| `text-irs-p17` | IRS Publication 17, 142 pages of text, 2,958 links | 3.09 MB |
+| `phone-camscanner` | CamScanner export, colour JPEG at about 280 dpi | 6.38 MB |
+| `phone-camscanner-160dpi` | CamScanner export at 160 dpi | 3.31 MB |
+| `mfp-konica-200dpi` | Konica copier, gray and colour JPEG at 200 dpi, q75, 115 pages | 47.27 MB |
+| `mfp-konica-mrc` | Konica copier in its "Compact PDF" mode | 8.02 MB |
+| `scan-cmyk-400dpi` | a court exhibit scanned to CMYK JPEG at 400 dpi | 15.95 MB |
+| `scan-bw-ccitt` | a black-and-white patent, CCITT G4 at 300 dpi | 4.14 MB |
+| `book-ia-jpx` | an Internet Archive book in JPEG 2000 | 2.56 MB |
+
+### Method
+
+The spike's `eval.py`: 8 pages spread over each file, rendered gray by
+`pdftoppm` at 150 dpi (the first round; `photos-conv`, whose pages are 58
+inches wide, scaled to 2,400 px) or scaled to 2,000 px (the scans), and
+scored with scikit-image's SSIM against the original's. Text is
+`pdftotext`'s output compared byte for byte; form fields and their values,
+links, annotations, outlines and the structure tree come from
+`qpdf --json`; every output passed `qpdf --check`.
+
+### `--compress`
+
+| File | Size | Mean SSIM | Lowest page | Time |
+|---|---|---|---|---|
+| `phone-scan` | 11.3% | 0.935 | 0.877 | 0.5 s |
+| `photos-conv` | 30.1% | 0.919 | 0.819 | 0.3 s |
+| `deck-cs231n-1` | 30.6% | 0.997 | 0.990 | 0.9 s |
+| `deck-cs231n-2` | 37.9% | 0.996 | 0.971 | 0.3 s |
+| `paper-attention` | 75.8% | 0.999 | 0.995 | 0.4 s |
+| `form-fw9` | 88.0% | 1.0 | 1.0 | 0.1 s |
+| `text-irs-p17` | 97.5% | 1.0 | 1.0 | 2.6 s |
+| `phone-camscanner` | 66.4% | 0.895 | 0.885 | 0.4 s |
+| `phone-camscanner-160dpi` | 99.9%, suggests `2.2mb` | 1.0 | 1.0 | 0.3 s |
+| `mfp-konica-200dpi` | 99.9%, suggests `26mb` | 1.0 | 1.0 | 1.6 s |
+| `mfp-konica-mrc` | 100.0% | 1.0 | 1.0 | 0.5 s |
+| `scan-cmyk-400dpi` | 20.0% | 0.968 | 0.924 | 0.5 s |
+| `scan-bw-ccitt` | 99.7% | 1.0 | 1.0 | 0.1 s |
+| `book-ia-jpx` | 99.2% | 1.0 | 1.0 | 0.2 s |
+
+Every field and value, link, annotation, outline entry and tag tree came
+through, and every file's text was identical. Against the spike: the scans
+and decks match its prototype (11% and 30% there, 36% for both decks, 66%
+for the CamScanner file). The CMYK exhibit, which the first prototype left
+at 100% and its CMYK version took to 40%, is at 20% here, from writing
+YCCK; MuPDF reached 58% and Ghostscript 11%, the last by converting it to
+RGB. The text-only publication, which the prototype made 3% bigger, is
+2.5% smaller. The lowest pages are the photos drawn above 225 dpi and
+scored at 150 dpi or more, where the downsampling itself shows; at 220 dpi
+zoom the receipts' print stays sharp enough to read. Peak memory was 760
+MB, on the CMYK exhibit (four 400 dpi pages decoded at once, under a
+budget of 64 million pixels in flight).
+
+Rules the spike did not have:
+
+- **The lowest resolution, not the highest.** The prototype sized an image
+  by the largest resolution it was drawn at, which would blur an image
+  drawn once as a thumbnail and once full size.
+- **Gray images are lightly sharpened after downsampling** (unsharp mask,
+  sigma 0.6, amount 0.6). At 150 dpi the one-pixel lines of the copier's
+  200 dpi engineering drawings came out lighter and wider, as round two of
+  the spike found; sharpened, the handwritten labels read as in the
+  original. It costs 6% on that file at 150 dpi (25.74 MB against 24.19
+  MB) and moves its SSIM by 0.0002.
+- **The photo test is made at quality 80 on every level.** Made at each
+  level's own quality, a harder level kept more photos lossless and came
+  out larger than an easier one: the first deck was 30.6% at L1 and about
+  36% at L3.
+- **No linearization.** qpdf's `--linearize` made the W-9 6% and
+  Publication 17 15% larger, and doubled qpdf's time, for a layout only a
+  browser streaming a large PDF page by page uses.
+
+The CMYK check, which the design made a condition for CMYK: the exhibit
+and two synthetic pages (a CMYK JPEG at 400 dpi from Pillow, which writes
+Adobe's inverted values, with and without `/Decode [1 0 1 0 1 0 1 0]`)
+were rendered before and after in poppler, PDF.js and PDFKit at 144 dpi.
+The mean colour moved by less than 0.5 of 255 on the synthetic pages in
+every renderer, and by at most 1 on the exhibit, where downsampling the
+print accounts for it; side by side, its coloured seal and blue header
+look the same. jpeg-decoder returns 255 minus the stored values and
+jpeg-encoder stores 255 minus what it is given, so the values a decoder
+reads are the source's, and both files carry Adobe's marker, which viewers
+read to decide how to invert. A CMYK JPEG without that marker is left
+alone.
+
+### The ladder (`--max-size`)
+
+Each level's file was made by asking `--max-size` for a target just under
+the last level's result. Size, then mean SSIM:
+
+| File | L0 lossless | L1 150 dpi q80 | L2 150 dpi q65 | L3 120 dpi q60 | L4 96 dpi q50 | L5 72 dpi q40 |
+|---|---|---|---|---|---|---|
+| `deck-cs231n-1` | 95.6% | 30.6%, 0.997 | 24.3%, 0.994 | 18.9%, 0.988 | 15.1%, 0.983 | 10.9%, 0.967 |
+| `deck-cs231n-2` | 98.3% | 37.9%, 0.996 | 28.6%, 0.994 | 20.0%, 0.990 | 14.1%, 0.986 | 9.6%, 0.978 |
+| `phone-scan` | | 11.3%, 0.935 | 7.7%, 0.922 | 4.7%, 0.895 | 2.7%, 0.857 | 1.4%, 0.807 |
+| `photos-conv` | | 30.1%, 0.919 | 19.9%, 0.909 | 15.5%, 0.886 | 5.9%, 0.848 | 2.8%, 0.812 |
+| `phone-camscanner` | | 66.4%, 0.895 | 49.7%, 0.889 | 32.9%, 0.836 | 20.4%, 0.773 | 11.0%, 0.684 |
+| `phone-camscanner-160dpi` | 99.9% | | 64.6%, 0.994 | 38.9%, 0.977 | 25.3%, 0.953 | 14.9%, 0.902 |
+| `mfp-konica-200dpi` | 99.9% | | 54.5%, 0.939 | 36.7%, 0.917 | 23.0%, 0.889 | 12.3%, 0.847 |
+| `scan-cmyk-400dpi` | | 20.0%, 0.968 | 15.4%, 0.964 | 10.6%, 0.954 | 7.2%, 0.940 | 4.3%, 0.921 |
+| `mfp-konica-mrc` | 100% | | | | 90.4%, 0.979 | 79.3%, 0.963 |
+| `paper-attention` | 80.4% | 75.8% | 75.2% | 74.1% | 73.3% | 72.7% |
+
+An empty cell is a level that made no smaller file than the one before.
+The text-only, black-and-white and JPEG 2000 files stop at L0 or L1, with
+nothing left to take out: a `--max-size` under that keeps the smallest and
+flags it over target. Read on the copier's text pages at 150 dpi, L3 (120
+dpi) looks like the original and L4 (96 dpi) is still clear for body text;
+at L5 (72 dpi) 12-point text is readable but small print is not. On its
+engineering drawings, zoomed in, the handwritten labels soften at L3, are
+hard to read at L4 and are gone at L5. So L4 and L5 ask first, and the
+question names the smallest size L0 to L3 reached.
+
+### Binary size
+
+The dist profile (thin LTO), stripped, on macOS arm64: 6.96 MB before, 8.45
+MB after. fast_image_resize's untyped `resize` compiled every pixel layout
+it knows and cost 1.6 MB more; the typed call for the three layouts conv
+uses does not.
+
+### Not verified
+
+PDF/A: the claim and the output intent are kept, and a PDF/A-1 input keeps
+its objects out of object streams, but no output was checked with veraPDF.

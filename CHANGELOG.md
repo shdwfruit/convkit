@@ -32,6 +32,18 @@
   lookalike letters, and `conv diff` marks the changed words inside
   changed lines. Each reads its argument, a file (`-f`), a pipe or the
   clipboard (`--paste`), and takes `--copy` and `--json`.
+- **`--compress` makes a PDF smaller with the same look.** `conv
+  scan.pdf --compress` writes `scan-compressed.pdf`: images drawn above
+  225 dpi go to 150 dpi, high-quality JPEGs are saved again at quality 80,
+  and photos stored without loss become JPEGs when they look the same.
+  Text, links, bookmarks, form fields, tags and attachments are kept as they
+  are, and CMYK stays CMYK. The result is never bigger than the original;
+  when it saves little, conv measures 150 dpi and suggests the `--max-size`
+  that reaches it. Runs on qpdf and conv's own image pass, with no AGPL code.
+- **`--max-size` takes PDFs.** `conv deck.pdf --max-size 5mb` tries qpdf's
+  lossless rewrite, then lower image resolutions, and keeps the first one
+  under the size; below 120 dpi it asks first. A signed PDF asks before any
+  rewrite.
 - **`conv merge` and `conv split` for PDFs.** `conv merge a.pdf b.pdf out.pdf`
   joins PDFs in order; a folder adds every PDF in it. `conv split report.pdf`
   writes one file per page, and `conv split report.pdf 1-3 4-z` one per range
