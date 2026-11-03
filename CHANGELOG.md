@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.2 - 2026-11-03
+
+### New
+
+- **A GIF changes speed and cuts as a GIF.** `conv anim.gif --speed 0.5`,
+  `conv anim.gif --start 1 --end 3` and `conv trim anim.gif` used to ask
+  for `--to mp4`; now the GIF stays a GIF, at its own size and frame
+  timing. Browsers play a GIF no faster than 50 fps, so one sped past that
+  drops frames to keep its speed, and a note says so.
+
 ## 0.6.1 - 2026-10-23
 
 ### New
