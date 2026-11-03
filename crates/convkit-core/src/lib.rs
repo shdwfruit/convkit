@@ -14,6 +14,7 @@ mod media;
 pub mod metadata;
 mod mov;
 pub mod office;
+pub mod pdf;
 pub mod plan;
 pub mod probe;
 mod procutil;
@@ -32,7 +33,7 @@ mod video;
 pub mod winpath;
 mod xmp;
 
-pub use backend::{Backend, PackageManager};
+pub use backend::{Backend, ManagedLayout, PackageManager};
 pub use backend_overrides::BackendOverrides;
 pub use error::{manual_hint_for, ConvError, ErrorCode, Remediation, Result};
 pub use exec::{BackendOutput, Event, Outcome, Request};
