@@ -56,7 +56,9 @@ pub struct Cli {
 
     /// Fit within this geometry, aspect preserved: `1600x900`, `1600x`
     /// (width), `x900` (height), or `50%`. Never enlarges: a source already
-    /// smaller is left alone, unless --upscale is given.
+    /// smaller is left alone, unless --upscale is given. A lone input keeps
+    /// its format and is written as NAME-SIZE.EXT, e.g. photo-50pct.jpg or
+    /// clip-1280w.mp4.
     // Not `global` -- see `dry_run`'s comment; likewise the flags below.
     #[arg(long, value_name = "GEOMETRY", value_parser = parse_resize_geometry)]
     pub resize: Option<String>,

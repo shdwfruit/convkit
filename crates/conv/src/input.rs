@@ -325,18 +325,27 @@ fn is_image_merge(paths: &[PathBuf]) -> bool {
 /// video into its own container; a range (`--start`, `--end`,
 /// `--duration`) or `--speed`, which cut or retime video and audio into
 /// their own format; `--rotate`, which turns most image and video files
-/// into their own format; or `--strip-metadata`, which strips most image,
-/// video and audio files into their own format. A derived output that would
-/// land on its input is named NAME-SUFFIX.EXT. With a range, a speed or a
-/// size, their rules and name apply: they are the narrower, and each one
-/// given must keep the format. A turn adds its name to theirs, and each
-/// format kept must also be one it can turn.
+/// into their own format; `--strip-metadata`, which strips most image,
+/// video and audio files into their own format; or `--resize` as the only
+/// one of these and with no `--to`, which resizes a picture or a video into
+/// its own format. A derived output that would land on its input is named
+/// NAME-SUFFIX.EXT. With a range, a speed or a size, their rules and name
+/// apply: they are the narrower, and each one given must keep the format.
+/// A turn adds its name to theirs, and each format kept must also be one it
+/// can turn. A turn alone with `--resize` and no `--to` names the size
+/// after the turn, `photo-rotated-50pct.jpg`, since the picture is resized
+/// once turned. Otherwise, with `--strip-metadata`, or with `--to`,
+/// `--resize` only tunes the conversion; a file already in the `--to`
+/// format is then resized beside the original as NAME-50pct.EXT instead of
+/// being written over itself.
 struct OwnFormat {
     sized: bool,
     /// Cut or retimed: either needs a timeline.
     timed: bool,
     turned: bool,
     stripped: bool,
+    /// `--resize` alone, which keeps what `registry::resize_in_place` does.
+    resized: bool,
     /// The flag, for messages: the range's first flag, else `--speed`, else
     /// the size's, else `--rotate`.
     flag: &'static str,
@@ -344,8 +353,10 @@ struct OwnFormat {
     verb: &'static str,
     done: &'static str,
     /// Added to a derived name: the range, the speed, the turn and the size,
-    /// in the order they happen (`1m02s-1m10s-2x-rotated-5mb`), or
-    /// `stripped`.
+    /// in the order they happen (`1m02s-1m10s-2x-rotated-5mb`); `rotated`,
+    /// with the `--resize` geometry after it when that names the size
+    /// (`rotated-50pct`); `stripped`; or the `--resize` geometry alone
+    /// (`50pct`).
     suffix: String,
 }
 
@@ -377,6 +388,7 @@ impl OwnFormat {
                 timed: true,
                 turned,
                 stripped: cli.strip_metadata,
+                resized: false,
                 flag,
                 verb,
                 done,
@@ -390,33 +402,58 @@ impl OwnFormat {
                 timed: false,
                 turned,
                 stripped: cli.strip_metadata,
+                resized: false,
                 flag: "--max-size",
                 verb: "size",
                 done: "sized",
                 suffix: parts.join("-"),
             });
         }
+        // The picture is resized once turned, so a size given alongside a
+        // turn goes after it in the name. With `--to` the suffix names a
+        // batch's folder, where `--resize` stays a tuning flag.
+        let geometry = cli.resize.as_deref().filter(|_| cli.to.is_none());
         if turned {
+            let parts: Vec<String> = [turn, geometry.map(resize_suffix)]
+                .into_iter()
+                .flatten()
+                .collect();
             return Some(OwnFormat {
                 sized: false,
                 timed: false,
                 turned,
                 stripped: cli.strip_metadata,
+                resized: false,
                 flag: "--rotate",
                 verb: "rotate",
                 done: "rotated",
-                suffix: "rotated".to_string(),
+                suffix: parts.join("-"),
             });
         }
-        cli.strip_metadata.then(|| OwnFormat {
+        if cli.strip_metadata {
+            return Some(OwnFormat {
+                sized: false,
+                timed: false,
+                turned: false,
+                stripped: true,
+                resized: false,
+                flag: "--strip-metadata",
+                verb: "strip",
+                done: "stripped",
+                suffix: "stripped".to_string(),
+            });
+        }
+        let geometry = geometry?;
+        Some(OwnFormat {
             sized: false,
             timed: false,
             turned: false,
-            stripped: true,
-            flag: "--strip-metadata",
-            verb: "strip",
-            done: "stripped",
-            suffix: "stripped".to_string(),
+            stripped: false,
+            resized: true,
+            flag: "--resize",
+            verb: "resize",
+            done: "resized",
+            suffix: resize_suffix(geometry),
         })
     }
 
@@ -427,6 +464,8 @@ impl OwnFormat {
             (!self.sized || convkit_core::sized::is_video_target(f))
                 && (!self.timed || convkit_core::registry::takes_range(f, f))
                 && turnable
+        } else if self.resized {
+            convkit_core::registry::resize_in_place(f).is_ok()
         } else {
             turnable && (!self.stripped || convkit_core::metadata::in_place(f).is_ok())
         }
@@ -449,19 +488,42 @@ impl OwnFormat {
             }
             Some(f) => convkit_core::metadata::strip_target_for(f)
                 .map(|to| to.ext())
-                .ok_or_else(|| {
-                    convkit_core::metadata::in_place(f)
-                        .err()
-                        .unwrap_or_default()
-                }),
+                .ok_or_else(|| self.refusal(f)),
             None => Ok("<format>"),
         }
     }
+
+    /// Why a lone `f` cannot keep its format under a strip or a resize,
+    /// with the fix.
+    fn refusal(&self, f: Format) -> String {
+        let why = if self.resized {
+            convkit_core::registry::resize_in_place(f)
+        } else {
+            convkit_core::metadata::in_place(f)
+        };
+        why.err().unwrap_or_default()
+    }
 }
 
-/// `conv clip.mp4 --max-size 10mb`, `conv talk.mp4 --start 1:02` or
-/// `conv photo.jpg --strip-metadata`: the input's own format, beside the
-/// input (or in `-o`); `name_own_format_outputs` adds the suffix.
+/// What a `--resize` geometry adds to a name: `50%` -> `50pct`, `1280` and
+/// `1280x` -> `1280w`, `x720` -> `720h`, `1280x720` as it is. Only the forms
+/// `--resize` accepts reach here, and none holds a character a file name
+/// cannot.
+fn resize_suffix(geometry: &str) -> String {
+    if let Some(pct) = geometry.strip_suffix('%') {
+        return format!("{pct}pct");
+    }
+    match geometry.split_once('x') {
+        None | Some((_, "")) => format!("{}w", geometry.trim_end_matches('x')),
+        Some(("", height)) => format!("{height}h"),
+        Some(_) => geometry.to_string(),
+    }
+}
+
+/// `conv clip.mp4 --max-size 10mb`, `conv talk.mp4 --start 1:02`,
+/// `conv photo.jpg --strip-metadata` or `conv photo.jpg --resize 50%`: the
+/// input's own format, beside the input (or in `-o`);
+/// `name_own_format_outputs` adds the suffix.
 fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Result<Job, ConvError> {
     let from = format_of(input)?;
     let invalid = |why| ConvError::new(ErrorCode::InvalidInvocation, why);
@@ -471,6 +533,9 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
         }
         if own.stripped {
             convkit_core::metadata::in_place(from).map_err(invalid)?;
+        }
+        if own.resized {
+            convkit_core::registry::resize_in_place(from).map_err(invalid)?;
         }
     }
     if own.sized && !convkit_core::sized::is_video_target(from) {
@@ -540,10 +605,10 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
     })
 }
 
-/// A sized, cut or stripped conversion may target its own format, so an
-/// output can land on its input. A derived output gets the suffix in its
-/// name (`clip-10mb.mp4`, `talk-1m02s-1m10s.mp4`, `photo-stripped.jpg`); an
-/// explicit one is refused.
+/// A sized, cut, stripped or resized conversion may target its own format,
+/// so an output can land on its input. A derived output gets the suffix in
+/// its name (`clip-10mb.mp4`, `talk-1m02s-1m10s.mp4`, `photo-stripped.jpg`,
+/// `photo-50pct.jpg`); an explicit one is refused.
 ///
 /// The renaming itself can make outputs collide: `clip.mp4` becomes
 /// `clip-10mb.mp4`, which `clip-10mb.mov --to mp4` already plans onto, or
@@ -555,9 +620,9 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
 /// With `timed`, a cut or a speed change is renamed even where it would not
 /// land on its input (`-o` to another folder): a clip is not the file it
 /// came from, and two clips of one file written to one folder must not
-/// share a name. A size or a strip alone keeps the name there, as it always
-/// has, and so does a cut in a batch's folder, whose name already says the
-/// range.
+/// share a name. A size, a strip or a resize alone keeps the name there, as
+/// it always has, and so does a cut in a batch's folder, whose name already
+/// says the range.
 fn name_own_format_outputs(
     mut jobs: Vec<Job>,
     suffix: &str,
@@ -800,9 +865,9 @@ fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
 
     // Without `--to`, the last positional is the output and must not be
     // globbed. See `expand_globs`.
-    // The exception is a lone path under `--max-size`, a range or
-    // `--strip-metadata`: that form has no output positional at all, so the
-    // one path is an input.
+    // The exception is a lone path under `--max-size`, a range,
+    // `--strip-metadata` or `--resize`: that form has no output positional
+    // at all, so the one path is an input.
     let own = OwnFormat::of(cli);
     let lone_sized_input = own.is_some() && cli.to.is_none() && cli.paths.len() == 1;
     let globbable = match cli.to {
@@ -948,7 +1013,18 @@ fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
         }
     }
     let Some(own) = own else {
-        return jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref());
+        let jobs = jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?;
+        // With `--to`, `--resize` tunes the conversion and names nothing,
+        // except where a file already in the `--to` format would be written
+        // over itself (`conv *.jpg --to jpg --resize 50%`, the fix several
+        // lone inputs are given): that one is named as a lone input would
+        // be, `photo-50pct.jpg`, beside the original. No other run reaches
+        // here with a job that lands on its input, since the planner refuses
+        // a format into itself unless it is stripped or resized.
+        return match cli.resize.as_deref() {
+            Some(geometry) => name_own_format_outputs(jobs, &resize_suffix(geometry), false, false),
+            None => Ok(jobs),
+        };
     };
     // A typed-out OUT is the user's explicit choice and is never renamed;
     // the `.ext` shorthand and every --to output are derived.
@@ -1015,9 +1091,10 @@ fn create_output_dir(dir: &Path) -> Result<(), ConvError> {
     })
 }
 
-/// Under `--max-size`, a range or `--strip-metadata` with no `--to`, a glob
-/// (`conv *.mp4 --max-size 8mb`, `conv *.jpg --strip-metadata`) reaches conv
-/// as a list of paths that the positional grammar reads as something else.
+/// Under `--max-size`, a range, `--strip-metadata` or `--resize` with no
+/// `--to`, a glob (`conv *.mp4 --max-size 8mb`, `conv *.jpg
+/// --strip-metadata`) reaches conv as a list of paths that the positional
+/// grammar reads as something else.
 /// Two paths are the `IN OUT` pair, so sizing them would replace the second
 /// clip with a sized copy of the first; three or more are the image-to-PDF
 /// merge form. Both are refused here with `--to` as the fix. A pair whose
@@ -2642,5 +2719,225 @@ mod tests {
         c.strip_metadata = true;
         let e = plan_jobs(&c).unwrap_err();
         assert!(e.message.contains("add --to mp4"), "{:?}", e.message);
+    }
+
+    // --- --resize ------------------------------------------------------------
+
+    fn resized(
+        geometry: &str,
+        paths: Vec<PathBuf>,
+        to: Option<&str>,
+        outdir: Option<PathBuf>,
+    ) -> Cli {
+        let mut c = cli_for(paths, to, outdir);
+        c.resize = Some(geometry.to_string());
+        c
+    }
+
+    #[test]
+    fn a_lone_path_resized_keeps_its_format_and_names_the_size() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, geometry, out, format) in [
+            ("IMG_0042.jpg", "50%", "IMG_0042-50pct.jpg", Format::Jpg),
+            ("clip.MOV", "1280", "clip-1280w.MOV", Format::Mov),
+            ("c.tiff", "800x", "c-800w.tiff", Format::Tiff),
+            ("a.png", "x900", "a-900h.png", Format::Png),
+            ("b.webp", "1600x900", "b-1600x900.webp", Format::Webp),
+        ] {
+            let jobs =
+                plan_jobs(&resized(geometry, vec![dir.path().join(name)], None, None)).unwrap();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].output, dir.path().join(out));
+            assert_eq!((jobs[0].from, jobs[0].to), (format, format));
+        }
+    }
+
+    /// `--resize` keeps the format only on its own: with an operation that
+    /// does, that operation's name stands, as it did before.
+    #[test]
+    fn resize_with_another_operation_keeps_todays_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = resized("50%", vec![dir.path().join("photo.jpg")], None, None);
+        c.strip_metadata = true;
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            dir.path().join("photo-stripped.jpg")
+        );
+        let mut c = resized("50%", vec![dir.path().join("clip.mp4")], None, None);
+        c.speed = Some(convkit_core::speed::parse("2").unwrap());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            dir.path().join("clip-2x.mp4")
+        );
+    }
+
+    /// With `--to`, `--resize` tunes the conversion and names nothing: the
+    /// output keeps its plain name, beside its input, in no size folder.
+    #[test]
+    fn resize_with_to_is_a_plain_tuning_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("photo.png");
+        std::fs::write(&photo, b"x").unwrap();
+        let jobs = plan_jobs(&resized("50%", vec![photo], Some("jpg"), None)).unwrap();
+        assert_eq!(jobs[0].output, dir.path().join("photo.jpg"));
+        assert!(!dir.path().join("50pct").exists());
+    }
+
+    /// A file already in the `--to` format would be written over itself;
+    /// it is named as a lone input would be instead, beside the original.
+    #[test]
+    fn resize_with_to_never_writes_a_file_over_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let (jpg, png) = (dir.path().join("photo.jpg"), dir.path().join("photo.png"));
+        let jobs = plan_jobs(&resized("50%", vec![jpg, png], Some("jpg"), None)).unwrap();
+        assert_eq!(
+            under(dir.path(), &jobs),
+            ["photo-50pct.jpg", "photo-png.jpg"]
+        );
+    }
+
+    #[test]
+    fn a_lone_file_that_cannot_be_resized_into_itself_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = plan_jobs(&resized(
+            "50%",
+            vec![dir.path().join("IMG.heif")],
+            None,
+            None,
+        ))
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(
+            e.message.contains("--resize keeps heif's own format"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("add --to heic"), "{}", e.message);
+        let e = plan_jobs(&resized(
+            "50%",
+            vec![dir.path().join("song.mp3")],
+            None,
+            None,
+        ))
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert!(e.message.contains("resize sound"), "{}", e.message);
+    }
+
+    /// Several paths take the rules `--strip-metadata` takes, and the fix
+    /// they name works.
+    #[test]
+    fn several_paths_resized_without_to_are_told_to_add_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.jpg"), dir.path().join("b.jpg"));
+        for f in [&a, &b] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let e = plan_jobs(&resized("50%", vec![a.clone(), b.clone()], None, None)).unwrap_err();
+        assert!(
+            e.message
+                .contains("are both jpg files; add --to jpg to resize each one, or remove"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.ends_with("to write a resized copy there"),
+            "{}",
+            e.message
+        );
+        let three = v(&["a.png", "b.png", "c.png"]);
+        let e = plan_jobs(&resized("50%", three, None, None)).unwrap_err();
+        assert!(
+            e.message.ends_with("; add --to png to resize each file"),
+            "{}",
+            e.message
+        );
+        let e = plan_jobs(&resized("50%", vec![dir.path().join("*.jpg")], None, None)).unwrap_err();
+        assert!(
+            e.message.ends_with("add --to jpg to resize each one"),
+            "{}",
+            e.message
+        );
+        let jobs = plan_jobs(&resized("50%", vec![a, b], Some("jpg"), None)).unwrap();
+        assert_eq!(under(dir.path(), &jobs), ["a-50pct.jpg", "b-50pct.jpg"]);
+    }
+
+    /// `-o` writes the copy there under its own name, as a strip's is, and
+    /// a typed-out output of the same format is taken as given.
+    #[test]
+    fn a_resized_copy_goes_where_it_is_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("small");
+        let photo = dir.path().join("photo.jpg");
+        let jobs = plan_jobs(&resized(
+            "50%",
+            vec![photo.clone()],
+            None,
+            Some(out.clone()),
+        ))
+        .unwrap();
+        assert_eq!(jobs[0].output, out.join("photo.jpg"));
+        let clip = dir.path().join("clip.mp4");
+        let trip = dir.path().join("trip.mp4");
+        let jobs = plan_jobs(&resized("1280", vec![clip, trip.clone()], None, None)).unwrap();
+        assert_eq!(jobs[0].output, trip);
+        assert_eq!((jobs[0].from, jobs[0].to), (Format::Mp4, Format::Mp4));
+        let e = plan_jobs(&resized("50%", vec![photo.clone(), photo], None, None)).unwrap_err();
+        assert!(
+            e.message.starts_with("output is the input"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// The picture is resized once turned, so a turn with `--resize` keeps
+    /// the format and names both, the size after the turn; stripped as
+    /// well, it names the same. With `--to`, the batch folder is still the
+    /// turn's.
+    #[test]
+    fn a_turn_and_a_resize_keep_the_format_and_name_both() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, geometry, out, format) in [
+            ("photo.jpg", "50%", "photo-rotated-50pct.jpg", Format::Jpg),
+            ("IMG.heic", "x900", "IMG-rotated-900h.heic", Format::Heic),
+            ("clip.mp4", "1280", "clip-rotated-1280w.mp4", Format::Mp4),
+        ] {
+            let mut c = resized(geometry, vec![dir.path().join(name)], None, None);
+            c.rotate = Some(convkit_core::rotate::Turn::Right);
+            let jobs = plan_jobs(&c).unwrap();
+            assert_eq!(jobs[0].output, dir.path().join(out), "{name}");
+            assert_eq!((jobs[0].from, jobs[0].to), (format, format), "{name}");
+        }
+        let mut c = resized("50%", vec![dir.path().join("photo.jpg")], None, None);
+        c.rotate = Some(convkit_core::rotate::Turn::Left);
+        c.strip_metadata = true;
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            dir.path().join("photo-rotated-50pct.jpg")
+        );
+        let (a, b) = (dir.path().join("a.jpg"), dir.path().join("b.png"));
+        let mut c = resized("50%", vec![a, b], Some("jpg"), None);
+        c.rotate = Some(convkit_core::rotate::Turn::Right);
+        let jobs = plan_jobs(&c).unwrap();
+        assert_eq!(under(dir.path(), &jobs), ["rotated/a.jpg", "rotated/b.jpg"]);
+    }
+
+    /// A turn keeps formats a resize alone cannot (a gif), and refuses the
+    /// ones it cannot keep with its own fix, resize or not.
+    #[test]
+    fn a_turn_with_a_resize_keeps_what_the_turn_keeps() {
+        let mut c = resized("50%", v(&["logo.svg"]), None, None);
+        c.rotate = Some(convkit_core::rotate::Turn::Right);
+        let e = plan_jobs(&c).unwrap_err();
+        assert_eq!(
+            e.message,
+            "conv cannot keep svg files as svg; add --to png to turn them"
+        );
+        let mut c = resized("50%", v(&["anim.gif"]), None, None);
+        c.rotate = Some(convkit_core::rotate::Turn::Right);
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("anim-rotated-50pct.gif")
+        );
     }
 }

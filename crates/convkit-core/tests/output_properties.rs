@@ -3752,6 +3752,51 @@ fn a_video_stripped_in_place_is_copied_not_re_encoded() {
     assert_eq!(after.rotation.map(i32::abs), Some(90));
 }
 
+/// A photo resized into its own format comes out smaller and upright, and
+/// keeps its location as a conversion to its format does, which the note
+/// says. A clip resized into its own container is scaled and stays in its
+/// codec; a webm, whose own recipe has no filter, too.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_photo_and_a_clip_resized_in_place_shrink_and_keep_their_format() {
+    let dir = tmp();
+    let resize = |geometry: &str| Tuning {
+        resize: Some(geometry.into()),
+        ..Tuning::default()
+    };
+    let photo = gps_photo(&dir);
+    let half = dir.path().join("IMG_0042-50pct.jpg");
+    let outcome = convert_tuned(&photo, &half, &resize("50%")).unwrap();
+    assert_eq!(identify_format(&half, "%m"), "JPEG");
+    assert_eq!(imagemagick_dimensions(&half), (96, 48), "upright, halved");
+    assert!(carries_identifying(&half));
+    assert!(says_location(&outcome), "{:?}", outcome.warnings);
+    // A resize larger than the picture changes nothing, and says so.
+    let same = dir.path().join("IMG_0042-4000w.jpg");
+    let outcome = convert_tuned(&photo, &same, &resize("4000")).unwrap();
+    assert_eq!(imagemagick_dimensions(&same), (192, 96));
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("Source is 192x96; --resize 4000 left it unchanged")),
+        "{:?}",
+        outcome.warnings
+    );
+
+    let clip = synth_video(&dir, 640, 360, 30);
+    let small = dir.path().join("src-320w.mov");
+    convert_tuned(&clip, &small, &resize("320")).unwrap();
+    assert_eq!(probe_dims(&small), (320, 180));
+    assert_eq!(ffprobe_video_codec(&small), "h264");
+    let webm = dir.path().join("src.webm");
+    convert_tuned(&clip, &webm, &Tuning::default()).unwrap();
+    let smaller = dir.path().join("src-x90.webm");
+    convert_tuned(&webm, &smaller, &resize("x90")).unwrap();
+    assert_eq!(probe_dims(&smaller), (160, 90));
+    assert_eq!(ffprobe_video_codec(&smaller), "vp9");
+}
+
 /// A compressed tiff stripped into a tiff stays compressed, losslessly;
 /// an uncompressed one stays uncompressed.
 #[test]

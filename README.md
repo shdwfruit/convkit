@@ -200,6 +200,10 @@ Three flags override named defaults on image conversions:
   scale (60 makes a photo about the size a phone writes).
 - `--colors <2-256>` — palette reduction on raster targets.
 
+With just an input, `--resize` keeps the file's format and puts the size in
+the name: `conv photo.jpg --resize 50%` writes `photo-50pct.jpg` next to the
+original, and `conv clip.mp4 --resize 1280` writes `clip-1280w.mp4`.
+
 A flag that doesn't apply to the requested pair is refused with the reason,
 never silently ignored:
 
@@ -636,11 +640,13 @@ is turned frame by frame.
 Naming works as it does for `--strip-metadata`: one file keeps its format
 and gets `-rotated` in its name, and a batch writes into a `rotated` folder.
 Name an output to convert it as well. The turn comes before `--resize`, so
-the size fits the turned picture:
+the size fits the turned picture, and one file's name says the size after
+the turn (`photo-rotated-50pct.jpg`):
 
 ```console
 conv IMG_0042.heic .jpg --rotate right
 conv ./scans --to png --rotate 180
+conv photo.jpg --rotate right --resize 50%
 conv screen.mov clip.gif --rotate left --resize 480x
 ```
 

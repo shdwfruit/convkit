@@ -302,12 +302,13 @@ const SVG_TO_PNG_STRIPPED: Recipe = Recipe {
     warnings: &[],
 };
 
-/// `IMG_LOSSLESS` for a compressed tiff stripped into a tiff. ImageMagick
-/// writes a tiff uncompressed whatever the source used, so an LZW scan of
-/// 2.6 MB came back 5.8 MB, and a JPEG-compressed one of 0.85 MB the same,
-/// for no change to a pixel. Zip is lossless, so nothing is re-encoded; a
-/// JPEG-compressed source is not given JPEG back, which would be. Only when
-/// the source was compressed: an uncompressed tiff stays uncompressed.
+/// `IMG_LOSSLESS` for a compressed tiff stripped or resized into a tiff.
+/// ImageMagick writes a tiff uncompressed whatever the source used, so an
+/// LZW scan of 2.6 MB came back 5.8 MB, and a JPEG-compressed one of 0.85
+/// MB the same, for no change to a pixel. Zip is lossless, so nothing is
+/// re-encoded; a JPEG-compressed source is not given JPEG back, which would
+/// be. Only when the source was compressed: an uncompressed tiff stays
+/// uncompressed.
 pub(crate) const IMG_TO_TIFF_ZIP: Recipe = Recipe {
     steps: &[step!(
         Backend::Magick,
@@ -1846,13 +1847,21 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
 }
 
 /// The recipe whose reads (a size, the notes' traits) a conversion makes:
-/// the pair's own, or for a file stripped or turned into its own format,
-/// which has no pair, the recipe that rewrites it.
+/// the pair's own, or for a file stripped, turned or resized into its own
+/// format, which has no pair, the recipe that rewrites it. A resize alone
+/// takes the recipe any raster takes to the format, which a gif has none
+/// of.
 fn recipe_read_for(from: Format, to: Format, tuning: &Tuning) -> Option<Recipe> {
     lookup(from, to).or_else(|| {
-        (from == to && (tuning.strip_metadata || tuning.rotate.is_some()))
-            .then(|| turn_recipe_for(to))
-            .flatten()
+        if from != to {
+            None
+        } else if tuning.strip_metadata || tuning.rotate.is_some() {
+            turn_recipe_for(to)
+        } else if tuning.resize.is_some() {
+            image_recipe_for(to)
+        } else {
+            None
+        }
     })
 }
 
@@ -1866,7 +1875,10 @@ fn recipe_read_for(from: Format, to: Format, tuning: &Tuning) -> Option<Recipe> 
 /// largest, and at the density it renders a vector source at.
 pub fn image_read(from: Format, to: Format, tuning: &Tuning) -> Option<crate::probe::ImageRead> {
     let upscale = tuning.upscale && tuning.resize.is_some();
-    if !upscale && to != Format::Ico {
+    // A resize into the file's own format may be a no-op, which the note
+    // says only when the size is known.
+    let in_place = from == to && tuning.resize.is_some();
+    if !upscale && !in_place && to != Format::Ico {
         return None;
     }
     let step = recipe_read_for(from, to, tuning)?.steps.iter().find(|s| {
@@ -1914,14 +1926,18 @@ pub fn notes_need_image(from: Format, to: Format, tuning: &Tuning) -> bool {
             .iter()
             .any(|&w| matches!(w, FLATTEN_FIRST_FRAME_NOTE | FIRST_FRAME_NOTE))
     });
-    // A tiff stripped into a tiff keeps its compression, which the read
-    // reports (see `IMG_TO_TIFF_ZIP`).
-    let tiff_in_place = from == Format::Tiff && to == Format::Tiff && tuning.strip_metadata;
+    // A tiff stripped or resized into a tiff keeps its compression, which
+    // the read reports (see `IMG_TO_TIFF_ZIP`).
+    let tiff_in_place = from == Format::Tiff
+        && to == Format::Tiff
+        && (tuning.strip_metadata || tuning.resize.is_some());
+    // A picture resized into its own format keeps its location as a
+    // conversion to that format does, so it is read for the note too.
     frame_notes
         || tiff_in_place
         || (!tuning.strip_metadata
             && from != Format::Webp
-            && lookup(from, to).is_some()
+            && recipe_read_for(from, to, tuning).is_some()
             && crate::metadata::keeps_exif_location(from, to))
 }
 
@@ -2070,7 +2086,8 @@ pub fn reads_table(from: Format, to: Format) -> bool {
 /// there, and it needs the probe to map the streams. And any `--max-size`
 /// conversion to a video target that convkit can convert to, which needs the
 /// duration to set a bitrate at all. And any range on a pair it can cut,
-/// which needs the file's length to place the cut.
+/// which needs the file's length to place the cut. And a video resized
+/// into its own format, which only the probe-aware transcode can scale.
 pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     // --max-size needs the duration and the picture; there is no fallback.
     // Only for a pair that can be converted at all, so an unsupported one is
@@ -2089,14 +2106,20 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     // sound to filter, at what rate, and the subtitles and chapters it
     // leaves out.
     let retimed = tuning.speed.is_some() && takes_range(from, to);
-    sized || webm_knob || cut || retimed
+    // A video resized into its own format has no pair to fall back on, so
+    // it is transcoded from the probe as a cut is (webm's own recipe has no
+    // filter slot at all).
+    let resized_in_place =
+        from == to && tuning.resize.is_some() && crate::sized::is_video_target(to);
+    sized || webm_knob || cut || retimed || resized_in_place
 }
 
 /// What a format cut into itself runs (`conv talk.mp4 --start 1:02`): the
 /// recipe any other source of the same family uses to reach it. Only ever
-/// consulted for a range. Without one, converting a file into its own
-/// format is no conversion at all, which is why these pairs are not in the
-/// table. GIF has its own: the recipe into GIF caps the result at 15 fps
+/// consulted for a range, a speed or a video's `--resize`, where the
+/// probe-aware transcode declined. Without one, converting a file into its
+/// own format is no conversion at all, which is why these pairs are not in
+/// the table. GIF has its own: the recipe into GIF caps the result at 15 fps
 /// and 640 px, so cutting one into itself with it would also shrink it.
 pub fn same_format_recipe(f: Format) -> Option<Recipe> {
     match f {
@@ -2113,6 +2136,40 @@ pub fn same_format_recipe(f: Format) -> Option<Recipe> {
         Format::Ogg => Some(TO_OGG),
         _ => None,
     }
+}
+
+/// Whether `--resize` alone can keep a file of format `f` as `f`
+/// (`photo.jpg` -> `photo-50pct.jpg`), and if not, why, with the fix. A
+/// raster conv writes runs the recipe any raster takes to it
+/// (`image_recipe_for`); a video is transcoded as a cut into its own format
+/// is. Everything else has no such route: conv does not write heif or avi;
+/// a gif, svg or ico is not resized into itself; and sound and documents
+/// have no picture to resize. The fix is the format `--strip-metadata` names for the same
+/// file, where there is one. Shared by the planner, the command line and
+/// the right-click form, so all three say the same.
+pub fn resize_in_place(f: Format) -> Result<(), String> {
+    if RASTER_WRITABLE.contains(&f) || crate::sized::is_video_target(f) {
+        return Ok(());
+    }
+    let ext = f.ext();
+    let reason = match f.kind() {
+        Kind::Image if matches!(f, Format::Heic | Format::Heif) => format!("write {ext}"),
+        Kind::Image => {
+            let a = if matches!(f, Format::Svg | Format::Ico) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("resize {a} {ext} into {a} {ext}")
+        }
+        Kind::Video => format!("write {ext}"),
+        Kind::Audio => "resize sound".to_string(),
+        Kind::Document => "resize a document".to_string(),
+    };
+    let fix = crate::metadata::strip_target_for(f).map_or("<format>", |to| to.ext());
+    Err(format!(
+        "--resize keeps {ext}'s own format, and conv can't {reason}; add --to {fix}"
+    ))
 }
 
 /// Whether a range can cut this pair: its recipe carries an `Arg::Trim`
@@ -2196,7 +2253,10 @@ mod tests {
         };
         let jpg = image_read(Format::Jpg, Format::Jpg, &stripped_up).unwrap();
         assert!(!jpg.every_page && !jpg.every_input, "{jpg:?}");
-        assert_eq!(image_read(Format::Jpg, Format::Jpg, &up), None, "no pair");
+        // So is one resized into its own format without the flag; a gif has
+        // no recipe into itself, so nothing to read for.
+        assert_eq!(image_read(Format::Jpg, Format::Jpg, &up), Some(jpg));
+        assert_eq!(image_read(Format::Gif, Format::Gif, &up), None, "no recipe");
     }
 
     fn read_image(alpha: Option<bool>, multi_frame: bool) -> crate::MediaProbe {
@@ -3268,6 +3328,95 @@ mod tests {
             Format::Webm,
             &Tuning::default()
         ));
+    }
+
+    /// A video resized into its own format is routed as a cut is: always
+    /// probed, webm included, since there is no pair to fall back on. A
+    /// picture is not probed for it.
+    #[test]
+    fn a_video_resized_into_itself_requires_a_probe() {
+        let resize = Tuning {
+            resize: Some("1280".into()),
+            ..Default::default()
+        };
+        for f in [Format::Mp4, Format::Mov, Format::Mkv, Format::Webm] {
+            assert!(requires_probe(f, f, &resize), "{f:?}");
+            assert!(!requires_probe(f, f, &Tuning::default()), "{f:?}");
+        }
+        assert!(!requires_probe(Format::Jpg, Format::Jpg, &resize));
+    }
+
+    /// `--resize` alone keeps the formats conv both writes and resizes, and
+    /// names the fix for every other.
+    #[test]
+    fn resize_in_place_keeps_what_conv_writes_and_can_resize() {
+        for f in [
+            Format::Jpg,
+            Format::Png,
+            Format::Webp,
+            Format::Avif,
+            Format::Heic,
+            Format::Tiff,
+            Format::Bmp,
+            Format::Mp4,
+            Format::Mov,
+            Format::Mkv,
+            Format::Webm,
+        ] {
+            assert_eq!(resize_in_place(f), Ok(()), "{f:?}");
+        }
+        for (f, want) in [
+            (
+                Format::Heif,
+                "--resize keeps heif's own format, and conv can't write heif; add --to heic",
+            ),
+            (
+                Format::Gif,
+                "--resize keeps gif's own format, and conv can't resize a gif into a gif; \
+                 add --to mp4",
+            ),
+            (
+                Format::Svg,
+                "--resize keeps svg's own format, and conv can't resize an svg into an svg; \
+                 add --to png",
+            ),
+            (
+                Format::Ico,
+                "--resize keeps ico's own format, and conv can't resize an ico into an ico; \
+                 add --to <format>",
+            ),
+            (
+                Format::Mp3,
+                "--resize keeps mp3's own format, and conv can't resize sound; add --to <format>",
+            ),
+            (
+                Format::Pdf,
+                "--resize keeps pdf's own format, and conv can't resize a document; \
+                 add --to <format>",
+            ),
+            (
+                Format::Avi,
+                "--resize keeps avi's own format, and conv can't write avi; add --to mp4",
+            ),
+        ] {
+            assert_eq!(resize_in_place(f).unwrap_err(), want, "{f:?}");
+        }
+    }
+
+    /// A picture resized into its own format is read as one converted to
+    /// that format is: for its frame and alpha notes, its location, and a
+    /// tiff's compression. A webp's EXIF is out of a header read's reach.
+    #[test]
+    fn a_picture_resized_into_itself_is_read_like_any_other() {
+        let resize = Tuning {
+            resize: Some("50%".into()),
+            ..Tuning::default()
+        };
+        for f in [Format::Jpg, Format::Png, Format::Avif, Format::Tiff] {
+            assert!(notes_need_image(f, f, &resize), "{f:?}");
+        }
+        assert!(!notes_need_image(Format::Webp, Format::Webp, &resize));
+        assert!(!notes_need_image(Format::Gif, Format::Gif, &resize));
     }
 
     #[test]
