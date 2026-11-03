@@ -658,7 +658,7 @@ pub fn pdf_success_human(
             (vec![listed, format!("{} files", many.len())], folder)
         }
     };
-    fields.push(human_size(total));
+    fields.push(convkit_core::size::human(total));
     fields.push(human_elapsed(elapsed));
 
     let glyph = if styled {

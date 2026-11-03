@@ -4015,19 +4015,21 @@ mod tests {
             ..Tuning::default()
         };
         for f in [Format::Jpg, Format::Png, Format::Avif, Format::Tiff] {
-            assert!(notes_need_image(f, f, &one(f), &resize), "{f:?}");
+            assert!(notes_need_image(f, f, &one(f), &resize, None), "{f:?}");
         }
         assert!(!notes_need_image(
             Format::Webp,
             Format::Webp,
             &one(Format::Webp),
-            &resize
+            &resize,
+            None
         ));
         assert!(!notes_need_image(
             Format::Gif,
             Format::Gif,
             &one(Format::Gif),
-            &resize
+            &resize,
+            None
         ));
     }
 
