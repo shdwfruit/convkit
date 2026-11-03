@@ -35,7 +35,7 @@ final class FileItem: Identifiable {
 
 /// Flags conv applies when a lone file keeps its format.
 private let sameFormatTuning: Set<String> = [
-    "--max-size", "--strip-metadata", "--start", "--end", "--speed", "--shift-pitch",
+    "--max-size", "--strip-metadata", "--start", "--end", "--duration", "--speed", "--shift-pitch",
 ]
 
 /// The app's state: which tool is showing, the conv in use, and Convert's own state.
@@ -44,6 +44,11 @@ final class AppModel {
     var tool: Tool = .convert
     let qr = QRModel()
     let ascii = AsciiModel()
+    let trim = TrimModel()
+    let scan = ScanModel()
+    let backends = BackendsModel()
+    let formats = FormatsModel()
+    let changelog = ChangelogModel()
     /// Subcommands the conv in use offers, from its --help.
     private(set) var subcommands: Set<String> = []
 
@@ -57,6 +62,11 @@ final class AppModel {
     var format = "same"
     var maxSize = ""
     var resize = ""
+    var upscale = false
+    var colors = ""
+    var fps = ""
+    var crf = ""
+    var duration = ""
     var quality: Double = 92
     var useQuality = false
     var speed = ""
@@ -99,6 +109,11 @@ final class AppModel {
         convURL = url
         qr.conv = url
         ascii.conv = url
+        trim.conv = url
+        scan.conv = url
+        backends.conv = url
+        formats.conv = url
+        changelog.conv = url
         setupProblem = nil
         if let out = try? await Conv.run(url, ["--version"]) {
             convVersion = String(decoding: out.stdout, as: UTF8.self)
@@ -124,12 +139,14 @@ final class AppModel {
         return names
     }
 
-    /// Files from Finder or the Dock go to ASCII Art when it's showing a lone picture's tool,
-    /// otherwise to Convert.
+    /// A lone file from Finder or the Dock goes to ASCII Art or Trim when that tool is showing;
+    /// anything else goes to Convert.
     @MainActor
     func open(_ urls: [URL]) {
         if tool == .ascii, urls.count == 1 {
             ascii.input = urls[0]
+        } else if tool == .trim, urls.count == 1 {
+            trim.load(urls[0])
         } else {
             tool = .convert
             add(urls)
@@ -228,6 +245,10 @@ final class AppModel {
         check(!maxSize.isEmpty, "--max-size", "Keep under")
         check(!resize.isEmpty, "--resize", "Resize")
         check(useQuality, "--quality", "Quality")
+        check(!colors.isEmpty, "--colors", "Colors")
+        check(!fps.isEmpty, "--fps", "Frame rate")
+        check(!crf.isEmpty, "--crf", "Video quality")
+        check(!duration.isEmpty, "--duration", "Keep")
         check(!speed.isEmpty, "--speed", "Speed")
         check(!start.isEmpty, "--start", "Start")
         check(!end.isEmpty, "--end", "End")
@@ -247,11 +268,16 @@ final class AppModel {
         }
         add("--max-size", maxSize.replacingOccurrences(of: " ", with: ""))
         add("--resize", resize)
+        if upscale && !resize.isEmpty && applies("--upscale") { a.append("--upscale") }
+        add("--colors", colors)
+        add("--fps", fps)
+        add("--crf", crf)
         if useQuality && applies("--quality") { a += ["--quality", String(Int(quality))] }
         add("--speed", speed)
         if shiftPitch && !speed.isEmpty && applies("--shift-pitch") { a.append("--shift-pitch") }
         add("--start", start)
         add("--end", end)
+        add("--duration", duration)
         if strip && applies("--strip-metadata") { a.append("--strip-metadata") }
         if let dir = outputFolder { a += ["-o", dir.path] }
         return a

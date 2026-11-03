@@ -1,10 +1,23 @@
 # ConvKit for Mac (prototype)
 
-A SwiftUI toolkit for conv. The sidebar has a tool for each job:
+A SwiftUI toolkit for conv, with a tool in the sidebar for each thing conv does.
 
-- Convert: drop files in, pick what you want, press Convert.
+Files
+- Convert: drop files in, pick a format and any of conv's options (size limit,
+  resize, quality, colors, frame rate, CRF, cuts, speed, metadata), press Convert.
+- Trim: play a video or audio file, mark clips with I and O, write them all.
+  A clip can keep just the sound.
+- Scan Folder: what each file in a folder could become. Send any of them to Convert.
+
+Make
 - QR Code: type a link or text, see the code conv made and checked, save or copy it.
 - ASCII Art: drop a picture, GIF or video, tune the look, copy the text or save it.
+
+conv
+- Backends: which programs conv uses, where they are, and Install or Update for
+  the ones conv manages.
+- Formats: every format, what it turns into, and which options apply.
+- What's New: the changelog built into conv.
 
 A tool only shows when your conv has the command behind it, so new conv
 commands can get a tool without breaking older installs.

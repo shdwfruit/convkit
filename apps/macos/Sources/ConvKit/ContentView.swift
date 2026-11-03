@@ -20,7 +20,8 @@ struct ConvertView: View {
 
     /// Changes whenever any option does, so the preview re-runs.
     private var optionsKey: String {
-        [model.format, model.maxSize, model.resize, "\(model.useQuality)\(Int(model.quality))",
+        [model.format, model.maxSize, model.resize, "\(model.upscale)", model.colors, model.fps, model.crf,
+         model.duration, "\(model.useQuality)\(Int(model.quality))",
          model.speed, "\(model.shiftPitch)", model.start, model.end, "\(model.strip)",
          model.outputFolder?.path ?? ""].joined(separator: "|")
     }

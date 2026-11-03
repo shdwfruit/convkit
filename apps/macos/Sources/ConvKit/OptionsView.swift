@@ -44,6 +44,10 @@ struct OptionsView: View {
                         placeholder: "1600x900"
                     )
                     .applies(model.applies("--resize"))
+                    if !model.resize.isEmpty && model.applies("--upscale") {
+                        Toggle("Allow enlarging a smaller file", isOn: $model.upscale)
+                            .help("Enlarging adds no detail and makes a larger file. conv warns when it does.")
+                    }
                     Toggle("Set quality", isOn: $model.useQuality)
                         .applies(model.applies("--quality"))
                     if model.useQuality && model.applies("--quality") {
@@ -51,6 +55,29 @@ struct OptionsView: View {
                             Text("Quality \(Int(model.quality))")
                         }
                     }
+                    PresetField(
+                        "Colors", value: $model.colors,
+                        presets: [("All", ""), ("256", "256"), ("64", "64"), ("16", "16")],
+                        placeholder: "2 to 256"
+                    )
+                    .applies(model.applies("--colors"))
+                }
+
+                Section("Video") {
+                    PresetField(
+                        "Frame rate", value: $model.fps,
+                        presets: [("As is", ""), ("Up to 60", "60"), ("Up to 30", "30"),
+                                  ("Up to 24", "24"), ("Up to 15", "15")],
+                        placeholder: "12"
+                    )
+                    .applies(model.applies("--fps"))
+                    PresetField(
+                        "Quality (CRF)", value: $model.crf,
+                        presets: [("Default", ""), ("Near lossless (16)", "16"), ("High (20)", "20"),
+                                  ("Smaller (28)", "28"), ("Smallest (34)", "34")],
+                        placeholder: "0 to 51, lower is better"
+                    )
+                    .applies(model.applies("--crf"))
                 }
 
                 Section("Time") {
@@ -58,6 +85,8 @@ struct OptionsView: View {
                         .applies(model.applies("--start"))
                     TextField("End", text: $model.end, prompt: Text("end"))
                         .applies(model.applies("--end"))
+                    TextField("Or keep", text: $model.duration, prompt: Text("a length, like 30s"))
+                        .applies(model.applies("--duration"))
                     PresetField(
                         "Speed", value: $model.speed,
                         presets: [("Normal", ""), ("Half (0.5×)", "0.5"), ("1.5×", "1.5"),

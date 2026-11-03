@@ -92,6 +92,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard kv.count == 2 else { continue }
                 switch kv[0] {
                 case "tool": model.tool = Tool(rawValue: kv[1]) ?? .convert
+                case "trimFile": model.trim.load(URL(fileURLWithPath: kv[1]))
+                case "trimClip":
+                    let parts = kv[1].split(separator: ",")
+                    let t = parts.prefix(2).compactMap { Double($0) }
+                    if t.count == 2 {
+                        model.trim.clips.append(.init(start: t[0], end: t[1], keep: parts.count > 2 ? .sound : .both))
+                    }
+                case "trimWrite": model.trim.writeAll()
+                case "scanDir": Task { await model.scan.scan(URL(fileURLWithPath: kv[1])) }
                 case "qrText": model.qr.text = kv[1]; model.qr.changed()
                 case "asciiInput": model.ascii.input = URL(fileURLWithPath: kv[1]); model.ascii.changed()
                 case "asciiStyle": model.ascii.style = kv[1]; model.ascii.changed()
@@ -99,6 +108,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case "format": model.format = kv[1]
                 case "maxSize": model.maxSize = kv[1]
                 case "resize": model.resize = kv[1]
+                case "upscale": model.upscale = kv[1] == "1"
+                case "colors": model.colors = kv[1]
+                case "fps": model.fps = kv[1]
+                case "crf": model.crf = kv[1]
+                case "duration": model.duration = kv[1]
                 case "speed": model.speed = kv[1]
                 case "start": model.start = kv[1]
                 case "end": model.end = kv[1]
@@ -115,6 +129,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let wait = Double(env["CONVKIT_WAIT"] ?? "") ?? 6
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [self] in
             var dump = "conv: \(model.convURL?.path ?? "-") \(model.convVersion)\ntools: \(model.availableTools.map(\.rawValue)) showing \(model.tool.rawValue)\ntargets: \(model.targets)\n"
+            dump += "trim: dur=\(model.trim.duration) video=\(model.trim.hasVideo) targets=\(model.trim.targets) clips=\(model.trim.clips.map { "\($0.start)-\($0.end) \($0.status)" })\n"
+            dump += "scan: \(model.scan.entries.map { "\($0.name):\($0.targets?.count ?? 0)" }) problem=\(model.scan.problem ?? "-")\n"
+            dump += "backends: \(model.backends.doctor.map { "\($0.backend)=\($0.found)" }) outdated=\(model.backends.outdated) conv=\(model.backends.me?.update_hint ?? "-")\n"
+            dump += "formats: \(model.formats.formats.count) selected=\(model.formats.selected ?? "-") targets=\(model.formats.detail?.targets?.count ?? 0)\n"
+            dump += "changelog: \(model.changelog.releases.map(\.version)) installed=\(model.changelog.installed)\n"
             dump += "qr: preview=\(model.qr.preview?.size as Any) info=\(model.qr.info) problem=\(model.qr.problem ?? "-")\n"
             dump += "ascii: problem=\(model.ascii.problem ?? "-") warnings=\(model.ascii.warnings) art:\n\(model.ascii.art.split(separator: "\n").prefix(6).joined(separator: "\n"))\n"
             for f in model.files {
