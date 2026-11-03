@@ -440,9 +440,23 @@ fn parse_size(line: &str) -> Option<(u32, u32)> {
     Some(if on_its_side { (h, w) } else { (w, h) })
 }
 
+/// How far apart, in all, the colours of a picture's opposite corners are
+/// (red, green and blue, 0 to 1 each, for both diagonals): 0 when a border
+/// of one colour goes all round, or across the top and bottom.
+const CORNERS: &str = "%[fx:abs(p{0,0}.r-p{w-1,h-1}.r)+abs(p{0,0}.g-p{w-1,h-1}.g)\
+     +abs(p{0,0}.b-p{w-1,h-1}.b)+abs(p{w-1,0}.r-p{0,h-1}.r)+abs(p{w-1,0}.g-p{0,h-1}.g)\
+     +abs(p{w-1,0}.b-p{0,h-1}.b)]";
+
+/// Corners further apart than this are no one border's: `TRIM_FUZZ` on each
+/// of the six channels.
+const CORNERS_APART: f64 = 0.18;
+
 /// The plain border around a picture: ImageMagick's trim box (`%@`) at
 /// `TRIM_FUZZ`, of the picture turned upright. A GIF's frames are drawn
-/// whole first, and the box is the one that holds every frame's.
+/// whole first, and the box is the one that holds every frame's. The trim
+/// box takes each edge's own colour, so a picture blue above and red below
+/// was cut to the line between them; a border has to be one colour, which
+/// opposite corners that differ are not.
 fn detect_border(magick: &Path, from: Format, input: &Path) -> Result<Found> {
     let mut cmd = backend_command(magick);
     if from == Format::Gif {
@@ -452,8 +466,9 @@ fn detect_border(magick: &Path, from: Format, input: &Path) -> Result<Found> {
         first.push("[0]");
         cmd.arg(first).arg("-auto-orient");
     }
+    let format = format!("%w %h %@ {CORNERS}\n");
     let out = cmd
-        .args(["-fuzz", TRIM_FUZZ, "-format", "%w %h %@\n", "info:"])
+        .args(["-fuzz", TRIM_FUZZ, "-format", &format, "info:"])
         .output()
         .map_err(|e| failed_to_run("ImageMagick", e))?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -469,18 +484,22 @@ fn detect_border(magick: &Path, from: Format, input: &Path) -> Result<Found> {
     })
 }
 
-/// Parses `W H BOX` lines, one per frame, into the box that holds them all.
-/// A frame with nothing but border reads `0x0+W+H` and adds nothing; a box
-/// the size of the picture means there is no border.
+/// Parses `W H BOX CORNERS` lines, one per frame, into the box that holds
+/// them all. A frame with nothing but border reads `0x0+W+H` and adds
+/// nothing; a box the size of the picture, or corners of different colours
+/// in any frame, mean there is no border.
 fn parse_trim(text: &str) -> Option<Found> {
     let mut size = None;
     let mut union: Option<(u32, u32, u32, u32)> = None;
+    let mut one_colour = true;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let mut it = line.split_whitespace();
         let w: u32 = it.next()?.parse().ok()?;
         let h: u32 = it.next()?.parse().ok()?;
         size.get_or_insert((w, h));
         let r = parse_geometry(it.next()?)?;
+        let apart: f64 = it.next()?.parse().ok()?;
+        one_colour &= apart <= CORNERS_APART;
         if r.w == 0 || r.h == 0 {
             continue;
         }
@@ -498,7 +517,7 @@ fn parse_trim(text: &str) -> Option<Found> {
             x: x1,
             y: y1,
         })
-        .filter(|r| (r.w, r.h) != size && r.w > 0 && r.h > 0);
+        .filter(|r| one_colour && (r.w, r.h) != size && r.w > 0 && r.h > 0);
     Some(Found { size, rect })
 }
 
@@ -947,7 +966,7 @@ mod tests {
 
     #[test]
     fn a_trim_box_holds_every_frame_and_a_whole_picture_is_no_border() {
-        let f = parse_trim("200 100 123x66+29+19\n").unwrap();
+        let f = parse_trim("200 100 123x66+29+19 0.02\n").unwrap();
         assert_eq!(f.size, (200, 100));
         assert_eq!(
             f.rect,
@@ -958,7 +977,7 @@ mod tests {
                 y: 19
             })
         );
-        let f = parse_trim("50 50 10x10+0+0\n50 50 0x0+50+50\n50 50 10x10+30+30\n").unwrap();
+        let f = parse_trim("50 50 10x10+0+0 0\n50 50 0x0+50+50 0\n50 50 10x10+30+30 0\n").unwrap();
         assert_eq!(
             f.rect,
             Some(Rect {
@@ -968,8 +987,10 @@ mod tests {
                 y: 0
             })
         );
-        assert_eq!(parse_trim("70 46 70x46+0+0\n").unwrap().rect, None);
-        assert_eq!(parse_trim("50 50 0x0+50+50\n").unwrap().rect, None);
+        assert_eq!(parse_trim("70 46 70x46+0+0 1.2\n").unwrap().rect, None);
+        assert_eq!(parse_trim("50 50 0x0+50+50 0\n").unwrap().rect, None);
+        // Blue above and red below is no border, though each edge is plain.
+        assert_eq!(parse_trim("20 40 20x2+0+19 3.98\n").unwrap().rect, None);
         assert_eq!(parse_trim(""), None);
     }
 
