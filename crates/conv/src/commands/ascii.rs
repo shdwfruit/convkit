@@ -15,7 +15,7 @@ use convkit_core::{frames, registry, Backend, ConvError, ErrorCode, Format, Kind
 use serde_json::json;
 
 use crate::cli::{Cli, Command};
-use crate::{ansi, clipboard, input, install_prompt, output, render};
+use crate::{ansi, clipboard, input, install_prompt, output, paste, render};
 
 mod frame;
 mod session;
@@ -55,6 +55,8 @@ struct Args<'a> {
     clipboard: bool,
     tune: bool,
     overwrite: bool,
+    /// The input is a picture taken from the clipboard.
+    pasted: bool,
 }
 
 pub fn run(cli: &Cli) -> i32 {
@@ -71,14 +73,33 @@ pub fn run(cli: &Cli) -> i32 {
         contrast,
         brightness,
         clipboard,
+        paste,
         tune,
         overwrite,
     }) = &cli.command
     else {
         unreachable!("main dispatches only Command::Ascii here");
     };
+    // With --paste the one path given is OUT.
+    let (named, output) = match (*paste, input) {
+        (true, Some(out)) if output.is_none() => (None, Some(out.clone())),
+        _ => (input.clone(), output.clone()),
+    };
+    let pasted = match paste.then(|| paste::one("conv ascii")).transpose() {
+        Ok(p) => p,
+        Err(e) => {
+            render::print_error(cli.json, &e);
+            return e.code.exit_code();
+        }
+    };
+    // The folder a pasted picture is in lives until the art is made.
+    let input = match (&pasted, &named) {
+        (Some(p), _) => p.path.clone(),
+        (None, Some(path)) => path.clone(),
+        (None, None) => unreachable!("clap requires the picture without --paste"),
+    };
     let args = Args {
-        input,
+        input: &input,
         output: output.as_deref(),
         outdir: outdir.as_deref(),
         width: *width,
@@ -92,6 +113,7 @@ pub fn run(cli: &Cli) -> i32 {
         clipboard: *clipboard,
         tune: *tune,
         overwrite: *overwrite,
+        pasted: *paste,
     };
     match draw(cli, &args) {
         Ok(()) => 0,

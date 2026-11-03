@@ -107,6 +107,8 @@ conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 conv clip.mp4 --speed 2          # play twice as fast
 conv IMG_0042.mov --rotate left  # turn a sideways video or photo
 conv trim talk.mp4               # find clips in the terminal and cut them
+conv --paste .jpg                # convert the picture or files you copied
+conv photo.heic .jpg --copy      # convert, then copy the result to paste anywhere
 conv qr "https://example.com"    # make a QR code, written as qr.png
 conv ascii photo.jpg             # print a picture as ASCII art
 conv changelog --since 0.5.1     # what's new since the version you had
@@ -676,6 +678,33 @@ a folder given to `conv merge` adds every PDF in it, in natural order.
 The merged file keeps the first file's bookmarks only, and neither command
 keeps permission restrictions; conv says so when either applies.
 Password-protected PDFs aren't supported yet.
+
+## Copy and paste
+
+`--paste` takes the input from the clipboard, and `--copy` puts the result
+on it, so a screenshot or a file never has to be saved and found first:
+
+```console
+conv --paste .jpg                 # a copied picture -> clipboard.jpg here
+conv --paste --to png             # files copied in Finder or Explorer -> PNGs beside them
+conv --paste                      # save a copied picture as it is, as clipboard.png
+conv photo.heic .jpg --copy       # paste the JPEG into a chat, a mail or a folder
+conv notes.md .html --copy        # an md, csv or html result is copied as its text
+conv --paste --to jpg --copy      # convert what's on the clipboard, in place
+```
+
+A copied picture goes on the clipboard as the picture and as its file, so
+it pastes into an editor or as an attachment. Other results, and several
+at once, are copied as files. `conv qr` takes `--copy` too, and in
+`conv ascii` it's the same as `--clipboard`. `--paste` works wherever conv
+takes a file: `conv ascii --paste -i` tunes art from a copied picture,
+`conv trim --paste` cuts a copied video, and `conv qr --paste` makes a code of a
+copied link (or takes a copied picture as the logo).
+
+Over SSH the server's clipboard is no use, so conv goes through the
+terminal with kitty's clipboard protocol, which kitty and Ghostty 1.4 or
+later speak. That carries a picture or text, not files. The terminal may
+ask before letting conv read the clipboard.
 
 ## QR codes
 

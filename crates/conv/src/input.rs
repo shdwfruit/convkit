@@ -520,6 +520,13 @@ fn resize_suffix(geometry: &str) -> String {
     }
 }
 
+/// Whether a flag makes a lone input keep its format (`--max-size`,
+/// `--strip-metadata`, `--rotate`, `--resize` alone, a range, `--speed`),
+/// so a lone input is a whole job.
+pub(crate) fn keeps_own_format(cli: &Cli) -> bool {
+    OwnFormat::of(cli).is_some()
+}
+
 /// `conv clip.mp4 --max-size 10mb`, `conv talk.mp4 --start 1:02`,
 /// `conv photo.jpg --strip-metadata` or `conv photo.jpg --resize 50%`: the
 /// input's own format, beside the input (or in `-o`);
@@ -1736,6 +1743,8 @@ mod tests {
             speed: None,
             shift_pitch: false,
             rotate: None,
+            copy: false,
+            paste: false,
             yes: false,
             no_install: false,
             outdir,

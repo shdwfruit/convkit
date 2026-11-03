@@ -188,6 +188,8 @@ pub struct Invocation<'a> {
     pub input: &'a Path,
     pub output: Option<&'a Path>,
     pub outdir: Option<&'a Path>,
+    /// The picture came from the clipboard: the command says `--paste`.
+    pub pasted: bool,
     /// Whether the style the tuner ends on is in colour without `--color`
     /// where this command's art goes.
     pub default_colour: bool,
@@ -209,7 +211,11 @@ pub fn command_output(output: Option<&Path>, last_written: Option<&Path>) -> Opt
 /// defaults.
 pub fn command_line(tune: &Tune, how: &Invocation) -> String {
     let mut words = vec!["conv".to_string(), "ascii".to_string()];
-    words.push(shell_quote(&how.input.to_string_lossy()));
+    if how.pasted {
+        words.push("--paste".into());
+    } else {
+        words.push(shell_quote(&how.input.to_string_lossy()));
+    }
     if let Some(out) = how.output {
         words.push(shell_quote(&out.to_string_lossy()));
     }
@@ -427,6 +433,7 @@ mod tests {
             input: Path::new("cat.jpg"),
             output: None,
             outdir: None,
+            pasted: false,
             default_colour: false,
         };
         let mut t = Tune::new(60, Style::Ascii, Bg::Dark, false, 0, 0);
@@ -449,6 +456,11 @@ mod tests {
         );
 
         t = Tune::new(60, Style::parse(" .oO@").unwrap(), Bg::Dark, false, 0, 0);
+        let pasted = Invocation {
+            pasted: true,
+            ..how
+        };
+        assert!(command_line(&t, &pasted).starts_with("conv ascii --paste --width 60"));
         let spaced = Invocation {
             input: Path::new("my cat.jpg"),
             ..how

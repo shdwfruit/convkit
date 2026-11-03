@@ -13,7 +13,9 @@ use convkit_core::{registry, ConvError, ErrorCode, Format, Outcome};
 use serde_json::json;
 
 use crate::cli::{Cli, Command};
-use crate::{input, output, render};
+use crate::clipboard::Got;
+use crate::commands::convert;
+use crate::{input, output, paste, render};
 
 pub fn run(cli: &Cli) -> i32 {
     let Some(Command::Qr {
@@ -23,19 +25,42 @@ pub fn run(cli: &Cli) -> i32 {
         logo,
         size,
         overwrite,
+        copy,
+        paste,
     }) = &cli.command
     else {
         unreachable!("qr::run is only called for `conv qr`");
     };
+    let pasted = match paste.then(|| pasted(text.as_deref(), output.as_deref(), logo.as_deref())) {
+        Some(Ok(p)) => Some(p),
+        Some(Err(e)) => {
+            render::print_error(cli.json, &e);
+            return e.code.exit_code();
+        }
+        None => None,
+    };
+    let (text, output, logo) = match &pasted {
+        Some(Pasted::Text(t)) => (t.as_str(), text.as_deref().map(Path::new), logo.as_deref()),
+        Some(Pasted::Logo(p)) => (
+            text.as_deref().unwrap_or_default(),
+            output.as_deref(),
+            Some(p.path.as_path()),
+        ),
+        None => (
+            text.as_deref().expect("clap requires TEXT without --paste"),
+            output.as_deref(),
+            logo.as_deref(),
+        ),
+    };
     let start = Instant::now();
-    let made = output_path(output.as_deref(), outdir.as_deref()).and_then(|(path, format)| {
+    let made = output_path(output, outdir.as_deref()).and_then(|(path, format)| {
         write(
             cli,
             text,
             &path,
             format,
             outdir.as_deref(),
-            logo.as_deref(),
+            logo,
             size.unwrap_or(qr::DEFAULT_SIZE),
             *overwrite,
         )
@@ -43,12 +68,58 @@ pub fn run(cli: &Cli) -> i32 {
     match made {
         Ok((mut outcome, qr)) => {
             outcome.elapsed_ms = start.elapsed().as_millis() as u64;
-            print(cli, &outcome, text, &qr);
+            let copied = copy.then(|| convert::copy_outputs(std::slice::from_ref(&outcome.output)));
+            print(cli, &outcome, text, &qr, copied.as_ref());
             0
         }
         Err(e) => {
             render::print_error(cli.json, &e);
             e.code.exit_code()
+        }
+    }
+}
+
+/// What `--paste` found for the code.
+enum Pasted {
+    /// Copied text: what the code holds.
+    Text(String),
+    /// A copied picture or file: the logo.
+    Logo(paste::Pasted),
+}
+
+/// Reads the clipboard for `conv qr --paste`, given what was typed: TEXT
+/// (which is OUT when the clipboard holds the text), OUT and `--logo`.
+fn pasted(
+    text: Option<&str>,
+    output: Option<&Path>,
+    logo: Option<&Path>,
+) -> Result<Pasted, ConvError> {
+    let refused = |m: &str| ConvError::new(ErrorCode::InvalidInvocation, m.to_string());
+    match paste::get()? {
+        got @ (Got::Files(_) | Got::Picture { .. }) => {
+            if logo.is_some() {
+                return Err(refused(
+                    "the clipboard holds a picture, and --logo names one too",
+                ));
+            }
+            if text.is_none() {
+                return Err(refused(
+                    "the clipboard holds a picture for the logo; say what the code holds",
+                ));
+            }
+            Ok(Pasted::Logo(paste::from(got, "--logo")?))
+        }
+        Got::Text(t) => {
+            if text.is_some() && output.is_some() {
+                return Err(refused(
+                    "the clipboard holds the code's text; give at most the file to write",
+                ));
+            }
+            let t = t.trim();
+            if t.is_empty() {
+                return Err(refused("the clipboard is empty"));
+            }
+            Ok(Pasted::Text(t.to_string()))
         }
     }
 }
@@ -121,7 +192,13 @@ fn write(
     Ok((outcome, code))
 }
 
-fn print(cli: &Cli, outcome: &Outcome, text: &str, code: &qr::Qr) {
+fn print(
+    cli: &Cli,
+    outcome: &Outcome,
+    text: &str,
+    code: &qr::Qr,
+    copied: Option<&convert::CopyReport>,
+) {
     if cli.json {
         let mut v = render::outcome_json(outcome);
         v["qr"] = json!({
@@ -130,7 +207,10 @@ fn print(cli: &Cli, outcome: &Outcome, text: &str, code: &qr::Qr) {
             "version": code.version,
             "error_correction": code.error_correction,
         });
-        let envelope = json!({ "ok": true, "results": [v] });
+        let mut envelope = json!({ "ok": true, "results": [v] });
+        if let Some(c) = copied {
+            envelope["clipboard"] = c.json();
+        }
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
         return;
     }
@@ -144,6 +224,9 @@ fn print(cli: &Cli, outcome: &Outcome, text: &str, code: &qr::Qr) {
         "{}",
         render::conversion_notes_human("", outcome, &[], render::stderr_styled())
     );
+    if let Some(c) = copied {
+        c.print(cli);
+    }
 }
 
 #[cfg(test)]

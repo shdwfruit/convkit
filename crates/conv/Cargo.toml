@@ -64,6 +64,11 @@ unicode-width = "0.2"
 # are byte-preserving.
 [target.'cfg(target_os = "macos")'.dependencies]
 unicode-normalization = "0.1"
+# --copy and --paste use the macOS clipboard (NSPasteboard) directly:
+# pbcopy and pbpaste carry text only, not pictures or files.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSImage"] }
 
 # conv trim and conv ascii -i hold the tty's mode for their whole session
 # (see screen.rs).
