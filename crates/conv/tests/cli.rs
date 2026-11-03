@@ -58,11 +58,11 @@ fn dry_run_resizes_a_lone_photo_into_a_sized_copy() {
     assert!(command.ends_with("photo-50pct.jpg"), "{stdout}");
     conv()
         .current_dir(dir.path())
-        .args(["IMG.heic", "--resize", "50%", "--dry-run"])
+        .args(["IMG.heif", "--resize", "50%", "--dry-run"])
         .assert()
         .code(2)
         .stderr(contains(
-            "--resize keeps heic's own format, and conv can't write heic; add --to jpg",
+            "--resize keeps heif's own format, and conv can't write heif; add --to heic",
         ));
 }
 

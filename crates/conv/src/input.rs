@@ -2760,18 +2760,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let e = plan_jobs(&resized(
             "50%",
-            vec![dir.path().join("IMG.heic")],
+            vec![dir.path().join("IMG.heif")],
             None,
             None,
         ))
         .unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidInvocation);
         assert!(
-            e.message.contains("--resize keeps heic's own format"),
+            e.message.contains("--resize keeps heif's own format"),
             "{}",
             e.message
         );
-        assert!(e.message.contains("add --to jpg"), "{}", e.message);
+        assert!(e.message.contains("add --to heic"), "{}", e.message);
         let e = plan_jobs(&resized(
             "50%",
             vec![dir.path().join("song.mp3")],

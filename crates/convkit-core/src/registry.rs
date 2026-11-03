@@ -2143,8 +2143,8 @@ pub fn same_format_recipe(f: Format) -> Option<Recipe> {
 /// raster conv writes runs the recipe any raster takes to it
 /// (`image_recipe_for`); a video is transcoded as a cut into its own format
 /// is. Everything else has no such route: conv does not write heif or avi;
-/// a gif, svg or ico is not resized into itself; and sound and documents have no picture to
-/// resize. The fix is the format `--strip-metadata` names for the same
+/// a gif, svg or ico is not resized into itself; and sound and documents
+/// have no picture to resize. The fix is the format `--strip-metadata` names for the same
 /// file, where there is one. Shared by the planner, the command line and
 /// the right-click form, so all three say the same.
 pub fn resize_in_place(f: Format) -> Result<(), String> {
@@ -3355,6 +3355,7 @@ mod tests {
             Format::Png,
             Format::Webp,
             Format::Avif,
+            Format::Heic,
             Format::Tiff,
             Format::Bmp,
             Format::Mp4,
@@ -3366,8 +3367,8 @@ mod tests {
         }
         for (f, want) in [
             (
-                Format::Heic,
-                "--resize keeps heic's own format, and conv can't write heic; add --to jpg",
+                Format::Heif,
+                "--resize keeps heif's own format, and conv can't write heif; add --to heic",
             ),
             (
                 Format::Gif,

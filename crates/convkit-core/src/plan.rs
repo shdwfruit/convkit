@@ -1780,7 +1780,7 @@ mod tests {
         for (f, why) in [
             (Format::Mp3, "conv can't resize sound"),
             (Format::Gif, "conv can't resize a gif into a gif"),
-            (Format::Heic, "conv can't write heic"),
+            (Format::Heif, "conv can't write heif"),
         ] {
             let input = p(&format!("a.{}", f.ext()));
             let output = format!("b.{}", f.ext());
