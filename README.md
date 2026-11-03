@@ -15,8 +15,11 @@ One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
 ImageMagick, LibreOffice, pandoc, Typst, or qpdf — and runs it locally: 176
 conversion pairs across 37 formats (`conv capabilities` is the source of
-truth). Files never leave your machine; only `conv install`/`conv update`
-ever touch the network.
+truth). Files never leave your machine; only `conv install`/`conv update`,
+and `conv link --follow` when asked, ever touch the network. It also does
+the small text and developer chores (base64, checksums, JWTs, timestamps,
+tracking-free links and more) that people otherwise paste into a website;
+see [Text and developer tools](#text-and-developer-tools).
 
 ```console
 $ conv clip.mkv clip.mp4
@@ -114,6 +117,8 @@ conv ascii photo.jpg             # print a picture as ASCII art
 conv data.json .yaml             # JSON, YAML, TOML and CSV, converted with no backend
 conv fmt data.json               # pretty-print and check JSON, YAML or TOML
 conv changelog --since 0.5.1     # what's new since the version you had
+conv hash a.iso --check 3f2a...  # does the download match?
+conv link --paste --copy         # the copied link, without its tracking
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -862,6 +867,74 @@ when conv can't tell. `--lenient` reads JSON5 and JSONC (comments,
 trailing commas, single quotes, unquoted keys) and drops YAML tags, saying
 what it dropped; conversions always read that way. conv won't write over a
 file whose comments it would lose.
+## Text and developer tools
+
+The small jobs people search for and do on a website, often by pasting a
+token or a password into it, done here instead. Nothing leaves your
+machine; only `conv link --follow` makes a request, and only when asked.
+
+```console
+conv base64 "hello"                     # aGVsbG8=; -d decodes, --url for URLs
+conv base64 -f logo.png --data-uri      # data:image/png;base64,... for HTML or CSS
+conv hash ubuntu.iso                    # its SHA-256, as sha256sum prints it
+conv hash ubuntu.iso --check 3F2A...    # says whether it matches, exits 1 if not
+conv hash --sums SHA256SUMS             # checks each listed file that is here
+conv uuid --v7 -n 5                     # or conv uuid ID to read one
+conv jwt "$TOKEN"                       # header, claims and expiry; --verify checks the signature
+conv time 1730642400000                 # a timestamp as dates, or a date as a timestamp
+conv link --paste --copy                # the copied link without its tracking
+conv count -f essay.md                  # words, characters, reading time
+conv case snake "Hello World"           # hello_world
+conv chars -f config.yml --suspicious   # invisible and lookalike characters
+conv lorem -p 3 --html                  # placeholder text
+conv diff old.txt new.txt               # changed words marked inside changed lines
+```
+
+Input works the same way in all of them. What follows the command is the
+text itself, or for `hash` and `diff` the files. conv never guesses which:
+`conv base64 notes.txt` encodes the word, and a note says `-f notes.txt`
+reads the file (`--text` does the opposite for `hash` and `diff`). `-` or
+a pipe reads what is piped in; `conv time` and `conv uuid` read a pipe
+only with `-`, since alone they show now or make a new UUID. `--paste`
+takes the clipboard. The result goes to stdout, `--copy` also puts it on
+the clipboard, and `--json` prints one JSON document. Colour is only for a
+terminal.
+
+Input a tool can't read (base64 with a stray character, a token in two
+parts, 29 February 2023) exits 1 and says what is wrong and where. So does
+a check that fails, a hash or a signature that doesn't match. `conv diff`
+exits 0, 1 or 2, as diff does.
+
+- `conv hash --check` takes the hash in either case and knows the
+  algorithm by its length. A match on MD5 or SHA-1 comes with a word on
+  what that is worth. `--sums` reads `HASH  NAME` and BSD-style lines, and
+  finds the files next to the sums file.
+- `conv jwt` asks for the secret without showing it (`--verify`), or reads
+  it from a variable (`--secret-env VAR`). `--secret` works but warns,
+  since the secret stays in your shell's history. A checked token that has
+  expired, or whose signature is wrong, exits 1.
+- `conv time` takes Unix timestamps in seconds, milliseconds, microseconds
+  or nanoseconds, guessed by size and said, and dates in ISO 8601, RFC
+  2822 and the usual written forms. A date without a zone is read in
+  yours, with a note when daylight saving skipped or repeated that hour.
+  `03/04/2024` could be either month, so conv asks for `2024-03-04`.
+  `--tz Asia/Tokyo` shows another zone, and `"3 days ago"` works too.
+- `conv link` takes out tracking parameters (`utm_*`, `fbclid`, `gclid`,
+  `mc_eid`, `igshid`, YouTube's and Spotify's `si`, Amazon's `ref`, and
+  more), and undoes redirect wrappers that carry the link inside them
+  (Google, Facebook, Outlook Safe Links, Proofpoint, Slack, Steam,
+  DuckDuckGo and others), leaving the rest of the link as it was. Given
+  text, it cleans every link in it. A short link (`t.co`, `bit.ly`) can't
+  be expanded offline, so conv says so; `--follow` asks it, one HEAD
+  request a hop, without cookies, downloading nothing.
+- `conv count` and `conv chars` follow Unicode: each Chinese or Japanese
+  character is a word, and an emoji built from several code points is one
+  character. `conv chars` flags zero-width and tag characters, bidi
+  controls, a Cyrillic `а` in a Latin word and other lookalikes, and
+  no-break spaces, and never prints a bidi control as it is.
+- `conv diff` takes CRLF and LF line endings as the same and says when
+  they differ; `--eol` counts them as a change. `--unified` leaves out the
+  word marks, for `patch` and `git apply`.
 
 ## Discovering formats and capabilities
 
@@ -1149,3 +1222,6 @@ upstream builds straight from their publishers.
 SIL Open Font License 1.1; the licence is in
 [JetBrainsMono-OFL.txt](crates/convkit-core/src/ascii/JetBrainsMono-OFL.txt)
 and in every release archive.
+
+`conv chars` names characters from the Unicode Character Database, © Unicode,
+Inc., under the [Unicode License](https://www.unicode.org/license.txt).

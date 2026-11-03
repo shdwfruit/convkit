@@ -19,7 +19,19 @@
   `--copy`. An invalid file gets the line, the column, a caret under the
   spot and the usual cause. `--lenient` reads JSON5 and JSONC, and `--to`
   converts as it goes.
-
+- **Text and developer tools.** `conv base64`, `hash`, `uuid`, `jwt`,
+  `time`, `link`, `count`, `case`, `chars`, `lorem` and `diff` do the small
+  jobs people otherwise paste into a website, here and offline. `conv hash
+  FILE --check HASH` says plainly whether a download matches, and `--sums
+  SHA256SUMS` checks a release. `conv jwt` shows a token's claims and
+  expiry, and checks an HMAC signature with a secret it asks for without
+  showing. `conv time` turns timestamps into dates and back, saying which
+  unit it took. `conv link` takes the tracking out of links and unwraps
+  Google, Facebook, Outlook and other redirects; only `--follow` goes
+  online. `conv chars` flags invisible characters, bidi controls and
+  lookalike letters, and `conv diff` marks the changed words inside
+  changed lines. Each reads its argument, a file (`-f`), a pipe or the
+  clipboard (`--paste`), and takes `--copy` and `--json`.
 - **`conv merge` and `conv split` for PDFs.** `conv merge a.pdf b.pdf out.pdf`
   joins PDFs in order; a folder adds every PDF in it. `conv split report.pdf`
   writes one file per page, and `conv split report.pdf 1-3 4-z` one per range
