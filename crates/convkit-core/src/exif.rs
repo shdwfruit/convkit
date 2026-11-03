@@ -25,6 +25,14 @@ pub(crate) fn read(path: &Path) -> Option<Orientation> {
     Orientation::from_exif(tags.value)
 }
 
+/// The orientation in an EXIF block that starts at its TIFF header, as a
+/// PNG's eXIf chunk and the JPEG and WebP decoders give it. A leading
+/// `Exif\0\0`, which some writers keep, is skipped.
+pub(crate) fn orientation_in_tiff(tiff: &[u8]) -> Option<Orientation> {
+    let tiff = tiff.strip_prefix(EXIF).unwrap_or(tiff);
+    Orientation::from_exif(in_tiff(tiff, 0)?.value)
+}
+
 /// Rewrites the tag, and any XMP copy of it, to 1: shown as stored.
 pub(crate) fn set_upright(path: &Path) -> io::Result<()> {
     let mut f = File::options().read(true).write(true).open(path)?;
@@ -246,6 +254,17 @@ mod tests {
         let f = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(f.path(), bytes).unwrap();
         f
+    }
+
+    #[test]
+    fn a_bare_tiff_block_gives_its_orientation() {
+        let six = Orientation::from_exif(6);
+        assert_eq!(orientation_in_tiff(&tiff(false, 6)), six);
+        assert_eq!(orientation_in_tiff(&tiff(true, 6)), six);
+        let mut prefixed = EXIF.to_vec();
+        prefixed.extend(tiff(true, 6));
+        assert_eq!(orientation_in_tiff(&prefixed), six);
+        assert_eq!(orientation_in_tiff(b"not a tiff"), None);
     }
 
     #[test]

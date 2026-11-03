@@ -98,6 +98,17 @@ impl Orientation {
         clockwise: 0,
     };
 
+    /// Whether the stored picture is mirrored left to right before it is
+    /// turned.
+    pub fn mirrored(&self) -> bool {
+        self.mirrored
+    }
+
+    /// How far it is then turned clockwise: 0, 90, 180 or 270 degrees.
+    pub fn clockwise(&self) -> u16 {
+        self.clockwise
+    }
+
     /// The orientation an EXIF tag (1 to 8) names.
     pub fn from_exif(tag: u16) -> Option<Orientation> {
         let (mirrored, clockwise) = match tag {

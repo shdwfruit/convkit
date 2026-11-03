@@ -312,8 +312,10 @@ dependencies = [
  "base64",
  "csv",
  "flate2",
+ "gif",
  "heck",
  "hmac",
+ "image-webp",
  "insta",
  "jiff",
  "lzma-rs",
@@ -343,6 +345,7 @@ dependencies = [
  "uuid",
  "which",
  "zip",
+ "zune-jpeg",
 ]
 
 [[package]]

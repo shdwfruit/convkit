@@ -1,6 +1,7 @@
 pub mod ascii;
 pub mod backend;
 pub mod backend_overrides;
+pub mod beautify;
 pub mod budget;
 pub mod data;
 pub mod error;
@@ -18,7 +19,9 @@ pub mod metadata;
 mod mov;
 pub mod office;
 pub mod offline;
+pub mod palette;
 pub mod pdf;
+pub mod picture;
 pub mod plan;
 pub mod probe;
 mod procutil;
@@ -37,6 +40,7 @@ pub mod text;
 pub mod tools;
 pub mod trim;
 mod video;
+pub mod wifi;
 pub mod winpath;
 mod xmp;
 
