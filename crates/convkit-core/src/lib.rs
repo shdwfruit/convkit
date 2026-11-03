@@ -38,6 +38,7 @@ pub mod sized;
 pub mod soundtrack;
 pub mod speech;
 pub mod speed;
+pub mod subtitles;
 pub mod table;
 pub mod text;
 pub mod tools;

@@ -189,6 +189,7 @@ fn other_knobs(t: &Tuning) -> Vec<&'static str> {
         (t.rotate.is_some(), "--rotate"),
         (t.crop.is_some(), "--crop"),
         (t.audio.is_some(), "--audio"),
+        (t.subtitles.is_some(), "--subtitles"),
         (t.mute, "--mute"),
     ]
     .into_iter()
@@ -963,6 +964,7 @@ pub(crate) fn run(
         pages: None,
         crop: None,
         audio: None,
+        subtitles: None,
     };
 
     // A file already under its target is copied as it is, as video is.
@@ -1160,6 +1162,7 @@ fn plan_with(
         pages: None,
         crop: None,
         audio: None,
+        subtitles: None,
     }
 }
 

@@ -311,6 +311,9 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     if let Some(a) = &o.audio {
         v["audio"] = json!(a);
     }
+    if let Some(s) = &o.subtitles {
+        v["subtitles"] = json!(s);
+    }
     v
 }
 
@@ -946,6 +949,7 @@ mod tests {
             pages: None,
             crop: None,
             audio: None,
+            subtitles: None,
         }
     }
 

@@ -146,6 +146,12 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
         push_flag(&mut flags, "--speed");
         push_flag(&mut flags, "--shift-pitch");
     }
+    // Subtitles are drawn by the filter chain, which every video and GIF
+    // target composes (webm's at run time, as `--resize` is).
+    let picture_source = from.kind() == convkit_core::Kind::Video || from == Format::Gif;
+    if picture_source && (has(|a| matches!(a, Arg::VideoChain(_))) || to == Format::Webm) {
+        push_flag(&mut flags, "--subtitles");
+    }
     // A new sound is a second input the probe-aware paths map, from any
     // video into any video target, so it is keyed on the pair's kinds.
     if from.kind() == convkit_core::Kind::Video && convkit_core::sized::is_video_target(to) {

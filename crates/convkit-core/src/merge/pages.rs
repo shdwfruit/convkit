@@ -27,7 +27,7 @@ use crate::error::{ConvError, ErrorCode, Result};
 use crate::exec::{self, Event, Request};
 use crate::pdf::range::join_and;
 use crate::pdf::{self, path_arg, AskPassword, Lock, Password, PdfInfo, PdfOutcome, PdfPlan};
-use crate::plan::{PlannedStep, Prepare, TextForm};
+use crate::plan::{PlannedStep, Prepare};
 use crate::procutil::backend_command;
 use crate::resolve::{ResolvedBackend, Resolver};
 use crate::{layout, registry, Backend, Format, Kind, OutputMode};
@@ -641,17 +641,9 @@ pub fn run(
                         exec::stage_file(from, to, false, exec::hard_link)?;
                     }
                 }
-                // A merge stages pictures, never text, but runs one the
-                // way exec does all the same.
-                Prepare::Text {
-                    from,
-                    to,
-                    form,
-                    source,
-                } => match form {
-                    TextForm::Page { title } => crate::text::write_page(from, to, title, source)?,
-                    TextForm::Speech => crate::text::write_speakable(from, to, source)?,
-                },
+                // A merge stages pictures, and has nothing else to do
+                // first, but anything else runs as exec runs it.
+                other => exec::prepare(other)?,
             }
         }
         on_event(Event::StepSpawned {

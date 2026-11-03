@@ -87,6 +87,10 @@ pub struct Tuning {
     /// under it (`--mix`). Resolved by `soundtrack::resolve`; it reaches
     /// argv through `ResolvedVideo::soundtrack`.
     pub audio: Option<crate::soundtrack::Request>,
+    /// A subtitle file to burn into the picture (`--subtitles`). Read
+    /// before planning by `subtitles::attach`; it reaches the filter chain
+    /// through `ResolvedVideo::subtitles`.
+    pub subtitles: Option<std::path::PathBuf>,
 }
 
 impl Tuning {
@@ -102,6 +106,7 @@ impl Tuning {
             && self.rotate.is_none()
             && self.crop.is_none()
             && self.audio.is_none()
+            && self.subtitles.is_none()
             && self.range.is_none()
             && self.resize.is_none()
             && self.quality.is_none()
@@ -230,6 +235,11 @@ impl VideoChainSpec {
             out.push(',');
         }
         out.push_str(self.prefix);
+        // Subtitles go on the picture as it is shown, turned and cropped,
+        // and before any size, which then scales them with it.
+        if let Some(burn) = &resolved.subtitles {
+            out.push_str(&burn.filter());
+        }
         let authored = self.fps.filter(|_| !resolved.keep_source_rate);
         // A retimed stream with no rate of its own is held to the source's.
         let retimed = resolved.speed.as_ref().and_then(|r| r.rate.as_deref());
@@ -991,6 +1001,7 @@ mod tests {
             pages: None,
             crop: None,
             audio: None,
+            subtitles: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],

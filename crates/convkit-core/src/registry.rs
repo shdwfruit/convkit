@@ -3052,7 +3052,11 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     // video's length.
     let new_sound =
         tuning.audio.is_some() && from.kind() == Kind::Video && crate::sized::is_video_target(to);
-    sized || webm_knob || cut || retimed || resized_in_place || cropped || new_sound
+    // Subtitles are drawn at the picture's size and placed in its time.
+    let subtitled = tuning.subtitles.is_some()
+        && (from.kind() == Kind::Video || from == Format::Gif)
+        && (crate::sized::is_video_target(to) || to == Format::Gif);
+    sized || webm_knob || cut || retimed || resized_in_place || cropped || new_sound || subtitled
 }
 
 /// What a format cut into itself runs (`conv talk.mp4 --start 1:02`): the

@@ -5786,3 +5786,99 @@ fn a_mix_holds_both_sounds_for_the_length_of_the_clip() {
         "own {own} dB, new {new} dB: not a quarter as loud"
     );
 }
+
+// --- Subtitles: --subtitles ---------------------------------------------------
+
+/// How many pixels of a frame are near white: subtitle text on a dark
+/// picture.
+fn bright_pixels(((_, _), rgb): &((u32, u32), Vec<u8>)) -> usize {
+    rgb.chunks_exact(3)
+        .filter(|p| p.iter().all(|&c| c > 200))
+        .count()
+}
+
+/// A dark 4 s clip, and an SRT with one subtitle from 1 s to 2 s.
+fn dark_clip_and_subs(dir: &tempfile::TempDir, text: &str) -> (PathBuf, PathBuf) {
+    let clip = synth_media(
+        dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x202020:size=320x240:rate=25:duration=4",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+        ],
+        "dark.mp4",
+    );
+    let subs = dir.path().join("subs.srt");
+    std::fs::write(&subs, format!("1\n00:00:01,000 --> 00:00:02,000\n{text}\n")).unwrap();
+    (clip, subs)
+}
+
+/// The text is there inside the subtitle's time and not outside it, and a
+/// cut moves it with the video.
+#[test]
+#[ignore = "requires backends and a system font; run with --ignored"]
+fn burned_subtitles_show_inside_their_time_only() {
+    let dir = tmp();
+    let (clip, subs) = dark_clip_and_subs(&dir, "WWW MMM WWW");
+    let out = dir.path().join("out.mp4");
+    let tuning = Tuning {
+        subtitles: Some(subs.clone()),
+        ..Tuning::default()
+    };
+    let outcome = convert_tuned(&clip, &out, &tuning).unwrap();
+    assert_eq!(outcome.subtitles.expect("a report").drawn, 1);
+    assert_eq!(probe_dims(&out), (320, 240));
+    let before = bright_pixels(&frame_rgb(&out, 0.5));
+    let during = bright_pixels(&frame_rgb(&out, 1.5));
+    let after = bright_pixels(&frame_rgb(&out, 2.5));
+    assert!(during > 300, "too little text inside the cue: {during}");
+    assert!(
+        before < 20 && after < 20,
+        "text outside the cue: {before}, {after}"
+    );
+    // The text sits in the bottom half of the picture.
+    let ((w, _), rgb) = frame_rgb(&out, 1.5);
+    let top_half = rgb[..(w * 120 * 3) as usize]
+        .chunks_exact(3)
+        .filter(|p| p.iter().all(|&c| c > 200))
+        .count();
+    assert!(top_half < 20, "text in the top half: {top_half}");
+
+    // Cut from 1 s and played at 2x, the subtitle runs from 0 to 0.5 s.
+    let out = dir.path().join("cut.mp4");
+    let tuning = Tuning {
+        subtitles: Some(subs),
+        range: convkit_core::trim::Range::new(
+            Some(convkit_core::trim::parse_time("1").unwrap()),
+            None,
+            None,
+        )
+        .unwrap(),
+        speed: Some(convkit_core::speed::parse("2").unwrap()),
+        ..Tuning::default()
+    };
+    convert_tuned(&clip, &out, &tuning).unwrap();
+    assert!(bright_pixels(&frame_rgb(&out, 0.25)) > 300);
+    assert!(bright_pixels(&frame_rgb(&out, 0.9)) < 20);
+}
+
+/// Right-to-left text and a GIF target draw as well.
+#[test]
+#[ignore = "requires backends and a system font; run with --ignored"]
+fn right_to_left_subtitles_draw_into_a_gif() {
+    let dir = tmp();
+    let (clip, subs) = dark_clip_and_subs(&dir, "שלום עולם. مرحبا");
+    let out = dir.path().join("out.gif");
+    let tuning = Tuning {
+        subtitles: Some(subs),
+        ..Tuning::default()
+    };
+    convert_tuned(&clip, &out, &tuning).unwrap();
+    assert!(bright_pixels(&frame_rgb(&out, 1.5)) > 100);
+    assert!(bright_pixels(&frame_rgb(&out, 0.5)) < 20);
+}

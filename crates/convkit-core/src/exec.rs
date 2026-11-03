@@ -158,6 +158,10 @@ pub struct Outcome {
     /// `ConversionPlan::audio`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio: Option<crate::soundtrack::AudioReport>,
+    /// The subtitles a `--subtitles` conversion burned in; see
+    /// `ConversionPlan::subtitles`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitles: Option<crate::subtitles::SubtitlesReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -576,6 +580,8 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     );
     // A picture's size, and the border `--crop auto` finds, for a crop.
     crate::crop::attach(resolver, req.from, &req.inputs[0], &req.tuning, &mut probed)?;
+    // The subtitles `--subtitles` burns in.
+    crate::subtitles::attach(req.from, req.to, &req.tuning, &mut probed)?;
     // What `--audio` brings, and how loud a mix's two sounds are.
     crate::soundtrack::attach(
         resolver,
@@ -737,6 +743,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let rotation = ran.rotation;
     let crop = ran.crop.clone();
     let audio = ran.audio.clone();
+    let subtitles = ran.subtitles.clone();
     let mut warnings = ran.warnings;
     warnings.extend(sheet_notes);
     // Only the written PDF says what Typst's lossless pages cost, so it is
@@ -799,6 +806,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         pages: None,
         crop,
         audio,
+        subtitles,
     })
 }
 
@@ -937,6 +945,7 @@ fn run_pdf_pages(
         pages: Some(report),
         crop: None,
         audio: None,
+        subtitles: None,
     })
 }
 
@@ -1047,26 +1056,8 @@ impl StepRunner<'_> {
         });
         let resolved = self.resolver.resolve(step.backend)?;
 
-        for prepare in &step.prepare {
-            match prepare {
-                plan::Prepare::Write { path, contents } => {
-                    std::fs::write(path, contents).map_err(io_err)?;
-                }
-                plan::Prepare::Stage { from, to, strip } => {
-                    stage_file(from, to, *strip, hard_link)?;
-                }
-                plan::Prepare::Text {
-                    from,
-                    to,
-                    form,
-                    source,
-                } => match form {
-                    plan::TextForm::Page { title } => {
-                        crate::text::write_page(from, to, title, source)?;
-                    }
-                    plan::TextForm::Speech => crate::text::write_speakable(from, to, source)?,
-                },
-            }
+        for p in &step.prepare {
+            prepare(p)?;
         }
 
         // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
@@ -1622,6 +1613,37 @@ fn io_err(e: std::io::Error) -> ConvError {
 
 pub(crate) fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::hard_link(from, to)
+}
+
+/// Does one thing a step needs done before it runs (`plan::Prepare`).
+pub(crate) fn prepare(p: &plan::Prepare) -> Result<()> {
+    match p {
+        plan::Prepare::Write { path, contents } => {
+            std::fs::write(path, contents).map_err(io_err)?;
+        }
+        plan::Prepare::Stage { from, to, strip } => {
+            stage_file(from, to, *strip, hard_link)?;
+        }
+        plan::Prepare::Text {
+            from,
+            to,
+            form,
+            source,
+        } => match form {
+            plan::TextForm::Page { title } => {
+                crate::text::write_page(from, to, title, source)?;
+            }
+            plan::TextForm::Speech => crate::text::write_speakable(from, to, source)?,
+        },
+        // Drawn once a run: a retried size target plans the same
+        // subtitles again.
+        plan::Prepare::Subtitles { path, render } => {
+            if !path.is_file() {
+                crate::subtitles::draw(render, path)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Places `from` at `to` for a step to read: a hard link to the input's

@@ -119,6 +119,9 @@ pub struct ResolvedVideo {
     /// in place of the video's own sound or mixed under it. Only the
     /// probe-aware media paths carry it.
     pub soundtrack: Option<crate::soundtrack::Soundtrack>,
+    /// Subtitles burned into the picture (`--subtitles`): an animated PNG
+    /// laid over it in the filter chain, which the step's `prepare` draws.
+    pub subtitles: Option<crate::subtitles::Burn>,
     /// An Ogg source going to a target that is not Ogg: its tags are on its
     /// audio stream, and are copied to the file's own (`Arg::StripMetadata`).
     pub ogg_tags: bool,

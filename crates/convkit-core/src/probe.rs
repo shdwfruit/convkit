@@ -119,6 +119,10 @@ pub struct MediaProbe {
     /// What `--audio` brings, read by `soundtrack::attach`. `None` when no
     /// new sound was asked for, or it was not read.
     pub soundtrack: Option<crate::soundtrack::Read>,
+    /// The subtitle file `--subtitles` burns in, read by
+    /// `subtitles::attach`. Shared, since the probe is copied at every
+    /// step of planning.
+    pub subtitle_file: Option<std::sync::Arc<crate::subtitles::Track>>,
 }
 
 /// The two ways a video or audio file records where it was made. Outputs

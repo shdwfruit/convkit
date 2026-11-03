@@ -287,6 +287,15 @@ pub struct Cli {
     )]
     pub mix: Option<convkit_core::soundtrack::Level>,
 
+    /// Burn the subtitles of an .srt, .vtt or .ass file into the picture:
+    /// white with a black outline, near the bottom, sized to the picture,
+    /// in the system's fonts, right-to-left text included. A cut or speed
+    /// change moves them with the video. Video and GIF targets. A lone
+    /// input keeps its format: clip.mp4 -> clip-subtitled.mp4.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "FILE")]
+    pub subtitles: Option<PathBuf>,
+
     /// Copy what was written to the clipboard, ready to paste: a picture
     /// as itself (and its file), an md, csv, html, txt, json, yaml or toml
     /// file as its text, and anything else, or several outputs, as the
@@ -1318,6 +1327,7 @@ impl Cli {
                     path: path.clone(),
                     mix: self.mix,
                 }),
+            subtitles: self.subtitles.clone(),
         }
     }
 
@@ -1416,6 +1426,7 @@ mod tests {
             crop: None,
             audio: None,
             mix: None,
+            subtitles: None,
             copy: false,
             paste: false,
             yes: false,

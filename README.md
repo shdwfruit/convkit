@@ -121,6 +121,7 @@ conv clip.mp4 --speed 2          # play twice as fast
 conv IMG_0042.mov --rotate left  # turn a sideways video or photo
 conv clip.mp4 --crop 9:16        # crop to a shape, a box, or auto for black bars
 conv clip.mp4 --audio song.mp3   # replace the sound; add --mix to put it under
+conv clip.mp4 --subtitles subs.srt # burn subtitles into the picture
 conv trim talk.mp4               # find clips in the terminal and cut them
 conv --paste .jpg                # convert the picture or files you copied
 conv photo.heic .jpg --copy      # convert, then copy the result to paste anywhere
@@ -770,6 +771,41 @@ One file is named `-audio`, or `-mixed`, and a batch writes into an
 `audio` or `mixed` folder. It works into mp4, mov, mkv and webm, not into
 a GIF, which has no sound, and not with `--max-size` yet: add the sound
 first, then size the result.
+
+## Burning in subtitles
+
+`--subtitles` draws an .srt, .vtt or .ass file's subtitles onto the
+picture, so they show in any player and on any site:
+
+```console
+$ conv talk.mp4 --subtitles talk.srt
+OK talk-subtitled.mp4 - 38.2 MB - 41.0s
+  /home/user/Videos/talk-subtitled.mp4
+  note  The video is re-encoded to draw the subtitles on it.
+```
+
+They are white with a black outline, centred near the bottom, a size
+that suits the picture, and wrapped to fit inside it. Italics and bold
+come through. conv draws the text itself, in your system's fonts: a line
+in Arabic, Hebrew, Chinese or any other script is set in a font that has
+it, and right-to-left lines read right to left. An ASS file keeps its
+text, not its styles or positions, and a note says so. A file that is not
+UTF-8 is read as UTF-16 by its mark, or as Windows-1252.
+
+The times are the video's: `--start` and `--end` move the subtitles with
+the clip and leave out the ones outside it, and `--speed` speeds them up
+with it. They go on after `--rotate` and `--crop`, and `--resize` scales
+them with the picture. GIFs take them too:
+
+```console
+conv talk.mkv .mp4 --subtitles talk.vtt --start 2:00 --end 2:30
+conv clip.mp4 meme.gif --subtitles caption.srt --crop 1:1
+```
+
+One file is named `-subtitled`. A subtitle file belongs to one video, so a
+batch is refused. Drawing them needs no ffmpeg filter beyond `overlay`,
+which every ffmpeg has, so it works with Homebrew's ffmpeg, which can't
+draw subtitles itself.
 
 ## Merge and split
 

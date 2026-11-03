@@ -144,6 +144,7 @@ mod tests {
             crop: None,
             audio: None,
             mix: None,
+            subtitles: None,
             copy: false,
             paste: false,
             yes,

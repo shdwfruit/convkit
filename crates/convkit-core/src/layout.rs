@@ -94,7 +94,7 @@ pub(crate) fn name_inputs(report: &str, step: &PlannedStep) -> String {
         .iter()
         .filter_map(|p| match p {
             Prepare::Stage { from, to, .. } => Some((from.display().to_string(), to.as_path())),
-            Prepare::Write { .. } | Prepare::Text { .. } => None,
+            Prepare::Write { .. } | Prepare::Text { .. } | Prepare::Subtitles { .. } => None,
         })
         .collect();
     let mut staged: Vec<(String, &str)> = Vec::with_capacity(inputs.len() * 2);
@@ -234,7 +234,7 @@ mod tests {
             .iter()
             .filter_map(|step| match step {
                 Prepare::Stage { strip, .. } => Some(*strip),
-                Prepare::Write { .. } | Prepare::Text { .. } => None,
+                Prepare::Write { .. } | Prepare::Text { .. } | Prepare::Subtitles { .. } => None,
             })
             .collect();
         assert_eq!(strips, [true, false, true]);

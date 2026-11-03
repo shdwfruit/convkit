@@ -189,6 +189,9 @@ struct Prepared<'a> {
     /// The box `--crop` keeps, carried into every pass. Never copied.
     crop: Option<crate::crop::Rect>,
     crop_report: Option<crate::crop::CropReport>,
+    /// Subtitles drawn on every pass. Never copied.
+    subtitles: Option<crate::subtitles::Burn>,
+    subtitles_report: Option<crate::subtitles::SubtitlesReport>,
     /// The range's notes, then the speed change's, then the crop's.
     clip_notes: Vec<String>,
 }
@@ -217,6 +220,7 @@ pub(crate) fn plan(
     // and any other is never copied; nor is a speed change, which filters.
     let copy_ok = p.retime.is_none()
         && p.crop.is_none()
+        && p.subtitles.is_none()
         && (p.turn.is_none() || p.retag)
         && p.cut.is_none_or(|c| c.why_not_copied(&p.probe).is_none());
     let copied_rotation = p.turn.map(|turn| crate::rotate::RotationReport {
@@ -251,6 +255,7 @@ pub(crate) fn plan(
                 pages: None,
                 crop: p.crop_report.clone(),
                 audio: None,
+                subtitles: p.subtitles_report.clone(),
             });
         }
         if let Some(m) = media::stream_mapped_invocation(
@@ -284,6 +289,7 @@ pub(crate) fn plan(
                 pages: None,
                 crop: p.crop_report.clone(),
                 audio: None,
+                subtitles: p.subtitles_report.clone(),
             });
         }
     }
@@ -479,6 +485,23 @@ fn prepare<'a>(
         }
         None => (probe, None, None),
     };
+    // Subtitles on the clip as it plays, at the size the crop left.
+    let subs = crate::subtitles::resolve(
+        tuning,
+        from,
+        to,
+        Some(&probe),
+        cut.as_ref(),
+        tuning.speed,
+        output,
+    )?;
+    let (subtitles, subtitles_report) = match subs {
+        Some(s) => {
+            clip_notes.extend(s.notes);
+            (s.burn, Some(s.report))
+        }
+        None => (None, None),
+    };
     let src = Source::from_probe(&probe).map_err(|gap| gap_error(gap, input))?;
     // A rate that cannot be held exactly is refused: dropping it would leave
     // the conversion with no ceiling the user asked for.
@@ -525,6 +548,8 @@ fn prepare<'a>(
         retag,
         crop,
         crop_report,
+        subtitles,
+        subtitles_report,
         clip_notes,
     })
 }
@@ -574,6 +599,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         speed: p.retime.clone(),
         turn: p.turn,
         crop: p.crop,
+        subtitles: p.subtitles.clone(),
         mute: false,
         ..ResolvedVideo::default()
     };
@@ -632,7 +658,11 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         inputs: p.inputs.to_vec(),
         output: p.output.to_path_buf(),
         steps: vec![
-            ffmpeg_step(two.pass1, OutputMode::Discard, passlog),
+            // Both passes read the subtitles, drawn before the first.
+            PlannedStep {
+                prepare: p.subtitles.iter().map(|b| b.prepare()).collect(),
+                ..ffmpeg_step(two.pass1, OutputMode::Discard, passlog)
+            },
             ffmpeg_step(two.pass2.argv, OutputMode::Path, p.output.to_path_buf()),
         ],
         warnings,
@@ -647,6 +677,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         pages: None,
         crop: p.crop_report.clone(),
         audio: None,
+        subtitles: p.subtitles_report.clone(),
     })
 }
 
@@ -702,6 +733,7 @@ pub fn preview(
     let ffprobe = resolver.resolve(Backend::Ffprobe)?;
     let mut probe = Some(crate::probe::run(&ffprobe.path, input)?);
     crate::crop::attach(resolver, from, input, tuning, &mut probe)?;
+    crate::subtitles::attach(from, to, tuning, &mut probe)?;
     let probe = probe.unwrap_or_default();
     let out = input.with_extension(format!("preview.{}", to.ext()));
     Ok(plan(

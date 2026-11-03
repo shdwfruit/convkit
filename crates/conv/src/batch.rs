@@ -320,6 +320,7 @@ mod tests {
             pages: None,
             crop: None,
             audio: None,
+            subtitles: None,
         })
     }
 
@@ -391,6 +392,7 @@ mod tests {
             dpi: None,
             crop: None,
             audio: None,
+            subtitles: None,
             mix: None,
             copy: false,
             paste: false,

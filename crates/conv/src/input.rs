@@ -347,8 +347,10 @@ struct OwnFormat {
     timed: bool,
     turned: bool,
     cropped: bool,
-    /// A new sound (`--audio`), which only a video kept as a video takes.
+    /// A new sound (`--audio`) or burned-in subtitles (`--subtitles`):
+    /// what only a video kept as a video takes (or, for subtitles, a GIF).
     sounded: bool,
+    subtitled: bool,
     stripped: bool,
     /// `--resize` alone, which keeps what `registry::resize_in_place` does.
     resized: bool,
@@ -388,6 +390,8 @@ impl OwnFormat {
             Some(_) => "mixed".to_string(),
             None => "audio".to_string(),
         });
+        let subtitled = cli.subtitles.is_some();
+        let subs = subtitled.then(|| "subtitled".to_string());
         if range.is_some() || speed.is_some() {
             let (flag, verb, done) = match (&range, cli.speed) {
                 (Some(r), _) => (r.flag(), "cut", "cut"),
@@ -395,7 +399,7 @@ impl OwnFormat {
                 (None, _) => ("--speed", "speed up", "sped-up"),
             };
             let cut = range.as_ref().map(convkit_core::trim::name_suffix);
-            let parts: Vec<String> = [cut, speed, turn, crop, sound, size.clone()]
+            let parts: Vec<String> = [cut, speed, turn, crop, subs, sound, size.clone()]
                 .into_iter()
                 .flatten()
                 .collect();
@@ -406,6 +410,7 @@ impl OwnFormat {
                 turned,
                 cropped,
                 sounded,
+                subtitled,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag,
@@ -415,7 +420,7 @@ impl OwnFormat {
             });
         }
         if let Some(size) = size {
-            let parts: Vec<String> = [turn, crop, sound, Some(size)]
+            let parts: Vec<String> = [turn, crop, subs, sound, Some(size)]
                 .into_iter()
                 .flatten()
                 .collect();
@@ -426,6 +431,7 @@ impl OwnFormat {
                 turned,
                 cropped,
                 sounded,
+                subtitled,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag: "--max-size",
@@ -442,6 +448,7 @@ impl OwnFormat {
                 turned,
                 cropped,
                 sounded,
+                subtitled,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag: "--compress",
@@ -454,8 +461,8 @@ impl OwnFormat {
         // turn goes after it in the name. With `--to` the suffix names a
         // batch's folder, where `--resize` stays a tuning flag.
         let geometry = cli.resize.as_deref().filter(|_| cli.to.is_none());
-        if turned || cropped || sounded {
-            let parts: Vec<String> = [turn, crop, sound, geometry.map(resize_suffix)]
+        if turned || cropped || sounded || subtitled {
+            let parts: Vec<String> = [turn, crop, subs, sound, geometry.map(resize_suffix)]
                 .into_iter()
                 .flatten()
                 .collect();
@@ -463,6 +470,8 @@ impl OwnFormat {
                 ("--rotate", "rotate", "rotated")
             } else if cropped {
                 ("--crop", "crop", "cropped")
+            } else if subtitled {
+                ("--subtitles", "burn the subtitles into", "subtitled")
             } else if cli.mix.is_some() {
                 ("--audio", "mix the audio into", "mixed")
             } else {
@@ -475,6 +484,7 @@ impl OwnFormat {
                 turned,
                 cropped,
                 sounded,
+                subtitled,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag,
@@ -491,6 +501,7 @@ impl OwnFormat {
                 turned: false,
                 cropped: false,
                 sounded: false,
+                subtitled: false,
                 stripped: true,
                 resized: false,
                 flag: "--strip-metadata",
@@ -507,6 +518,7 @@ impl OwnFormat {
             turned: false,
             cropped: false,
             sounded: false,
+            subtitled: false,
             stripped: false,
             resized: true,
             flag: "--resize",
@@ -523,7 +535,8 @@ impl OwnFormat {
         }
         let turnable = (!self.turned || convkit_core::rotate::in_place(f).is_ok())
             && (!self.cropped || convkit_core::crop::in_place(f).is_ok())
-            && (!self.sounded || convkit_core::soundtrack::in_place(f).is_ok());
+            && (!self.sounded || convkit_core::soundtrack::in_place(f).is_ok())
+            && (!self.subtitled || convkit_core::subtitles::in_place(f).is_ok());
         if self.sized || self.timed {
             (!self.sized || convkit_core::sized::is_sized_target(f))
                 && (!self.timed || convkit_core::registry::takes_range(f, f))
@@ -558,6 +571,14 @@ impl OwnFormat {
                 match f.kind() {
                     Kind::Video => Ok("mp4"),
                     _ => Err(convkit_core::soundtrack::in_place(f)
+                        .err()
+                        .unwrap_or_default()),
+                }
+            }
+            Some(f) if self.subtitled && convkit_core::subtitles::in_place(f).is_err() => {
+                match f.kind() {
+                    Kind::Video => Ok("mp4"),
+                    _ => Err(convkit_core::subtitles::in_place(f)
                         .err()
                         .unwrap_or_default()),
                 }
@@ -627,6 +648,9 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
         }
         if own.sounded {
             convkit_core::soundtrack::in_place(from).map_err(invalid)?;
+        }
+        if own.subtitled {
+            convkit_core::subtitles::in_place(from).map_err(invalid)?;
         }
         if own.stripped {
             convkit_core::metadata::in_place(from).map_err(invalid)?;
@@ -943,6 +967,17 @@ pub(crate) fn files_in(
 /// ourselves.
 pub fn plan_jobs(cli: &Cli) -> Result<Vec<Job>, ConvError> {
     let jobs = plan(cli)?;
+    // One subtitle file belongs to one video.
+    if cli.subtitles.is_some() && jobs.len() > 1 {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--subtitles burns one file's subtitles into one video, and this would \
+                 convert {}; give one video",
+                jobs.len()
+            ),
+        ));
+    }
     // `-o/--outdir` is a request to write there, not a precondition that it
     // already exists — `exec::run` refuses outright when its scratch
     // directory's parent is missing, and until this fix nothing ever
@@ -1906,6 +1941,7 @@ mod tests {
             crop: None,
             audio: None,
             mix: None,
+            subtitles: None,
             copy: false,
             paste: false,
             yes: false,
@@ -3311,6 +3347,30 @@ mod tests {
             e.message.contains("convert it to mp4 first"),
             "{}",
             e.message
+        );
+    }
+
+    // --- --subtitles ---------------------------------------------------------
+
+    #[test]
+    fn subtitles_are_named_after_the_crop_and_before_the_sound() {
+        let mut c = cli_for(v(&["clip.mp4"]), None, None);
+        c.subtitles = Some(p("clip.srt"));
+        assert_eq!(plan_jobs(&c).unwrap()[0].output, p("clip-subtitled.mp4"));
+        c.crop = Some(convkit_core::crop::Spec::Auto);
+        c.audio = Some(p("song.mp3"));
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("clip-cropped-subtitled-audio.mp4")
+        );
+        let mut c = cli_for(v(&["anim.gif"]), None, None);
+        c.subtitles = Some(p("anim.vtt"));
+        assert_eq!(plan_jobs(&c).unwrap()[0].output, p("anim-subtitled.gif"));
+        let mut c = cli_for(v(&["clip.avi"]), None, None);
+        c.subtitles = Some(p("clip.srt"));
+        assert_eq!(
+            plan_jobs(&c).unwrap_err().message,
+            "conv cannot keep avi files as avi; add --to mp4 to burn the subtitles in"
         );
     }
 }

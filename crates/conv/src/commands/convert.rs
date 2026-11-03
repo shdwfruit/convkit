@@ -883,6 +883,7 @@ fn probed_for(
     );
     // As `exec::run` does, so the preview crops the same box.
     convkit_core::crop::attach(resolver, job.from, &job.inputs[0], tuning, &mut probed)?;
+    convkit_core::subtitles::attach(job.from, job.to, tuning, &mut probed)?;
     convkit_core::soundtrack::attach(
         resolver,
         job.from,
@@ -1628,6 +1629,7 @@ mod tests {
                 pages: None,
                 crop: None,
                 audio: None,
+                subtitles: None,
             }),
         }
     }

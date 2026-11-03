@@ -150,6 +150,13 @@
   shorter one leaves the rest silent, with a note. `--start`/`--end` cut the
   video and `--speed` retimes it, and the new sound plays from the clip's
   start at its own speed. Named `-audio` or `-mixed`.
+- **`--subtitles`.** `conv clip.mp4 --subtitles subs.srt` burns an .srt,
+  .vtt or .ass file's subtitles into the picture: white with an outline,
+  near the bottom, sized to the picture and wrapped to fit, italics and bold
+  kept. conv draws them itself in the system's fonts, with right-to-left
+  and other scripts set properly, so it works with an ffmpeg that has no
+  subtitle filter, as Homebrew's doesn't. A cut or speed change moves them
+  with the video. Video and GIF targets; named `-subtitled`.
 
 ## 0.6.2 - 2026-11-03
 

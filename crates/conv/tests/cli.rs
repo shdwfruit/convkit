@@ -1633,6 +1633,35 @@ fn a_mix_level_without_an_equals_sign_says_how_to_write_it() {
         .stderr(contains("--audio"));
 }
 
+/// `--subtitles` goes where there is a picture, GIFs included.
+#[test]
+fn capabilities_lists_subtitles_on_video_and_gif_targets() {
+    let assert = conv().args(["capabilities", "mkv"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for pair in ["mkv -> mp4", "mkv -> gif", "mkv -> webm"] {
+        let line = stdout.lines().find(|l| l.contains(pair)).unwrap();
+        assert!(line.contains("--subtitles"), "{pair}: {stdout}");
+    }
+    let flac = stdout.lines().find(|l| l.contains("mkv -> flac")).unwrap();
+    assert!(!flac.contains("--subtitles"), "{stdout}");
+}
+
+/// One subtitle file goes into one video: a batch is refused before
+/// anything runs.
+#[test]
+fn subtitles_for_a_batch_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.mp4", "b.mp4", "subs.srt"] {
+        std::fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    conv()
+        .current_dir(dir.path())
+        .args(["a.mp4", "b.mp4", "--to", "mkv", "--subtitles", "subs.srt"])
+        .assert()
+        .code(2)
+        .stderr(contains("burns one file's subtitles into one video"));
+}
+
 /// A dry run of a turn the tag makes shows no command, and says why.
 #[test]
 fn dry_run_of_a_photo_whose_tag_the_turn_undoes_runs_nothing() {
