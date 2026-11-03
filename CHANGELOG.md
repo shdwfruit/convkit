@@ -178,6 +178,15 @@
   than its page scaled down to the page's width. A workbook that sets its
   own scale, fit or print range is left alone, and a note says what
   changed.
+- **`conv info` shows what a file is.** For video and audio: the container,
+  duration, bitrate and each stream's codec, size, frame rate, rotation,
+  HDR, sample rate, channels and language, with subtitle and chapter
+  counts. For pictures: the size, colour profile, bit depth, transparency,
+  frames, orientation tag, camera, date taken and whether a GPS position is
+  recorded. For PDFs: pages, page size, encryption and producer. Each file
+  also lists what conv can convert it into. `--json` gives the same as
+  data. A missing ffprobe or ImageMagick is named, with how to install it,
+  next to what could be shown without it.
 
 ### Changed
 

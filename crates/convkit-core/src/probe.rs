@@ -258,7 +258,7 @@ impl MediaProbe {
 /// Parses one ffprobe `N/D` rate. `0/0`, `N/A` and an absent value all
 /// yield `None` rather than a zero tuple, which would divide by zero at
 /// every comparison site.
-fn parse_rate(s: Option<&str>) -> Option<(u32, u32)> {
+pub(crate) fn parse_rate(s: Option<&str>) -> Option<(u32, u32)> {
     let (n, d) = s?.split_once('/')?;
     let (n, d) = (n.parse::<u32>().ok()?, d.parse::<u32>().ok()?);
     (n != 0 && d != 0).then_some((n, d))
@@ -267,7 +267,7 @@ fn parse_rate(s: Option<&str>) -> Option<(u32, u32)> {
 /// Parses ffprobe's decimal seconds (`60.123456`) into whole milliseconds,
 /// by digit string rather than through a float. Anything that is not plain
 /// digits with an optional fraction (`N/A`, exponent forms) is `None`.
-fn parse_duration_ms(s: &str) -> Option<u64> {
+pub(crate) fn parse_duration_ms(s: &str) -> Option<u64> {
     let (whole, frac) = s.split_once('.').unwrap_or((s, ""));
     if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -462,6 +462,13 @@ fn read_tags(p: &mut MediaProbe, tags: &serde_json::Map<String, serde_json::Valu
 /// including a `conv mcp` frontend — inherits it, the same reasoning that
 /// put refuse-by-default overwrite into `exec::run` (I5).
 pub fn run(ffprobe: &Path, input: &Path) -> Result<MediaProbe> {
+    Ok(parse(&json(ffprobe, input)?))
+}
+
+/// ffprobe's whole report on `input`, as JSON text: streams, container and
+/// chapters. `run` parses it for planning; `conv info` shows more of it.
+/// An unreadable file yields text with no `streams`, as `parse` expects.
+pub(crate) fn json(ffprobe: &Path, input: &Path) -> Result<String> {
     if !input.is_file() {
         return Err(ConvError::new(
             ErrorCode::InputNotFound,
@@ -493,7 +500,7 @@ pub fn run(ffprobe: &Path, input: &Path) -> Result<MediaProbe> {
                 format!("failed to run ffprobe: {e}"),
             )
         })?;
-    Ok(parse(&String::from_utf8_lossy(&out.stdout)))
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// How a recipe reads an image, so its pages can be sized the same way:

@@ -845,6 +845,24 @@ Files convkit does not recognise are listed with `--` rather than hidden, so an 
         /// Files or directories to list. Defaults to the current directory.
         paths: Vec<std::path::PathBuf>,
     },
+    /// Show what a file is: format, size, streams, dimensions, pages.
+    #[command(long_about = "\
+Shows what each FILE is. For video and audio: the container, duration, \
+bitrate and every stream, with its codec, size, frame rate, rotation, HDR, \
+sample rate, channels and language. For pictures: the format, size, colour \
+profile, bit depth, transparency, frames, orientation tag, camera, date \
+taken and whether a GPS position is recorded. For PDFs: pages, page size, \
+whether it is encrypted, and what made it. Every file also lists what conv \
+can convert it into.
+
+Nothing is changed or uploaded. Video and audio are read with ffprobe and \
+pictures with ImageMagick; when one is missing, conv shows what it can \
+without it and says how to install it. A folder is read one level deep.")]
+    Info {
+        /// The files to describe, or folders to describe the files in.
+        #[arg(required = true)]
+        files: Vec<std::path::PathBuf>,
+    },
     /// Update managed backends to the versions this convkit pins.
     #[command(long_about = "\
 Brings managed backends (ffmpeg, ffprobe, pandoc, typst, qpdf) in line with the \

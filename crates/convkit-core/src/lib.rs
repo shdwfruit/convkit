@@ -11,6 +11,7 @@ mod exif;
 pub mod format;
 pub mod frames;
 mod icon;
+pub mod info;
 pub mod install;
 mod jpeg;
 mod layout;

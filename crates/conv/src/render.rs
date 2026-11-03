@@ -422,6 +422,11 @@ pub fn notes_human(notes: &[String], styled: bool) -> String {
         .collect()
 }
 
+/// `text` in bold where styling is on, for a heading.
+pub(crate) fn bold(text: &str, styled: bool) -> String {
+    paint(text, Style::new().bold(), styled)
+}
+
 fn dim() -> Style {
     Style::new().dimmed()
 }
