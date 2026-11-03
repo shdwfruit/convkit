@@ -3043,8 +3043,10 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
         from == to && tuning.resize.is_some() && crate::sized::is_video_target(to);
     // A crop is decided against the video's displayed size, and only the
     // probe-aware transcode crops a video into its own format or a webm.
+    // A GIF ffmpeg converts is read the same way, so its size needs no
+    // ImageMagick.
     let cropped = tuning.crop.is_some()
-        && from.kind() == Kind::Video
+        && (from.kind() == Kind::Video || (from == Format::Gif && to != Format::Gif))
         && (from == to || lookup(from, to).is_some());
     // A new sound is mapped from the probe, and planned against the
     // video's length.

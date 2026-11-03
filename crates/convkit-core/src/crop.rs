@@ -293,7 +293,7 @@ pub(crate) fn resolve(
                     format!("could not look for a border around {name}, which --crop auto needs"),
                 )
             })?;
-            let what = if probe.is_some_and(|p| p.video_streams > 0) {
+            let what = if from.kind() == Kind::Video {
                 "black bars"
             } else {
                 "a plain border"
@@ -372,6 +372,13 @@ pub fn attach(
                 p.crop_found = Some(detect_bars(&ffmpeg.path, input, p)?);
             }
         }
+        // A GIF ffmpeg converts has been read by ffprobe, whose size is its
+        // canvas: ImageMagick is needed only to look for its border.
+        Kind::Image
+            if spec != Spec::Auto
+                && probed
+                    .as_ref()
+                    .is_some_and(|p| p.width.is_some() && p.height.is_some()) => {}
         Kind::Image => {
             let magick = resolver.resolve(Backend::Magick)?;
             let (size, rect) = if spec == Spec::Auto {
