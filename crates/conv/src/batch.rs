@@ -288,6 +288,7 @@ mod tests {
             enlarged: None,
             range: None,
             speed: None,
+            rotation: None,
         })
     }
 
@@ -348,6 +349,7 @@ mod tests {
             duration: None,
             speed: None,
             shift_pitch: false,
+            rotate: None,
             yes: false,
             no_install: false,
             outdir: None,
