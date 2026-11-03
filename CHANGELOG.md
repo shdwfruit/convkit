@@ -187,6 +187,14 @@
   also lists what conv can convert it into. `--json` gives the same as
   data. A missing ffprobe or ImageMagick is named, with how to install it,
   next to what could be shown without it.
+- **`conv qr --read` reads QR codes.** `conv qr --read photo.jpg` prints
+  what every code in a picture holds, one per line, from a screenshot or a
+  phone photo where the code is small, tilted or faint. A Wi-Fi code also
+  shows its network, security and password. Links are printed, never
+  opened. `--json` gives each code's text, position and Wi-Fi fields.
+  PNG, JPG, GIF, WebP and SVG are read with no backend; HEIC, AVIF and
+  other pictures go through ImageMagick. `conv qr menu.png` still makes a
+  code for the text "menu.png", with a note if that's a picture here.
 
 ### Changed
 

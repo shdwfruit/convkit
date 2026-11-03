@@ -127,6 +127,7 @@ conv trim talk.mp4               # find clips in the terminal and cut them
 conv --paste .jpg                # convert the picture or files you copied
 conv photo.heic .jpg --copy      # convert, then copy the result to paste anywhere
 conv qr "https://example.com"    # make a QR code, written as qr.png
+conv qr --read photo.jpg         # print what the QR codes in a picture say
 conv ascii photo.jpg             # print a picture as ASCII art
 conv data.json .yaml             # JSON, YAML, TOML and CSV, converted with no backend
 conv fmt data.json               # pretty-print and check JSON, YAML or TOML
@@ -1131,6 +1132,31 @@ logo.
 
 `conv qr --wifi Home` makes a code that joins a saved Wi-Fi network, with
 the password read from the system; see [Wi-Fi passwords](#wi-fi-passwords).
+
+`conv qr --read` goes the other way. It reads every QR code in a picture
+and prints what each one holds on its own line, so it pipes:
+
+```console
+$ conv qr --read menu-photo.jpg
+https://example.com/menu
+$ conv qr --read wifi.png
+WIFI:S:Cafe Rosa;T:WPA;P:espresso42;;
+  Wi-Fi network: Cafe Rosa
+  security: WPA
+  password: espresso42
+```
+
+Screenshots and phone photos both work, including a code that is small,
+tilted or faint. A Wi-Fi code's network is shown on stderr, so only the
+text goes down a pipe. Links are printed, never opened. Give several
+pictures and each line starts with the file's name; `--json` adds each
+code's position and the parsed Wi-Fi fields. conv reads PNG, JPG, GIF,
+WebP and SVG itself, and HEIC, AVIF, TIFF and other pictures through
+ImageMagick. PDFs aren't read yet; read a screenshot of the page.
+
+The text you give `conv qr` is always the text, even when a file has that
+name: `conv qr menu.png` makes a code that says "menu.png". If that file
+is a picture, conv says so and shows the `--read` command.
 
 ## ASCII art
 

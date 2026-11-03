@@ -478,7 +478,8 @@ replaces a file already there.")]
         )]
         graphics: Option<String>,
     },
-    /// Make a QR code: `conv qr "https://example.com"` writes qr.png.
+    /// Make a QR code (`conv qr "https://example.com"` writes qr.png), or
+    /// read one (`conv qr --read photo.jpg`).
     #[command(long_about = "\
 Makes a QR code that holds TEXT, a link or any other text, exactly as \
 given. The text is in the code itself, with no redirect service behind \
@@ -490,11 +491,18 @@ writing, conv reads the code back and checks it gives exactly TEXT.
 
 With --logo, the image sits in the middle on a white square about a \
 fifth of the code's width, and the code is made to survive losing 30% \
-of itself instead of 15%, so it still scans.")]
+of itself instead of 15%, so it still scans.
+
+With --read, conv reads the QR codes in pictures instead and prints what \
+each one holds on its own line. A Wi-Fi code's network, security and \
+password are also shown. Links are printed, never opened. Screenshots \
+and phone photos both work, in png, jpg, gif, webp or svg, and in other \
+formats (heic, avif, tiff, ...) through ImageMagick.")]
     Qr {
-        /// What the code holds: a link or any text. With --wifi, the
-        /// network's name.
-        #[arg(required_unless_present_any = ["paste", "wifi"])]
+        /// What the code holds: a link or any text, always the text even
+        /// when a file has that name (--read reads a picture). With --wifi,
+        /// the network's name.
+        #[arg(required_unless_present_any = ["paste", "wifi", "read"])]
         text: Option<String>,
         /// The file to write, or a bare `.ext` for qr.EXT (`.svg`). Without
         /// it, conv writes qr.png.
@@ -530,6 +538,14 @@ of itself instead of 15%, so it still scans.")]
         /// NAME-wifi.png. See conv wifi.
         #[arg(long, conflicts_with = "paste")]
         wifi: bool,
+        /// Read the QR codes in these pictures instead of making one.
+        #[arg(
+            long,
+            value_name = "PICTURE",
+            num_args = 1..,
+            conflicts_with_all = ["text", "output", "outdir", "logo", "size", "overwrite", "copy", "paste", "wifi"]
+        )]
+        read: Vec<PathBuf>,
     },
     /// Make ASCII art from a picture: `conv ascii photo.jpg` prints it here.
     #[command(long_about = "\
