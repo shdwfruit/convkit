@@ -1,5 +1,6 @@
 //! The `--max-size` value: how many bytes, which unit family the user wrote
-//! it in, and the spelling to reuse in a file name.
+//! it in, and the spelling to reuse in a file name. Also how a file's size
+//! reads where no `--max-size` sets the units (`human`).
 //!
 //! Decimal units (`kb`, `mb`, `gb`) are the default reading of "10 MB"
 //! because they are the smaller one: a file sized for `10mb` (10,000,000
@@ -118,6 +119,27 @@ pub fn display(bytes: u64, family: UnitFamily) -> String {
     format!("{}.{:02} {label}", hundredths / 100, hundredths % 100)
 }
 
+/// A file size in the same binary-but-labelled-decimal convention common
+/// file managers use (1024 B = "1 KB", not 1000) — kilobytes with no
+/// decimal place, megabytes and up with one. For example, 2161 KiB is
+/// 2.11 MiB, which this formula shows as "2.1 MB". What a result line
+/// shows, so a note that names a size reads the same.
+pub fn human(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < MB {
+        format!("{:.0} KB", b / KB)
+    } else if b < GB {
+        format!("{:.1} MB", b / MB)
+    } else {
+        format!("{:.1} GB", b / GB)
+    }
+}
+
 /// The smallest clean size at or above `bytes`: two significant figures,
 /// the second raised to a multiple of 5 (38.2 MB -> 40mb, 7.3 -> 7.5mb,
 /// 142 -> 150mb), in the largest unit of `family` the value reaches.
@@ -199,6 +221,20 @@ mod tests {
     fn a_label_reads_the_way_a_person_writes_it() {
         assert_eq!(parse("10mb").unwrap().label(), "10 MB");
         assert_eq!(parse("1.5gib").unwrap().label(), "1.5 GiB");
+    }
+
+    /// 2161 KiB must come out "2.1 MB", not "2.2 MB" — proving this uses
+    /// binary (1024-based) units labelled `MB`, not decimal (1000-based)
+    /// ones.
+    #[test]
+    fn human_matches_the_file_manager_convention() {
+        assert_eq!(human(2161 * 1024), "2.1 MB");
+    }
+
+    #[test]
+    fn human_uses_whole_kb_below_one_mb() {
+        assert_eq!(human(500), "500 B");
+        assert_eq!(human(2048), "2 KB");
     }
 
     /// Floored, never rounded: a file under the target must never print as

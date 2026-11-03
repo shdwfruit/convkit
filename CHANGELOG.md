@@ -22,9 +22,16 @@
   `--copy` puts the result on the clipboard, a picture as the picture and
   its file, an md, csv or html file as its text, and anything else as the
   file. `conv qr` takes `--copy` too. `--paste` works wherever conv takes
-  a file: `conv ascii`, `conv trim`, and `conv qr`, where a
-  copied link is what the code holds and a copied picture is the logo. Over SSH both go through the
-  terminal, in kitty and Ghostty 1.4 or later.
+  a file: `conv ascii`, `conv trim`, and `conv qr`, where a copied link is
+  what the code holds and a copied picture is the logo. Over SSH both go
+  through the terminal, in kitty and Ghostty 1.4 or later.
+- **Photos go into a PDF without ImageMagick.** `conv a.jpg b.png out.pdf`
+  now runs on Typst, which `conv install typst` sets up. A JPEG goes in as
+  it is, without being re-encoded, and `--strip-metadata` strips it the same
+  way. PNG and WebP pages are kept without loss, and a note says when that
+  makes the PDF much larger. GIF to PDF works too. HEIC, AVIF, TIFF and
+  BMP, and `--quality`, `--resize` and `--rotate`, still go through
+  ImageMagick, as does any merge when Typst isn't installed.
 
 ## 0.6.2 - 2026-11-03
 
