@@ -169,9 +169,10 @@ pub struct Cli {
     )]
     pub rotate: Option<convkit_core::rotate::Turn>,
     /// Copy what was written to the clipboard, ready to paste: a picture
-    /// as itself (and its file), an md, csv or html file as its text, and
-    /// anything else, or several outputs, as the files. Over SSH it goes
-    /// through the terminal, which takes only a picture or text.
+    /// as itself (and its file), an md, csv, html, json, yaml or toml file
+    /// as its text, and anything else, or several outputs, as the files.
+    /// Over SSH it goes through the terminal, which takes only a picture or
+    /// text.
     // Not `global` -- see `dry_run`'s comment.
     #[arg(long)]
     pub copy: bool,
@@ -233,6 +234,64 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+/// `conv fmt`'s arguments.
+#[derive(Args, Debug, Clone)]
+pub struct FmtArgs {
+    /// The JSON, YAML or TOML file (or CSV, to convert with --to). `-`, or
+    /// nothing with text piped in, reads standard input.
+    pub input: Option<PathBuf>,
+    /// Write the result here instead of printing it: a file, or a bare
+    /// `.ext` for FILE's name with that extension. Another extension writes
+    /// that language. Writing over FILE needs -y.
+    pub output: Option<PathBuf>,
+    /// Write the result into this directory, under FILE's name.
+    #[arg(short = 'o', long)]
+    pub outdir: Option<PathBuf>,
+    /// Read the text as this, not by its extension or how it looks.
+    #[arg(long, value_name = "LANG", value_parser = ["json", "yaml", "toml", "csv"])]
+    pub from: Option<String>,
+    /// Write this language instead of the text's own.
+    #[arg(long, value_name = "LANG", value_parser = ["json", "yaml", "toml", "csv"])]
+    pub to: Option<String>,
+    /// Indent by N spaces, JSON and YAML. [default: 2]
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u8).range(1..=8),
+        conflicts_with_all = ["tab", "minify"]
+    )]
+    pub indent: Option<u8>,
+    /// Indent JSON with tabs.
+    #[arg(long, conflicts_with = "minify")]
+    pub tab: bool,
+    /// Pack JSON onto one line.
+    #[arg(long)]
+    pub minify: bool,
+    /// Sort every object's keys.
+    #[arg(long)]
+    pub sort_keys: bool,
+    /// Read JSON5 and JSONC, and YAML with tags conv can't keep, saying
+    /// what was dropped, rather than refuse them.
+    #[arg(long)]
+    pub lenient: bool,
+    /// Only check that the text is valid.
+    #[arg(
+        long,
+        conflicts_with_all = ["output", "outdir", "copy", "to", "indent", "tab", "minify", "sort_keys"]
+    )]
+    pub check: bool,
+    /// Overwrite OUT if it exists, FILE included.
+    #[arg(short = 'y', long)]
+    pub overwrite: bool,
+    /// Put the result on the clipboard instead of printing it (with OUT,
+    /// as well as writing it).
+    #[arg(long)]
+    pub copy: bool,
+    /// Take the text from the clipboard. The one path given is then OUT.
+    #[arg(long)]
+    pub paste: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -420,6 +479,26 @@ and q quits and prints the command for what you made.")]
         #[arg(short = 'y', long)]
         overwrite: bool,
     },
+    /// Format, check or convert JSON, YAML and TOML: `conv fmt data.json`.
+    #[command(long_about = "\
+Pretty-prints JSON, YAML or TOML (two spaces, or --indent N, or --tab), \
+or packs JSON onto one line with --minify, keeping every key in its place \
+and every number as written. Invalid text is refused with the line, the \
+column, a caret under the spot and the usual cause.
+
+The text comes from FILE, from a pipe, or from the clipboard with --paste. \
+Its language is told from the file's extension, or from how it looks; \
+--from says it. The result is printed (in colour on a terminal), written \
+to OUT, or put on the clipboard with --copy. --to, or OUT's extension, \
+writes another language: conv fmt --paste --to yaml --copy turns copied \
+JSON into YAML. To format a file where it is, name it twice and add -y: \
+conv fmt data.json data.json -y. conv won't write over a file whose \
+comments it would lose.
+
+--check only says whether the text is valid. --lenient reads JSON5 and \
+JSONC (comments, trailing commas, single quotes, unquoted keys) and drops \
+YAML tags, saying what it dropped.")]
+    Fmt(FmtArgs),
     /// Show what each version of conv added.
     #[command(long_about = "\
 Shows what each version of conv added, newest first, from the changelog \

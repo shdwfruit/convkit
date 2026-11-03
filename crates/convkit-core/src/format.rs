@@ -60,6 +60,10 @@ pub enum Format {
     Csv,
     Html,
     Md,
+    // Data, converted in process (`data`)
+    Json,
+    Yaml,
+    Toml,
 }
 
 /// Every format, its family, the extensions it can be **written** as
@@ -109,6 +113,12 @@ const TABLE: &[(Format, Kind, &[&str], &[&str])] = &[
     (Format::Csv, Kind::Document, &["csv"], &[]),
     (Format::Html, Kind::Document, &["html", "htm"], &[]),
     (Format::Md, Kind::Document, &["md", "markdown"], &[]),
+    // JSONC and JSON5 are read as JSON with their comments and the rest
+    // allowed; conv writes plain JSON, which has none, so it never writes
+    // those names.
+    (Format::Json, Kind::Document, &["json"], &["jsonc", "json5"]),
+    (Format::Yaml, Kind::Document, &["yaml", "yml"], &[]),
+    (Format::Toml, Kind::Document, &["toml"], &[]),
 ];
 
 /// Levenshtein distance at or below this counts as a near miss worth suggesting.

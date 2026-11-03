@@ -586,6 +586,13 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         return Err(crate::video::confirmation_error(&req.inputs));
     }
     let (ran, sizing) = match built.sizing.clone() {
+        // JSON, YAML, TOML or CSV: converted here, in process. What the
+        // conversion found to say joins the plan's notes.
+        None if built.built_in => {
+            let notes = crate::data::convert_file(&req.inputs[0], req.from, &temp_final, req.to)?;
+            built.warnings.extend(notes);
+            (built, None)
+        }
         // A turn made by the tag alone: the file is copied, and its note
         // reset below.
         None if built.steps.is_empty() && retags(&built) => {

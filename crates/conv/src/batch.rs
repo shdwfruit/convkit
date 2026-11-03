@@ -155,7 +155,13 @@ pub fn run_each(
                 // (`Request::overwrite`), so this is a fast path — skipping
                 // backend resolution and a scratch directory entirely for
                 // the common case — not the only place it's checked.
-                let result = if job.output.exists() && !cli.overwrite {
+                // A data file into its own format is `conv fmt`'s, which
+                // says so before the file it would be written over does.
+                let refused =
+                    job.from == job.to && convkit_core::data::why_not(job.from, job.to).is_some();
+                let result = if refused {
+                    Err(ConvError::unsupported_pair(job.from, job.to))
+                } else if job.output.exists() && !cli.overwrite {
                     Err(ConvError::new(
                         ErrorCode::OutputExists,
                         format!("{} exists; pass -y to overwrite", job.output.display()),

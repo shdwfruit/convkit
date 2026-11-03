@@ -37,13 +37,19 @@ pub enum ErrorCode {
     /// it from a damaged file: LibreOffice's own words for the two are the
     /// same.
     PasswordProtected,
+    /// A JSON, YAML, TOML or CSV file that is not valid in its own
+    /// language. Its own code, rather than `ConversionFailed`, so a script
+    /// can tell a file to fix from a conversion that went wrong.
+    InvalidData,
 }
 
 impl ErrorCode {
     /// Process exit code. Values are fixed by the spec; do not renumber.
     pub fn exit_code(&self) -> i32 {
         match self {
-            ErrorCode::ConversionFailed | ErrorCode::PasswordProtected => 1,
+            ErrorCode::ConversionFailed | ErrorCode::PasswordProtected | ErrorCode::InvalidData => {
+                1
+            }
             ErrorCode::UnsupportedPair
             | ErrorCode::UnknownFormat
             | ErrorCode::InputNotFound
@@ -87,6 +93,14 @@ impl ConvError {
     }
 
     pub fn unsupported_pair(from: Format, to: Format) -> Self {
+        // A pair of data formats says why: what TOML can't hold, or that
+        // reformatting is `conv fmt`'s.
+        if let Some(why) = crate::data::why_not(from, to) {
+            return ConvError::new(
+                ErrorCode::UnsupportedPair,
+                format!("conv can't convert {} to {}: {why}", from.ext(), to.ext()),
+            );
+        }
         ConvError::new(
             ErrorCode::UnsupportedPair,
             format!(

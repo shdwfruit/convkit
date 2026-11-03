@@ -27,8 +27,10 @@ bmp -> pdf: magick in.bmp -auto-orient -compress jpeg -quality 92 out.pdf
 bmp -> png: magick in.bmp[0] -auto-orient out.png
 bmp -> tiff: magick in.bmp -auto-orient out.tiff
 bmp -> webp: magick in.bmp -auto-orient -quality 92 out.webp
+csv -> json: built in
 csv -> ods: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=Text - txt - csv (StarCalc):44,34,76,1,,1033,false,false,false,false,false,,false,,false --convert-to ods:calc8 --outdir . in.csv
 csv -> xlsx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=Text - txt - csv (StarCalc):44,34,76,1,,1033,false,false,false,false,false,,false,,false --convert-to xlsx:Calc MS Excel 2007 XML --outdir . in.csv
+csv -> yaml: built in
 doc -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to docx:MS Word 2007 XML --outdir . in.doc
 doc -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.doc
 docx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.docx
@@ -63,6 +65,9 @@ jpg -> pdf: typst compile --root . --ignore-system-fonts --diagnostic-format sho
 jpg -> png: magick in.jpg[0] -auto-orient out.png
 jpg -> tiff: magick in.jpg -auto-orient out.tiff
 jpg -> webp: magick in.jpg -auto-orient -quality 92 out.webp
+json -> csv: built in
+json -> toml: built in
+json -> yaml: built in
 m4a -> flac: ffmpeg -i in.m4a -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
 m4a -> mp3: ffmpeg -i in.m4a -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
 m4a -> ogg: ffmpeg -i in.m4a -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
@@ -142,6 +147,8 @@ tiff -> jpg: magick in.tiff[0] -auto-orient -background white -alpha remove -alp
 tiff -> pdf: magick in.tiff -auto-orient -compress jpeg -quality 92 out.pdf
 tiff -> png: magick in.tiff[0] -auto-orient out.png
 tiff -> webp: magick in.tiff -auto-orient -quality 92 out.webp
+toml -> json: built in
+toml -> yaml: built in
 wav -> flac: ffmpeg -i in.wav -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
 wav -> m4a: ffmpeg -i in.wav -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
 wav -> mp3: ffmpeg -i in.wav -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
@@ -169,3 +176,6 @@ xls -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --no
 xls -> xlsx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to xlsx:Calc MS Excel 2007 XML --outdir . in.xls
 xlsx -> csv: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to csv:Text - txt - csv (StarCalc):44,34,76,1,,1033,false,true,false,false,false,0 --outdir . in.xlsx
 xlsx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore macro:///Convkit.Sheets.ToPdf("in.xlsx","out.pdf")
+yaml -> csv: built in
+yaml -> json: built in
+yaml -> toml: built in

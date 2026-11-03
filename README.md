@@ -13,8 +13,8 @@
 
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
-ImageMagick, LibreOffice, pandoc, Typst, or qpdf — and runs it locally: 166
-conversion pairs across 34 formats (`conv capabilities` is the source of
+ImageMagick, LibreOffice, pandoc, Typst, or qpdf — and runs it locally: 176
+conversion pairs across 37 formats (`conv capabilities` is the source of
 truth). Files never leave your machine; only `conv install`/`conv update`
 ever touch the network.
 
@@ -111,6 +111,8 @@ conv --paste .jpg                # convert the picture or files you copied
 conv photo.heic .jpg --copy      # convert, then copy the result to paste anywhere
 conv qr "https://example.com"    # make a QR code, written as qr.png
 conv ascii photo.jpg             # print a picture as ASCII art
+conv data.json .yaml             # JSON, YAML, TOML and CSV, converted with no backend
+conv fmt data.json               # pretty-print and check JSON, YAML or TOML
 conv changelog --since 0.5.1     # what's new since the version you had
 ```
 
@@ -707,7 +709,7 @@ conv --paste .jpg                 # a copied picture -> clipboard.jpg here
 conv --paste --to png             # files copied in Finder or Explorer -> PNGs beside them
 conv --paste                      # save a copied picture as it is, as clipboard.png
 conv photo.heic .jpg --copy       # paste the JPEG into a chat, a mail or a folder
-conv notes.md .html --copy        # an md, csv or html result is copied as its text
+conv notes.md .html --copy        # an md, csv, html, json, yaml or toml result is copied as its text
 conv --paste --to jpg --copy      # convert what's on the clipboard, in place
 ```
 
@@ -787,6 +789,79 @@ otherwise. A transparent border around the picture is left out, so the
 drawing fills that width. `--bg light` is for art shown on a light background, so it
 doesn't come out as a negative. `--clipboard` also copies the text; paste
 it inside ``` in Discord, Slack or GitHub to keep it lined up.
+
+## JSON, YAML, TOML and CSV
+
+conv converts JSON, YAML and TOML into one another, and a CSV to and from
+JSON or YAML, by itself, with no backend:
+
+```console
+$ conv package.json .yaml
+OK package.yaml - 729 B - 0.0s
+  /home/user/app/package.yaml
+$ conv orders.csv .json
+OK orders.json - 5.7 MB - 0.3s
+  /home/user/data/orders.json
+  note  Columns with leading zeros or long digit strings, such as zip codes and IDs, are kept as text.
+```
+
+Keys stay in their order and numbers keep their digits: `0.1` stays `0.1`,
+and a 23-digit ID stays exact. What the target can't hold is refused,
+naming where it is, rather than changed: TOML has no null, no list at its
+top level and no integer past 64 bits, and JSON has no NaN or infinity. For
+the same reason a CSV can't become TOML, or TOML a CSV. A key given twice
+in one object is refused in every format, since readers disagree about
+which one wins.
+
+YAML is read safely: no tag runs code or builds an object. Aliases are
+expanded up to a million values, so a "billion laughs" file stops instead
+of filling memory, and merge keys (`<<`) are expanded too. A tag conv can't
+keep, like CloudFormation's `!Ref`, is dropped from the value and noted. A
+file of several documents becomes a list of them in JSON. `yes`, `no`, `on`
+and `off` are text, as YAML 1.2 reads them, and a note says so. No format
+keeps its comments, and a note says how many there were.
+
+A CSV's first row names the columns. A column whose every cell is a number
+becomes numbers, one of true and false becomes true and false, and any
+other column stays text, so `02134` keeps its zero. An empty cell is null
+in a column of numbers and `""` in one of text. The other way, each object
+in a list becomes a row, and a nested value a column named by its path,
+`address.city` or `tags.0`. Converting back keeps those names as they are.
+
+JSON to JSON, YAML or CSV, and CSV to JSON or YAML, stream, so a file of
+any size converts in little memory. YAML, TOML, anything going to TOML and
+`--sort-keys` read the whole file, and stop at 512 MB of values.
+`conv capabilities` lists these pairs as built in, and its `--json` marks
+them `"built_in": true`, with no backends.
+
+`conv fmt` pretty-prints JSON, YAML and TOML from a file, a pipe or the
+clipboard, in colour on a terminal:
+
+```console
+conv fmt data.json                   # two spaces; --indent 4 or --tab
+conv fmt --minify < dump.json        # one line
+conv fmt Cargo.toml --sort-keys
+conv fmt --paste --to yaml --copy    # copied JSON, as YAML, back on the clipboard
+conv fmt data.json data.json -y      # format the file where it is
+```
+
+When the text is wrong, it says where, and what usually causes it:
+
+```console
+$ conv fmt bad.json
+FAIL bad.json is not valid JSON
+  line 3, column 15: a comma after the last item
+   3 |   "tags": ["a",],
+     |               ^
+  try  JSON allows no comma before } or ]; remove it, or: conv fmt --lenient reads JSON5 and JSONC, which allow it
+```
+
+`--check` only says whether it is valid. `--to`, or the output's
+extension, writes another language, and `--from` says what piped text is
+when conv can't tell. `--lenient` reads JSON5 and JSONC (comments,
+trailing commas, single quotes, unquoted keys) and drops YAML tags, saying
+what it dropped; conversions always read that way. conv won't write over a
+file whose comments it would lose.
 
 ## Discovering formats and capabilities
 

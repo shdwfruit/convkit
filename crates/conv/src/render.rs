@@ -69,6 +69,15 @@ pub(crate) fn shell_quote(token: &str) -> String {
 /// choice carries.
 pub fn plan_human(plan: &ConversionPlan) -> String {
     let mut s = String::new();
+    // No command to show: conv reads and writes it itself.
+    if plan.built_in {
+        let name = |p: &std::path::Path| shell_quote(&p.display().to_string());
+        s.push_str(&format!(
+            "built in: {} to {}, no backend\n",
+            plan.inputs.first().map_or_else(String::new, |p| name(p)),
+            name(&plan.output)
+        ));
+    }
     for step in &plan.steps {
         s.push_str(&shell_quote(&step.program));
         for a in &step.argv {

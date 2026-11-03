@@ -81,7 +81,6 @@ enum Pasted {
 }
 
 fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
-    let refused = |message: String| ConvError::new(ErrorCode::InvalidInvocation, message);
     let got = paste::get()?;
     let mut run = cli.clone();
     run.paste = false;
@@ -106,9 +105,18 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
             return Ok(Pasted::Inputs(Box::new(run), None));
         }
         Got::Text(_) => {
-            return Err(refused(
-                "the clipboard holds text, not a picture or files".to_string(),
-            ))
+            return Err(ConvError {
+                code: ErrorCode::InvalidInvocation,
+                message: "the clipboard holds text, not a picture or files".to_string(),
+                backend: None,
+                remediation: Some(convkit_core::Remediation {
+                    managed: None,
+                    manual: Some(
+                        "for copied JSON, YAML or TOML, conv fmt --paste formats it, and --to converts it"
+                            .to_string(),
+                    ),
+                }),
+            })
         }
         Got::Picture { format, bytes } => (format, bytes),
     };

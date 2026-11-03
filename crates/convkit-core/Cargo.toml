@@ -33,6 +33,24 @@ resvg = { version = "0.48", default-features = false, features = ["raster-images
 rqrr = { version = "0.10", default-features = false }
 png = "0.18"
 base64 = "0.22"
+# JSON, YAML, TOML and CSV, converted in process (`data`). JSON is read and
+# written by conv's own code, which keeps every number's digits and every
+# key's place; serde_json's `arbitrary_precision` and `preserve_order` would
+# do it too, but they are features of the one serde_json the whole
+# workspace shares, and would reorder every --json envelope conv prints.
+# saphyr-parser is the event parser of the maintained successor to
+# yaml-rust (yaml-rust2 now only gets basic maintenance; serde_yaml is
+# archived and serde_yml deprecated): events with spans, so conv decides
+# what aliases, tags and plain scalars mean itself. toml_edit parses TOML
+# with each number's text; toml_datetime checks a YAML timestamp is one
+# TOML can hold.
+saphyr-parser = "0.3"
+toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
+toml_datetime = "1"
+csv = "1"
+# Lines up the caret under a data error, where a character can take two
+# columns. Already in the tree through console.
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
