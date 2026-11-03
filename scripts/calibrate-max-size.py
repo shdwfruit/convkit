@@ -228,7 +228,8 @@ def encode(ref, out, codec, w, h, bps, passlog, frames):
         tail = ["-movflags", "+faststart"]
     else:
         enc = ["-c:v", "libvpx-vp9", "-b:v", str(bps)]
-        companions = ["-fps_mode", "vfr", "-row-mt", "1", "-threads", "0"]
+        companions = ["-fps_mode", "vfr", "-row-mt", "1", "-threads", "0",
+                      "-deadline", "good", "-cpu-used", "4"]
         tail = []
     common = ["ffmpeg", "-y", "-v", "error", "-i", ref, "-frames:v", str(frames),
               "-map", "0:v:0", "-vf", chain, *enc]
