@@ -3381,6 +3381,292 @@ fn a_batch_cut_fails_only_the_file_too_short_for_it() {
     assert!(!clips.join("short.mkv").exists());
 }
 
+// --- Stills ----------------------------------------------------------------
+
+/// A folder with `clip.mp4` in it and an ffprobe stand-in that says it is
+/// `secs` long at 30 fps; `conv` runs there with that ffprobe.
+fn stills_dir(secs: u64) -> (tempfile::TempDir, impl Fn(&[&str]) -> std::process::Output) {
+    let dir = tempfile::tempdir().unwrap();
+    let ffprobe = ffprobe_stub(dir.path(), &probe_json(secs, 1_000_000));
+    std::fs::write(dir.path().join("clip.mp4"), b"x").unwrap();
+    let at = dir.path().to_path_buf();
+    let run = move |args: &[&str]| {
+        conv()
+            .current_dir(&at)
+            .arg("--ffprobe-path")
+            .arg(&ffprobe)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    (dir, run)
+}
+
+fn dry_plan(out: &std::process::Output) -> serde_json::Value {
+    assert!(out.status.success(), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["plans"][0]["plan"].clone()
+}
+
+/// `--start` alone is the one still at that time, named for it as a cut is.
+#[test]
+fn a_start_alone_saves_one_still_named_for_its_time() {
+    let (_dir, run) = stills_dir(60);
+    let out = run(&["clip.mp4", ".png", "--start", "0:12", "--dry-run"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        stdout
+            .contains("ffmpeg -ss 12 -i clip.mp4 -map 0:v:0 -frames:v 1 -update 1 -y clip-12s.png"),
+        "{stdout}"
+    );
+    let plan = dry_plan(&run(&[
+        "clip.mp4",
+        ".jpg",
+        "--start",
+        "-5",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(plan["output"], "clip-end-5s.jpg");
+    assert_eq!(plan["stills"]["at_ms"], 55_000);
+    assert_eq!(plan["steps"][1]["program"], "magick");
+    // A typed-out name is kept.
+    let plan = dry_plan(&run(&[
+        "clip.mp4",
+        "thumb.webp",
+        "--start",
+        "3",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(plan["output"], "thumb.webp");
+}
+
+/// With no time, a video gives ten stills spread across it, into a folder
+/// named after it, and says how to get others.
+#[test]
+fn no_time_spreads_ten_stills_into_a_folder_named_after_the_clip() {
+    let (_dir, run) = stills_dir(100);
+    let plan = dry_plan(&run(&["clip.mp4", ".jpg", "--dry-run", "--json"]));
+    assert_eq!(plan["output"], "clip");
+    assert_eq!(plan["stills"]["series"], true);
+    assert_eq!(plan["stills"]["pick"], "spread");
+    assert_eq!(plan["stills"]["expected"], 10);
+    let grab = plan["steps"][0]["argv"].as_array().unwrap();
+    let grab: Vec<&str> = grab.iter().map(|a| a.as_str().unwrap()).collect();
+    assert_eq!(&grab[..4], ["-ss", "5", "-t", "95"]);
+    assert!(
+        grab.windows(2).any(|w| w == ["-vf", "fps=1/10"]),
+        "{grab:?}"
+    );
+    assert!(
+        grab.windows(2).any(|w| w == ["-frames:v", "10"]),
+        "{grab:?}"
+    );
+    assert!(grab.last().unwrap().ends_with("clip-%04d.png"), "{grab:?}");
+    assert_eq!(plan["steps"][1]["argv"][0], "mogrify");
+    let note = plan["warnings"][0].as_str().unwrap();
+    assert!(
+        note.starts_with("10 stills spread evenly across the 1:40 video."),
+        "{note}"
+    );
+}
+
+/// `--every` with a range names the folder after the range; `-o` takes the
+/// folder; a typed-out name is the folder's name.
+#[test]
+fn every_writes_a_numbered_series_named_after_the_clip_and_range() {
+    let (_dir, run) = stills_dir(600);
+    let plan = dry_plan(&run(&[
+        "clip.mp4",
+        ".png",
+        "--every",
+        "2s",
+        "--start",
+        "1:00",
+        "--end",
+        "2:00",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(plan["output"], "clip-1m00s-2m00s");
+    assert_eq!(plan["stills"]["expected"], 30);
+    let last = plan["steps"][0]["argv"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last, "clip-1m00s-2m00s/clip-1m00s-2m00s-%04d.png");
+
+    let plan = dry_plan(&run(&[
+        "clip.mp4",
+        ".png",
+        "--every",
+        "1:00",
+        "-o",
+        "stills",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(
+        Path::new(plan["output"].as_str().unwrap()),
+        Path::new("stills").join("clip")
+    );
+    let plan = dry_plan(&run(&[
+        "clip.mp4",
+        "shots.png",
+        "--every",
+        "1:00",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(plan["output"], "shots");
+    let last = plan["steps"][0]["argv"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last, "shots/shots-%04d.png");
+}
+
+/// A series past 1,000 files says how many, and without a terminal is
+/// refused unless --yes says to go ahead. Nothing is written.
+#[test]
+fn a_large_series_is_refused_without_yes_and_says_how_many() {
+    let (dir, run) = stills_dir(45 * 60);
+    let out = run(&["clip.mp4", ".jpg", "--every", "1s"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("This saves about 2,700 stills (one every 1s of 45:00) into clip/."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("saving about 2,700 stills from clip.mp4 not confirmed; pass --yes"),
+        "{stderr}"
+    );
+    assert!(!dir.path().join("clip").exists());
+    // The preview says so too, and is not refused.
+    let out = run(&["clip.mp4", ".jpg", "--every", "1s", "--dry-run"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("warning: This saves about 2,700"));
+    // Under the line, nothing is asked.
+    let out = run(&["clip.mp4", ".jpg", "--every", "3s", "--dry-run", "--json"]);
+    assert_eq!(dry_plan(&out)["stills"]["needs_confirmation"], false);
+}
+
+/// A folder already holding a series of the same name and format is
+/// refused without -y; another format beside it is not in the way.
+#[test]
+fn an_earlier_series_is_not_replaced_without_y() {
+    let (dir, run) = stills_dir(60);
+    std::fs::create_dir(dir.path().join("clip")).unwrap();
+    std::fs::write(dir.path().join("clip").join("clip-0001.png"), b"old").unwrap();
+    let out = run(&["clip.mp4", ".png"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("already holds stills (clip-0001.png)"),
+        "{out:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("clip").join("clip-0001.png")).unwrap(),
+        b"old"
+    );
+    let plan = dry_plan(&run(&["clip.mp4", ".jpg", "--dry-run", "--json"]));
+    assert_eq!(plan["output"], "clip");
+}
+
+/// --every needs a picture format, and applies to stills alone.
+#[test]
+fn every_without_a_picture_target_is_refused_with_the_fix() {
+    let (_dir, run) = stills_dir(60);
+    let out = run(&["clip.mp4", "--every", "2s"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(
+            "--every saves stills, so it needs their format: conv clip.mp4 .jpg --every 2s"
+        ),
+        "{out:?}"
+    );
+    let out = run(&["clip.mp4", ".gif", "--every", "2s", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--every does not apply to mp4 -> gif"),
+        "{out:?}"
+    );
+    let out = run(&["clip.mp4", ".png", "--fps", "5", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("use --every to say how often"),
+        "{out:?}"
+    );
+}
+
+/// A --to batch of single stills names each after its time, beside its
+/// video, with no folder named after the range.
+#[test]
+fn a_batch_of_single_stills_is_named_beside_each_video() {
+    let (dir, run) = stills_dir(60);
+    std::fs::write(dir.path().join("b.mov"), b"x").unwrap();
+    let out = run(&[
+        "clip.mp4",
+        "b.mov",
+        "--to",
+        "png",
+        "--start",
+        "1",
+        "--dry-run",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    assert!(stdout.contains(" clip-1s.png\n"), "{stdout}");
+    assert!(stdout.contains(" b-1s.png\n"), "{stdout}");
+}
+
+/// Stills are listed from every video and from GIF, with their flags; GIF
+/// to WebP is not one.
+#[test]
+fn capabilities_lists_the_stills_pairs_and_their_flags() {
+    let out = conv()
+        .args(["capabilities", "mp4", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    for to in ["png", "jpg", "webp", "heic"] {
+        let flags = tuning_row(&v, to);
+        for f in [
+            "--every",
+            "--start",
+            "--end",
+            "--duration",
+            "--resize",
+            "--rotate",
+        ] {
+            assert!(flags.iter().any(|x| x == f), "mp4 -> {to} lacks {f}");
+        }
+        assert_eq!(flags.iter().any(|x| x == "--quality"), to != "png", "{to}");
+        assert!(!flags.iter().any(|x| x == "--fps"), "{to}");
+    }
+    let out = conv()
+        .args(["capabilities", "gif", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let targets: Vec<&str> = v["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["to"].as_str().unwrap())
+        .collect();
+    for to in ["png", "jpg", "heic"] {
+        assert!(targets.contains(&to), "{targets:?}");
+    }
+    assert!(!targets.contains(&"webp"), "{targets:?}");
+}
+
 // --- --speed -------------------------------------------------------------
 
 /// Every pair with a timeline lists the speed flags, and nothing else does.

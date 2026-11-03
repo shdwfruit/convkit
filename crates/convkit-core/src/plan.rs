@@ -161,6 +161,10 @@ pub struct ConversionPlan {
     /// absent, like `sizing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subtitles: Option<crate::subtitles::SubtitlesReport>,
+    /// The stills a video or GIF gives as pictures: one, or a series into
+    /// `output` as a folder. Skipped when absent, like `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stills: Option<crate::stills::StillsReport>,
 }
 
 /// Why a probe-aware media pair re-encoded instead of copying: a video knob.
@@ -244,6 +248,23 @@ pub fn build_tuned(
         && matches!(from, Format::Docx | Format::Xlsx | Format::Pptx)
     {
         return Err(ConvError::password_protected(&inputs[0], from));
+    }
+
+    // Stills take the whole conversion, as a size target does below: what
+    // to save is decided against the probe (stills.rs).
+    if crate::stills::is_pair(from, to) {
+        return crate::stills::plan(from, to, inputs, output, probe, tuning);
+    }
+    if tuning.every.is_some() {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--every does not apply to {} -> {}: it saves stills from a video or GIF \
+                 as png, jpg, webp or heic",
+                from.ext(),
+                to.ext()
+            ),
+        ));
     }
 
     // A turn, a flip or a crop needs a picture: a video file the probe
@@ -578,6 +599,7 @@ pub fn build_tuned(
                     crop,
                     audio,
                     subtitles,
+                    stills: None,
                 });
             }
         }
@@ -657,6 +679,7 @@ pub fn build_tuned(
         range,
         speed,
         denoise: tuning.denoise,
+        stills: None,
         rotation,
         pages: None,
         crop,
@@ -695,6 +718,11 @@ fn built_in(
             tuning.denoise.is_some(),
             "it cleans up the sound of video and audio",
         ),
+        (
+            "--every",
+            tuning.every.is_some(),
+            "it saves stills from a video or GIF",
+        ),
     ];
     if let Some((flag, _, why)) = timed.into_iter().find(|(_, given, _)| *given) {
         let verb = if flag.ends_with(" do") { "" } else { " does" };
@@ -732,6 +760,7 @@ fn built_in(
         audio: None,
         subtitles: None,
         denoise: None,
+        stills: None,
     })
 }
 
@@ -761,6 +790,7 @@ fn not_for_speech(tuning: &Tuning) -> Option<&'static str> {
         ("--speed", tuning.speed.is_some()),
         ("--shift-pitch", tuning.shift_pitch),
         ("--denoise", tuning.denoise.is_some()),
+        ("--every", tuning.every.is_some()),
         ("--rotate", tuning.rotate.is_some()),
         ("--flip", tuning.flip.is_some()),
         ("--crop", tuning.crop.is_some()),
@@ -859,6 +889,7 @@ pub fn build_speech(
         audio: None,
         subtitles: None,
         denoise: None,
+        stills: None,
     })
 }
 
@@ -942,7 +973,7 @@ fn rewrites_in_place(format: Format, probe: Option<&MediaProbe>, tuning: &Tuning
 /// Renders a static recipe's steps: each step's output (the final output, or
 /// an intermediate named after it), its argv, and the positions of its
 /// paths. Shared by `build_tuned` and `in_place`.
-fn render_steps(
+pub(crate) fn render_steps(
     recipe: &Recipe,
     inputs: &[PathBuf],
     output: &Path,
@@ -965,7 +996,12 @@ fn render_steps(
             let ext = step
                 .intermediate_ext
                 .expect("non-final step declares intermediate_ext");
-            output.with_extension(format!("convkit-step{i}.{ext}"))
+            // A series' intermediate is a folder of `ext` files.
+            if step.output == OutputMode::Folder {
+                output.with_extension(format!("convkit-step{i}"))
+            } else {
+                output.with_extension(format!("convkit-step{i}.{ext}"))
+            }
         });
     }
 
@@ -1265,6 +1301,7 @@ fn in_place(
         audio: None,
         subtitles: None,
         denoise: None,
+        stills: None,
     })
 }
 
@@ -3424,6 +3461,7 @@ mod tests {
             subtitles: None,
             flip: None,
             denoise: None,
+            every: None,
         }
     }
 
@@ -4578,7 +4616,7 @@ mod tests {
     fn a_range_on_a_pair_without_a_timeline_is_refused_by_name() {
         for (from, to, why) in [
             (Format::Png, Format::Jpg, "jpg is a still image"),
-            (Format::Gif, Format::Png, "png is a still image"),
+            (Format::Svg, Format::Png, "png is a still image"),
             (
                 Format::Docx,
                 Format::Pdf,

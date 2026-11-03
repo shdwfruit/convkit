@@ -14,7 +14,7 @@
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
 ImageMagick, LibreOffice, pandoc, Typst, qpdf, or the system's own speech
-engine — and runs it locally: 240 conversion pairs across 40 formats
+engine — and runs it locally: 263 conversion pairs across 40 formats
 (`conv capabilities` is the source of truth). Files never leave your
 machine; only `conv install`/`conv update`, and `conv link --follow` when
 asked, ever touch the network. It also does the small text and developer
@@ -125,6 +125,7 @@ conv clip.mp4 --crop 9:16        # crop to a shape, a box, or auto for black bar
 conv clip.mp4 --audio song.mp3   # replace the sound; add --mix to put it under
 conv clip.mp4 --subtitles subs.srt # burn subtitles into the picture
 conv selfie.jpg --flip h         # mirror a photo or video
+conv clip.mp4 .png --start 0:12  # save the frame at 0:12 as a picture
 conv trim talk.mp4               # find clips in the terminal and cut them
 conv --paste .jpg                # convert the picture or files you copied
 conv photo.heic .jpg --copy      # convert, then copy the result to paste anywhere
@@ -1164,6 +1165,52 @@ Over SSH the server's clipboard is no use, so conv goes through the
 terminal with kitty's clipboard protocol, which kitty and Ghostty 1.4 or
 later speak. That carries a picture or text, not files. The terminal may
 ask before letting conv read the clipboard.
+
+## Stills from a video
+
+Name a picture format to save stills from a video or a GIF: PNG, JPEG,
+WebP or HEIC. `--start` alone saves the frame at that time:
+
+```console
+$ conv clip.mp4 .png --start 0:12
+OK clip-12s.png - 1.9 MB - 0.3s
+  /home/user/Videos/clip-12s.png
+```
+
+`--every` saves one every so often, or every frame with `--every frame`,
+into a folder named after the clip. With `--start`, `--end` or
+`--duration` the stills come from that part, and the folder is named after
+it too:
+
+```console
+$ conv clip.mp4 .jpg --every 2s
+OK clip/ - 45 stills - 14.2 MB - 4.1s
+  /home/user/Videos/clip
+
+$ conv clip.mp4 .heic --every frame --start 1:00 --duration 1
+OK clip-1m00s-1m01s/ - 30 stills - 3.1 MB - 2.6s
+  /home/user/Videos/clip-1m00s-1m01s
+```
+
+The files are numbered in order: `clip/clip-0001.jpg`, `clip-0002.jpg`
+and so on. With no time, a video gives 10 stills spread evenly across it,
+a quick look at the whole thing, and a GIF gives every frame. More than
+1,000 files asks first; `--yes` answers for a script.
+
+Stills come out the way the video plays, so a phone video filmed upright
+is upright, not on its side. An HDR video is mapped to ordinary colors
+first, as it is for a GIF. `--resize` and `--rotate` work as they do for
+photos, and `--quality` sets JPEG, WebP and HEIC quality. ffmpeg draws the
+frames; JPEG, WebP and HEIC are encoded by ImageMagick, the same way as
+any photo conv converts. A series goes into the folder beside what is
+there; it only stops if that folder already holds stills of the same name
+and format, which `-y` replaces.
+
+```console
+conv IMG_0042.mov .jpg --start 3          # one still, upright
+conv talk.mp4 .png --every 30s -o stills  # stills/talk/talk-0001.png ...
+conv anim.gif .png                        # every frame of a GIF
+```
 
 ## QR codes
 

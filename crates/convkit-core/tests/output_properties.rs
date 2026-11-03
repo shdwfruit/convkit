@@ -6426,3 +6426,313 @@ fn denoised_sound_stays_in_sync_with_the_picture() {
     );
     assert!(probe_media(&out).video_streams == 1);
 }
+
+// --- Stills ----------------------------------------------------------------
+
+/// Saves stills from `input` as `to`: one, at `output`, or a series into
+/// the folder `output`, through the same `exec::run` path as everything
+/// above. Returns the pictures written, in name order.
+fn save_stills(
+    input: &Path,
+    output: &Path,
+    to: Format,
+    tuning: &Tuning,
+    allow_extreme: bool,
+) -> (exec::Outcome, Vec<PathBuf>) {
+    let from = Format::from_path(input).unwrap();
+    let resolver = Resolver::new();
+    for backend in registry::backends_for(from, to) {
+        require_backend(&resolver, backend);
+    }
+    let req = exec::Request {
+        from,
+        to,
+        inputs: vec![input.to_path_buf()],
+        output: output.to_path_buf(),
+        overwrite: false,
+        tuning: tuning.clone(),
+        allow_extreme,
+    };
+    let outcome = exec::run(&req, &resolver, &mut |_| {})
+        .unwrap_or_else(|e| panic!("{} -> {to:?} stills failed: {e}", input.display()));
+    let files = if output.is_dir() {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(output)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        files
+    } else {
+        vec![output.to_path_buf()]
+    };
+    (outcome, files)
+}
+
+fn every(text: &str) -> Option<convkit_core::stills::Every> {
+    Some(convkit_core::stills::parse_every(text).unwrap())
+}
+
+fn from_start(at: &str) -> Option<convkit_core::trim::Range> {
+    convkit_core::trim::Range::new(
+        Some(convkit_core::trim::parse_time(at).unwrap()),
+        None,
+        None,
+    )
+    .unwrap()
+}
+
+/// A phone video is stored on its side with a note saying how to show it.
+/// Its stills are saved the way it plays, one or a series, in every format.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn stills_from_a_phone_video_come_out_the_way_it_plays() {
+    let dir = tmp();
+    let mov = halves_video(&dir, "IMG_4.mov");
+    turn_note(&mov);
+    assert_eq!(probe_media(&mov).display_dimensions(), Some((90, 160)));
+    let one = Tuning {
+        range: from_start("1"),
+        ..Tuning::default()
+    };
+    let (_, files) = save_stills(
+        &mov,
+        &dir.path().join("IMG_4-1s.png"),
+        Format::Png,
+        &one,
+        false,
+    );
+    assert_eq!(imagemagick_dimensions(&files[0]), (90, 160));
+    assert_eq!(red_side(&files[0]), "top");
+
+    let mut targets = vec![(Format::Jpg, "jpg"), (Format::Webp, "webp")];
+    if magick_writes("HEIC") {
+        targets.push((Format::Heic, "heic"));
+    } else {
+        eprintln!("this ImageMagick cannot write HEIC; not checked");
+    }
+    for (to, ext) in targets {
+        let folder = dir.path().join(format!("IMG_4-{ext}"));
+        let (outcome, files) = save_stills(&mov, &folder, to, &Tuning::default(), false);
+        assert_eq!(files.len(), 10, "{ext}: {files:?}");
+        assert_eq!(outcome.stills.as_ref().unwrap().written, Some(10), "{ext}");
+        assert!(
+            files[0].ends_with(format!("IMG_4-{ext}-0001.{ext}")),
+            "{ext}: {files:?}"
+        );
+        for f in [&files[0], &files[9]] {
+            assert_eq!(imagemagick_dimensions(f), (90, 160), "{}", f.display());
+            assert_eq!(red_side(f), "top", "{}", f.display());
+        }
+        // Nothing of the work in progress is left beside the stills.
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".convkit"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+    // A turn and a size apply to the picture as it plays.
+    let turned = Tuning {
+        rotate: Some(convkit_core::rotate::Turn::Left),
+        resize: Some("50%".into()),
+        ..one
+    };
+    let (_, files) = save_stills(
+        &mov,
+        &dir.path().join("turned.png"),
+        Format::Png,
+        &turned,
+        false,
+    );
+    assert_eq!(imagemagick_dimensions(&files[0]), (80, 45));
+    assert_eq!(red_side(&files[0]), "left");
+}
+
+/// Two seconds: red for the first, blue for the second.
+fn red_then_blue(dir: &tempfile::TempDir) -> PathBuf {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let path = dir.path().join("rb.mp4");
+    let result = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:size=64x36:rate=30:duration=1",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "color=blue:size=64x36:rate=30:duration=1",
+        ])
+        .args(["-filter_complex", "[0][1]concat=n=2:v=1[v]", "-map", "[v]"])
+        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "60"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    path
+}
+
+/// Whether the middle of a picture is mostly red (else blue).
+fn is_red(path: &Path) -> bool {
+    identify_format(path, "%[fx:p{w/2,h/2}.r>0.5]") == "1"
+}
+
+/// A still is the frame shown at its time, though the nearest keyframe is
+/// the first; a series counts as asked, from where it was asked.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn stills_are_the_frames_at_the_times_asked_for() {
+    let dir = tmp();
+    let rb = red_then_blue(&dir);
+    for (at, red) in [("0.5", true), ("1.5", false), ("-0.2", false)] {
+        let t = Tuning {
+            range: from_start(at),
+            ..Tuning::default()
+        };
+        let out = dir.path().join(format!("at{at}.png"));
+        let (outcome, files) = save_stills(&rb, &out, Format::Png, &t, false);
+        assert_eq!(is_red(&files[0]), red, "--start {at}");
+        assert!(!outcome.stills.unwrap().series);
+    }
+
+    // Every half second: 0, 0.5, 1 and 1.5 s.
+    let t = Tuning {
+        every: every("0.5"),
+        ..Tuning::default()
+    };
+    let (_, files) = save_stills(&rb, &dir.path().join("half"), Format::Png, &t, false);
+    let reds: Vec<bool> = files.iter().map(|f| is_red(f)).collect();
+    assert_eq!(reds, [true, true, false, false]);
+    assert_eq!(imagemagick_dimensions(&files[0]), (64, 36));
+
+    // Every frame of a range: 0.9 s to 1.2 s at 30 fps is 9 frames, the
+    // first three red.
+    let t = Tuning {
+        every: every("frame"),
+        range: convkit_core::trim::Range::new(
+            Some(convkit_core::trim::parse_time("0.9").unwrap()),
+            Some(convkit_core::trim::parse_time("1.2").unwrap()),
+            None,
+        )
+        .unwrap(),
+        ..Tuning::default()
+    };
+    let (outcome, files) = save_stills(&rb, &dir.path().join("range"), Format::Jpg, &t, false);
+    assert_eq!(files.len(), 9, "{files:?}");
+    assert_eq!(outcome.stills.unwrap().written, Some(9));
+    let reds: Vec<bool> = files.iter().map(|f| is_red(f)).collect();
+    assert_eq!(reds.iter().filter(|r| **r).count(), 3, "{reds:?}");
+
+    // Spread: ten, five of each colour, none from the first frame.
+    let (_, files) = save_stills(
+        &rb,
+        &dir.path().join("spread"),
+        Format::Png,
+        &Tuning::default(),
+        false,
+    );
+    let reds: Vec<bool> = files.iter().map(|f| is_red(f)).collect();
+    assert_eq!(
+        reds,
+        [true, true, true, true, true, false, false, false, false, false]
+    );
+}
+
+/// A GIF splits into every frame, whole, at its own size, keeping its
+/// transparency in a PNG and flattening it onto white in a JPEG.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_gif_splits_into_its_frames() {
+    let dir = tmp();
+    // The first frame is red on the left and see-through on the right.
+    let gif = synth_image(
+        &dir,
+        &[
+            "-size",
+            "40x30",
+            "-delay",
+            "10",
+            "(",
+            "xc:none",
+            "-fill",
+            "red",
+            "-draw",
+            "rectangle 0,0 19,29",
+            ")",
+            "-delay",
+            "50",
+            "xc:blue",
+            "-delay",
+            "20",
+            "xc:green",
+            "-loop",
+            "0",
+        ],
+        "anim.gif",
+    );
+    let (_, files) = save_stills(
+        &gif,
+        &dir.path().join("anim"),
+        Format::Png,
+        &Tuning::default(),
+        false,
+    );
+    assert_eq!(files.len(), 3, "{files:?}");
+    for f in &files {
+        assert_eq!(imagemagick_dimensions(f), (40, 30));
+    }
+    assert_eq!(identify_format(&files[0], "%[fx:p{30,15}.a<0.5]"), "1");
+    assert_eq!(identify_format(&files[1], "%[fx:p{30,15}.b>0.9]"), "1");
+    let (_, files) = save_stills(
+        &gif,
+        &dir.path().join("flat"),
+        Format::Jpg,
+        &Tuning::default(),
+        false,
+    );
+    assert_eq!(files.len(), 3);
+    assert_eq!(
+        identify_format(&files[0], "%[fx:p{30,15}.r>0.9&&p{30,15}.g>0.9]"),
+        "1"
+    );
+}
+
+/// More than 1,000 stills are refused without consent, before anything
+/// is written, and written with it.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_large_series_runs_only_with_consent() {
+    let dir = tmp();
+    let src = synth_video(&dir, 32, 18, 600);
+    let t = Tuning {
+        every: every("frame"),
+        ..Tuning::default()
+    };
+    let resolver = Resolver::new();
+    let folder = dir.path().join("many");
+    let req = exec::Request {
+        from: Format::Mov,
+        to: Format::Png,
+        inputs: vec![src.clone()],
+        output: folder.clone(),
+        overwrite: false,
+        tuning: t.clone(),
+        allow_extreme: false,
+    };
+    let e = exec::run(&req, &resolver, &mut |_| {}).unwrap_err();
+    assert_eq!(e.code, convkit_core::ErrorCode::ConfirmationRequired);
+    assert!(!folder.exists());
+    let (outcome, files) = save_stills(&src, &folder, Format::Png, &t, true);
+    assert_eq!(files.len(), 1200);
+    assert!(files[1199].ends_with("many-1200.png"));
+    assert_eq!(outcome.stills.unwrap().written, Some(1200));
+}

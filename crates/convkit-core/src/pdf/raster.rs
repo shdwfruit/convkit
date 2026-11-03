@@ -262,7 +262,7 @@ fn pixels((w, h): (u32, u32), sizing: &Sizing) -> (u32, u32) {
 /// Refuses a flag that does nothing to a PDF's pages, naming why.
 fn refuse_flags(to: Format, tuning: &Tuning) -> Result<()> {
     let pair = format!("pdf -> {}", to.ext());
-    let refused: [(&str, bool, &str); 15] = [
+    let refused: [(&str, bool, &str); 16] = [
         (
             "--upscale",
             tuning.upscale,
@@ -296,6 +296,11 @@ fn refuse_flags(to: Format, tuning: &Tuning) -> Result<()> {
         ),
         ("--speed", tuning.speed.is_some(), "a PDF has no timeline"),
         ("--denoise", tuning.denoise.is_some(), "a PDF has no sound"),
+        (
+            "--every",
+            tuning.every.is_some(),
+            "it saves stills from a video; --pages picks a PDF's pages",
+        ),
         (
             "--rotate",
             tuning.rotate.is_some(),
@@ -895,6 +900,7 @@ fn conversion_plan(
         audio: None,
         subtitles: None,
         denoise: None,
+        stills: None,
     }
 }
 

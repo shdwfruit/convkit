@@ -98,6 +98,9 @@ pub struct Tuning {
     /// A mirror of the picture as it is shown (`--flip`), after any turn.
     /// Decided and carried as `rotate` is, through `ResolvedVideo::turn`.
     pub flip: Option<crate::rotate::Flip>,
+    /// How often to save a still from a video or GIF (`--every`). Only
+    /// stills take it; see `stills`.
+    pub every: Option<crate::stills::Every>,
 }
 
 impl Tuning {
@@ -110,6 +113,7 @@ impl Tuning {
         self.dpi.is_none()
             && self.pages.is_none()
             && !self.upscale
+            && self.every.is_none()
             && !self.compress
             && !self.strip_metadata
             && !self.mute
@@ -354,6 +358,26 @@ pub enum Arg {
     /// drops audio even where a recipe maps it explicitly (`-map 0`),
     /// checked on ffmpeg 6.1 and 9.0.
     Mute,
+    /// Where a still or a series starts and how long it runs, as ffmpeg
+    /// input options (`-ss`, `-t`), from `ResolvedVideo::stills`; renders
+    /// nothing without one. See `stills::Pick::input_args`.
+    StillsSeek,
+    /// Which frames a still or a series keeps: the filter chain (an HDR
+    /// mapping, `fps=`, a turn, a size) and `-frames:v` or `-fps_mode
+    /// passthrough`, from `ResolvedVideo::stills`. See
+    /// `stills::Pick::output_args`.
+    StillsPick,
+    /// The image2 pattern a series is written to, inside the step's output
+    /// folder: `DIR/NAME-%04d.EXT`, with this extension. NAME and the
+    /// number's width come from `ResolvedVideo::stills`; without one, the
+    /// folder's name and four digits.
+    FramePattern(&'static str),
+    /// The step's output folder itself, for ImageMagick's `mogrify -path`.
+    FramesDir,
+    /// Every file with this extension in the first input, which is a
+    /// folder: `DIR/*.EXT`. ImageMagick expands the pattern itself, on every
+    /// platform, so the list never meets a command-line length limit.
+    InputFrames(&'static str),
     /// The first (usually only) input path.
     Input,
     /// The first input path with ImageMagick's `[0]` frame selector
@@ -599,6 +623,41 @@ impl Step {
                         argv.push("-an".to_string());
                     }
                 }
+                Arg::StillsSeek => {
+                    if let Some(pick) = &video.stills {
+                        argv.extend(pick.input_args());
+                    }
+                }
+                Arg::StillsPick => {
+                    if let Some(pick) = &video.stills {
+                        argv.extend(pick.output_args(video));
+                    }
+                }
+                Arg::FramePattern(ext) => {
+                    let template;
+                    let pick = match &video.stills {
+                        Some(p) => p,
+                        None => {
+                            let name = output.file_name().unwrap_or_default();
+                            template =
+                                crate::stills::Pick::template(name.to_string_lossy().into_owned());
+                            &template
+                        }
+                    };
+                    path_args.push(argv.len());
+                    argv.push(pick.pattern(output, ext));
+                }
+                Arg::FramesDir => {
+                    path_args.push(argv.len());
+                    argv.push(output.to_string_lossy().into_owned());
+                }
+                // Not a path position: the long-path rewriter would hand
+                // ImageMagick a pattern in extended form, which it does not
+                // expand.
+                Arg::InputFrames(ext) => argv.push(format!(
+                    "{}/*.{ext}",
+                    crate::stills::folder_text(&inputs[0].to_string_lossy())
+                )),
                 Arg::Input => {
                     path_args.push(argv.len());
                     argv.push(inputs[0].to_string_lossy().into_owned());
@@ -1020,6 +1079,7 @@ mod tests {
             audio: None,
             subtitles: None,
             flip: None,
+            every: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],

@@ -83,6 +83,11 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     if raster::is_pair(from, to) {
         return raster::flags(to);
     }
+    // Stills plan their own flags (`stills::plan`): a range there picks
+    // the stills rather than cutting the source.
+    if convkit_core::stills::is_pair(from, to) {
+        return convkit_core::stills::flags(to);
+    }
     let recipes: Vec<Recipe> = std::iter::once(recipe)
         .chain(registry::alternate(from, to))
         .collect();

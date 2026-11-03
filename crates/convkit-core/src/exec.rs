@@ -166,6 +166,11 @@ pub struct Outcome {
     /// `ConversionPlan::subtitles`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subtitles: Option<crate::subtitles::SubtitlesReport>,
+    /// The stills a video or GIF gave: one, or a series, whose `output` is
+    /// the folder they are in and whose `bytes` are theirs together. Omitted
+    /// from `--json` for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stills: Option<crate::stills::StillsReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -481,7 +486,26 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     // otherwise inherit a silent overwrite. Checked early, before any work
     // (probing, a scratch directory, an actual conversion) is done, so a
     // refusal is cheap rather than discarding a completed transcode.
-    if req.output.exists() && !req.overwrite {
+    // A series writes into a folder, which may be there already: what it
+    // would replace is a series of the same name in the same format.
+    let series = crate::stills::is_series(req.from, req.to, &req.tuning);
+    if series {
+        if let Some(first) = crate::stills::occupied(&req.output, req.to.ext()) {
+            if !req.overwrite {
+                return Err(crate::stills::exists_error(&req.output, &first));
+            }
+        }
+        if req.output.exists() && !req.output.is_dir() {
+            return Err(ConvError::new(
+                ErrorCode::OutputExists,
+                format!(
+                    "{} is a file, and stills are saved into a folder of that name; \
+                     move it or pick another name",
+                    req.output.display()
+                ),
+            ));
+        }
+    } else if req.output.exists() && !req.overwrite {
         return Err(ConvError::new(
             ErrorCode::OutputExists,
             format!("{} exists; pass -y to overwrite", req.output.display()),
@@ -650,6 +674,11 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     {
         return Err(crate::video::confirmation_error(&req.inputs));
     }
+    if let Some(s) = built.stills.as_ref().filter(|s| s.needs_confirmation) {
+        if !req.allow_extreme {
+            return Err(crate::stills::confirmation_error(&req.inputs[0], s));
+        }
+    }
     let (ran, sizing) = match built.sizing.clone() {
         // JSON, YAML, TOML or CSV: converted here, in process. What the
         // conversion found to say joins the plan's notes.
@@ -733,8 +762,21 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         ..
     } = runner;
 
-    let bytes = file_len(&temp_final)?;
-    std::fs::rename(&temp_final, &req.output).map_err(io_err)?;
+    let mut stills = ran.stills.clone();
+    let bytes = if series {
+        let (count, bytes) = move_series(&temp_final, &req.output, req.to, req.overwrite)?;
+        if let Some(s) = &mut stills {
+            s.written = Some(count);
+        }
+        bytes
+    } else {
+        let bytes = file_len(&temp_final)?;
+        std::fs::rename(&temp_final, &req.output).map_err(io_err)?;
+        if let Some(s) = &mut stills {
+            s.written = Some(1);
+        }
+        bytes
+    };
 
     // A note says what convkit chose; this says what `--upscale` costs, so
     // it goes with the notes the frontend prints as warnings.
@@ -813,7 +855,42 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         crop,
         audio,
         subtitles,
+        stills,
     })
+}
+
+/// Moves a series out of the scratch folder into `dest`, made if missing,
+/// and returns how many files it holds and their bytes together. With
+/// `overwrite`, an earlier series of the same name and format is removed
+/// first, so the folder never mixes two runs' stills; nothing else there is
+/// touched. Each file is renamed on its own, within one filesystem.
+fn move_series(scratch: &Path, dest: &Path, to: Format, overwrite: bool) -> Result<(u64, u64)> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(scratch)
+        .map_err(io_err)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            "no stills were written",
+        ));
+    }
+    std::fs::create_dir_all(dest).map_err(io_err)?;
+    if overwrite {
+        for old in crate::stills::series_files(dest, to.ext()) {
+            std::fs::remove_file(&old).map_err(io_err)?;
+        }
+    }
+    let mut bytes = 0;
+    for f in &files {
+        bytes += file_len(f)?;
+        let name = f.file_name().expect("a listed file has a name");
+        std::fs::rename(f, dest.join(name)).map_err(io_err)?;
+    }
+    Ok((files.len() as u64, bytes))
 }
 
 /// Saves a PDF's pages as images (`pdf::raster`). Reads the page count with
@@ -953,6 +1030,7 @@ fn run_pdf_pages(
         audio: None,
         subtitles: None,
         denoise: None,
+        stills: None,
     })
 }
 

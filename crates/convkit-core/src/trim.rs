@@ -156,7 +156,7 @@ pub fn format_time(ms: u64) -> String {
 
 /// A time as a file name holds it: no colon, which Windows forbids in one.
 /// `5s`, `1m02s`, `1m02.5s`, `1h02m03s`.
-fn name_time(ms: u64) -> String {
+pub fn name_time(ms: u64) -> String {
     let (h, m, s) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60);
     let frac = fraction(ms);
     if h > 0 {
@@ -267,7 +267,7 @@ pub struct Cut {
 }
 
 /// Whole milliseconds as ffmpeg's seconds: `62`, `62.5`, `7.75`.
-fn seconds(ms: u64) -> String {
+pub(crate) fn seconds(ms: u64) -> String {
     format!("{}{}", ms / 1000, fraction(ms))
 }
 

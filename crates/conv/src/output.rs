@@ -43,6 +43,7 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> Result<Outcome, ConvError> {
         crop: None,
         audio: None,
         subtitles: None,
+        stills: None,
     })
 }
 

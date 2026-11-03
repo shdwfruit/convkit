@@ -190,16 +190,36 @@ fn say_what(held: &str, formats: &[Option<Format>]) -> ConvError {
         let theirs = can(f);
         targets.retain(|t| theirs.contains(t));
     }
-    let Some(example) = [
-        Format::Jpg,
-        Format::Png,
-        Format::Mp4,
-        Format::Mp3,
-        Format::Pdf,
-    ]
-    .into_iter()
-    .find(|f| targets.contains(f))
-    .or(targets.first().copied()) else {
+    // A video can become a still, but the example a video asks for is
+    // another video.
+    let media = formats.iter().flatten().all(|f| {
+        matches!(
+            f.kind(),
+            convkit_core::Kind::Video | convkit_core::Kind::Audio
+        )
+    });
+    let preferred = if media {
+        [
+            Format::Mp4,
+            Format::Mp3,
+            Format::Jpg,
+            Format::Png,
+            Format::Pdf,
+        ]
+    } else {
+        [
+            Format::Jpg,
+            Format::Png,
+            Format::Mp4,
+            Format::Mp3,
+            Format::Pdf,
+        ]
+    };
+    let Some(example) = preferred
+        .into_iter()
+        .find(|f| targets.contains(f))
+        .or(targets.first().copied())
+    else {
         let why = if formats.len() > 1 {
             "conv can't make them all into one format"
         } else {
@@ -500,6 +520,8 @@ struct Asked<'a> {
     sizing: Option<sized::SizingPlan>,
     /// The PDF whose pages the question is about, when it is one.
     pages: Option<raster::PagesReport>,
+    /// The series of stills the question is about, when it is one.
+    stills: Option<convkit_core::stills::StillsReport>,
 }
 
 /// Previews every job a question can be about -- an extreme `--max-size`
@@ -513,10 +535,13 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
     // Cannot run, and `batch::run` will say so; not worth a question. A
     // PDF's pages are checked against where they go, once the plan says.
     let runnable = |job: &&input::Job| {
-        !job.output.exists() || cli.overwrite || raster::is_pair(job.from, job.to)
+        cli.overwrite || raster::is_pair(job.from, job.to) || batch::taken(job, &tuning).is_none()
     };
     let sizing = cli.max_size.is_some();
     let pages = jobs.iter().any(|j| raster::is_pair(j.from, j.to));
+    let stills = jobs
+        .iter()
+        .any(|j| convkit_core::stills::is_series(j.from, j.to, &tuning));
     let asked: Vec<Asked> = if sizing {
         jobs.iter()
             .filter(runnable)
@@ -536,10 +561,13 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
                         suggested: sz.suggested.clone(),
                         sizing: Some(sz.clone()),
                         pages: None,
+                        stills: None,
                     })
             })
             .collect()
-    } else if tuning.upscale {
+    } else if tuning.upscale || stills {
+        // A large upscale and a large series of stills are each asked
+        // about; a series that is both asks once, about the upscale.
         jobs.iter()
             .filter(runnable)
             .filter_map(|job| {
@@ -555,13 +583,24 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
                     &tuning,
                 )
                 .ok()?;
-                let e = plan.enlarged.filter(|e| e.needs_confirmation)?;
+                if let Some(e) = plan.enlarged.filter(|e| e.needs_confirmation) {
+                    return Some(Asked {
+                        job,
+                        warning: e.warning,
+                        suggested: None,
+                        sizing: None,
+                        pages: None,
+                        stills: None,
+                    });
+                }
+                let s = plan.stills.filter(|s| s.needs_confirmation)?;
                 Some(Asked {
                     job,
-                    warning: e.warning,
+                    warning: s.warning.clone().unwrap_or_default(),
                     suggested: None,
                     sizing: None,
                     pages: None,
+                    stills: Some(s),
                 })
             })
             .collect()
@@ -596,6 +635,7 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
                     suggested: None,
                     sizing: None,
                     pages: Some(report),
+                    stills: None,
                 })
             })
             .collect()
@@ -632,19 +672,25 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
         shown,
     };
     let many_pages = asked.iter().all(|a| a.pages.is_some());
+    let many_stills = asked.iter().all(|a| a.stills.is_some());
     let what = if sizing {
         "extreme compression"
     } else if many_pages {
         "saving over 1,000 pages"
+    } else if many_stills {
+        "saving over 1,000 stills"
     } else {
         "large upscale"
     };
     let refusal = || {
         if let ([only], 1) = (asked.as_slice(), jobs.len()) {
-            return match (&only.sizing, &only.pages) {
-                (Some(sz), _) => sized::confirmation_error(&only.job.inputs[0], sz),
-                (None, Some(p)) => raster::confirmation_error(&only.job.inputs[0], p),
-                (None, None) => convkit_core::upscale_confirmation_error(&only.job.inputs),
+            return match (&only.sizing, &only.pages, &only.stills) {
+                (Some(sz), _, _) => sized::confirmation_error(&only.job.inputs[0], sz),
+                (None, Some(p), _) => raster::confirmation_error(&only.job.inputs[0], p),
+                (None, None, Some(s)) => {
+                    convkit_core::stills::confirmation_error(&only.job.inputs[0], s)
+                }
+                (None, None, None) => convkit_core::upscale_confirmation_error(&only.job.inputs),
             };
         }
         ConvError::new(
@@ -665,13 +711,19 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
         Gate::Proceed => Ok(allowed),
         Gate::Refuse => Err(refusal()),
         Gate::Ask => {
-            let question = if jobs.len() == 1 && many_pages {
+            let question = if jobs.len() == 1 && (many_pages || many_stills) {
                 "Save them anyway? [y/N] ".to_string()
             } else if jobs.len() == 1 {
                 "Convert anyway? [y/N] ".to_string()
             } else if many_pages {
                 format!(
                     "{} of {} PDFs would each save over 1,000 pages. Save them anyway? [y/N] ",
+                    asked.len(),
+                    jobs.len()
+                )
+            } else if many_stills {
+                format!(
+                    "{} of {} files would each save over 1,000 stills. Save them anyway? [y/N] ",
                     asked.len(),
                     jobs.len()
                 )
@@ -1626,6 +1678,7 @@ mod tests {
                 range: None,
                 speed: None,
                 denoise: None,
+                stills: None,
                 rotation: None,
                 pages: None,
                 crop: None,
