@@ -91,6 +91,7 @@ struct BackendsView: View {
         "pandoc": "Documents: Markdown, Word, HTML",
         "typst": "PDFs from documents",
         "soffice": "Office files (LibreOffice)",
+        "qpdf": "Merging and splitting PDFs",
     ]
 
     var body: some View {

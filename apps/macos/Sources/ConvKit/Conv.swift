@@ -36,10 +36,11 @@ enum Conv {
     }
 
     /// Runs conv with `args`. Cancelling the calling task stops the process.
-    static func run(_ binary: URL, _ args: [String]) async throws -> Output {
+    static func run(_ binary: URL, _ args: [String], in folder: URL? = nil) async throws -> Output {
         let process = Process()
         process.executableURL = binary
         process.arguments = args
+        if let folder { process.currentDirectoryURL = folder }
         process.standardInput = FileHandle.nullDevice
         // A Finder-launched app gets a minimal PATH; let conv find Homebrew backends.
         var env = ProcessInfo.processInfo.environment
@@ -144,6 +145,12 @@ struct DryRunResponse: Decodable {
 }
 
 struct RunResponse: Decodable {
+    /// `--copy`'s report: what went on the clipboard, or why it couldn't.
+    struct ClipboardReport: Decodable {
+        var ok: Bool
+        var message: String
+    }
+    var clipboard: ClipboardReport?
     struct Result: Decodable {
         var ok: Bool
         var output: String?

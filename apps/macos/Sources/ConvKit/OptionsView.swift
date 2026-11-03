@@ -99,6 +99,16 @@ struct OptionsView: View {
                     }
                 }
 
+                Section("Turn") {
+                    Picker("Turn", selection: $model.rotate) {
+                        Text("Don't turn").tag("")
+                        Text("Right (90° clockwise)").tag("right")
+                        Text("Left (90° counterclockwise)").tag("left")
+                        Text("Upside down (180°)").tag("180")
+                    }
+                    .applies(model.applies("--rotate"))
+                }
+
                 Section("Privacy") {
                     Toggle("Remove location and other metadata", isOn: $model.strip)
                         .applies(model.applies("--strip-metadata"))
@@ -117,6 +127,12 @@ struct OptionsView: View {
                     if model.outputFolder != nil {
                         Button("Change Folder…") { chooseFolder() }
                     }
+                    if model.files.contains(where: \.pasted) && model.outputFolder == nil {
+                        Text("A pasted picture has no folder of its own, so its result goes to Downloads.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Toggle("Copy the result to the clipboard", isOn: $model.copyResult)
+                        .help("A picture is copied as itself, a text file as its text, anything else as the file.")
                 }
             }
             .formStyle(.grouped)

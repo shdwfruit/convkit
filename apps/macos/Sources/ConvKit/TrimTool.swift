@@ -174,6 +174,7 @@ struct PlayerView: NSViewRepresentable {
 
 struct TrimView: View {
     @Bindable var trim: TrimModel
+    let paste: () async -> [URL]
     @State private var dropHover = false
 
     var body: some View {
@@ -215,6 +216,10 @@ struct TrimView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { choose() } label: { Label("Open", systemImage: "folder") }
+                Button { Task { if let first = await paste().first { trim.load(first) } } } label: {
+                    Label("Paste", systemImage: "doc.on.clipboard")
+                }
+                .help("Cut a video or audio file copied in Finder")
                 Button(trim.clips.count > 1 ? "Write \(trim.clips.count) Clips" : "Write Clip") { trim.writeAll() }
                     .buttonStyle(.borderedProminent)
                     .disabled(trim.clips.isEmpty || trim.isRunning)

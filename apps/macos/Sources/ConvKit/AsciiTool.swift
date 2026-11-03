@@ -111,6 +111,7 @@ final class AsciiModel {
 
 struct AsciiView: View {
     @Bindable var ascii: AsciiModel
+    let paste: () async -> [URL]
     @State private var dropHover = false
 
     var body: some View {
@@ -123,6 +124,10 @@ struct AsciiView: View {
         .navigationTitle("ASCII Art")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button { Task { if let first = await paste().first { ascii.input = first } } } label: {
+                    Label("Paste", systemImage: "doc.on.clipboard")
+                }
+                .help("Use a copied picture, screenshot or file")
                 Button("Copy Text") { ascii.copy() }.disabled(ascii.art.isEmpty)
                 Button("Save…") { ascii.save() }
                     .buttonStyle(.borderedProminent)
@@ -194,7 +199,8 @@ struct AsciiView: View {
             Section("Picture") {
                 if let input = ascii.input {
                     LabeledContent("File") {
-                        Text(input.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                        Text(Clipboard.isPasted(input) ? "Pasted picture" : input.lastPathComponent)
+                            .lineLimit(1).truncationMode(.middle)
                     }
                 }
                 Button(ascii.input == nil ? "Choose…" : "Choose Another…") { choose() }

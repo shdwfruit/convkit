@@ -18,6 +18,9 @@ final class FileItem: Identifiable {
     let url: URL
     let size: Int64?
     var ext: String { url.pathExtension.lowercased() }
+    /// A picture pasted from the clipboard, saved in the app's own folder.
+    var pasted: Bool { Clipboard.isPasted(url) }
+    var displayName: String { pasted ? "Pasted picture (\(ext.uppercased()))" : url.lastPathComponent }
 
     // From the latest dry run.
     var plannedOutput: URL?
@@ -33,10 +36,13 @@ final class FileItem: Identifiable {
     }
 }
 
-/// Flags conv applies when a lone file keeps its format.
-private let sameFormatTuning: Set<String> = [
-    "--max-size", "--strip-metadata", "--start", "--end", "--duration", "--speed", "--shift-pitch",
+/// Flags that make conv write a lone file in its own format (photo-50pct.jpg,
+/// clip-rotated.mp4). Quality, colors, frame rate and CRF only refine one of these.
+private let keepFormatTriggers: Set<String> = [
+    "--max-size", "--strip-metadata", "--start", "--end", "--duration", "--speed",
+    "--resize", "--rotate",
 ]
+private let sameFormatTuning = keepFormatTriggers.union(["--shift-pitch", "--upscale"])
 
 /// The app's state: which tool is showing, the conv in use, and Convert's own state.
 @Observable
@@ -45,6 +51,8 @@ final class AppModel {
     let qr = QRModel()
     let ascii = AsciiModel()
     let trim = TrimModel()
+    let merge = MergeModel()
+    let split = SplitModel()
     let scan = ScanModel()
     let backends = BackendsModel()
     let formats = FormatsModel()
@@ -74,7 +82,12 @@ final class AppModel {
     var start = ""
     var end = ""
     var strip = false
+    var rotate = ""
+    /// Put the result on the clipboard (`--copy`).
+    var copyResult = false
     var outputFolder: URL?
+    /// Shown after a run: what went on the clipboard, or why not.
+    private(set) var clipboardNote: String?
 
     // Derived from `conv capabilities`.
     private(set) var targets: [String] = []
@@ -110,6 +123,8 @@ final class AppModel {
         qr.conv = url
         ascii.conv = url
         trim.conv = url
+        merge.conv = url
+        split.conv = url
         scan.conv = url
         backends.conv = url
         formats.conv = url
@@ -147,6 +162,10 @@ final class AppModel {
             ascii.input = urls[0]
         } else if tool == .trim, urls.count == 1 {
             trim.load(urls[0])
+        } else if tool == .merge {
+            merge.add(urls)
+        } else if tool == .split, urls.count == 1 {
+            split.load(urls[0])
         } else {
             tool = .convert
             add(urls)
@@ -179,6 +198,35 @@ final class AppModel {
             .filter { !known.contains($0.standardizedFileURL) }
             .map(FileItem.init)
         Task { await refreshTargets() }
+    }
+
+    /// ⌘V: files copied in Finder, or a copied picture or screenshot.
+    @MainActor
+    func paste() async {
+        guard let conv = convURL else { return }
+        switch await Clipboard.take(conv: conv) {
+        case .success(let urls):
+            pasteProblem = nil
+            add(urls)
+        case .failure(let problem):
+            pasteProblem = problem.message
+        }
+    }
+    /// Why the last Paste brought nothing in.
+    var pasteProblem: String?
+
+    /// Paste for the other tools: the clipboard's files or picture, or none and a problem.
+    @MainActor
+    func pasteURLs() async -> [URL] {
+        guard let conv = convURL else { return [] }
+        switch await Clipboard.take(conv: conv) {
+        case .success(let urls):
+            pasteProblem = nil
+            return urls
+        case .failure(let problem):
+            pasteProblem = problem.message
+            return []
+        }
     }
 
     @MainActor
@@ -219,7 +267,14 @@ final class AppModel {
 
     private func updateTuning() {
         guard format != "same" else {
-            tuning = sameFormatTuning
+            // Keeping the format allows what conv allows for any of the file's targets,
+            // when one of the triggers is set; the dry run reports the rest.
+            var flags: Set<String>? = nil
+            for ext in Set(files.map(\.ext)) {
+                let all = Set((caps[ext]?.targets ?? []).flatMap(\.tuning))
+                flags = flags.map { $0.intersection(all) } ?? all
+            }
+            tuning = sameFormatTuning.union(flags ?? [])
             targetNotes = []
             return
         }
@@ -253,6 +308,7 @@ final class AppModel {
         check(!start.isEmpty, "--start", "Start")
         check(!end.isEmpty, "--end", "End")
         check(strip, "--strip-metadata", "Remove metadata")
+        check(!rotate.isEmpty, "--rotate", "Turn")
         return out
     }
 
@@ -279,7 +335,12 @@ final class AppModel {
         add("--end", end)
         add("--duration", duration)
         if strip && applies("--strip-metadata") { a.append("--strip-metadata") }
-        if let dir = outputFolder { a += ["-o", dir.path] }
+        add("--rotate", rotate)
+        if let dir = outputFolder {
+            a += ["-o", dir.path]
+        } else if item.pasted {
+            a += ["-o", Clipboard.pastedOutputFolder.path]
+        }
         return a
     }
 
@@ -327,7 +388,7 @@ final class AppModel {
 
     /// Same format and no flag: conv would refuse, so say what to do instead.
     private func nothingToDo(_ args: [String]) -> Bool {
-        format == "same" && !args.dropFirst().contains { $0.hasPrefix("--") }
+        format == "same" && !args.contains(where: keepFormatTriggers.contains)
     }
 
     @MainActor
@@ -360,6 +421,10 @@ final class AppModel {
         switch err.code {
         case "unsupported_pair":
             return "conv can't make that from this file."
+        case "output_exists":
+            // "/path/x.pdf exists; pass -y to overwrite" -> "x.pdf already exists."
+            let path = err.message.components(separatedBy: " exists;").first ?? err.message
+            return "\((path as NSString).lastPathComponent) already exists."
         case "backend_missing":
             return err.message + " Run `conv doctor` in Terminal for the install command."
         default:
@@ -379,10 +444,24 @@ final class AppModel {
         guard let conv = convURL else { return }
         let items = files.filter { $0.problem == nil && !$0.isDone }
         isRunning = true
+        clipboardNote = nil
+        // conv copies one run's output itself. The app runs one conv a file, so with
+        // several files it copies all the outputs at the end, as `--copy` would.
+        let copyEach = copyResult && items.count == 1
         runTask = Task { @MainActor in
             for item in items {
                 if Task.isCancelled { break }
-                await run(item, conv: conv, extra: [])
+                await run(item, conv: conv, extra: copyEach ? ["--copy"] : [])
+            }
+            if copyResult && items.count > 1 {
+                let outputs = items.compactMap { item -> URL? in
+                    if case .done(let out, _) = item.status { return out }
+                    return nil
+                }
+                if !outputs.isEmpty {
+                    Clipboard.copyFiles(outputs)
+                    clipboardNote = "Copied \(outputs.count) files to the clipboard."
+                }
             }
             isRunning = false
         }
@@ -394,7 +473,7 @@ final class AppModel {
         guard let conv = convURL else { return }
         isRunning = true
         runTask = Task { @MainActor in
-            await run(item, conv: conv, extra: extra)
+            await run(item, conv: conv, extra: extra + (copyResult ? ["--copy"] : []))
             isRunning = false
         }
     }
@@ -421,6 +500,7 @@ final class AppModel {
                 return
             }
             let r = resp.results?.first
+            if let c = resp.clipboard { clipboardNote = c.message }
             if let r, r.ok, let output = r.output {
                 item.status = .done(output: URL(fileURLWithPath: output), bytes: r.bytes)
                 item.notes = (r.warnings ?? []) + (r.notes ?? [])

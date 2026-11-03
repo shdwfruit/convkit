@@ -22,7 +22,7 @@ struct ConvertView: View {
     private var optionsKey: String {
         [model.format, model.maxSize, model.resize, "\(model.upscale)", model.colors, model.fps, model.crf,
          model.duration, "\(model.useQuality)\(Int(model.quality))",
-         model.speed, "\(model.shiftPitch)", model.start, model.end, "\(model.strip)",
+         model.speed, "\(model.shiftPitch)", model.start, model.end, "\(model.strip)", model.rotate,
          model.outputFolder?.path ?? ""].joined(separator: "|")
     }
 
@@ -30,6 +30,12 @@ struct ConvertView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .navigation) {
             Button { pickFiles(model) } label: { Label("Add Files", systemImage: "plus") }
+            Button { Task { await model.paste() } } label: {
+                Label("Paste", systemImage: "doc.on.clipboard")
+            }
+            .help("Add files copied in Finder, or a copied picture or screenshot (⇧⌘V)")
+            .keyboardShortcut("v", modifiers: [.command, .shift])
+            .disabled(model.isRunning)
             Button { model.clear() } label: { Label("Clear", systemImage: "trash") }
                 .disabled(model.files.isEmpty || model.isRunning)
         }
@@ -83,6 +89,18 @@ struct ConvertView: View {
             model.add(urls)
             return true
         } isTargeted: { dropHover = $0 }
+        .onPasteCommand(of: [.fileURL, .image]) { _ in Task { await model.paste() } }
+        .safeAreaInset(edge: .bottom) {
+            if let note = model.pasteProblem ?? model.clipboardNote {
+                HStack {
+                    Image(systemName: model.pasteProblem == nil ? "doc.on.clipboard" : "exclamationmark.circle")
+                    Text(note).font(.callout)
+                    Spacer()
+                }
+                .padding(8)
+                .background(.bar)
+            }
+        }
     }
 
     private var emptyDrop: some View {
@@ -115,7 +133,7 @@ struct FileRow: View {
                 .frame(width: 32, height: 32)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(item.url.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                    Text(item.displayName).lineLimit(1).truncationMode(.middle)
                     if let size = item.size {
                         Text(bytes(size)).foregroundStyle(.secondary).font(.callout)
                     }
@@ -154,7 +172,10 @@ struct FileRow: View {
             if let problem = item.problem {
                 line(problem, systemImage: "exclamationmark.circle", color: .secondary)
             } else if let out = item.plannedOutput {
-                Label(out.lastPathComponent, systemImage: "arrow.turn.down.right")
+                Label(item.pasted && model.outputFolder == nil
+                      ? "\(out.lastPathComponent) in \(out.deletingLastPathComponent().lastPathComponent)"
+                      : out.lastPathComponent,
+                      systemImage: "arrow.turn.down.right")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 notesList(item.warnings, color: .orange)

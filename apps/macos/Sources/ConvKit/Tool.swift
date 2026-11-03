@@ -3,7 +3,7 @@ import SwiftUI
 /// One entry in the sidebar. A tool only shows when the conv in use has its subcommand,
 /// so an older conv hides what it can't do.
 enum Tool: String, CaseIterable, Identifiable {
-    case convert, trim, scan
+    case convert, trim, merge, split, scan
     case qr, ascii
     case backends, formats, changelog
 
@@ -13,6 +13,8 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .convert: "Convert"
         case .trim: "Trim"
+        case .merge: "Merge PDFs"
+        case .split: "Split PDF"
         case .scan: "Scan Folder"
         case .qr: "QR Code"
         case .ascii: "ASCII Art"
@@ -26,6 +28,8 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .convert: "arrow.triangle.2.circlepath"
         case .trim: "scissors"
+        case .merge: "doc.on.doc"
+        case .split: "doc.badge.ellipsis"
         case .scan: "folder.badge.questionmark"
         case .qr: "qrcode"
         case .ascii: "textformat.abc"
@@ -39,6 +43,8 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .convert: "Change format, size, length or speed"
         case .trim: "Cut clips out of a video or audio file"
+        case .merge: "Join PDFs into one"
+        case .split: "One PDF a page, or a file for each range"
         case .scan: "See what a folder's files could become"
         case .qr: "A code for a link or any text"
         case .ascii: "Turn a picture into text"
@@ -53,6 +59,8 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .convert: nil
         case .trim: "trim"
+        case .merge: "merge"
+        case .split: "split"
         case .scan: "scan"
         case .qr: "qr"
         case .ascii: "ascii"
@@ -70,7 +78,7 @@ enum Tool: String, CaseIterable, Identifiable {
 
     var section: Section {
         switch self {
-        case .convert, .trim, .scan: .files
+        case .convert, .trim, .merge, .split, .scan: .files
         case .qr, .ascii: .make
         case .backends, .formats, .changelog: .conv
         }
@@ -99,11 +107,27 @@ struct RootView: View {
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 240)
         } detail: {
+            detail
+        }
+        .alert("Nothing to paste", isPresented: Binding(
+            get: { model.tool != .convert && model.pasteProblem != nil },
+            set: { if !$0 { model.pasteProblem = nil } }
+        )) {
+            Button("OK") { model.pasteProblem = nil }
+        } message: {
+            Text(model.pasteProblem ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
             switch model.tool {
             case .convert: ConvertView()
             case .qr: QRView(qr: model.qr)
-            case .ascii: AsciiView(ascii: model.ascii)
-            case .trim: TrimView(trim: model.trim)
+            case .ascii: AsciiView(ascii: model.ascii, paste: model.pasteURLs)
+            case .trim: TrimView(trim: model.trim, paste: model.pasteURLs)
+            case .merge: MergeView(merge: model.merge, paste: model.pasteURLs)
+            case .split: SplitView(split: model.split, paste: model.pasteURLs)
             case .scan: ScanView(scan: model.scan) { urls in
                     model.tool = .convert
                     model.add(urls)
@@ -112,7 +136,6 @@ struct RootView: View {
             case .formats: FormatsView(formats: model.formats)
             case .changelog: ChangelogView(changelog: model.changelog)
             }
-        }
     }
 }
 

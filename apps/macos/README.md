@@ -3,10 +3,14 @@
 A SwiftUI toolkit for conv, with a tool in the sidebar for each thing conv does.
 
 Files
-- Convert: drop files in, pick a format and any of conv's options (size limit,
-  resize, quality, colors, frame rate, CRF, cuts, speed, metadata), press Convert.
+- Convert: drop or paste files in, pick a format and any of conv's options (size
+  limit, resize, turn, quality, colors, frame rate, CRF, cuts, speed, metadata),
+  press Convert. A copied picture or screenshot can be pasted too, and the result
+  can go straight to the clipboard.
 - Trim: play a video or audio file, mark clips with I and O, write them all.
   A clip can keep just the sound.
+- Merge PDFs: join PDFs in the order you drag them into.
+- Split PDF: one file a page, or one for each range you type, with the pages shown.
 - Scan Folder: what each file in a folder could become. Send any of them to Convert.
 
 Make

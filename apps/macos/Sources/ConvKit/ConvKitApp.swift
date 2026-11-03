@@ -100,11 +100,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         model.trim.clips.append(.init(start: t[0], end: t[1], keep: parts.count > 2 ? .sound : .both))
                     }
                 case "trimWrite": model.trim.writeAll()
+                case "mergeAdd": model.merge.add(kv[1].split(separator: ",").map { URL(fileURLWithPath: String($0)) })
+                case "mergeRun":
+                    // Bypasses the save panel: merges into the path given.
+                    let args = ["merge", "--json", "--no-install"] + model.merge.items.map(\.url.path) + [kv[1]]
+                    Task { if let c = model.convURL, let out = try? await Conv.run(c, args) {
+                        try? out.stdout.write(to: URL(fileURLWithPath: kv[1] + ".json")) } }
+                case "splitFile": model.split.load(URL(fileURLWithPath: kv[1]))
+                case "splitRanges": model.split.ranges = kv[1].replacingOccurrences(of: "_", with: " "); model.split.changed()
+                case "splitRun": model.split.split()
                 case "scanDir": Task { await model.scan.scan(URL(fileURLWithPath: kv[1])) }
                 case "qrText": model.qr.text = kv[1]; model.qr.changed()
                 case "asciiInput": model.ascii.input = URL(fileURLWithPath: kv[1]); model.ascii.changed()
                 case "asciiStyle": model.ascii.style = kv[1]; model.ascii.changed()
                 case "asciiWidth": model.ascii.width = Double(kv[1]) ?? 100; model.ascii.changed()
+                case "rotate": model.rotate = kv[1]
+                case "copy": model.copyResult = kv[1] == "1"
+                case "paste": Task { await model.paste() }
                 case "format": model.format = kv[1]
                 case "maxSize": model.maxSize = kv[1]
                 case "resize": model.resize = kv[1]
@@ -129,6 +141,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let wait = Double(env["CONVKIT_WAIT"] ?? "") ?? 6
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [self] in
             var dump = "conv: \(model.convURL?.path ?? "-") \(model.convVersion)\ntools: \(model.availableTools.map(\.rawValue)) showing \(model.tool.rawValue)\ntargets: \(model.targets)\n"
+            dump += "clipboard: note=\(model.clipboardNote ?? "-") pasteProblem=\(model.pasteProblem ?? "-")\n"
+            dump += "merge: \(model.merge.items.map { "\($0.url.lastPathComponent):\($0.pages ?? -1)" }) warnings=\(model.merge.warnings) problem=\(model.merge.problem ?? "-")\n"
+            dump += "split: pages=\(model.split.pages ?? -1) planned=\(model.split.planned.map { "\(($0.path as NSString).lastPathComponent)\($0.pages ?? [])" }) written=\(model.split.written.map(\.lastPathComponent)) problem=\(model.split.problem ?? "-") exists=\(model.split.exists) warnings=\(model.split.warnings)\n"
             dump += "trim: dur=\(model.trim.duration) video=\(model.trim.hasVideo) targets=\(model.trim.targets) clips=\(model.trim.clips.map { "\($0.start)-\($0.end) \($0.status)" })\n"
             dump += "scan: \(model.scan.entries.map { "\($0.name):\($0.targets?.count ?? 0)" }) problem=\(model.scan.problem ?? "-")\n"
             dump += "backends: \(model.backends.doctor.map { "\($0.backend)=\($0.found)" }) outdated=\(model.backends.outdated) conv=\(model.backends.me?.update_hint ?? "-")\n"
