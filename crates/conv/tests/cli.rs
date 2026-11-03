@@ -1618,9 +1618,9 @@ fn tagged_jpeg(tag: u8) -> Vec<u8> {
 }
 
 /// Photos merge into a PDF on Typst, which embeds a JPEG as it is, and
-/// `--quality` and `--resize` still work there: they move the run to
-/// ImageMagick, so the pair lists both routes' flags. Its defaults are the
-/// Typst route's, which re-encodes nothing.
+/// `--quality`, `--resize` and `--rotate` still work there: they move the
+/// run to ImageMagick, so the pair lists both routes' flags. Its defaults
+/// are the Typst route's, which re-encodes nothing.
 #[test]
 fn capabilities_list_quality_and_resize_for_jpg_to_pdf() {
     for format in ["jpg", "gif"] {
@@ -1630,7 +1630,13 @@ fn capabilities_list_quality_and_resize_for_jpg_to_pdf() {
             .success();
         let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
         let flags = tuning_row(&v, "pdf");
-        for f in ["--quality", "--resize", "--upscale", "--strip-metadata"] {
+        for f in [
+            "--quality",
+            "--resize",
+            "--upscale",
+            "--rotate",
+            "--strip-metadata",
+        ] {
             assert!(flags.iter().any(|x| x == f), "{format} -> pdf lacks {f}");
         }
         assert!(!flags.iter().any(|x| x == "--colors"), "{flags:?}");

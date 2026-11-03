@@ -261,8 +261,9 @@ pub(crate) const TYPST_READS: &[Format] = &[Format::Jpg, Format::Png, Format::We
 /// typeset, and it skips the font scan. `--diagnostic-format short` puts
 /// an error on one `file:line:col` line, which leads back to the input.
 /// `--strip-metadata` strips in the staging, so its slot renders nothing.
-/// `--quality` and `--resize` re-encode the pixels, which Typst cannot do,
-/// so `image_pdf_variant` hands those runs to `IMG_TO_PDF`.
+/// `--quality`, `--resize` and `--rotate` re-encode the pixels, which this
+/// route does not do, so `image_pdf_variant` hands those runs to
+/// `IMG_TO_PDF`.
 pub(crate) const TYPST_IMG_TO_PDF: Recipe = Recipe {
     steps: &[step!(
         Backend::Typst,
@@ -295,7 +296,7 @@ pub(crate) fn image_pdf_variant(
     tuning: &Tuning,
     available: Option<&AvailableBackends>,
 ) -> Recipe {
-    let reencodes = tuning.quality.is_some() || tuning.resize.is_some();
+    let reencodes = tuning.quality.is_some() || tuning.resize.is_some() || tuning.rotate.is_some();
     let foreign = inputs.iter().any(|i| !typst_reads(i));
     if recipe == TYPST_IMG_TO_PDF && (reencodes || foreign || typst_absent(available)) {
         IMG_TO_PDF
@@ -358,6 +359,8 @@ pub(crate) fn magick_reason(to: Format, inputs: &[PathBuf], tuning: &Tuning) -> 
         "--quality"
     } else if tuning.resize.is_some() {
         "--resize"
+    } else if tuning.rotate.is_some() {
+        "--rotate"
     } else {
         return None;
     };
@@ -3133,7 +3136,7 @@ mod tests {
     /// every input, in either order, and over the knobs only ImageMagick
     /// honours. The flag that strips a JPEG is honoured on Typst.
     #[test]
-    fn quality_resize_or_a_foreign_input_moves_a_merge_to_magick() {
+    fn quality_resize_rotate_or_a_foreign_input_moves_a_merge_to_magick() {
         let p = |s: &str| PathBuf::from(s);
         let typst = lookup(Format::Jpg, Format::Pdf).unwrap();
         let both = [p("a.jpg"), p("b.png")];
@@ -3145,6 +3148,10 @@ mod tests {
             resize: Some("800x".into()),
             ..Tuning::default()
         };
+        let rotate = Tuning {
+            rotate: Some(crate::rotate::Turn::Left),
+            ..Tuning::default()
+        };
         let strip = Tuning {
             strip_metadata: true,
             ..Tuning::default()
@@ -3152,6 +3159,7 @@ mod tests {
         let plain = Tuning::default();
         assert_eq!(image_pdf_variant(typst, &both, &quality, None), IMG_TO_PDF);
         assert_eq!(image_pdf_variant(typst, &both, &resize, None), IMG_TO_PDF);
+        assert_eq!(image_pdf_variant(typst, &both, &rotate, None), IMG_TO_PDF);
         assert_eq!(
             image_pdf_variant(typst, &[p("a.jpg"), p("b.heic")], &plain, None),
             IMG_TO_PDF

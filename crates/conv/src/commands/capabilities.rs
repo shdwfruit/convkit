@@ -66,9 +66,9 @@ pub fn run(cli: &Cli, format: Option<&str>) -> i32 {
 /// whole video conversion, not a slot in one recipe).
 ///
 /// A pair with a second route (`registry::alternate`: images into a PDF go
-/// through Typst, or ImageMagick for `--quality` and `--resize`) lists the
-/// flags of both, since giving one of the second route's is what takes the
-/// run there.
+/// through Typst, or ImageMagick for `--quality`, `--resize` and `--rotate`)
+/// lists the flags of both, since giving one of the second route's is what
+/// takes the run there.
 fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     let Some(recipe) = registry::lookup(from, to) else {
         return Vec::new();

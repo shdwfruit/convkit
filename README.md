@@ -182,11 +182,11 @@ are kept without loss, so a PDF of photos in those formats can come out
 several times their size; conv says when that happens, and `--quality`
 stores them as JPEG instead. An animated GIF or WebP contributes its first
 frame. HEIC, HEIF, AVIF, TIFF and BMP need ImageMagick, and so do
-`--quality` and `--resize`, which re-encode the pictures. Any one of them
-sends the whole merge through ImageMagick. An SVG or ICO can't start a
-merge, but later in the list it goes in through ImageMagick too. Without
-Typst, ImageMagick merges JPG, PNG, WebP and GIF as well, re-encoding them,
-and conv says so.
+`--quality`, `--resize` and `--rotate`, which re-encode the pictures. Any
+one of them sends the whole merge through ImageMagick. An SVG or ICO can't
+start a merge, but later in the list it goes in through ImageMagick too.
+Without Typst, ImageMagick merges JPG, PNG, WebP and GIF as well,
+re-encoding them, and conv says so.
 
 A failure never looks like a success, and carries its own fix — `try` names
 whichever package manager is on `PATH` (winget/scoop/choco, brew,
@@ -889,7 +889,7 @@ convkit dispatches to seven binaries, each invoked as a subprocess:
 | Backend | Used for | `conv install` | Pinned version |
 |---|---|---|---|
 | `ffmpeg` / `ffprobe` | video, audio, GIF, remux | Yes | 9.0.1 |
-| `magick` (ImageMagick) | images, HEIC (HEIF read-only), HEIC/HEIF/AVIF/TIFF/BMP → PDF, and image → PDF with `--quality`, `--resize`, or an SVG or ICO in the merge | No — use your package manager | — |
+| `magick` (ImageMagick) | images, HEIC (HEIF read-only), HEIC/HEIF/AVIF/TIFF/BMP → PDF, and image → PDF with `--quality`, `--resize`, `--rotate`, or an SVG or ICO in the merge | No — use your package manager | — |
 | `pandoc` | Markdown → HTML/DOCX; parses docx/odt for the PDF fallback | Yes | 3.11 |
 | `typst` | JPG/PNG/WebP/GIF → PDF; PDF engine for the docx/odt → pdf fallback | Yes | 0.15.1 |
 | `soffice` (LibreOffice) | Office documents ⇄ PDF | No — manual install, always | — |

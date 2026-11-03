@@ -3103,6 +3103,10 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             resize: Some("800x".into()),
             ..Default::default()
         };
+        let rotate = crate::Tuning {
+            rotate: Some(crate::rotate::Turn::Right),
+            ..Default::default()
+        };
         for (names, tuning, reason) in [
             (
                 &["a.jpg", "b.heic"][..],
@@ -3118,6 +3122,11 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
                 &["a.jpg", "b.png"][..],
                 resize,
                 "--resize re-encodes the images, which needs it",
+            ),
+            (
+                &["a.jpg", "b.png"][..],
+                rotate,
+                "--rotate re-encodes the images, which needs it",
             ),
         ] {
             let mut req = merge_request(dir.path(), names);
