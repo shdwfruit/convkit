@@ -15,6 +15,7 @@
   all five platforms, checks its SHA-256, and installs it as a folder. The
   Linux build needs glibc 2.34 or newer. `--qpdf-path` and `CONVKIT_QPDF`
   point conv at another copy.
+
 ## 0.6.2 - 2026-11-03
 
 ### New
