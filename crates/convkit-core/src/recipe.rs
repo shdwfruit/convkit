@@ -70,11 +70,15 @@ pub struct Tuning {
     /// Words per minute for text read aloud (`--rate`), spelled for each
     /// engine by `Arg::Rate`.
     pub rate: Option<u16>,
+    /// Make a PDF smaller with the same look (`--compress`). Not a knob but
+    /// a job of its own, run by `pdf::compress`.
+    pub compress: bool,
 }
 
 impl Tuning {
     pub fn is_empty(&self) -> bool {
         !self.upscale
+            && !self.compress
             && !self.strip_metadata
             && !self.mute
             && !self.shift_pitch
@@ -948,6 +952,7 @@ mod tests {
             rotate: None,
             voice: None,
             rate: None,
+            compress: false,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],

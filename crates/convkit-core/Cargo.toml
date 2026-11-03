@@ -88,6 +88,15 @@ image-webp = "0.2"
 # The owner password of a restricted PDF lock: random, and never shown.
 # Already in the tree through ring.
 getrandom = "0.2"
+# --compress and --max-size on PDFs, all pure Rust under MIT or Apache-2.0:
+# lopdf reads the page tree, content streams and images; jpeg-decoder
+# decodes JPEGs, CMYK and YCCK included; fast_image_resize downsamples;
+# jpeg-encoder writes the JPEGs, CMYK as YCCK. qpdf still does every write
+# of the PDF itself.
+lopdf = { version = "0.45", default-features = false }
+jpeg-decoder = { version = "0.3", default-features = false }
+jpeg-encoder = { version = "0.7", default-features = false, features = ["std", "simd"] }
+fast_image_resize = { version = "6", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

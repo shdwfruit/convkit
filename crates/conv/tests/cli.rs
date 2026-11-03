@@ -5551,3 +5551,62 @@ fn wifi_refusals() {
             .stderr(contains(says));
     }
 }
+
+#[test]
+fn compress_refuses_a_file_that_is_not_a_pdf_and_names_the_two_steps() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("report.docx"), b"x").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["report.docx", "--compress"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--compress makes a PDF smaller, and report.docx is not a PDF",
+        ))
+        .stderr(contains(
+            "convert it first, then `conv report.pdf --compress`",
+        ));
+}
+
+#[test]
+fn compress_cannot_be_combined_with_another_knob() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("scan.pdf"), b"%PDF-1.7").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["scan.pdf", "--compress", "--quality", "50", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--compress chooses how each image is kept, so it can't be combined with --quality",
+        ));
+    conv()
+        .current_dir(dir.path())
+        .args(["scan.pdf", "scan.jpg", "--compress", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--compress makes a PDF into a smaller PDF, not jpg",
+        ));
+}
+
+/// Without qpdf, the run reports the missing backend the way other
+/// conversions do, with the install command, and writes nothing.
+#[test]
+fn compress_without_qpdf_is_backend_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("scan.pdf"), b"%PDF-1.7").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let assert = cmd
+        .current_dir(dir.path())
+        .args(["scan.pdf", "--compress", "--json"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["results"][0]["error"]["code"], "backend_missing", "{v}");
+    assert_eq!(v["results"][0]["error"]["backend"], "qpdf", "{v}");
+    assert!(!dir.path().join("scan-compressed.pdf").exists());
+}

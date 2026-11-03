@@ -440,6 +440,15 @@ pub(crate) fn convert_as(cli: &Cli, passing: Option<Passing>) -> i32 {
         }
     }
 
+    // A signed PDF under --compress is only known once qpdf has read it, so
+    // the core refuses it then, and the question is asked here, once for
+    // every such file, before they run again.
+    let asked_after = confirm_after(&mut results, &original_jobs, cli);
+    if asked_after > Duration::ZERO {
+        elapsed += asked_after;
+        code = batch::exit_code(&results);
+    }
+
     if let Some((_, name)) = passing {
         for r in &mut results {
             r.input = PathBuf::from(name);
@@ -621,6 +630,93 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
                 Err(refusal())
             }
         }
+    }
+}
+
+/// The jobs the core refused for want of a yes it could only ask for once
+/// it had read the file (a signed PDF under `--compress`): asked once for
+/// all of them, on a terminal, and run again with the answer. Under
+/// `--yes` the core never refuses them, and without a terminal (or under
+/// `--json` or `--quiet`) the refusals stand, as for an extreme
+/// `--max-size` target. Returns the time the rerun took.
+fn confirm_after(results: &mut [batch::JobResult], jobs: &[input::Job], cli: &Cli) -> Duration {
+    let asked: Vec<usize> = results
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            r.to == Format::Pdf
+                && matches!(&r.result, Err(e) if e.code == ErrorCode::ConfirmationRequired)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if asked.is_empty() {
+        return Duration::ZERO;
+    }
+    let gate = prompt::extreme_gate(
+        cli.yes,
+        cli.json,
+        cli.quiet,
+        prompt::is_interactive_session(),
+    );
+    if gate != Gate::Ask {
+        return Duration::ZERO;
+    }
+    let styled = render::stderr_styled();
+    for &i in &asked {
+        let Err(e) = &results[i].result else { continue };
+        let line = if results.len() == 1 {
+            format!("warning  {}.", sentence(&e.message))
+        } else {
+            format!("warning  {}: {}.", results[i].input.display(), e.message)
+        };
+        eprintln!("{}", render::paint_warning(&line, styled));
+        let hint = e.remediation.as_ref().and_then(|r| r.manual.as_deref());
+        if let Some(size) = hint.and_then(|h| h.split("try --max-size ").nth(1)) {
+            let line = if results.len() == 1 {
+                format!(
+                    "         For a readable result, try: {}",
+                    render::suggestion_command(&typed_args(), size)
+                )
+            } else {
+                format!("         For a readable result, try --max-size {size}.")
+            };
+            eprintln!("{}", render::paint_warning(&line, styled));
+        }
+    }
+    let question = if asked.len() == 1 {
+        "Make it anyway? [y/N] ".to_string()
+    } else {
+        format!("Make all {} anyway? [y/N] ", asked.len())
+    };
+    if !prompt::ask(&question) {
+        // Answered: the refusal says so rather than repeat the warning.
+        for &i in &asked {
+            let name = results[i]
+                .input
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Err(e) = &mut results[i].result {
+                e.message = format!("not confirmed for {name}, so nothing was written");
+            }
+        }
+        return Duration::ZERO;
+    }
+    let start = Instant::now();
+    let redo: Vec<input::Job> = asked.iter().map(|&i| jobs[i].clone()).collect();
+    let (redone, _, _) = batch::run(redo, cli, true);
+    for (i, r) in asked.into_iter().zip(redone) {
+        results[i] = r;
+    }
+    start.elapsed()
+}
+
+/// A message as the start of a sentence.
+fn sentence(message: &str) -> String {
+    let mut chars = message.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -813,6 +909,18 @@ fn dry_run(jobs: &[input::Job], cli: &Cli) -> i32 {
     let results: Vec<_> = jobs
         .iter()
         .map(|job| {
+            // `--compress` reads the PDF (qpdf's pre-pass, into the system's
+            // temporary folder) to say what it would do with each image.
+            if convkit_core::pdf::compress::applies(&tuning, job.from, job.to) {
+                return convkit_core::pdf::compress::preview(
+                    job.from,
+                    job.to,
+                    &job.inputs,
+                    &job.output,
+                    &tuning,
+                    &resolver,
+                );
+            }
             let available = available_for(&resolver, job);
             let probed = probed_for(&resolver, job, &tuning, available.as_ref())?;
             let mut plan = plan::build_tuned(

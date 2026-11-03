@@ -79,6 +79,11 @@ pub enum Event {
         measured: u64,
         target: u64,
     },
+    /// Work conv does itself, between backend steps: `--compress` reading
+    /// and shrinking a PDF's images. `what` is a short label for a spinner.
+    Working {
+        what: String,
+    },
 }
 
 /// One step's raw diagnostic output, kept even on success. Backends
@@ -454,6 +459,12 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
             ErrorCode::OutputExists,
             format!("{} exists; pass -y to overwrite", req.output.display()),
         ));
+    }
+
+    // `--compress`, and `--max-size` on a PDF, are a job of their own: qpdf
+    // passes around conv's image pass, with no recipe and nothing to probe.
+    if crate::pdf::compress::applies(&req.tuning, req.from, req.to) {
+        return crate::pdf::compress::run(req, resolver, on_event);
     }
 
     // Probe when a stream copy is even possible for this pair, or when a
@@ -1237,7 +1248,7 @@ fn file_len(p: &Path) -> Result<u64> {
 /// Copies `from` to a new file at `to`. Not `std::fs::copy`, which would
 /// carry the source's permissions along: a read-only source must not make a
 /// read-only output.
-fn copy_fresh(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn copy_fresh(from: &Path, to: &Path) -> Result<()> {
     let mut src = std::fs::File::open(from).map_err(io_err)?;
     let mut dst = std::fs::File::create(to).map_err(io_err)?;
     std::io::copy(&mut src, &mut dst).map_err(io_err)?;
@@ -4050,7 +4061,11 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             tries[1].short,
             "the kept attempt's picture"
         );
-        assert_eq!(s.target_bytes, 1_000_000, "the target itself never moves");
+        assert_eq!(
+            s.target_bytes,
+            Some(1_000_000),
+            "the target itself never moves"
+        );
     }
 
     /// The smallest whole-kilobyte target, spelled as `--max-size` takes it,
@@ -4781,7 +4796,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             assert!(bytes_over_a_minute(a) < 4_000_000, "{tries:?}");
         }
         let s = o.sizing.unwrap();
-        assert_eq!((s.target_bytes, s.over_target), (10_000_000, false));
+        assert_eq!((s.target_bytes, s.over_target), (Some(10_000_000), false));
     }
 
     /// The encode a remux falls back to is budgeted at the source's own size

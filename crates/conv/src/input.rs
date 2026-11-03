@@ -340,6 +340,8 @@ fn is_image_merge(paths: &[PathBuf]) -> bool {
 /// being written over itself.
 struct OwnFormat {
     sized: bool,
+    /// `--compress`: a PDF made smaller, kept a PDF.
+    compressed: bool,
     /// Cut or retimed: either needs a timeline.
     timed: bool,
     turned: bool,
@@ -385,6 +387,7 @@ impl OwnFormat {
                 .collect();
             return Some(OwnFormat {
                 sized: size.is_some(),
+                compressed: cli.compress,
                 timed: true,
                 turned,
                 stripped: cli.strip_metadata,
@@ -399,6 +402,7 @@ impl OwnFormat {
             let parts: Vec<String> = [turn, Some(size)].into_iter().flatten().collect();
             return Some(OwnFormat {
                 sized: true,
+                compressed: cli.compress,
                 timed: false,
                 turned,
                 stripped: cli.strip_metadata,
@@ -407,6 +411,20 @@ impl OwnFormat {
                 verb: "size",
                 done: "sized",
                 suffix: parts.join("-"),
+            });
+        }
+        if cli.compress {
+            return Some(OwnFormat {
+                sized: false,
+                compressed: true,
+                timed: false,
+                turned,
+                stripped: cli.strip_metadata,
+                resized: false,
+                flag: "--compress",
+                verb: "compress",
+                done: "compressed",
+                suffix: "compressed".to_string(),
             });
         }
         // The picture is resized once turned, so a size given alongside a
@@ -420,6 +438,7 @@ impl OwnFormat {
                 .collect();
             return Some(OwnFormat {
                 sized: false,
+                compressed: false,
                 timed: false,
                 turned,
                 stripped: cli.strip_metadata,
@@ -433,6 +452,7 @@ impl OwnFormat {
         if cli.strip_metadata {
             return Some(OwnFormat {
                 sized: false,
+                compressed: false,
                 timed: false,
                 turned: false,
                 stripped: true,
@@ -446,6 +466,7 @@ impl OwnFormat {
         let geometry = geometry?;
         Some(OwnFormat {
             sized: false,
+            compressed: false,
             timed: false,
             turned: false,
             stripped: false,
@@ -459,9 +480,12 @@ impl OwnFormat {
 
     /// Whether this run can keep `f` as `f`.
     fn keeps(&self, f: Format) -> bool {
+        if self.compressed {
+            return f == Format::Pdf;
+        }
         let turnable = !self.turned || convkit_core::rotate::in_place(f).is_ok();
         if self.sized || self.timed {
-            (!self.sized || convkit_core::sized::is_video_target(f))
+            (!self.sized || convkit_core::sized::is_sized_target(f))
                 && (!self.timed || convkit_core::registry::takes_range(f, f))
                 && turnable
         } else if self.resized {
@@ -478,6 +502,10 @@ impl OwnFormat {
     fn fix_ext(&self, f: Option<Format>) -> Result<&'static str, String> {
         match f {
             Some(f) if self.keeps(f) => Ok(f.ext()),
+            Some(f) if self.compressed => Err(format!(
+                "--compress makes PDFs smaller, and {} files are not PDFs",
+                f.ext()
+            )),
             _ if self.sized || self.timed => Ok("mp4"),
             // A format the turn cannot keep says the turn's fix; one it can,
             // the strip's, which is what refused it.
@@ -534,7 +562,10 @@ pub(crate) fn keeps_own_format(cli: &Cli) -> bool {
 fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Result<Job, ConvError> {
     let from = format_of(input)?;
     let invalid = |why| ConvError::new(ErrorCode::InvalidInvocation, why);
-    if !own.sized && !own.timed {
+    if own.compressed && from != Format::Pdf {
+        return Err(convkit_core::pdf::compress::not_a_pdf(input));
+    }
+    if !own.sized && !own.timed && !own.compressed {
         if own.turned {
             convkit_core::rotate::in_place(from).map_err(invalid)?;
         }
@@ -545,7 +576,7 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
             convkit_core::registry::resize_in_place(from).map_err(invalid)?;
         }
     }
-    if own.sized && !convkit_core::sized::is_video_target(from) {
+    if own.sized && !convkit_core::sized::is_sized_target(from) {
         // `--to mp4` is only a fix where a conversion to mp4 exists (avi,
         // gif); for audio, other images and documents there is none, and
         // suggesting it would just move the refusal.
@@ -557,7 +588,7 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
             )
         } else {
             format!(
-                "--max-size applies to video; {} is not a video file",
+                "--max-size applies to video and PDF; {} is neither",
                 input.display()
             )
         };
@@ -1743,6 +1774,7 @@ mod tests {
             fps: None,
             crf: None,
             max_size: None,
+            compress: false,
             strip_metadata: false,
             start: None,
             end: None,
@@ -2122,6 +2154,86 @@ mod tests {
         );
     }
 
+    fn compressed(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+        let mut c = cli_for(paths, to, outdir);
+        c.compress = true;
+        c
+    }
+
+    #[test]
+    fn a_single_pdf_under_compress_is_named_compressed_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let scan = dir.path().join("scan.pdf");
+        let jobs = plan_jobs(&compressed(vec![scan.clone()], None, None)).unwrap();
+        assert_eq!(jobs[0].output, dir.path().join("scan-compressed.pdf"));
+        assert_eq!((jobs[0].from, jobs[0].to), (Format::Pdf, Format::Pdf));
+        // The .pdf shorthand lands on the input, so it is named the same way.
+        let jobs = plan_jobs(&compressed(vec![scan.clone(), p(".pdf")], None, None)).unwrap();
+        assert_eq!(jobs[0].output, dir.path().join("scan-compressed.pdf"));
+        // A named output is the person's own, and the input itself is refused.
+        let small = dir.path().join("small.pdf");
+        let jobs = plan_jobs(&compressed(vec![scan.clone(), small.clone()], None, None)).unwrap();
+        assert_eq!(jobs[0].output, small);
+        let e = plan_jobs(&compressed(vec![scan.clone(), scan], None, None)).unwrap_err();
+        assert!(
+            e.message.starts_with("output is the input"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn compress_refuses_a_file_that_is_not_a_pdf_with_the_two_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("report.docx");
+        let e = plan_jobs(&compressed(vec![doc], None, None)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert_eq!(
+            e.message,
+            "--compress makes a PDF smaller, and report.docx is not a PDF"
+        );
+        assert_eq!(
+            e.remediation.unwrap().manual.unwrap(),
+            "convert it first, then `conv report.pdf --compress`"
+        );
+    }
+
+    #[test]
+    fn a_batch_under_compress_needs_to_pdf_and_writes_into_compressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir(&docs).unwrap();
+        for name in ["a.pdf", "b.pdf", "a-compressed.pdf", "notes.docx"] {
+            std::fs::write(docs.join(name), b"x").unwrap();
+        }
+        let (a, b) = (docs.join("a.pdf"), docs.join("b.pdf"));
+        let e = plan_jobs(&compressed(
+            vec![a.clone(), b.clone(), docs.join("c.pdf")],
+            None,
+            None,
+        ))
+        .unwrap_err();
+        assert!(
+            e.message.contains("add --to pdf to compress each file"),
+            "{}",
+            e.message
+        );
+
+        let jobs = plan_jobs(&compressed(vec![docs.clone()], Some("pdf"), None)).unwrap();
+        let inputs = names(&jobs.iter().map(|j| j.inputs[0].clone()).collect::<Vec<_>>());
+        // The docx is planned, to be refused on its own by the run; the
+        // earlier result is left behind.
+        assert_eq!(inputs, vec!["a.pdf", "b.pdf", "notes.docx"], "{jobs:?}");
+        assert_eq!(
+            under(&docs, &jobs),
+            [
+                "compressed/a.pdf",
+                "compressed/b.pdf",
+                "compressed/notes.pdf"
+            ]
+        );
+    }
+
     #[test]
     fn a_single_path_with_max_size_keeps_its_container_and_gains_a_suffix() {
         let dir = tempfile::tempdir().unwrap();
@@ -2413,7 +2525,7 @@ mod tests {
             .unwrap_err();
             assert!(e.message.contains("add --to mp4"), "{ext}: {}", e.message);
         }
-        for ext in ["mp3", "png", "pdf"] {
+        for ext in ["mp3", "png", "docx"] {
             let e = plan_jobs(&sized(
                 vec![dir.path().join(format!("clip.{ext}"))],
                 None,
@@ -2421,14 +2533,21 @@ mod tests {
             ))
             .unwrap_err();
             assert!(
-                e.message.starts_with("--max-size applies to video; ")
-                    && e.message
-                        .ends_with(&format!("clip.{ext} is not a video file")),
+                e.message
+                    .starts_with("--max-size applies to video and PDF; ")
+                    && e.message.ends_with(&format!("clip.{ext} is neither")),
                 "{ext}: {}",
                 e.message
             );
             assert!(!e.message.contains("--to"), "{ext}: {}", e.message);
         }
+        // A PDF keeps its format.
+        let jobs = plan_jobs(&sized(vec![dir.path().join("scan.pdf")], None, None)).unwrap();
+        assert_eq!(jobs[0].output, dir.path().join("scan-10mb.pdf"));
+        let mut both = sized(vec![dir.path().join("scan.pdf")], None, None);
+        both.compress = true;
+        let jobs = plan_jobs(&both).unwrap();
+        assert_eq!(jobs[0].output, dir.path().join("scan-10mb.pdf"));
     }
 
     #[test]

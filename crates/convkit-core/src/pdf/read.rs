@@ -282,6 +282,7 @@ mod tests {
             "encrypted, opened without the owner password"
         );
         let info = parse_read(Path::new("a.pdf"), Some(0), &report(true, true, 0, 1), "").unwrap();
+        assert!(info.encrypted);
         assert!(
             !info.restricted,
             "the owner password matched, so nothing is restricted"
