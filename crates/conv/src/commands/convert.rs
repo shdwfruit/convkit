@@ -20,6 +20,16 @@ use crate::prompt::{self, Gate};
 use crate::render;
 
 pub fn run(cli: &Cli) -> i32 {
+    // Archives are made and opened in process, from the same positional
+    // grammar; see `commands::archive`.
+    match crate::commands::archive::detect(cli) {
+        Some(Ok(ops)) => return crate::commands::archive::run(cli, ops),
+        Some(Err(e)) => {
+            render::print_error(cli.json, &e);
+            return e.code.exit_code();
+        }
+        None => {}
+    }
     // A PDF kept as a PDF, locked or unlocked on qpdf; see
     // `commands::pdf_lock`.
     if crate::commands::pdf_lock::wanted(cli) {

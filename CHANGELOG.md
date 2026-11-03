@@ -216,6 +216,19 @@
   spread across it and a GIF gives every frame. Phone videos come out
   upright and HDR video in ordinary colors, and conv asks before saving
   more than 1,000 files.
+- **Archives, with nothing to install.** `conv photos/ .zip` makes
+  photos.zip, `conv photos.zip` opens it beside itself, `conv photos.zip
+  dest` opens it into dest, and `conv backup.tar.gz .zip` turns one kind
+  into another. conv writes zip, tar, tar.gz, tar.xz, tar.bz2 and tar.zst,
+  and opens those and 7z. Times, the executable bit and links are kept,
+  and Finder's `.DS_Store` and `__MACOSX` files are left out, with a note.
+- **Safe to open.** An archive with an entry that would land outside its
+  folder (a `../` name, an absolute path, or a link pointing out) is
+  refused whole, and nothing is written. One that would grow past a
+  gigabyte and 100 times its size asks first, like a large `--upscale`.
+- **`--password` locks a zip with AES-256.** conv asks for the password
+  without showing it, or reads `CONVKIT_PASSWORD`, so it never lands in
+  your shell history.
 
 ### Changed
 

@@ -14,12 +14,13 @@
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
 ImageMagick, LibreOffice, pandoc, Typst, qpdf, or the system's own speech
-engine — and runs it locally: 263 conversion pairs across 40 formats
-(`conv capabilities` is the source of truth). Files never leave your
-machine; only `conv install`/`conv update`, and `conv link --follow` when
-asked, ever touch the network. It also does the small text and developer
-chores (base64, checksums, JWTs, timestamps, tracking-free links and more)
-that people otherwise paste into a website; see
+engine — and runs it locally: 312 conversion pairs across 47 formats, zip
+and tar archives included, which conv handles itself (`conv capabilities`
+is the source of truth). Files never leave your machine; only `conv
+install`/`conv update`, and `conv link --follow` when asked, ever touch the
+network. It also does the small text and developer chores (base64,
+checksums, JWTs, timestamps, tracking-free links and more) that people
+otherwise paste into a website; see
 [Text and developer tools](#text-and-developer-tools).
 
 ```console
@@ -142,6 +143,8 @@ conv wifi --qr                   # a QR code that joins your Wi-Fi
 conv changelog --since 0.5.1     # what's new since the version you had
 conv hash a.iso --check 3f2a...  # does the download match?
 conv link --paste --copy         # the copied link, without its tracking
+conv photos/ .zip                # make photos.zip
+conv photos.zip                  # open it
 ```
 
 A single conversion reports size, elapsed time, and the absolute path the
@@ -1622,6 +1625,55 @@ match its extension, as with a PNG named `.jpg`, a note says so. ImageMagick
 from a HEIC, and a note says that too, so a photo that records where it was
 taken doesn't look as if it didn't.
 
+## Archives
+
+conv makes and opens zip and tar archives itself, with nothing to install:
+
+```console
+conv photos/ .zip                # photos.zip, beside the folder
+conv a.jpg b.pdf out.zip         # several files in one zip
+conv photos.zip                  # unpack it beside itself
+conv photos.zip ./dest           # unpack it into ./dest
+conv backup.tar.gz .zip          # turn one kind of archive into another
+conv *.zip                       # unpack each one
+```
+
+It writes `zip`, `tar`, `tar.gz` (or `tgz`), `tar.xz`, `tar.bz2` and
+`tar.zst`, and opens those and `7z`. RAR it can't open, since there is no
+free RAR decoder to build in; The Unarchiver, Keka, 7-Zip or `unar` can.
+The format comes from the name, so `backup.2026.tar.gz` is a gzipped tar.
+
+Unpacking works the way Finder does it. An archive holding one file or
+folder unpacks as that file or folder, so `photos.zip` gives you `photos/`
+and not `photos/photos/`. Anything else goes in a folder named after the
+archive. `-o` picks the folder it lands in. A named folder (`conv a.zip
+dest`) gets the contents as they are, the way `unzip -d` works.
+
+Several files packed with a bare `.zip` go in `Archive.zip`, as Finder
+names it. Files keep their times and their executable bit, and links stay
+links. Finder's own files (`.DS_Store`, `._` copies, `__MACOSX`) are left
+out of a new archive and out of what conv unpacks, and a note says so.
+
+Existing files are never replaced without `-y`. Unpacking into a folder
+that is already there adds to it, but if any name the archive holds is
+taken, nothing is unpacked until you pass `-y`.
+
+An archive is opened into a hidden folder first and moved into place only
+once every entry checks out. conv refuses the whole archive, with nothing
+written, if any entry would land outside the folder: a `../` or absolute
+name, or a link that points out of it, directly or through another link.
+An archive that would grow to more than a gigabyte and over 100 times its
+own size is likely a zip bomb, so conv asks first; `--yes` answers for a
+script. Unpacked from a downloaded archive, files keep the download mark on
+macOS, so Gatekeeper still checks any app inside.
+
+`--password` locks a new zip with AES-256. conv asks for the password
+without showing it, or reads `CONVKIT_PASSWORD`; it never takes one on the
+command line, where it would end up in your shell history. File names stay
+readable in a locked zip, and macOS Archive Utility can't open one, though
+7-Zip, Keka and The Unarchiver can. Opening a locked zip or 7z, conv asks
+for its password, or reads the same variable.
+
 ## Discovering formats and capabilities
 
 `conv capabilities` lists every registered pair and the backend(s) behind it:
@@ -1663,11 +1715,11 @@ each could be converted into.
 ```console
 $ conv scan
 README       --
-already.jpg  Image   -> heic png webp avif tiff bmp ico pdf
-archive.zip  --
-clip.mp4     Video   -> mov mkv webm mp3 m4a wav flac opus ogg gif
-notes.md     Doc     -> pdf docx html
-photo.heic   Image   -> jpg png webp avif tiff bmp pdf
+already.jpg  Image    -> heic png webp avif tiff bmp ico pdf
+archive.zip  Archive  -> folder tar tar.gz tar.xz tar.bz2 tar.zst
+clip.mp4     Video    -> mov mkv webm mp3 m4a wav flac opus ogg gif
+notes.md     Doc      -> pdf docx html
+photo.heic   Image    -> jpg png webp avif tiff bmp pdf
 ```
 
 It is a pure lookup on the file extension: nothing is opened, decoded or

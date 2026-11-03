@@ -613,6 +613,49 @@ pub fn failure_human(header: &str, e: &ConvError, styled: bool) -> String {
     s
 }
 
+/// Renders a made or opened archive the way `conversion_success_human`
+/// renders a conversion, with what it holds after the name: `photos.zip ·
+/// 12 files · 3.4 MB · 0.2s`. A folder's name ends in the separator, so an
+/// unpacked folder reads as one.
+pub fn archive_success_human(o: &Outcome, folder: bool, holds: &str, styled: bool) -> String {
+    let mut name = o
+        .output
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| o.output.display().to_string());
+    if folder {
+        name.push(std::path::MAIN_SEPARATOR);
+    }
+    let sep = if styled { " \u{b7} " } else { " - " };
+    let fields = [
+        name,
+        holds.to_string(),
+        convkit_core::size::human(o.bytes),
+        human_elapsed(Duration::from_millis(o.elapsed_ms)),
+    ];
+    let glyph = if styled {
+        paint("\u{2713}", green_bold(), true)
+    } else {
+        "OK".to_string()
+    };
+    let mut s = format!(
+        "{glyph} {}\n  {}\n",
+        fields.join(sep),
+        absolute_display(&o.output)
+    );
+    for w in &o.warnings {
+        s.push_str("  ");
+        s.push_str(&paint(&format!("note  {w}"), dim(), styled));
+        s.push('\n');
+    }
+    s
+}
+
+/// One line of an archive `--dry-run`: what would be made, from what.
+pub fn archive_plan_human(verb: &str, from: &str, to: &Path, detail: &str) -> String {
+    format!("{verb} {from} -> {} ({detail})\n", absolute_display(to))
+}
+
 /// Renders one job's failure for a real (non-`--dry-run`) conversion:
 ///
 /// ```text

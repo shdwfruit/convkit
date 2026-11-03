@@ -6815,3 +6815,196 @@ fn qr_read_reads_other_pictures_through_a_backend() {
             .stdout(format!("https://example.com/{ext}\n"));
     }
 }
+
+/// A folder packs into a zip beside it and unpacks back as the same
+/// folder, with nothing from the run left behind.
+#[test]
+fn a_folder_packs_into_a_zip_and_opens_back() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("photos/sub")).unwrap();
+    std::fs::write(dir.path().join("photos/a.txt"), "hello").unwrap();
+    std::fs::write(dir.path().join("photos/sub/b.txt"), "deep").unwrap();
+    std::fs::write(dir.path().join("photos/.DS_Store"), "view").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["photos", ".zip"])
+        .assert()
+        .success()
+        .stdout(contains("photos.zip"))
+        .stdout(contains("2 files"))
+        .stdout(contains("only Finder uses"));
+    std::fs::remove_dir_all(dir.path().join("photos")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["photos.zip"])
+        .assert()
+        .success()
+        .stdout(contains("photos"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("photos/sub/b.txt")).unwrap(),
+        "deep"
+    );
+    assert!(!dir.path().join("photos/.DS_Store").exists());
+    assert!(!dir.path().join("photos/photos").exists());
+}
+
+#[test]
+fn an_archive_converts_to_another_format() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/a.txt"), "a").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["docs", "docs.tar.gz"])
+        .assert()
+        .success();
+    conv()
+        .current_dir(dir.path())
+        .args(["docs.tar.gz", ".zip", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"action\": \"convert\""))
+        .stdout(contains("\"format\": \"zip\""));
+    assert!(dir.path().join("docs.zip").is_file());
+}
+
+#[test]
+fn an_existing_archive_is_not_overwritten_without_y() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+    std::fs::write(dir.path().join("a.zip"), "mine").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["a.txt", ".zip"])
+        .assert()
+        .code(2)
+        .stderr(contains("pass -y to overwrite"));
+    assert_eq!(std::fs::read(dir.path().join("a.zip")).unwrap(), b"mine");
+    conv()
+        .current_dir(dir.path())
+        .args(["a.txt", ".zip", "-y"])
+        .assert()
+        .success();
+}
+
+/// A hand-made zip with a `../` name: refused with its own code, and
+/// nothing written.
+#[test]
+fn a_zip_slip_archive_is_refused_with_unsafe_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    // A minimal stored zip holding `../evil.txt`, built by hand so the
+    // test needs no zip library.
+    let name = b"../evil.txt";
+    let data = b"gotcha";
+    let crc = {
+        let mut c: u32 = !0;
+        for &b in data {
+            c ^= b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    (c >> 1) ^ 0xEDB8_8320
+                } else {
+                    c >> 1
+                };
+            }
+        }
+        !c
+    };
+    let mut z = Vec::new();
+    let le16 = |v: &mut Vec<u8>, x: u16| v.extend_from_slice(&x.to_le_bytes());
+    let le32 = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
+    le32(&mut z, 0x0403_4b50);
+    for x in [20u16, 0, 0, 0, 0x21] {
+        le16(&mut z, x);
+    }
+    le32(&mut z, crc);
+    le32(&mut z, data.len() as u32);
+    le32(&mut z, data.len() as u32);
+    le16(&mut z, name.len() as u16);
+    le16(&mut z, 0);
+    z.extend_from_slice(name);
+    z.extend_from_slice(data);
+    let central = z.len() as u32;
+    le32(&mut z, 0x0201_4b50);
+    for x in [20u16, 20, 0, 0, 0, 0x21] {
+        le16(&mut z, x);
+    }
+    le32(&mut z, crc);
+    le32(&mut z, data.len() as u32);
+    le32(&mut z, data.len() as u32);
+    le16(&mut z, name.len() as u16);
+    for x in [0u16, 0, 0, 0] {
+        le16(&mut z, x);
+    }
+    le32(&mut z, 0);
+    le32(&mut z, 0);
+    z.extend_from_slice(name);
+    let size = z.len() as u32 - central;
+    le32(&mut z, 0x0605_4b50);
+    for x in [0u16, 0, 1, 1] {
+        le16(&mut z, x);
+    }
+    le32(&mut z, size);
+    le32(&mut z, central);
+    le16(&mut z, 0);
+    std::fs::create_dir(dir.path().join("in")).unwrap();
+    std::fs::write(dir.path().join("in/slip.zip"), z).unwrap();
+    conv()
+        .current_dir(dir.path().join("in"))
+        .args(["slip.zip", "--json"])
+        .assert()
+        .code(1)
+        .stdout(contains("unsafe_archive"));
+    assert!(!dir.path().join("evil.txt").exists());
+    assert_eq!(std::fs::read_dir(dir.path().join("in")).unwrap().count(), 1);
+}
+
+#[test]
+fn an_archive_dry_run_names_where_it_would_land() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["a.txt", "--dry-run", ".tar.xz"])
+        .assert()
+        .success()
+        .stdout(contains("pack a.txt -> "))
+        .stdout(contains("a.tar.xz (tar.xz, built in)"));
+    assert!(!dir.path().join("a.tar.xz").exists());
+}
+
+#[test]
+fn scan_and_capabilities_show_archives() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("b.tar.gz"), "").unwrap();
+    std::fs::write(dir.path().join("c.rar"), "").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["scan"])
+        .assert()
+        .success()
+        .stdout(contains("b.tar.gz  Archive  -> folder zip tar tar.xz"))
+        .stdout(contains("c.rar     Archive  conv can't open it"));
+    conv()
+        .args(["capabilities"])
+        .assert()
+        .success()
+        .stdout(contains("Archive:"))
+        .stdout(contains("7z      -> folder  built in"))
+        .stdout(contains("folder  -> zip     built in"));
+    conv()
+        .args(["capabilities", "tgz"])
+        .assert()
+        .success()
+        .stdout(contains("tar.gz (Archive"));
+}
+
+#[test]
+fn password_on_neither_a_pdf_nor_a_zip_points_at_a_zip() {
+    conv()
+        .args(["in.mp4", "out.gif", "--password"])
+        .assert()
+        .code(2)
+        .stderr(contains("--password locks PDFs, and in.mp4 is not one"))
+        .stderr(contains("conv in.mp4 .zip --password"));
+}
