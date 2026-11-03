@@ -269,6 +269,7 @@ fn fmt(cli: &Cli, args: &FmtArgs) -> Result<i32, Failure> {
                 speed: None,
                 rotation: None,
                 pages: None,
+                crop: None,
             };
             let copied = args.copy.then(|| {
                 std::fs::read_to_string(&path)

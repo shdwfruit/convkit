@@ -150,6 +150,10 @@ pub struct Outcome {
     /// other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pages: Option<crate::pdf::raster::PagesReport>,
+    /// The box a `--crop` kept; see `ConversionPlan::crop`. Omitted from
+    /// `--json` for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crop: Option<crate::crop::CropReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -566,6 +570,8 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         &req.tuning,
         &mut probed,
     );
+    // A picture's size, and the border `--crop auto` finds, for a crop.
+    crate::crop::attach(resolver, req.from, &req.inputs[0], &req.tuning, &mut probed)?;
 
     let dest_dir = req
         .output
@@ -716,6 +722,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let range = ran.range.clone();
     let speed = ran.speed.clone();
     let rotation = ran.rotation;
+    let crop = ran.crop.clone();
     let mut warnings = ran.warnings;
     warnings.extend(sheet_notes);
     // Only the written PDF says what Typst's lossless pages cost, so it is
@@ -776,6 +783,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         speed,
         rotation,
         pages: None,
+        crop,
     })
 }
 
@@ -912,6 +920,7 @@ fn run_pdf_pages(
         speed: None,
         rotation: None,
         pages: Some(report),
+        crop: None,
     })
 }
 

@@ -1576,6 +1576,35 @@ fn capabilities_lists_rotate_where_there_is_a_picture() {
     assert!(jpg.contains("--rotate"), "{stdout}");
 }
 
+/// `--crop` is listed where a turn is, but not into an icon.
+#[test]
+fn capabilities_lists_crop_where_there_is_a_picture() {
+    let assert = conv().args(["capabilities", "mp4"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for pair in ["mp4 -> gif", "mp4 -> webm", "mp4 -> mov"] {
+        let line = stdout.lines().find(|l| l.contains(pair)).unwrap();
+        assert!(line.contains("--crop"), "{pair}: {stdout}");
+    }
+    let mp3 = stdout.lines().find(|l| l.contains("mp4 -> mp3")).unwrap();
+    assert!(!mp3.contains("--crop"), "{stdout}");
+    let assert = conv().args(["capabilities", "png"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let jpg = stdout.lines().find(|l| l.contains("png -> jpg")).unwrap();
+    assert!(jpg.contains("--crop"), "{stdout}");
+    let ico = stdout.lines().find(|l| l.contains("png -> ico")).unwrap();
+    assert!(!ico.contains("--crop"), "{stdout}");
+}
+
+/// A crop that is no box is a usage error naming the forms.
+#[test]
+fn a_crop_that_is_no_box_is_a_usage_error() {
+    conv()
+        .args(["clip.mp4", "--crop", "16x9x2"])
+        .assert()
+        .code(2)
+        .stderr(contains("expected WxH+X+Y"));
+}
+
 /// A dry run of a turn the tag makes shows no command, and says why.
 #[test]
 fn dry_run_of_a_photo_whose_tag_the_turn_undoes_runs_nothing() {

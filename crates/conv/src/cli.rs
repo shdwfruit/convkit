@@ -13,10 +13,11 @@ use convkit_core::{Resolver, Tuning};
 pub struct Cli {
     /// Input paths, then optionally an output path or a bare `.ext`. With
     /// `--max-size`, `--compress`, `--strip-metadata`,
-    /// `--start`/`--end`/`--duration`, `--speed` or `--rotate`, a lone input
-    /// keeps its format and is written as NAME-SUFFIX.EXT (`clip.mp4` ->
-    /// `clip-10mb.mp4`, `scan-compressed.pdf`, `photo-stripped.jpg`,
-    /// `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`, `photo-rotated.jpg`).
+    /// `--start`/`--end`/`--duration`, `--speed`, `--rotate` or `--crop`, a
+    /// lone input keeps its format and is written as NAME-SUFFIX.EXT
+    /// (`clip.mp4` -> `clip-10mb.mp4`, `scan-compressed.pdf`,
+    /// `photo-stripped.jpg`, `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`,
+    /// `photo-rotated.jpg`, `photo-cropped.jpg`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -222,6 +223,7 @@ pub struct Cli {
         requires = "password"
     )]
     pub restrict: Vec<convkit_core::pdf::Restriction>,
+
     /// The pages of a PDF to save as pictures, by split's grammar between
     /// commas: 5, 1-3, 11-z (z is the last page), as in --pages 1-3,7.
     /// Every page without it. One page is one file, report-3.png; more go
@@ -245,6 +247,18 @@ pub struct Cli {
         conflicts_with = "resize"
     )]
     pub dpi: Option<u32>,
+
+    /// Keep part of the picture as it is shown (after its orientation and
+    /// --rotate, before --resize): WxH+X+Y, a box from the top left; WxH, a
+    /// box in the middle; W:H, the largest box of that shape, e.g. 16:9,
+    /// 1:1 or 9:16; or auto, which cuts away black bars around a video or a
+    /// plain border around a picture. Images, video and GIFs. A lone input
+    /// keeps its format: photo.jpg -> photo-cropped.jpg; a --to batch
+    /// writes into a cropped folder, e.g. cropped/photo.jpg, unless -o is
+    /// given.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "BOX", value_parser = parse_crop)]
+    pub crop: Option<convkit_core::crop::Spec>,
 
     /// Copy what was written to the clipboard, ready to paste: a picture
     /// as itself (and its file), an md, csv, html, txt, json, yaml or toml
@@ -1210,6 +1224,10 @@ fn parse_restriction(s: &str) -> Result<convkit_core::pdf::Restriction, String> 
     convkit_core::pdf::Restriction::parse(s)
 }
 
+fn parse_crop(s: &str) -> Result<convkit_core::crop::Spec, String> {
+    convkit_core::crop::parse(s)
+}
+
 fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
     convkit_core::trim::parse_duration(s)
 }
@@ -1233,8 +1251,8 @@ fn parse_rate(s: &str) -> Result<u16, String> {
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
     /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
-    /// `--max-size`/`--start`/`--end`/`--duration`/`--speed`/`--rotate` was
-    /// passed.
+    /// `--max-size`/`--start`/`--end`/`--duration`/`--speed`/`--rotate`/
+    /// `--crop` was passed.
     pub fn tuning(&self) -> Tuning {
         Tuning {
             resize: self.resize.clone(),
@@ -1261,6 +1279,7 @@ impl Cli {
                 .pages
                 .as_deref()
                 .and_then(|p| convkit_core::pdf::parse_list(p).ok()),
+            crop: self.crop,
         }
     }
 
@@ -1344,6 +1363,7 @@ mod tests {
             restrict: vec![],
             pages: None,
             dpi: None,
+            crop: None,
             copy: false,
             paste: false,
             yes: false,

@@ -119,6 +119,7 @@ conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 conv clip.mp4 --speed 2          # play twice as fast
 conv IMG_0042.mov --rotate left  # turn a sideways video or photo
+conv clip.mp4 --crop 9:16        # crop to a shape, a box, or auto for black bars
 conv trim talk.mp4               # find clips in the terminal and cut them
 conv --paste .jpg                # convert the picture or files you copied
 conv photo.heic .jpg --copy      # convert, then copy the result to paste anywhere
@@ -692,6 +693,44 @@ conv IMG_0042.heic .jpg --rotate right
 conv ./scans --to png --rotate 180
 conv photo.jpg --rotate right --resize 50%
 conv screen.mov clip.gif --rotate left --resize 480x
+```
+
+## Cropping
+
+`--crop` keeps part of a photo, video or GIF. Give it a box, a shape, or
+`auto`:
+
+```console
+$ conv clip.mp4 --crop 9:16
+OK clip-cropped.mp4 - 3.1 MB - 4.2s
+  /home/user/Videos/clip-cropped.mp4
+  note  The video is re-encoded to crop it.
+```
+
+- `1280x720+0+140` is a box 1280 wide and 720 tall, 0 from the left and
+  140 from the top. `1280x720` alone is the same box in the middle.
+- `16:9`, `1:1` or `9:16` is the largest box of that shape, in the middle.
+- `auto` cuts away the black bars around a video, or the plain border
+  around a picture, and the note says what it kept.
+
+The numbers are of the picture as you see it, after its orientation tag
+and any `--rotate`, and the crop comes before `--resize`, so the size fits
+what was kept. A box that runs past the edge stops at it, and a video's box
+is kept to even sides, which its encoder needs; a note says when either
+changes the box. `auto` looks at frames from across a video, so a fade from
+black or a dark scene doesn't narrow the box.
+
+A cropped video is re-encoded, and a JPEG, WebP, AVIF or HEIC kept in its
+format is re-encoded at its usual quality, which a note says. A GIF kept as
+a GIF is cropped frame by frame. Naming works as it does for `--rotate`:
+one file gets `-cropped` in its name (`photo-rotated-cropped-50pct.jpg`
+with both and a size), and a batch writes into a `cropped` folder:
+
+```console
+conv movie.mkv .mp4 --crop auto
+conv IMG_0042.heic .jpg --crop 1:1 --resize 1080x
+conv screen.mov clip.gif --crop 800x600+120+80
+conv ./scans --to png --crop auto
 ```
 
 ## Merge and split

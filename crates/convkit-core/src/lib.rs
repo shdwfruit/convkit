@@ -3,6 +3,7 @@ pub mod backend;
 pub mod backend_overrides;
 pub mod beautify;
 pub mod budget;
+pub mod crop;
 pub mod data;
 pub mod error;
 pub mod exec;

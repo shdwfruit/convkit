@@ -5424,3 +5424,188 @@ fn a_heic_is_turned_into_a_heic() {
     assert_eq!(identify_format(&out, "%[orientation]"), "TopLeft");
     assert_eq!(&std::fs::read(&out).unwrap()[4..12], b"ftypheic");
 }
+
+// --- Crop: --crop -------------------------------------------------------------
+
+/// One frame of `path` at `at` seconds as packed RGB, with its size.
+fn frame_rgb(path: &Path, at: f64) -> ((u32, u32), Vec<u8>) {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let dims = probe_dims(path);
+    let out = Command::new(&ffmpeg)
+        .args(["-v", "error", "-ss", &format!("{at:.3}"), "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout.len(), (dims.0 * dims.1 * 3) as usize);
+    (dims, out.stdout)
+}
+
+/// The mean of each channel over the rows `rows` of an RGB frame.
+fn mean_rgb(((w, _), rgb): &((u32, u32), Vec<u8>), rows: std::ops::Range<u32>) -> [f64; 3] {
+    let mut sum = [0f64; 3];
+    let mut n = 0f64;
+    for y in rows {
+        for x in 0..*w {
+            let i = ((y * w + x) * 3) as usize;
+            for c in 0..3 {
+                sum[c] += f64::from(rgb[i + c]);
+            }
+            n += 1.0;
+        }
+    }
+    sum.map(|s| s / n)
+}
+
+/// A clip letterboxed with black bars is cut to its picture by `auto`, and
+/// nothing black is left at the top or the bottom.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn auto_crops_the_black_bars_off_a_video() {
+    let dir = tmp();
+    let src = synth_media(
+        &dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x180:rate=25:duration=2",
+            "-vf",
+            "pad=w=320:h=240:x=0:y=30:color=black",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+        ],
+        "letterbox.mp4",
+    );
+    let out = dir.path().join("out.mp4");
+    let tuning = Tuning {
+        crop: Some(convkit_core::crop::Spec::Auto),
+        ..Tuning::default()
+    };
+    let outcome = convert_tuned(&src, &out, &tuning).unwrap();
+    assert_eq!(probe_dims(&out), (320, 180));
+    let report = outcome.crop.expect("a crop report");
+    assert_eq!(
+        report.rect,
+        Some(convkit_core::crop::Rect {
+            w: 320,
+            h: 180,
+            x: 0,
+            y: 30
+        })
+    );
+    let frame = frame_rgb(&out, 1.0);
+    for rows in [0..4, 176..180] {
+        let m = mean_rgb(&frame, rows.clone());
+        assert!(
+            m.iter().sum::<f64>() > 60.0,
+            "rows {rows:?} still black: {m:?}"
+        );
+    }
+}
+
+/// A box is in the picture as it is shown: the fixture is stored 40x20,
+/// blue on the left and red on the right, and tagged to show a quarter
+/// turn right, so its top 20x20 as shown is all blue.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_box_is_cut_from_the_picture_as_it_is_shown() {
+    let dir = tmp();
+    let out = dir.path().join("top.png");
+    let tuning = Tuning {
+        crop: Some(convkit_core::crop::parse("20x20+0+0").unwrap()),
+        ..Tuning::default()
+    };
+    convert_tuned(&fixture("rotated.jpg"), &out, &tuning).unwrap();
+    assert_eq!(imagemagick_dimensions(&out), (20, 20));
+    let resolver = Resolver::new();
+    let magick = resolver.resolve(Backend::Magick).unwrap().path;
+    let colours = run_identify(
+        &magick,
+        &[
+            "-format",
+            "%[fx:mean.r] %[fx:mean.b]",
+            &out.display().to_string(),
+        ],
+    );
+    let mut it = colours
+        .split_whitespace()
+        .map(|v| v.parse::<f64>().unwrap());
+    let (r, b) = (it.next().unwrap(), it.next().unwrap());
+    assert!(b > 0.9 && r < 0.1, "not the blue half: r {r} b {b}");
+    // Turned right as well, the box is of the turned picture: the top of a
+    // 40x20 picture whose left half is red.
+    let out = dir.path().join("turned.png");
+    let tuning = Tuning {
+        rotate: Some(convkit_core::rotate::Turn::Right),
+        crop: Some(convkit_core::crop::parse("20x20+0+0").unwrap()),
+        ..Tuning::default()
+    };
+    convert_tuned(&fixture("rotated.jpg"), &out, &tuning).unwrap();
+    let colours = run_identify(
+        &magick,
+        &[
+            "-format",
+            "%[fx:mean.r] %[fx:mean.b]",
+            &out.display().to_string(),
+        ],
+    );
+    let mut it = colours
+        .split_whitespace()
+        .map(|v| v.parse::<f64>().unwrap());
+    let (r, b) = (it.next().unwrap(), it.next().unwrap());
+    assert!(r > 0.9 && b < 0.1, "not the red half: r {r} b {b}");
+}
+
+/// An aspect ratio keeps the middle of the picture, on video, GIF and
+/// photo targets alike, and a plain border comes off a picture.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_aspect_ratio_and_a_border_crop_land_on_the_right_size() {
+    let dir = tmp();
+    let src = synth_video(&dir, 320, 180, 25);
+    let square = Tuning {
+        crop: Some(convkit_core::crop::parse("1:1").unwrap()),
+        ..Tuning::default()
+    };
+    let out = dir.path().join("square.mp4");
+    convert_tuned(&src, &out, &square).unwrap();
+    assert_eq!(probe_dims(&out), (180, 180));
+    let tall = Tuning {
+        crop: Some(convkit_core::crop::parse("9:16").unwrap()),
+        ..Tuning::default()
+    };
+    let out = dir.path().join("tall.gif");
+    convert_tuned(&src, &out, &tall).unwrap();
+    assert_eq!(imagemagick_dimensions(&out), (100, 180));
+
+    let bordered = synth_image(
+        &dir,
+        &[
+            "-size",
+            "200x100",
+            "xc:white",
+            "-fill",
+            "red",
+            "-draw",
+            "rectangle 30,20 149,79",
+        ],
+        "bordered.png",
+    );
+    let out = dir.path().join("trimmed.png");
+    let auto = Tuning {
+        crop: Some(convkit_core::crop::Spec::Auto),
+        ..Tuning::default()
+    };
+    convert_tuned(&bordered, &out, &auto).unwrap();
+    assert_eq!(imagemagick_dimensions(&out), (120, 60));
+}

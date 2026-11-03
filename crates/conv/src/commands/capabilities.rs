@@ -132,6 +132,11 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     // in webm's transcode, as `--resize` does.
     if has(|a| matches!(a, Arg::Rotate | Arg::VideoChain(_))) || to == Format::Webm {
         push_flag(&mut flags, "--rotate");
+        // A crop goes where a turn does, but not from a picture conv draws
+        // at its own size, nor into an icon, whose sizes are fixed.
+        if !matches!(from, Format::Svg | Format::Ico) && to != Format::Ico {
+            push_flag(&mut flags, "--crop");
+        }
     }
     // A speed change applies wherever a cut does: both need a timeline.
     if has(|a| matches!(a, Arg::Trim)) {

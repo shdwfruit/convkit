@@ -305,6 +305,9 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     if let Some(p) = &o.pages {
         v["pages"] = json!(p);
     }
+    if let Some(c) = &o.crop {
+        v["crop"] = json!(c);
+    }
     v
 }
 
@@ -938,6 +941,7 @@ mod tests {
             speed: None,
             rotation: None,
             pages: None,
+            crop: None,
         }
     }
 

@@ -113,6 +113,9 @@ pub struct MediaProbe {
     /// read by `pdf::raster::read` and `read_sizes`. `None` when the source
     /// was not read.
     pub pdf: Option<crate::pdf::raster::PdfPages>,
+    /// The border `--crop auto` found in the pixels (`crop::attach`).
+    /// `None` when nothing looked.
+    pub crop_found: Option<crate::crop::Found>,
 }
 
 /// The two ways a video or audio file records where it was made. Outputs

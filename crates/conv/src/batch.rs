@@ -318,6 +318,7 @@ mod tests {
             speed: None,
             rotation: None,
             pages: None,
+            crop: None,
         })
     }
 
@@ -387,6 +388,7 @@ mod tests {
             restrict: vec![],
             pages: None,
             dpi: None,
+            crop: None,
             copy: false,
             paste: false,
             yes: false,

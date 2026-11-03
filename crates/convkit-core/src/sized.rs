@@ -186,7 +186,10 @@ struct Prepared<'a> {
     /// that a copy into mp4 or mov makes it with its note reset. Any other
     /// turn is of the pixels, and never copied.
     retag: bool,
-    /// The range's notes, then the speed change's.
+    /// The box `--crop` keeps, carried into every pass. Never copied.
+    crop: Option<crate::crop::Rect>,
+    crop_report: Option<crate::crop::CropReport>,
+    /// The range's notes, then the speed change's, then the crop's.
     clip_notes: Vec<String>,
 }
 
@@ -213,6 +216,7 @@ pub(crate) fn plan(
     // A copy can only make some cuts exactly (see `trim::Cut::why_not_copied`),
     // and any other is never copied; nor is a speed change, which filters.
     let copy_ok = p.retime.is_none()
+        && p.crop.is_none()
         && (p.turn.is_none() || p.retag)
         && p.cut.is_none_or(|c| c.why_not_copied(&p.probe).is_none());
     let copied_rotation = p.turn.map(|turn| crate::rotate::RotationReport {
@@ -245,6 +249,7 @@ pub(crate) fn plan(
                 speed: p.speed.clone(),
                 rotation: copied_rotation,
                 pages: None,
+                crop: p.crop_report.clone(),
             });
         }
         if let Some(m) = media::stream_mapped_invocation(
@@ -276,6 +281,7 @@ pub(crate) fn plan(
                 speed: p.speed.clone(),
                 rotation: copied_rotation,
                 pages: None,
+                crop: p.crop_report.clone(),
             });
         }
     }
@@ -462,6 +468,15 @@ fn prepare<'a>(
         Some(t) => crate::rotate::turned_probe(t, &probe),
         None => probe,
     };
+    // And a crop against the turned picture; the budget sizes what it kept.
+    let cropped = crate::crop::resolve(tuning, from, to, Some(&probe), input)?;
+    let (probe, crop, crop_report) = match cropped {
+        Some(c) => {
+            clip_notes.extend(c.notes);
+            (c.probe.unwrap_or(probe), c.rect, Some(c.report))
+        }
+        None => (probe, None, None),
+    };
     let src = Source::from_probe(&probe).map_err(|gap| gap_error(gap, input))?;
     // A rate that cannot be held exactly is refused: dropping it would leave
     // the conversion with no ceiling the user asked for.
@@ -506,6 +521,8 @@ fn prepare<'a>(
         speed,
         turn: tuning.rotate,
         retag,
+        crop,
+        crop_report,
         clip_notes,
     })
 }
@@ -554,6 +571,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         cut: p.cut,
         speed: p.retime.clone(),
         turn: p.turn,
+        crop: p.crop,
         mute: false,
         ..ResolvedVideo::default()
     };
@@ -625,6 +643,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
             by: crate::rotate::By::Pixels,
         }),
         pages: None,
+        crop: p.crop_report.clone(),
     })
 }
 
@@ -678,7 +697,9 @@ pub fn preview(
         return Ok(None);
     }
     let ffprobe = resolver.resolve(Backend::Ffprobe)?;
-    let probe = crate::probe::run(&ffprobe.path, input)?;
+    let mut probe = Some(crate::probe::run(&ffprobe.path, input)?);
+    crate::crop::attach(resolver, from, input, tuning, &mut probe)?;
+    let probe = probe.unwrap_or_default();
     let out = input.with_extension(format!("preview.{}", to.ext()));
     Ok(plan(
         from,

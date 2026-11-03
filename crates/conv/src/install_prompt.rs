@@ -141,6 +141,7 @@ mod tests {
             restrict: vec![],
             pages: None,
             dpi: None,
+            crop: None,
             copy: false,
             paste: false,
             yes,

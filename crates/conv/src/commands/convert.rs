@@ -881,6 +881,8 @@ fn probed_for(
         tuning,
         &mut probed,
     );
+    // As `exec::run` does, so the preview crops the same box.
+    convkit_core::crop::attach(resolver, job.from, &job.inputs[0], tuning, &mut probed)?;
     Ok(probed)
 }
 
@@ -1616,6 +1618,7 @@ mod tests {
                 speed: None,
                 rotation: None,
                 pages: None,
+                crop: None,
             }),
         }
     }

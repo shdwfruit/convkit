@@ -324,17 +324,18 @@ fn is_image_merge(paths: &[PathBuf]) -> bool {
 /// A run that can keep the input's own format: `--max-size`, which sizes a
 /// video into its own container; a range (`--start`, `--end`,
 /// `--duration`) or `--speed`, which cut or retime video and audio into
-/// their own format; `--rotate`, which turns most image and video files
-/// into their own format; `--strip-metadata`, which strips most image,
-/// video and audio files into their own format; or `--resize` as the only
-/// one of these and with no `--to`, which resizes a picture or a video into
-/// its own format. A derived output that would land on its input is named
-/// NAME-SUFFIX.EXT. With a range, a speed or a size, their rules and name
-/// apply: they are the narrower, and each one given must keep the format.
-/// A turn adds its name to theirs, and each format kept must also be one it
-/// can turn. A turn alone with `--resize` and no `--to` names the size
-/// after the turn, `photo-rotated-50pct.jpg`, since the picture is resized
-/// once turned. Otherwise, with `--strip-metadata`, or with `--to`,
+/// their own format; `--rotate` and `--crop`, which turn and crop most
+/// image and video files into their own format; `--strip-metadata`, which
+/// strips most image, video and audio files into their own format; or
+/// `--resize` as the only one of these and with no `--to`, which resizes a
+/// picture or a video into its own format. A derived output that would land
+/// on its input is named NAME-SUFFIX.EXT. With a range, a speed or a size,
+/// their rules and name apply: they are the narrower, and each one given
+/// must keep the format. A turn or a crop adds its name to theirs, and each
+/// format kept must also be one it can turn or crop. A turn or crop with
+/// `--resize` and no `--to` names the size after them,
+/// `photo-rotated-cropped-50pct.jpg`, since the picture is resized once
+/// turned and cropped. Otherwise, with `--strip-metadata`, or with `--to`,
 /// `--resize` only tunes the conversion; a file already in the `--to`
 /// format is then resized beside the original as NAME-50pct.EXT instead of
 /// being written over itself.
@@ -345,17 +346,19 @@ struct OwnFormat {
     /// Cut or retimed: either needs a timeline.
     timed: bool,
     turned: bool,
+    cropped: bool,
     stripped: bool,
     /// `--resize` alone, which keeps what `registry::resize_in_place` does.
     resized: bool,
     /// The flag, for messages: the range's first flag, else `--speed`, else
-    /// the size's, else `--rotate`.
+    /// the size's, else `--rotate`, else `--crop`.
     flag: &'static str,
     /// What it does to each file, and what the result is called.
     verb: &'static str,
     done: &'static str,
-    /// Added to a derived name: the range, the speed, the turn and the size,
-    /// in the order they happen (`1m02s-1m10s-2x-rotated-5mb`); `rotated`,
+    /// Added to a derived name: the range, the speed, the turn, the crop and
+    /// the size, in the order they happen (`1m02s-1m10s-2x-rotated-5mb`,
+    /// `rotated-cropped`); `rotated` or `cropped`,
     /// with the `--resize` geometry after it when that names the size
     /// (`rotated-50pct`); `stripped`; or the `--resize` geometry alone
     /// (`50pct`).
@@ -374,6 +377,9 @@ impl OwnFormat {
         });
         let turned = cli.rotate.is_some();
         let turn = turned.then(|| "rotated".to_string());
+        // A crop is of the turned picture, so it is named after the turn.
+        let cropped = cli.crop.is_some();
+        let crop = cropped.then(|| "cropped".to_string());
         if range.is_some() || speed.is_some() {
             let (flag, verb, done) = match (&range, cli.speed) {
                 (Some(r), _) => (r.flag(), "cut", "cut"),
@@ -381,7 +387,7 @@ impl OwnFormat {
                 (None, _) => ("--speed", "speed up", "sped-up"),
             };
             let cut = range.as_ref().map(convkit_core::trim::name_suffix);
-            let parts: Vec<String> = [cut, speed, turn, size.clone()]
+            let parts: Vec<String> = [cut, speed, turn, crop, size.clone()]
                 .into_iter()
                 .flatten()
                 .collect();
@@ -390,6 +396,7 @@ impl OwnFormat {
                 compressed: cli.compress,
                 timed: true,
                 turned,
+                cropped,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag,
@@ -399,12 +406,13 @@ impl OwnFormat {
             });
         }
         if let Some(size) = size {
-            let parts: Vec<String> = [turn, Some(size)].into_iter().flatten().collect();
+            let parts: Vec<String> = [turn, crop, Some(size)].into_iter().flatten().collect();
             return Some(OwnFormat {
                 sized: true,
                 compressed: cli.compress,
                 timed: false,
                 turned,
+                cropped,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag: "--max-size",
@@ -419,6 +427,7 @@ impl OwnFormat {
                 compressed: true,
                 timed: false,
                 turned,
+                cropped,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag: "--compress",
@@ -431,21 +440,27 @@ impl OwnFormat {
         // turn goes after it in the name. With `--to` the suffix names a
         // batch's folder, where `--resize` stays a tuning flag.
         let geometry = cli.resize.as_deref().filter(|_| cli.to.is_none());
-        if turned {
-            let parts: Vec<String> = [turn, geometry.map(resize_suffix)]
+        if turned || cropped {
+            let parts: Vec<String> = [turn, crop, geometry.map(resize_suffix)]
                 .into_iter()
                 .flatten()
                 .collect();
+            let (flag, verb, done) = if turned {
+                ("--rotate", "rotate", "rotated")
+            } else {
+                ("--crop", "crop", "cropped")
+            };
             return Some(OwnFormat {
                 sized: false,
                 compressed: false,
                 timed: false,
                 turned,
+                cropped,
                 stripped: cli.strip_metadata,
                 resized: false,
-                flag: "--rotate",
-                verb: "rotate",
-                done: "rotated",
+                flag,
+                verb,
+                done,
                 suffix: parts.join("-"),
             });
         }
@@ -455,6 +470,7 @@ impl OwnFormat {
                 compressed: false,
                 timed: false,
                 turned: false,
+                cropped: false,
                 stripped: true,
                 resized: false,
                 flag: "--strip-metadata",
@@ -469,6 +485,7 @@ impl OwnFormat {
             compressed: false,
             timed: false,
             turned: false,
+            cropped: false,
             stripped: false,
             resized: true,
             flag: "--resize",
@@ -483,7 +500,8 @@ impl OwnFormat {
         if self.compressed {
             return f == Format::Pdf;
         }
-        let turnable = !self.turned || convkit_core::rotate::in_place(f).is_ok();
+        let turnable = (!self.turned || convkit_core::rotate::in_place(f).is_ok())
+            && (!self.cropped || convkit_core::crop::in_place(f).is_ok());
         if self.sized || self.timed {
             (!self.sized || convkit_core::sized::is_sized_target(f))
                 && (!self.timed || convkit_core::registry::takes_range(f, f))
@@ -513,6 +531,11 @@ impl OwnFormat {
                 convkit_core::rotate::target_for(f)
                     .map(|to| to.ext())
                     .ok_or_else(|| convkit_core::rotate::in_place(f).err().unwrap_or_default())
+            }
+            Some(f) if self.cropped && convkit_core::crop::in_place(f).is_err() => {
+                convkit_core::crop::target_for(f)
+                    .map(|to| to.ext())
+                    .ok_or_else(|| convkit_core::crop::in_place(f).err().unwrap_or_default())
             }
             Some(f) => convkit_core::metadata::strip_target_for(f)
                 .map(|to| to.ext())
@@ -568,6 +591,9 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
     if !own.sized && !own.timed && !own.compressed {
         if own.turned {
             convkit_core::rotate::in_place(from).map_err(invalid)?;
+        }
+        if own.cropped {
+            convkit_core::crop::in_place(from).map_err(invalid)?;
         }
         if own.stripped {
             convkit_core::metadata::in_place(from).map_err(invalid)?;
@@ -1844,6 +1870,7 @@ mod tests {
             restrict: vec![],
             pages: None,
             dpi: None,
+            crop: None,
             copy: false,
             paste: false,
             yes: false,
@@ -3135,6 +3162,85 @@ mod tests {
         assert_eq!(
             plan_jobs(&c).unwrap()[0].output,
             p("anim-rotated-50pct.gif")
+        );
+    }
+
+    // --- --crop --------------------------------------------------------------
+
+    fn cropped(paths: Vec<PathBuf>, to: Option<&str>, outdir: Option<PathBuf>) -> Cli {
+        let mut c = cli_for(paths, to, outdir);
+        c.crop = Some(convkit_core::crop::parse("16:9").unwrap());
+        c
+    }
+
+    #[test]
+    fn a_lone_path_cropped_keeps_its_format_and_gains_a_suffix() {
+        for (name, out, format) in [
+            ("IMG_0042.jpg", "IMG_0042-cropped.jpg", Format::Jpg),
+            ("clip.MOV", "clip-cropped.MOV", Format::Mov),
+            ("anim.gif", "anim-cropped.gif", Format::Gif),
+        ] {
+            let jobs = plan_jobs(&cropped(v(&[name]), None, None)).unwrap();
+            assert_eq!(jobs[0].output, p(out), "{name}");
+            assert_eq!((jobs[0].from, jobs[0].to), (format, format), "{name}");
+        }
+    }
+
+    /// A crop is of the turned picture, so its name comes after the turn's
+    /// and before the size's.
+    #[test]
+    fn a_crop_goes_in_the_name_after_the_turn_and_before_a_size() {
+        let mut c = cut(v(&["talk.mp4"]), None, None);
+        c.rotate = Some(convkit_core::rotate::Turn::Left);
+        c.crop = Some(convkit_core::crop::Spec::Auto);
+        c.max_size = Some(convkit_core::size::parse("5mb").unwrap());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("talk-1m02s-1m10s-rotated-cropped-5mb.mp4")
+        );
+        let mut c = cropped(v(&["photo.jpg"]), None, None);
+        c.resize = Some("50%".into());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("photo-cropped-50pct.jpg")
+        );
+        let mut c = cropped(v(&["photo.jpg"]), None, None);
+        c.rotate = Some(convkit_core::rotate::Turn::Right);
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("photo-rotated-cropped.jpg")
+        );
+    }
+
+    #[test]
+    fn a_cropped_batch_writes_into_a_cropped_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.jpg"), dir.path().join("b.heic"));
+        let jobs = plan_jobs(&cropped(vec![a, b], Some("jpg"), None)).unwrap();
+        assert_eq!(under(dir.path(), &jobs), ["cropped/a.jpg", "cropped/b.jpg"]);
+    }
+
+    #[test]
+    fn a_lone_file_that_cannot_be_cropped_into_itself_says_what_to_do() {
+        for (input, want) in [
+            (
+                "clip.avi",
+                "conv cannot keep avi files as avi; add --to mp4 to crop them",
+            ),
+            (
+                "song.mp3",
+                "--crop does not apply to mp3 -> mp3: it crops images, video and GIFs",
+            ),
+        ] {
+            let e = plan_jobs(&cropped(v(&[input]), None, None)).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInvocation, "{input}");
+            assert_eq!(e.message, want, "{input}");
+        }
+        let e = plan_jobs(&cropped(v(&["logo.svg"]), None, None)).unwrap_err();
+        assert!(
+            e.message.contains("convert it to png first"),
+            "{}",
+            e.message
         );
     }
 }

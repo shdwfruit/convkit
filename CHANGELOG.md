@@ -136,6 +136,13 @@
   installs; WebP and HEIC need ImageMagick. conv asks before writing more
   than 1,000 files, and when a run needs several backends it can install,
   it offers each in turn.
+- **`--crop`.** `conv clip.mp4 --crop 9:16` keeps the largest 9:16 box in
+  the middle of the picture; `1280x720+0+140` is a box at a place,
+  `1280x720` one in the middle, and `auto` cuts away a video's black bars
+  or a picture's plain border. It works on photos, video and GIFs, in the
+  picture as it is shown after its orientation and `--rotate`, and before
+  `--resize`. One file is named `-cropped`, and a batch writes into
+  `cropped/`.
 
 ## 0.6.2 - 2026-11-03
 

@@ -79,6 +79,10 @@ pub struct Tuning {
     /// The pages of a PDF to save as images (`--pages 1-3,7`), as typed.
     /// Resolved against the page count by `pdf::raster`.
     pub pages: Option<Vec<crate::pdf::PageRange>>,
+    /// The part of the picture to keep, as it is shown after any turn
+    /// (`--crop`). Resolved to a box by `crop::resolve`; it reaches argv
+    /// through `ResolvedVideo::crop`.
+    pub crop: Option<crate::crop::Spec>,
 }
 
 impl Tuning {
@@ -92,6 +96,7 @@ impl Tuning {
             && !self.shift_pitch
             && self.speed.is_none()
             && self.rotate.is_none()
+            && self.crop.is_none()
             && self.range.is_none()
             && self.resize.is_none()
             && self.quality.is_none()
@@ -213,6 +218,12 @@ impl VideoChainSpec {
             out.push_str(turn.filter());
             out.push(',');
         }
+        // A crop is of the picture as it is shown, turned, and comes before
+        // any size, so `--resize` fits what was kept.
+        if let Some(rect) = resolved.crop {
+            out.push_str(&rect.filter());
+            out.push(',');
+        }
         out.push_str(self.prefix);
         let authored = self.fps.filter(|_| !resolved.keep_source_rate);
         // A retimed stream with no rate of its own is held to the source's.
@@ -274,10 +285,11 @@ pub enum Arg {
     TuneResize,
     /// `-colors <n>` when `--colors` was given; renders nothing otherwise.
     TuneColors,
-    /// `-rotate <degrees>` for a turn of the pixels (`ResolvedVideo::turn`);
+    /// `-rotate <degrees>` for a turn of the pixels (`ResolvedVideo::turn`),
+    /// then `-crop WxH+X+Y +repage` for a crop (`ResolvedVideo::crop`);
     /// renders nothing otherwise. Authored on ImageMagick steps only, right
-    /// after `-auto-orient`, so the turn is of the picture as it is shown
-    /// and every knob after it sees the turned picture.
+    /// after `-auto-orient`, so the turn and the crop are of the picture as
+    /// it is shown and every knob after them sees the changed picture.
     Rotate,
     /// `--strip-metadata`'s arguments for this step's backend when the flag
     /// was given (`metadata::MAGICK_STRIP` or `metadata::ffmpeg_args`);
@@ -517,6 +529,10 @@ impl Step {
                     if let Some(turn) = video.turn {
                         argv.push("-rotate".to_string());
                         argv.push(turn.degrees().to_string());
+                    }
+                    // The crop is of the turned picture (`crop::Rect`).
+                    if let Some(rect) = video.crop {
+                        argv.extend(rect.magick_args());
                     }
                 }
                 Arg::StripMetadata if tuning.strip_metadata => match self.backend {
@@ -968,6 +984,7 @@ mod tests {
             compress: false,
             dpi: None,
             pages: None,
+            crop: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],
