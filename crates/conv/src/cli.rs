@@ -6,7 +6,7 @@ use convkit_core::{Resolver, Tuning};
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "conv",
-    version,
+    version = env!("CONV_VERSION"),
     about = "One command for everyday file conversion, offline"
 )]
 #[command(args_conflicts_with_subcommands = true)]
