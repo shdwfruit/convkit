@@ -115,6 +115,10 @@ pub struct ResolvedVideo {
     /// turn: ffmpeg's `crop` filter in the chain, ImageMagick's `-crop`
     /// (`Arg::Rotate`). `None` when nothing is cut.
     pub crop: Option<crate::crop::Rect>,
+    /// The new sound `--audio` puts on the video: a second input, mapped
+    /// in place of the video's own sound or mixed under it. Only the
+    /// probe-aware media paths carry it.
+    pub soundtrack: Option<crate::soundtrack::Soundtrack>,
     /// An Ogg source going to a target that is not Ogg: its tags are on its
     /// audio stream, and are copied to the file's own (`Arg::StripMetadata`).
     pub ogg_tags: bool,

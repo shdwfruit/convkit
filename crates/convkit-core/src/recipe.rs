@@ -83,6 +83,10 @@ pub struct Tuning {
     /// (`--crop`). Resolved to a box by `crop::resolve`; it reaches argv
     /// through `ResolvedVideo::crop`.
     pub crop: Option<crate::crop::Spec>,
+    /// A new sound for a video (`--audio`), replacing its own or mixed
+    /// under it (`--mix`). Resolved by `soundtrack::resolve`; it reaches
+    /// argv through `ResolvedVideo::soundtrack`.
+    pub audio: Option<crate::soundtrack::Request>,
 }
 
 impl Tuning {
@@ -97,6 +101,7 @@ impl Tuning {
             && self.speed.is_none()
             && self.rotate.is_none()
             && self.crop.is_none()
+            && self.audio.is_none()
             && self.range.is_none()
             && self.resize.is_none()
             && self.quality.is_none()
@@ -985,6 +990,7 @@ mod tests {
             dpi: None,
             pages: None,
             crop: None,
+            audio: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],

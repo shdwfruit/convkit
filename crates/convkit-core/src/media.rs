@@ -53,6 +53,21 @@ pub(crate) fn input_position(argv: &[String]) -> usize {
     argv.iter().position(|a| a == "-i").map_or(1, |i| i + 1)
 }
 
+/// Where every input path sits: after each `-i`. The video's, then a new
+/// sound's (`--audio`).
+pub(crate) fn input_positions(argv: &[String]) -> Vec<usize> {
+    let mut at: Vec<usize> = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| *a == "-i")
+        .map(|(i, _)| i + 1)
+        .collect();
+    if at.is_empty() {
+        at.push(1);
+    }
+    at
+}
+
 /// A fully rendered single-step ffmpeg invocation plus the honesty that
 /// goes with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +244,27 @@ fn push_audio_args(
     }
 }
 
+/// The new sound's codec: copied where the target holds it, else encoded
+/// at the target's own rate, with libopus's channel layouts for a webm
+/// replacement (a mix carries them in its graph).
+fn push_soundtrack_args(argv: &mut Vec<String>, to: Format, s: &crate::soundtrack::Soundtrack) {
+    if s.copy {
+        push(argv, &["-c:a", "copy"]);
+        return;
+    }
+    if to == Format::Webm {
+        push(
+            argv,
+            &["-c:a", "libopus", "-b:a", registry::WEBM_AUDIO_BITRATE],
+        );
+        if s.mix_gain.is_none() {
+            push(argv, &["-af", registry::OPUS_CHANNEL_LAYOUTS]);
+        }
+    } else {
+        push(argv, &["-c:a", "aac", "-b:a", registry::AUDIO_BITRATE]);
+    }
+}
+
 /// Every audio track at one known rate, so the audio's size is arithmetic,
 /// through `filter` when a speed change gives one. A source with no audio
 /// gets no audio arguments at all.
@@ -304,6 +340,16 @@ fn mapped_invocation(
 
     let mut argv = input_args(cut, input);
     let mut warnings: Vec<String> = Vec::new();
+    // A new sound is the second input. A mix is a graph over both sounds:
+    // the video's own, through a speed change's filters, and the new one.
+    let soundtrack = resolved.soundtrack.as_ref();
+    if let Some(s) = soundtrack {
+        argv.extend(s.input_args());
+        let layouts = (to == Format::Webm).then_some(registry::OPUS_CHANNEL_LAYOUTS);
+        if let Some(graph) = s.mix_graph(filter, layouts) {
+            push(&mut argv, &["-filter_complex", &graph]);
+        }
+    }
 
     if to == Format::Mkv {
         // Matroska holds almost anything: keep everything, then carve out
@@ -311,6 +357,10 @@ fn mapped_invocation(
         // (timecode/metadata) streams, and the few subtitle codecs it has
         // no ID for. Attachments (fonts) ride along.
         push(&mut argv, &["-map", "0", "-map", "-0:d"]);
+        if let Some(s) = soundtrack {
+            push(&mut argv, &["-map", "-0:a"]);
+            push(&mut argv, &s.map());
+        }
         let mut any_kept_sub = false;
         let mut any_mov_text = false;
         for (i, sub) in subtitles.iter().enumerate() {
@@ -326,15 +376,18 @@ fn mapped_invocation(
         }
 
         push_video_args(&mut argv, to, &video);
-        push_audio_args(
-            &mut argv,
-            &mut warnings,
-            to,
-            audio_ok,
-            &audios,
-            audio,
-            filter,
-        );
+        match soundtrack {
+            Some(s) => push_soundtrack_args(&mut argv, to, s),
+            None => push_audio_args(
+                &mut argv,
+                &mut warnings,
+                to,
+                audio_ok,
+                &audios,
+                audio,
+                filter,
+            ),
+        }
 
         if any_mov_text {
             // mov_text only ever comes from mp4/mov, which cannot hold the
@@ -362,8 +415,10 @@ fn mapped_invocation(
     } else {
         // mp4/mov/webm: name exactly what is carried, per stream.
         push(&mut argv, &["-map", "0:v:0"]);
-        if !matches!(audio, AudioDisposition::Drop) {
-            push(&mut argv, &["-map", "0:a?"]);
+        match soundtrack {
+            Some(s) => push(&mut argv, &s.map()),
+            None if !matches!(audio, AudioDisposition::Drop) => push(&mut argv, &["-map", "0:a?"]),
+            None => {}
         }
         if probe.video_streams > 1 {
             warnings.push(format!(
@@ -401,15 +456,18 @@ fn mapped_invocation(
         }
 
         push_video_args(&mut argv, to, &video);
-        push_audio_args(
-            &mut argv,
-            &mut warnings,
-            to,
-            audio_ok,
-            &audios,
-            audio,
-            filter,
-        );
+        match soundtrack {
+            Some(s) => push_soundtrack_args(&mut argv, to, s),
+            None => push_audio_args(
+                &mut argv,
+                &mut warnings,
+                to,
+                audio_ok,
+                &audios,
+                audio,
+                filter,
+            ),
+        }
 
         if !kept_subs.is_empty() {
             let target_codec = if to == Format::Webm {
@@ -454,8 +512,10 @@ fn mapped_invocation(
         }
     }
     // Only where audio may be copied: a track re-encoded at a set rate is
-    // trimmed by its decoder.
+    // trimmed by its decoder. A new sound is not cut at all: it starts with
+    // the clip.
     if !audios.is_empty()
+        && soundtrack.is_none()
         && !matches!(
             audio,
             AudioDisposition::Reencode { .. } | AudioDisposition::Drop

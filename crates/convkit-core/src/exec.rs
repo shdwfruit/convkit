@@ -154,6 +154,10 @@ pub struct Outcome {
     /// `--json` for every other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crop: Option<crate::crop::CropReport>,
+    /// The new sound an `--audio` conversion put on the video; see
+    /// `ConversionPlan::audio`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<crate::soundtrack::AudioReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -572,6 +576,15 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     );
     // A picture's size, and the border `--crop auto` finds, for a crop.
     crate::crop::attach(resolver, req.from, &req.inputs[0], &req.tuning, &mut probed)?;
+    // What `--audio` brings, and how loud a mix's two sounds are.
+    crate::soundtrack::attach(
+        resolver,
+        req.from,
+        req.to,
+        &req.inputs[0],
+        &req.tuning,
+        &mut probed,
+    )?;
 
     let dest_dir = req
         .output
@@ -723,6 +736,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let speed = ran.speed.clone();
     let rotation = ran.rotation;
     let crop = ran.crop.clone();
+    let audio = ran.audio.clone();
     let mut warnings = ran.warnings;
     warnings.extend(sheet_notes);
     // Only the written PDF says what Typst's lossless pages cost, so it is
@@ -784,6 +798,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         rotation,
         pages: None,
         crop,
+        audio,
     })
 }
 
@@ -921,6 +936,7 @@ fn run_pdf_pages(
         rotation: None,
         pages: Some(report),
         crop: None,
+        audio: None,
     })
 }
 

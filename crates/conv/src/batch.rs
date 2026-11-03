@@ -319,6 +319,7 @@ mod tests {
             rotation: None,
             pages: None,
             crop: None,
+            audio: None,
         })
     }
 
@@ -389,6 +390,8 @@ mod tests {
             pages: None,
             dpi: None,
             crop: None,
+            audio: None,
+            mix: None,
             copy: false,
             paste: false,
             yes: false,

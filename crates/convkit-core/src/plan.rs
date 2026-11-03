@@ -141,6 +141,10 @@ pub struct ConversionPlan {
     /// `sizing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crop: Option<crate::crop::CropReport>,
+    /// The new sound an `--audio` conversion puts on the video. Skipped
+    /// when absent, like `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<crate::soundtrack::AudioReport>,
 }
 
 /// Why a probe-aware media pair re-encoded instead of copying: a video knob.
@@ -246,6 +250,7 @@ pub fn build_tuned(
         ));
     }
     crate::crop::refuse(from, to, inputs.len(), tuning)?;
+    crate::soundtrack::refuse(tuning, from, to)?;
 
     // Text read aloud is planned on its own: its engine depends on the
     // voice, and it takes no other knob.
@@ -334,6 +339,11 @@ pub fn build_tuned(
     let probe = cropped.as_ref().and_then(|c| c.probe.as_ref()).or(probe);
     clip_notes.extend(cropped.iter().flat_map(|c| c.notes.iter().cloned()));
     let crop = cropped.as_ref().map(|c| c.report.clone());
+    // A new sound goes on the output as it plays: after the cut and the
+    // speed change, which it takes no part in.
+    let sound = crate::soundtrack::resolve(tuning, from, to, probe, &inputs[0])?;
+    clip_notes.extend(sound.iter().flat_map(|s| s.notes.iter().cloned()));
+    let audio = sound.as_ref().map(|s| s.report.clone());
     if tuning.mute && !crate::sized::is_video_target(to) {
         let why = if to == Format::Gif {
             "gif has no sound to drop".to_string()
@@ -350,6 +360,7 @@ pub fn build_tuned(
     resolved.speed = retimed.as_ref().map(|r| r.retime.clone());
     resolved.turn = tuning.rotate;
     resolved.crop = cropped.as_ref().and_then(|c| c.rect);
+    resolved.soundtrack = sound.map(|s| s.soundtrack);
     resolved.mute = tuning.mute;
     resolved.ogg_tags = media::is_ogg(from) && !media::is_ogg(to);
     // An icon pair adds what it read of the source (`icon::resolve`); with
@@ -375,10 +386,16 @@ pub fn build_tuned(
         // A format cut, retimed, turned or resized into itself is no
         // registered pair, so it reaches the probe-aware paths by its range,
         // speed, turn or size instead.
-        let same_format =
-            from == to && (reencoded || tuning.rotate.is_some() || tuning.crop.is_some());
-        if same_format || (registry::lookup(from, to).is_some() && registry::needs_probe(from, to))
-        {
+        let same_format = from == to
+            && (reencoded
+                || tuning.rotate.is_some()
+                || tuning.crop.is_some()
+                || tuning.audio.is_some());
+        // Only the probe-aware paths map a second input, so a new sound
+        // takes them on any pair.
+        let probed_pair = registry::lookup(from, to).is_some()
+            && (registry::needs_probe(from, to) || tuning.audio.is_some());
+        if same_format || probed_pair {
             // A video knob changes the picture, and ffmpeg refuses a filter
             // alongside -c:v copy -- so consult the tuning before choosing
             // the path, not after. Choosing first is why `select()` below
@@ -483,7 +500,8 @@ pub fn build_tuned(
                 // after a cut's `-ss`/`-t` when there is one, and closes with
                 // the output path: those are the path positions the Windows
                 // long-path rewriter needs.
-                let path_args = vec![media::input_position(&m.argv), m.argv.len() - 1];
+                let mut path_args = media::input_positions(&m.argv);
+                path_args.push(m.argv.len() - 1);
                 return Ok(ConversionPlan {
                     from,
                     built_in: false,
@@ -509,6 +527,7 @@ pub fn build_tuned(
                     rotation,
                     pages: None,
                     crop,
+                    audio,
                 });
             }
         }
@@ -583,6 +602,7 @@ pub fn build_tuned(
         rotation,
         pages: None,
         crop,
+        audio,
     })
 }
 
@@ -645,6 +665,7 @@ fn built_in(
         built_in: true,
         pages: None,
         crop: None,
+        audio: None,
     })
 }
 
@@ -675,6 +696,7 @@ fn not_for_speech(tuning: &Tuning) -> Option<&'static str> {
         ("--shift-pitch", tuning.shift_pitch),
         ("--rotate", tuning.rotate.is_some()),
         ("--crop", tuning.crop.is_some()),
+        ("--audio", tuning.audio.is_some()),
         ("--mute", tuning.mute),
     ]
     .into_iter()
@@ -765,6 +787,7 @@ pub fn build_speech(
         built_in: false,
         pages: None,
         crop: None,
+        audio: None,
     })
 }
 
@@ -806,6 +829,10 @@ fn rotation_note(
 /// pixels turn, or that another knob re-encodes, takes the media paths
 /// instead, and so does one resized, since scaling it means re-encoding it.
 fn rewrites_in_place(format: Format, probe: Option<&MediaProbe>, tuning: &Tuning) -> bool {
+    // A new sound is a second input, which only the media paths map.
+    if tuning.audio.is_some() {
+        return false;
+    }
     // A picture is cropped by its recipe here; a video is re-encoded on the
     // media paths, which a crop always needs.
     if tuning.crop.is_some() {
@@ -1158,6 +1185,7 @@ fn in_place(
         rotation,
         pages: None,
         crop: crop_report,
+        audio: None,
     })
 }
 
@@ -1419,6 +1447,22 @@ fn validate_tuning(
             ));
         }
         return Err(crate::crop::not_applicable(from, to));
+    }
+    // No static recipe maps a second input: a new sound reaching one means
+    // the probe-aware path had no probe to map from.
+    if tuning.audio.is_some() {
+        if crate::sized::is_video_target(to) && from.kind() == crate::Kind::Video {
+            return Err(ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!(
+                    "--audio on {} -> {} needs ffprobe to read the source, and it could not; \
+                     check that ffprobe is installed and the input is a readable video",
+                    from.ext(),
+                    to.ext()
+                ),
+            ));
+        }
+        return Err(crate::soundtrack::not_applicable(from, to));
     }
     if tuning.strip_metadata && !has_slot(|a| matches!(a, Arg::StripMetadata)) {
         return Err(ConvError::new(
@@ -3278,6 +3322,7 @@ mod tests {
             dpi: None,
             pages: None,
             crop: None,
+            audio: None,
         }
     }
 
@@ -5767,5 +5812,154 @@ mod tests {
                 step.argv
             );
         }
+    }
+
+    // --- New sound: --audio, --mix ------------------------------------------
+
+    fn sounded(mix: Option<u16>) -> Tuning {
+        Tuning {
+            audio: Some(crate::soundtrack::Request {
+                path: p("song.mp3"),
+                mix: mix.map(crate::soundtrack::Level),
+            }),
+            ..Tuning::default()
+        }
+    }
+
+    /// `clip_probe` with a new sound read: `codec`, `secs` long, measured
+    /// 10 LU louder than the clip's own.
+    fn with_song(probe: MediaProbe, codec: &str, secs: u64) -> MediaProbe {
+        MediaProbe {
+            soundtrack: Some(crate::soundtrack::Read {
+                codec: Some(codec.into()),
+                duration_ms: Some(secs * 1000),
+                loudness: Some((Some(-200), Some(-100))),
+            }),
+            ..probe
+        }
+    }
+
+    #[test]
+    fn a_new_sound_replaces_the_old_and_the_video_is_copied() {
+        let probe = with_song(clip_probe(60), "mp3", 200);
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &sounded(None), Some(&probe)).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert_eq!(
+            argv[..6],
+            ["-i", "in.mp4", "-t", "60", "-i", "song.mp3"],
+            "{argv:?}"
+        );
+        assert!(has(argv, ["-map", "1:a:0"]), "{argv:?}");
+        assert!(!has(argv, ["-map", "0:a?"]), "{argv:?}");
+        assert!(
+            has(argv, ["-c:v", "copy"]) && has(argv, ["-c:a", "copy"]),
+            "{argv:?}"
+        );
+        // Both inputs are paths, for the Windows long-path rewrite.
+        assert_eq!(plan.steps[0].path_args, [1, 5, argv.len() - 1]);
+        let report = serde_json::to_value(plan.audio.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            report,
+            serde_json::json!({"file": "song.mp3", "mode": "replace", "copied": true})
+        );
+        // mkv keeps every other stream and drops only the old sound.
+        let plan = turned_plan(Format::Mp4, Format::Mkv, &sounded(None), Some(&probe)).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.windows(8)
+                .any(|w| w == ["-map", "0", "-map", "-0:d", "-map", "-0:a", "-map", "1:a:0"]),
+            "{argv:?}"
+        );
+    }
+
+    /// The cut is the video's: the new sound starts with the clip, and is
+    /// read only as long as the clip runs. A speed change leaves it alone.
+    #[test]
+    fn a_new_sound_starts_with_the_clip_and_keeps_its_own_speed() {
+        let probe = with_song(clip_probe(60), "aac", 200);
+        let t = Tuning {
+            range: Some(
+                crate::trim::Range::new(
+                    Some(crate::trim::parse_time("10").unwrap()),
+                    Some(crate::trim::parse_time("30").unwrap()),
+                    None,
+                )
+                .unwrap()
+                .unwrap(),
+            ),
+            speed: Some(crate::speed::parse("2").unwrap()),
+            ..sounded(None)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&probe)).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert_eq!(
+            argv[..10],
+            ["-ss", "10", "-t", "20", "-i", "in.mp4", "-t", "10", "-i", "song.mp3"],
+            "{argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "-af"),
+            "no filter on the new sound: {argv:?}"
+        );
+        assert!(!argv.iter().any(|a| a == "-copypriorss:a"), "{argv:?}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.ends_with("song.mp3 plays at its own speed.")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_mix_runs_the_videos_sound_through_its_speed_and_the_new_one_under_it() {
+        let probe = with_song(clip_probe(60), "mp3", 30);
+        let t = Tuning {
+            speed: Some(crate::speed::parse("2").unwrap()),
+            ..sounded(Some(25))
+        };
+        let plan = turned_plan(Format::Mp4, Format::Webm, &t, Some(&probe)).unwrap();
+        let argv = &plan.steps[0].argv;
+        let graph = value(argv, "-filter_complex");
+        assert!(graph.starts_with("[0:a:0]atempo=2"), "{graph}");
+        assert!(
+            graph.contains("[1:a:0]volume=-22.0dB[convkit_new]"),
+            "10 LU louder, then a quarter as loud: {graph}"
+        );
+        assert!(
+            graph.ends_with(",aformat=channel_layouts=7.1|5.1|stereo|mono[convkit_mix]"),
+            "{graph}"
+        );
+        assert!(has(argv, ["-map", "[convkit_mix]"]), "{argv:?}");
+        assert!(has(argv, ["-c:a", "libopus"]), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "-af"), "{argv:?}");
+        // 30 s of song under a 60 s clip played at 2x: they end together.
+        assert!(
+            !plan.warnings.iter().any(|w| w.contains("song.mp3 ends")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_new_sound_is_refused_without_a_video_to_put_it_on() {
+        let probe = with_song(clip_probe(5), "mp3", 5);
+        for (from, to) in [(Format::Mp4, Format::Mp3), (Format::Mp4, Format::Gif)] {
+            let e = turned_plan(from, to, &sounded(None), Some(&probe)).unwrap_err();
+            assert!(e.message.starts_with("--audio does not apply"), "{e}");
+        }
+        let e = turned_plan(Format::Mp4, Format::Mp4, &sounded(None), None).unwrap_err();
+        assert!(e.message.contains("needs ffprobe"), "{e}");
+        // A strip as well still maps the new sound rather than copying.
+        let t = Tuning {
+            strip_metadata: true,
+            ..sounded(None)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&probe)).unwrap();
+        assert!(
+            has(&plan.steps[0].argv, ["-map", "1:a:0"]),
+            "{:?}",
+            plan.steps
+        );
     }
 }

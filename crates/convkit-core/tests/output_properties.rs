@@ -5609,3 +5609,180 @@ fn an_aspect_ratio_and_a_border_crop_land_on_the_right_size() {
     convert_tuned(&bordered, &out, &auto).unwrap();
     assert_eq!(imagemagick_dimensions(&out), (120, 60));
 }
+
+// --- New sound: --audio, --mix ------------------------------------------------
+
+/// The mean volume of `path`'s sound around `freq` Hz, in dB: how much of
+/// a tone at that pitch it holds.
+fn band_level(path: &Path, freq: u32) -> f64 {
+    let resolver = Resolver::new();
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let out = Command::new(&ffmpeg)
+        .args(["-hide_banner", "-nostats", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:a:0",
+            "-af",
+            &format!("bandpass=f={freq}:width_type=q:w=20,volumedetect"),
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&out.stderr);
+    let line = log
+        .lines()
+        .find(|l| l.contains("mean_volume:"))
+        .unwrap_or_else(|| panic!("no volumedetect in {log}"));
+    line.split("mean_volume:")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .trim_end_matches("dB")
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// A 4 s clip with a 440 Hz tone of its own, and a 660 Hz song.
+fn clip_and_song(dir: &tempfile::TempDir, song_secs: u32) -> (PathBuf, PathBuf) {
+    let clip = synth_media(
+        dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=25:duration=4",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=4",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+        ],
+        "clip.mp4",
+    );
+    let song = synth_media(
+        dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=660:duration={song_secs}"),
+            "-ac",
+            "2",
+            "-c:a",
+            "libmp3lame",
+        ],
+        "song.mp3",
+    );
+    (clip, song)
+}
+
+fn duration_secs(path: &Path) -> f64 {
+    probe_media(path).duration_ms.unwrap() as f64 / 1000.0
+}
+
+/// Replacing keeps the picture and copies the new sound as it is, cut at
+/// the video's end; the old sound is gone.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_new_sound_replaces_the_old_and_stops_with_the_video() {
+    let dir = tmp();
+    let (clip, song) = clip_and_song(&dir, 10);
+    let out = dir.path().join("out.mp4");
+    let tuning = Tuning {
+        audio: Some(convkit_core::soundtrack::Request {
+            path: song.clone(),
+            mix: None,
+        }),
+        ..Tuning::default()
+    };
+    let outcome = convert_tuned(&clip, &out, &tuning).unwrap();
+    assert!(outcome.remuxed, "the picture and the mp3 are copied");
+    let p = probe_media(&out);
+    assert_eq!(p.video_codec.as_deref(), Some("h264"));
+    assert_eq!(p.audio_codecs, ["mp3"]);
+    assert!(
+        (duration_secs(&out) - 4.0).abs() < 0.15,
+        "{}",
+        duration_secs(&out)
+    );
+    assert!(band_level(&out, 660) > band_level(&out, 440) + 15.0);
+
+    // A shorter one leaves the rest silent, and says so.
+    let (_, short) = clip_and_song(&dir, 1);
+    let tuning = Tuning {
+        audio: Some(convkit_core::soundtrack::Request {
+            path: short,
+            mix: None,
+        }),
+        ..Tuning::default()
+    };
+    let out = dir.path().join("short.mkv");
+    let outcome = convert_tuned(&clip, &out, &tuning).unwrap();
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.contains("silent from there")),
+        "{:?}",
+        outcome.warnings
+    );
+    let streams = probe_media(&out);
+    assert_eq!((streams.video_streams, streams.audio_codecs.len()), (1, 1));
+    assert!(
+        (duration_secs(&out) - 4.0).abs() < 0.15,
+        "{}",
+        duration_secs(&out)
+    );
+}
+
+/// A mix holds both sounds, the new one under the old, for as long as the
+/// clip runs, and a cut and a speed change apply to the clip alone.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_mix_holds_both_sounds_for_the_length_of_the_clip() {
+    let dir = tmp();
+    let (clip, song) = clip_and_song(&dir, 10);
+    let out = dir.path().join("mixed.mp4");
+    let tuning = Tuning {
+        audio: Some(convkit_core::soundtrack::Request {
+            path: song,
+            mix: Some(convkit_core::soundtrack::DEFAULT_LEVEL),
+        }),
+        range: convkit_core::trim::Range::new(
+            Some(convkit_core::trim::parse_time("1").unwrap()),
+            None,
+            None,
+        )
+        .unwrap(),
+        speed: Some(convkit_core::speed::parse("1.5").unwrap()),
+        ..Tuning::default()
+    };
+    let outcome = convert_tuned(&clip, &out, &tuning).unwrap();
+    let report = outcome.audio.expect("an audio report");
+    assert_eq!(report.mode, "mix");
+    let p = probe_media(&out);
+    assert_eq!(p.audio_codecs, ["aac"]);
+    assert_eq!(p.video_streams, 1);
+    // 3 s of clip at 1.5x is 2 s.
+    assert!(
+        (duration_secs(&out) - 2.0).abs() < 0.15,
+        "{}",
+        duration_secs(&out)
+    );
+    let (own, new) = (band_level(&out, 440), band_level(&out, 660));
+    // Equal tones to begin with, the new one a quarter as loud: 12 dB under.
+    assert!(
+        (own - new - 12.0).abs() < 3.0,
+        "own {own} dB, new {new} dB: not a quarter as loud"
+    );
+}

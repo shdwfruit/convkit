@@ -143,6 +143,13 @@
   picture as it is shown after its orientation and `--rotate`, and before
   `--resize`. One file is named `-cropped`, and a batch writes into
   `cropped/`.
+- **`--audio` and `--mix`.** `conv clip.mp4 --audio song.mp3` replaces a
+  video's sound and copies the picture. `--mix` plays the new sound under
+  the old one, a quarter as loud after measuring both, and `--mix=50%` sets
+  how loud. The video's length decides: a longer sound stops at its end, a
+  shorter one leaves the rest silent, with a note. `--start`/`--end` cut the
+  video and `--speed` retimes it, and the new sound plays from the clip's
+  start at its own speed. Named `-audio` or `-mixed`.
 
 ## 0.6.2 - 2026-11-03
 

@@ -35,6 +35,7 @@ pub mod rotate;
 mod sheet_pdf;
 pub mod size;
 pub mod sized;
+pub mod soundtrack;
 pub mod speech;
 pub mod speed;
 pub mod table;

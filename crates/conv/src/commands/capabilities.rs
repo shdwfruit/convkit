@@ -146,6 +146,12 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
         push_flag(&mut flags, "--speed");
         push_flag(&mut flags, "--shift-pitch");
     }
+    // A new sound is a second input the probe-aware paths map, from any
+    // video into any video target, so it is keyed on the pair's kinds.
+    if from.kind() == convkit_core::Kind::Video && convkit_core::sized::is_video_target(to) {
+        push_flag(&mut flags, "--audio");
+        push_flag(&mut flags, "--mix");
+    }
     // --max-size is a policy over a whole video conversion rather than a
     // slot in one recipe, so it is keyed on the target, not scanned.
     if convkit_core::sized::is_video_target(to) {

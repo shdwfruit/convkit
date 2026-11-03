@@ -250,6 +250,7 @@ pub(crate) fn plan(
                 rotation: copied_rotation,
                 pages: None,
                 crop: p.crop_report.clone(),
+                audio: None,
             });
         }
         if let Some(m) = media::stream_mapped_invocation(
@@ -282,6 +283,7 @@ pub(crate) fn plan(
                 rotation: copied_rotation,
                 pages: None,
                 crop: p.crop_report.clone(),
+                audio: None,
             });
         }
     }
@@ -644,6 +646,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         }),
         pages: None,
         crop: p.crop_report.clone(),
+        audio: None,
     })
 }
 

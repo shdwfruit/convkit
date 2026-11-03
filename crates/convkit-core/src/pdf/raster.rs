@@ -262,7 +262,7 @@ fn pixels((w, h): (u32, u32), sizing: &Sizing) -> (u32, u32) {
 /// Refuses a flag that does nothing to a PDF's pages, naming why.
 fn refuse_flags(to: Format, tuning: &Tuning) -> Result<()> {
     let pair = format!("pdf -> {}", to.ext());
-    let refused: [(&str, bool, &str); 11] = [
+    let refused: [(&str, bool, &str); 12] = [
         (
             "--upscale",
             tuning.upscale,
@@ -304,6 +304,11 @@ fn refuse_flags(to: Format, tuning: &Tuning) -> Result<()> {
             "--crop",
             tuning.crop.is_some(),
             "it crops photos and video; crop the pages once they are pictures",
+        ),
+        (
+            "--audio",
+            tuning.audio.is_some(),
+            "it gives a video new sound",
         ),
         (
             "--quality",
@@ -876,6 +881,7 @@ fn conversion_plan(
         built_in: false,
         pages: Some(report),
         crop: None,
+        audio: None,
     }
 }
 

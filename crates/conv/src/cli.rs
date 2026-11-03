@@ -260,6 +260,33 @@ pub struct Cli {
     #[arg(long, value_name = "BOX", value_parser = parse_crop)]
     pub crop: Option<convkit_core::crop::Spec>,
 
+    /// Put this file's sound on the video in place of its own: a song, a
+    /// voice-over, or another video's sound. The video is stream-copied
+    /// where nothing else changes it. A sound longer than the video stops
+    /// where it ends; a shorter one leaves the rest silent. Video targets
+    /// (mp4, mov, mkv, webm). A lone input keeps its format:
+    /// clip.mp4 -> clip-audio.mp4.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "FILE")]
+    pub audio: Option<PathBuf>,
+
+    /// Mix --audio's sound under the video's own instead of replacing it,
+    /// at LEVEL of the video's loudness: --mix is a quarter as loud
+    /// (25%), --mix=50% half. Both are measured first, so the level holds
+    /// whatever each was recorded at. Named NAME-mixed.EXT.
+    // `require_equals` so `--mix clip.mp4` leaves the path a path. Not
+    // `global` -- see `dry_run`'s comment.
+    #[arg(
+        long,
+        value_name = "LEVEL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "25%",
+        requires = "audio",
+        value_parser = parse_mix_level
+    )]
+    pub mix: Option<convkit_core::soundtrack::Level>,
+
     /// Copy what was written to the clipboard, ready to paste: a picture
     /// as itself (and its file), an md, csv, html, txt, json, yaml or toml
     /// file as its text, and anything else, or several outputs, as the
@@ -1224,6 +1251,10 @@ fn parse_restriction(s: &str) -> Result<convkit_core::pdf::Restriction, String> 
     convkit_core::pdf::Restriction::parse(s)
 }
 
+fn parse_mix_level(s: &str) -> Result<convkit_core::soundtrack::Level, String> {
+    convkit_core::soundtrack::parse_level(s)
+}
+
 fn parse_crop(s: &str) -> Result<convkit_core::crop::Spec, String> {
     convkit_core::crop::parse(s)
 }
@@ -1280,6 +1311,13 @@ impl Cli {
                 .as_deref()
                 .and_then(|p| convkit_core::pdf::parse_list(p).ok()),
             crop: self.crop,
+            audio: self
+                .audio
+                .as_ref()
+                .map(|path| convkit_core::soundtrack::Request {
+                    path: path.clone(),
+                    mix: self.mix,
+                }),
         }
     }
 
@@ -1293,6 +1331,18 @@ impl Cli {
     /// contradiction is a usage error before anything runs, like clap's
     /// own.
     pub fn check(&self) -> Result<(), String> {
+        // `--mix 30%` left the level a path: say how to write it.
+        if self.mix.is_some() {
+            if let Some(level) = self.paths.iter().find(|p| {
+                let s = p.to_string_lossy();
+                convkit_core::soundtrack::parse_level(&s).is_ok() && s.ends_with('%')
+            }) {
+                return Err(format!(
+                    "--mix takes its level after an =: write --mix={}",
+                    level.display()
+                ));
+            }
+        }
         if self.paste && self.paths.len() > 1 {
             return Err(
                 "--paste takes the input from the clipboard; give at most the output's name or .ext"
@@ -1364,6 +1414,8 @@ mod tests {
             pages: None,
             dpi: None,
             crop: None,
+            audio: None,
+            mix: None,
             copy: false,
             paste: false,
             yes: false,

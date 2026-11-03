@@ -116,6 +116,9 @@ pub struct MediaProbe {
     /// The border `--crop auto` found in the pixels (`crop::attach`).
     /// `None` when nothing looked.
     pub crop_found: Option<crate::crop::Found>,
+    /// What `--audio` brings, read by `soundtrack::attach`. `None` when no
+    /// new sound was asked for, or it was not read.
+    pub soundtrack: Option<crate::soundtrack::Read>,
 }
 
 /// The two ways a video or audio file records where it was made. Outputs

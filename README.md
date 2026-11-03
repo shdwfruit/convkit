@@ -120,6 +120,7 @@ conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 conv clip.mp4 --speed 2          # play twice as fast
 conv IMG_0042.mov --rotate left  # turn a sideways video or photo
 conv clip.mp4 --crop 9:16        # crop to a shape, a box, or auto for black bars
+conv clip.mp4 --audio song.mp3   # replace the sound; add --mix to put it under
 conv trim talk.mp4               # find clips in the terminal and cut them
 conv --paste .jpg                # convert the picture or files you copied
 conv photo.heic .jpg --copy      # convert, then copy the result to paste anywhere
@@ -732,6 +733,43 @@ conv IMG_0042.heic .jpg --crop 1:1 --resize 1080x
 conv screen.mov clip.gif --crop 800x600+120+80
 conv ./scans --to png --crop auto
 ```
+
+## New sound
+
+`--audio` puts a file's sound on a video in place of its own: a song, a
+voice-over, or the sound of another video. The picture is copied, not
+re-encoded, and so is the new sound when the video's format holds it:
+
+```console
+$ conv clip.mp4 --audio song.mp3
+OK clip-audio.mp4 - 21.4 MB - 0.2s - stream copy, no re-encode
+  /home/user/Videos/clip-audio.mp4
+  note  song.mp3 runs 3:42; it stops where the video ends, at 0:48.
+```
+
+`--mix` plays it under the video's own sound instead, a quarter as loud.
+Both are measured first, so a song mastered loud sits under quiet phone
+speech the same way it sits under a loud recording. `--mix=50%` makes it
+half as loud as the video's sound, `--mix=100%` as loud. A mix is
+re-encoded, and only the video's first audio track is mixed.
+
+The video's length decides. A new sound that runs longer stops where the
+video ends, and one that runs shorter leaves the rest silent, or the
+video's own sound alone in a mix; nothing loops. A note says which.
+`--start` and `--end` cut the video, and the new sound starts with the
+clip. `--speed` changes the video and its own sound, and the new sound
+plays at its own speed:
+
+```console
+conv talk.mov .mp4 --audio voiceover.m4a
+conv clip.mp4 --audio song.mp3 --mix --start 0:05 --end 0:35
+conv screen.mkv --audio music.flac --mix=40% --speed 2
+```
+
+One file is named `-audio`, or `-mixed`, and a batch writes into an
+`audio` or `mixed` folder. It works into mp4, mov, mkv and webm, not into
+a GIF, which has no sound, and not with `--max-size` yet: add the sound
+first, then size the result.
 
 ## Merge and split
 

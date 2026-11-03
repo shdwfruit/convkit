@@ -1605,6 +1605,34 @@ fn a_crop_that_is_no_box_is_a_usage_error() {
         .stderr(contains("expected WxH+X+Y"));
 }
 
+/// `--audio` and `--mix` go on video into video, and not on sound or GIFs.
+#[test]
+fn capabilities_lists_audio_on_video_targets() {
+    let assert = conv().args(["capabilities", "mov"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let mp4 = stdout.lines().find(|l| l.contains("mov -> mp4")).unwrap();
+    assert!(mp4.contains("--audio --mix"), "{stdout}");
+    for pair in ["mov -> gif", "mov -> m4a"] {
+        let line = stdout.lines().find(|l| l.contains(pair)).unwrap();
+        assert!(!line.contains("--audio"), "{pair}: {stdout}");
+    }
+}
+
+/// `--mix 50%` leaves the level a path; conv says to write `--mix=50%`.
+#[test]
+fn a_mix_level_without_an_equals_sign_says_how_to_write_it() {
+    conv()
+        .args(["clip.mp4", "--audio", "song.mp3", "--mix", "50%"])
+        .assert()
+        .code(2)
+        .stderr(contains("write --mix=50%"));
+    conv()
+        .args(["clip.mp4", "--mix"])
+        .assert()
+        .code(2)
+        .stderr(contains("--audio"));
+}
+
 /// A dry run of a turn the tag makes shows no command, and says why.
 #[test]
 fn dry_run_of_a_photo_whose_tag_the_turn_undoes_runs_nothing() {

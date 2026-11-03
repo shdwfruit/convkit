@@ -3046,7 +3046,11 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     let cropped = tuning.crop.is_some()
         && from.kind() == Kind::Video
         && (from == to || lookup(from, to).is_some());
-    sized || webm_knob || cut || retimed || resized_in_place || cropped
+    // A new sound is mapped from the probe, and planned against the
+    // video's length.
+    let new_sound =
+        tuning.audio.is_some() && from.kind() == Kind::Video && crate::sized::is_video_target(to);
+    sized || webm_knob || cut || retimed || resized_in_place || cropped || new_sound
 }
 
 /// What a format cut into itself runs (`conv talk.mp4 --start 1:02`): the

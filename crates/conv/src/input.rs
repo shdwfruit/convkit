@@ -347,6 +347,8 @@ struct OwnFormat {
     timed: bool,
     turned: bool,
     cropped: bool,
+    /// A new sound (`--audio`), which only a video kept as a video takes.
+    sounded: bool,
     stripped: bool,
     /// `--resize` alone, which keeps what `registry::resize_in_place` does.
     resized: bool,
@@ -380,6 +382,12 @@ impl OwnFormat {
         // A crop is of the turned picture, so it is named after the turn.
         let cropped = cli.crop.is_some();
         let crop = cropped.then(|| "cropped".to_string());
+        // The new sound goes on the picture as it comes out.
+        let sounded = cli.audio.is_some();
+        let sound = sounded.then(|| match cli.mix {
+            Some(_) => "mixed".to_string(),
+            None => "audio".to_string(),
+        });
         if range.is_some() || speed.is_some() {
             let (flag, verb, done) = match (&range, cli.speed) {
                 (Some(r), _) => (r.flag(), "cut", "cut"),
@@ -387,7 +395,7 @@ impl OwnFormat {
                 (None, _) => ("--speed", "speed up", "sped-up"),
             };
             let cut = range.as_ref().map(convkit_core::trim::name_suffix);
-            let parts: Vec<String> = [cut, speed, turn, crop, size.clone()]
+            let parts: Vec<String> = [cut, speed, turn, crop, sound, size.clone()]
                 .into_iter()
                 .flatten()
                 .collect();
@@ -397,6 +405,7 @@ impl OwnFormat {
                 timed: true,
                 turned,
                 cropped,
+                sounded,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag,
@@ -406,13 +415,17 @@ impl OwnFormat {
             });
         }
         if let Some(size) = size {
-            let parts: Vec<String> = [turn, crop, Some(size)].into_iter().flatten().collect();
+            let parts: Vec<String> = [turn, crop, sound, Some(size)]
+                .into_iter()
+                .flatten()
+                .collect();
             return Some(OwnFormat {
                 sized: true,
                 compressed: cli.compress,
                 timed: false,
                 turned,
                 cropped,
+                sounded,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag: "--max-size",
@@ -428,6 +441,7 @@ impl OwnFormat {
                 timed: false,
                 turned,
                 cropped,
+                sounded,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag: "--compress",
@@ -440,15 +454,19 @@ impl OwnFormat {
         // turn goes after it in the name. With `--to` the suffix names a
         // batch's folder, where `--resize` stays a tuning flag.
         let geometry = cli.resize.as_deref().filter(|_| cli.to.is_none());
-        if turned || cropped {
-            let parts: Vec<String> = [turn, crop, geometry.map(resize_suffix)]
+        if turned || cropped || sounded {
+            let parts: Vec<String> = [turn, crop, sound, geometry.map(resize_suffix)]
                 .into_iter()
                 .flatten()
                 .collect();
             let (flag, verb, done) = if turned {
                 ("--rotate", "rotate", "rotated")
-            } else {
+            } else if cropped {
                 ("--crop", "crop", "cropped")
+            } else if cli.mix.is_some() {
+                ("--audio", "mix the audio into", "mixed")
+            } else {
+                ("--audio", "put the audio on", "new")
             };
             return Some(OwnFormat {
                 sized: false,
@@ -456,6 +474,7 @@ impl OwnFormat {
                 timed: false,
                 turned,
                 cropped,
+                sounded,
                 stripped: cli.strip_metadata,
                 resized: false,
                 flag,
@@ -471,6 +490,7 @@ impl OwnFormat {
                 timed: false,
                 turned: false,
                 cropped: false,
+                sounded: false,
                 stripped: true,
                 resized: false,
                 flag: "--strip-metadata",
@@ -486,6 +506,7 @@ impl OwnFormat {
             timed: false,
             turned: false,
             cropped: false,
+            sounded: false,
             stripped: false,
             resized: true,
             flag: "--resize",
@@ -501,7 +522,8 @@ impl OwnFormat {
             return f == Format::Pdf;
         }
         let turnable = (!self.turned || convkit_core::rotate::in_place(f).is_ok())
-            && (!self.cropped || convkit_core::crop::in_place(f).is_ok());
+            && (!self.cropped || convkit_core::crop::in_place(f).is_ok())
+            && (!self.sounded || convkit_core::soundtrack::in_place(f).is_ok());
         if self.sized || self.timed {
             (!self.sized || convkit_core::sized::is_sized_target(f))
                 && (!self.timed || convkit_core::registry::takes_range(f, f))
@@ -531,6 +553,14 @@ impl OwnFormat {
                 convkit_core::rotate::target_for(f)
                     .map(|to| to.ext())
                     .ok_or_else(|| convkit_core::rotate::in_place(f).err().unwrap_or_default())
+            }
+            Some(f) if self.sounded && convkit_core::soundtrack::in_place(f).is_err() => {
+                match f.kind() {
+                    Kind::Video => Ok("mp4"),
+                    _ => Err(convkit_core::soundtrack::in_place(f)
+                        .err()
+                        .unwrap_or_default()),
+                }
             }
             Some(f) if self.cropped && convkit_core::crop::in_place(f).is_err() => {
                 convkit_core::crop::target_for(f)
@@ -594,6 +624,9 @@ fn own_format_job(input: &Path, outdir: Option<&Path>, own: &OwnFormat) -> Resul
         }
         if own.cropped {
             convkit_core::crop::in_place(from).map_err(invalid)?;
+        }
+        if own.sounded {
+            convkit_core::soundtrack::in_place(from).map_err(invalid)?;
         }
         if own.stripped {
             convkit_core::metadata::in_place(from).map_err(invalid)?;
@@ -1871,6 +1904,8 @@ mod tests {
             pages: None,
             dpi: None,
             crop: None,
+            audio: None,
+            mix: None,
             copy: false,
             paste: false,
             yes: false,
@@ -3239,6 +3274,41 @@ mod tests {
         let e = plan_jobs(&cropped(v(&["logo.svg"]), None, None)).unwrap_err();
         assert!(
             e.message.contains("convert it to png first"),
+            "{}",
+            e.message
+        );
+    }
+
+    // --- --audio -------------------------------------------------------------
+
+    fn sounded(paths: Vec<PathBuf>, mix: bool) -> Cli {
+        let mut c = cli_for(paths, None, None);
+        c.audio = Some(p("song.mp3"));
+        c.mix = mix.then_some(convkit_core::soundtrack::DEFAULT_LEVEL);
+        c
+    }
+
+    #[test]
+    fn a_new_sound_is_named_audio_or_mixed() {
+        let jobs = plan_jobs(&sounded(v(&["clip.mp4"]), false)).unwrap();
+        assert_eq!(jobs[0].output, p("clip-audio.mp4"));
+        let jobs = plan_jobs(&sounded(v(&["clip.MOV"]), true)).unwrap();
+        assert_eq!(jobs[0].output, p("clip-mixed.MOV"));
+        let mut c = sounded(v(&["talk.mp4"]), true);
+        c.crop = Some(convkit_core::crop::Spec::Auto);
+        c.speed = Some(convkit_core::speed::parse("2").unwrap());
+        assert_eq!(
+            plan_jobs(&c).unwrap()[0].output,
+            p("talk-2x-cropped-mixed.mp4")
+        );
+        let e = plan_jobs(&sounded(v(&["clip.avi"]), false)).unwrap_err();
+        assert_eq!(
+            e.message,
+            "conv cannot keep avi files as avi; add --to mp4 to put the audio on them"
+        );
+        let e = plan_jobs(&sounded(v(&["anim.gif"]), false)).unwrap_err();
+        assert!(
+            e.message.contains("convert it to mp4 first"),
             "{}",
             e.message
         );
