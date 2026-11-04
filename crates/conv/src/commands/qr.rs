@@ -1,15 +1,18 @@
 //! `conv qr TEXT [OUT] [-o DIR]`: a QR code, drawn by convkit itself.
+//! `conv qr --read PICTURE...`: the codes in pictures, printed.
 //!
 //! The paths work as in a conversion: OUT is the file to write, or a bare
 //! `.ext` for `qr.EXT`, and `-o` is the directory to write into. PNG and
 //! SVG come straight from `convkit_core::qr`; any other format is that PNG
 //! sent through the ordinary png -> format conversion.
 
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use convkit_core::qr::read::{self as reader, Code, Picture};
 use convkit_core::qr::{self, Logo};
-use convkit_core::{registry, ConvError, ErrorCode, Format, Outcome};
+use convkit_core::{registry, ConvError, ErrorCode, Format, Kind, Outcome};
 use serde_json::json;
 
 use crate::cli::{Cli, Command};
@@ -28,10 +31,14 @@ pub fn run(cli: &Cli) -> i32 {
         copy,
         paste,
         wifi,
+        read,
     }) = &cli.command
     else {
         unreachable!("qr::run is only called for `conv qr`");
     };
+    if !read.is_empty() {
+        return read_all(cli, read);
+    }
     if *wifi {
         return join_code(
             cli,
@@ -60,7 +67,8 @@ pub fn run(cli: &Cli) -> i32 {
             Some(p.path.as_path()),
         ),
         None => (
-            text.as_deref().expect("clap requires TEXT without --paste"),
+            text.as_deref()
+                .expect("clap requires TEXT without --paste, --wifi or --read"),
             output.as_deref(),
             logo.as_deref(),
         ),
@@ -266,6 +274,9 @@ pub(crate) fn write(
         _ => output::convert_png(cli, &code.png()?, path, format, overwrite)?,
     };
     let mut warnings = code.warnings(format);
+    if let Some(hint) = names_a_picture(text) {
+        warnings.push(hint);
+    }
     warnings.append(&mut outcome.warnings);
     outcome.warnings = warnings;
     Ok((outcome, code))
@@ -311,9 +322,279 @@ pub(crate) fn print(
     }
 }
 
+/// A note for TEXT that is also the name of a picture here: the code holds
+/// the name, as asked, and `--read` is how to read the picture instead.
+fn names_a_picture(text: &str) -> Option<String> {
+    let path = Path::new(text);
+    let picture = Format::from_path(path).is_some_and(|f| f.kind() == Kind::Image);
+    (picture && path.is_file()).then(|| {
+        let command =
+            render::command_line_human("conv", &["qr".into(), "--read".into(), text.into()]);
+        format!(
+            "the code holds the text \"{text}\"; to read the code in the picture {text} instead, run: {command}"
+        )
+    })
+}
+
+/// `conv qr --read`: reads every picture, then prints what was found. The
+/// exit code is the batch rule: 0 when every picture had a code, the
+/// failure's own code when none did, 4 for a mix.
+fn read_all(cli: &Cli, paths: &[PathBuf]) -> i32 {
+    let paths = input::expand_globs(paths, paths.len());
+    let results: Vec<(PathBuf, Result<Vec<Code>, ConvError>)> = paths
+        .iter()
+        .map(|p| (p.clone(), read_codes(cli, p)))
+        .collect();
+    if cli.json {
+        let arr: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(p, r)| match r {
+                Ok(codes) => json!({ "ok": true, "input": p, "codes": codes }),
+                Err(e) => json!({ "ok": false, "input": p, "error": e }),
+            })
+            .collect();
+        let ok = results.iter().all(|(_, r)| r.is_ok());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "ok": ok, "results": arr })).unwrap()
+        );
+    } else {
+        print_read(cli, &results);
+    }
+    let failures: Vec<&ConvError> = results
+        .iter()
+        .filter_map(|(_, r)| r.as_ref().err())
+        .collect();
+    match failures.len() {
+        0 => 0,
+        n if n == results.len() => failures[0].code.exit_code(),
+        _ => ErrorCode::BatchPartialFailure.exit_code(),
+    }
+}
+
+/// Each code's text on its own line of stdout, after `NAME: ` when there
+/// are several pictures, so the output pipes. A Wi-Fi code's network goes
+/// to stderr under it, and so does a picture without a code.
+fn print_read(cli: &Cli, results: &[(PathBuf, Result<Vec<Code>, ConvError>)]) {
+    let tty = std::io::stdout().is_terminal();
+    let labelled = results.len() > 1;
+    let mut out = std::io::stdout().lock();
+    for (path, result) in results {
+        let label = if labelled {
+            format!("{}: ", path.display())
+        } else {
+            String::new()
+        };
+        match result {
+            Ok(codes) => {
+                for code in codes {
+                    let text = if tty {
+                        safe_for_terminal(&code.text)
+                    } else {
+                        code.text.clone()
+                    };
+                    // A closed pipe (`| head -1`) is not worth a panic.
+                    if writeln!(out, "{label}{text}")
+                        .and_then(|_| out.flush())
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if let (Some(w), false) = (&code.wifi, cli.quiet) {
+                        eprint!("{}", wifi_human(w));
+                    }
+                }
+            }
+            Err(e) => {
+                let mut msg = render::error_human(e);
+                if labelled && !e.message.contains(&path.display().to_string()) {
+                    msg = msg.replacen("error: ", &format!("error: {label}"), 1);
+                }
+                eprint!("{msg}");
+            }
+        }
+    }
+}
+
+/// A Wi-Fi code's network, indented, for stderr.
+fn wifi_human(w: &reader::Wifi) -> String {
+    let security = if w.security.eq_ignore_ascii_case("nopass") {
+        "none (an open network)".to_string()
+    } else {
+        w.security.clone()
+    };
+    let mut s = format!("  Wi-Fi network: {}\n  security: {security}\n", w.network);
+    if let Some(p) = &w.password {
+        s.push_str(&format!("  password: {p}\n"));
+    }
+    if w.hidden {
+        s.push_str("  hidden: yes, so join it by name\n");
+    }
+    s
+}
+
+/// `text` with control characters, and the ones that reorder text, shown
+/// as escapes: a code can hold anything, and a terminal would act on them.
+/// Newlines and tabs are kept.
+fn safe_for_terminal(text: &str) -> String {
+    let mut s = String::with_capacity(text.len());
+    for c in text.chars() {
+        let reorders = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+        if (c.is_control() && c != '\n' && c != '\t') || reorders {
+            s.push_str(&c.escape_unicode().to_string());
+        } else {
+            s.push(c);
+        }
+    }
+    s
+}
+
+/// The codes in one picture. conv decodes png, jpg, gif, webp and svg
+/// itself; any other picture that converts to PNG (heic, avif, tiff, ...)
+/// goes through that conversion first, as does a file conv's own decoder
+/// cannot read (a CMYK JPEG, say).
+fn read_codes(cli: &Cli, path: &Path) -> Result<Vec<Code>, ConvError> {
+    let name = path.display();
+    if path.is_dir() {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!("{name} is a folder; --read takes pictures"),
+        ));
+    }
+    if !path.exists() {
+        return Err(ConvError::new(
+            ErrorCode::InputNotFound,
+            format!("no such file: {name}"),
+        ));
+    }
+    let format = Format::from_path(path);
+    if format == Some(Format::Pdf) {
+        return Err(ConvError::new(
+            ErrorCode::UnsupportedPair,
+            format!("--read takes pictures, and cannot read a PDF's pages yet; take a screenshot of the page with the code and read that instead of {name}"),
+        ));
+    }
+    let format = format.filter(|f| f.kind() == Kind::Image).ok_or_else(|| {
+        ConvError::new(
+            ErrorCode::UnsupportedPair,
+            format!("--read takes pictures (png, jpg, heic, webp, ...); {name} is not one"),
+        )
+    })?;
+    let converts = format != Format::Png && registry::lookup(format, Format::Png).is_some();
+    let mut pictures = Vec::new();
+    if reader::decodes_itself(format) {
+        let bytes = std::fs::read(path).map_err(|e| {
+            ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!("cannot read {name}: {e}"),
+            )
+        })?;
+        match reader::decode(&bytes, format) {
+            Ok(p) => pictures.push(p),
+            Err(e) if !converts || format == Format::Svg => return Err(e),
+            Err(_) => {}
+        }
+    }
+    if pictures.is_empty() {
+        if !converts {
+            return Err(ConvError::new(
+                ErrorCode::UnsupportedPair,
+                format!("conv cannot read a .{} picture", format.ext()),
+            ));
+        }
+        pictures = converted(cli, format, path)?;
+    }
+    let mut codes: Vec<Code> = Vec::new();
+    for pic in &pictures {
+        for code in reader::read(pic) {
+            if !codes.iter().any(|c| c.text == code.text) {
+                codes.push(code);
+            }
+        }
+    }
+    if codes.is_empty() {
+        return Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            "no QR code found; if there is one, try a sharper picture with the whole code in it, closer and straighter",
+        ));
+    }
+    Ok(codes)
+}
+
+/// The picture converted to PNG in a private temporary folder and read
+/// back: every PNG the conversion leaves there, in case it writes one a
+/// frame or layer.
+fn converted(cli: &Cli, format: Format, path: &Path) -> Result<Vec<Picture>, ConvError> {
+    let (dir, temp) = output::private_temp("picture.png")?;
+    output::convert(cli, format, path, Format::Png, &temp, true)?;
+    let mut pngs: Vec<PathBuf> = std::fs::read_dir(dir.path())
+        .map_err(|e| {
+            ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!("cannot read {}: {e}", dir.path().display()),
+            )
+        })?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "png"))
+        .collect();
+    pngs.sort_by(|a, b| input::natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
+    pngs.iter()
+        .map(|p| {
+            let bytes = std::fs::read(p).map_err(|e| {
+                ConvError::new(
+                    ErrorCode::ConversionFailed,
+                    format!("cannot read {}: {e}", p.display()),
+                )
+            })?;
+            reader::decode(&bytes, Format::Png)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_characters_are_shown_not_sent_to_the_terminal() {
+        assert_eq!(
+            safe_for_terminal("a\u{1b}[31mb\tc\nd\u{202e}"),
+            "a\\u{1b}[31mb\tc\nd\\u{202e}"
+        );
+    }
+
+    #[test]
+    fn wifi_is_shown_parsed() {
+        let w = reader::parse_wifi("WIFI:S:Home;T:WPA;P:secret;;").unwrap();
+        assert_eq!(
+            wifi_human(&w),
+            "  Wi-Fi network: Home\n  security: WPA\n  password: secret\n"
+        );
+        let open = reader::parse_wifi("WIFI:S:Cafe;T:nopass;H:true;;").unwrap();
+        assert_eq!(
+            wifi_human(&open),
+            "  Wi-Fi network: Cafe\n  security: none (an open network)\n  hidden: yes, so join it by name\n"
+        );
+    }
+
+    #[test]
+    fn text_naming_a_picture_here_gets_a_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let pic = dir.path().join("menu.png");
+        std::fs::write(&pic, b"x").unwrap();
+        let text = pic.to_str().unwrap();
+        let hint = names_a_picture(text).unwrap();
+        // Quoted as a shell needs it: a Windows path is.
+        let command =
+            render::command_line_human("conv", &["qr".into(), "--read".into(), text.into()]);
+        assert!(hint.ends_with(&format!("run: {command}")), "{hint}");
+        // Not a file here, or not a picture: no hint.
+        assert_eq!(names_a_picture("menu.png-that-is-not-here.png"), None);
+        let doc = dir.path().join("notes.txt");
+        std::fs::write(&doc, b"x").unwrap();
+        assert_eq!(names_a_picture(doc.to_str().unwrap()), None);
+    }
 
     fn resolved(
         output: Option<&str>,

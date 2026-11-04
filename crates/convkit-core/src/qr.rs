@@ -11,6 +11,8 @@
 //! anything is written, the drawing is read back with a QR decoder and has
 //! to give back exactly the text it was made from.
 
+pub mod read;
+
 use std::fmt::Write as _;
 use std::path::Path;
 

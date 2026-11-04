@@ -6105,3 +6105,226 @@ fn info_reads_real_files() {
     assert_eq!(image["location"], heic_exif);
     assert_eq!(image["profile"], "Display P3");
 }
+
+/// Makes a QR code for `text` at `path` with conv itself.
+fn make_qr(text: &str, path: &Path) {
+    conv().args(["qr", text]).arg(path).assert().success();
+}
+
+#[test]
+fn qr_read_prints_each_code_on_its_own_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("code.png");
+    let svg = dir.path().join("code.svg");
+    make_qr("https://example.com/menu", &png);
+    make_qr("https://example.com/svg", &svg);
+    conv()
+        .args(["qr", "--read"])
+        .arg(&png)
+        .assert()
+        .success()
+        .stdout("https://example.com/menu\n");
+    // Several pictures: each line says which one it came from.
+    let out = conv()
+        .args(["qr", "--read"])
+        .arg(&png)
+        .arg(&svg)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!(
+            "{}: https://example.com/menu\n{}: https://example.com/svg\n",
+            png.display(),
+            svg.display()
+        )
+    );
+}
+
+#[test]
+fn qr_read_shows_a_wifi_network_on_stderr_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("wifi.png");
+    make_qr("WIFI:S:Home;T:WPA;P:secret;;", &png);
+    conv()
+        .args(["qr", "--read"])
+        .arg(&png)
+        .assert()
+        .success()
+        .stdout("WIFI:S:Home;T:WPA;P:secret;;\n")
+        .stderr(contains("Wi-Fi network: Home"))
+        .stderr(contains("security: WPA"))
+        .stderr(contains("password: secret"));
+}
+
+#[test]
+fn qr_read_json_has_each_code_and_a_wifi_network() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("wifi.png");
+    make_qr("WIFI:S:Home;T:WPA;P:secret;;", &png);
+    let out = conv()
+        .args(["qr", "--json", "--read"])
+        .arg(&png)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    let code = &v["results"][0]["codes"][0];
+    assert_eq!(code["text"], "WIFI:S:Home;T:WPA;P:secret;;");
+    assert_eq!(code["wifi"]["network"], "Home");
+    assert_eq!(code["wifi"]["security"], "WPA");
+    assert_eq!(code["wifi"]["password"], "secret");
+    assert_eq!(code["wifi"]["hidden"], false);
+    assert_eq!(code["corners"].as_array().unwrap().len(), 4);
+    assert!(code["version"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn qr_read_reads_a_phone_photo() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/qr-phone.jpg");
+    conv()
+        .args(["qr", "--read"])
+        .arg(&fixture)
+        .assert()
+        .success()
+        .stdout("https://example.com/menu?table=4\n");
+}
+
+/// TEXT is always the text: a code for "menu.png" can be made even where
+/// a menu.png exists, and a note points at --read in case that was meant.
+#[test]
+fn qr_text_that_names_a_picture_still_makes_a_code_of_the_text() {
+    let dir = tempfile::tempdir().unwrap();
+    make_qr("https://example.com/menu", &dir.path().join("menu.png"));
+    conv()
+        .current_dir(dir.path())
+        .args(["qr", "menu.png"])
+        .assert()
+        .success()
+        .stdout(contains("the code holds the text \"menu.png\""))
+        .stdout(contains("conv qr --read menu.png"));
+    conv()
+        .current_dir(dir.path())
+        .args(["qr", "--read", "qr.png"])
+        .assert()
+        .success()
+        .stdout("menu.png\n");
+    // Text that names no file here gets no note.
+    conv()
+        .current_dir(dir.path())
+        .args(["qr", "other.png", "two.png"])
+        .assert()
+        .success()
+        .stdout(contains("--read").not());
+}
+
+#[test]
+fn qr_read_without_a_code_fails_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let blank = dir.path().join("blank.svg");
+    std::fs::write(
+        &blank,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="gray"/></svg>"#,
+    )
+    .unwrap();
+    conv()
+        .args(["qr", "--read"])
+        .arg(&blank)
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(contains("error: no QR code found;"));
+    // One picture with a code and one without: the code is printed, and
+    // the exit code says some failed.
+    let png = dir.path().join("code.png");
+    make_qr("found", &png);
+    conv()
+        .args(["qr", "--read"])
+        .arg(&png)
+        .arg(&blank)
+        .assert()
+        .code(4)
+        .stdout(format!("{}: found\n", png.display()))
+        .stderr(contains(format!(
+            "error: {}: no QR code found",
+            blank.display()
+        )));
+    let out = conv()
+        .args(["qr", "--json", "--read"])
+        .arg(&png)
+        .arg(&blank)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["results"][0]["ok"], true);
+    assert_eq!(v["results"][1]["ok"], false);
+    assert_eq!(v["results"][1]["error"]["code"], "conversion_failed");
+}
+
+#[test]
+fn qr_read_refuses_what_is_not_a_picture() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, "hi").unwrap();
+    conv()
+        .args(["qr", "--read"])
+        .arg(&notes)
+        .assert()
+        .code(2)
+        .stderr(contains("--read takes pictures"));
+    let pdf = dir.path().join("menu.pdf");
+    std::fs::write(&pdf, "%PDF-1.4").unwrap();
+    conv()
+        .args(["qr", "--read"])
+        .arg(&pdf)
+        .assert()
+        .code(2)
+        .stderr(contains("take a screenshot of the page"));
+    conv()
+        .args(["qr", "--read"])
+        .arg(dir.path().join("missing.png"))
+        .assert()
+        .code(2)
+        .stderr(contains("no such file"));
+    conv()
+        .args(["qr", "--read"])
+        .arg(dir.path())
+        .assert()
+        .code(2)
+        .stderr(contains("is a folder"));
+}
+
+#[test]
+fn qr_read_does_not_mix_with_making_a_code() {
+    for args in [
+        &["qr", "text", "--read", "a.png"][..],
+        &["qr", "--read", "a.png", "--logo", "logo.png"],
+        &["qr", "--read", "a.png", "--size", "500"],
+        &["qr", "--read", "a.png", "-o", "out"],
+        &["qr", "--read"],
+        &["qr"],
+    ] {
+        conv().args(args).assert().code(2);
+    }
+}
+
+/// Needs magick: a HEIC, an AVIF and a TIFF are converted to PNG to be
+/// read.
+#[test]
+#[ignore]
+fn qr_read_reads_other_pictures_through_a_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    for ext in ["heic", "avif", "tiff"] {
+        let path = dir.path().join(format!("code.{ext}"));
+        make_qr(&format!("https://example.com/{ext}"), &path);
+        conv()
+            .args(["qr", "--read"])
+            .arg(&path)
+            .assert()
+            .success()
+            .stdout(format!("https://example.com/{ext}\n"));
+    }
+}

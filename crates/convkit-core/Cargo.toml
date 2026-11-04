@@ -84,9 +84,9 @@ heck = "0.5"
 # Line diffs with the changed words inside changed lines. Already in the
 # tree as insta's.
 similar = { version = "2.7", default-features = false, features = ["text", "inline", "unicode"] }
-# conv colors and conv beautify decode JPEG, GIF and WebP themselves with
-# the decoders resvg already brings in to draw a logo, at the same
-# versions, so a screenshot or a phone photo needs no backend.
+# conv colors, conv beautify and conv qr --read decode JPEG, GIF and WebP
+# themselves with the decoders resvg already brings in to draw a logo, at
+# the same versions, so a screenshot or a phone photo needs no backend.
 zune-jpeg = "0.5"
 gif = { version = "0.14", default-features = false, features = ["std"] }
 image-webp = "0.2"
