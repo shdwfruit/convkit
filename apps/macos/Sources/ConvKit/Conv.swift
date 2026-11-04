@@ -36,15 +36,21 @@ enum Conv {
     }
 
     /// Runs conv with `args`. Cancelling the calling task stops the process.
-    static func run(_ binary: URL, _ args: [String], in folder: URL? = nil) async throws -> Output {
+    /// `stdin` is piped in (for a `-` argument); `env` carries secrets such as
+    /// CONVKIT_PASSWORD, which conv never takes on its command line.
+    static func run(_ binary: URL, _ args: [String], in folder: URL? = nil,
+                    stdin: Data? = nil, env extra: [String: String] = [:]) async throws -> Output {
         let process = Process()
         process.executableURL = binary
         process.arguments = args
         if let folder { process.currentDirectoryURL = folder }
-        process.standardInput = FileHandle.nullDevice
+        let input = stdin.map { _ in Pipe() }
+        process.standardInput = input ?? FileHandle.nullDevice
         // A Finder-launched app gets a minimal PATH; let conv find Homebrew backends.
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
+        env["NO_COLOR"] = "1"
+        env.merge(extra) { _, new in new }
         process.environment = env
 
         let out = Pipe()
@@ -78,6 +84,12 @@ enum Conv {
                 }
                 do {
                     try process.run()
+                    if let input, let stdin {
+                        DispatchQueue.global().async {
+                            try? input.fileHandleForWriting.write(contentsOf: stdin)
+                            try? input.fileHandleForWriting.close()
+                        }
+                    }
                 } catch {
                     process.terminationHandler = nil
                     cont.resume(throwing: error)
@@ -122,7 +134,26 @@ struct CapabilitiesResponse: Decodable {
     var kind: String?
     var sources: [String]?
     var targets: [Target]?
+    /// Archives answer with these instead of sources and targets.
+    var accepts_from: [String]?
+    var converts_to: [String]?
+    var notes: [String]?
     var error: ConvError?
+
+    /// Targets, with an archive's other kinds of archive among them ("folder", which
+    /// is opening it, has a tool of its own).
+    var allTargets: [Target] {
+        targets ?? (converts_to ?? []).filter { $0 != "folder" }.map { Target(to: $0, tuning: [], notes: nil) }
+    }
+}
+
+/// conv's name for a file's format, with the two-part ones (tar.gz) kept whole.
+func fileExt(_ url: URL) -> String {
+    let name = url.lastPathComponent.lowercased()
+    for double in ["tar.gz", "tar.xz", "tar.bz2", "tar.zst"] where name.hasSuffix("." + double) {
+        return double
+    }
+    return url.pathExtension.lowercased()
 }
 
 struct DryRunResponse: Decodable {
@@ -130,6 +161,10 @@ struct DryRunResponse: Decodable {
         var ok: Bool
         var plan: Plan?
         var error: ConvError?
+        // PDF passwords plan through qpdf and answer at this level instead.
+        var output: String?
+        var warnings: [String]?
+        var notes: [String]?
     }
     struct Plan: Decodable {
         var output: String?

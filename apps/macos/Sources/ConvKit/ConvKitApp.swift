@@ -38,6 +38,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var connected = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Text goes to conv on a pipe; a conv that exits without reading it must not
+        // take the app down with SIGPIPE.
+        signal(SIGPIPE, SIG_IGN)
         // Needed when started from a terminal rather than as an .app.
         NSApp.setActivationPolicy(.regular)
         showWindow()
@@ -105,6 +108,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let v = kv[1].replacingOccurrences(of: "_", with: " ")
                 let urls = kv[1].split(separator: ",").map { URL(fileURLWithPath: String($0)) }
                 let job: ConvertJob? = { if case .tool(let id) = model.page { return model.jobs[id] }; return nil }()
+                let quick: QuickModel? = { if case .tool(let id) = model.page { return model.quick[id] }; return nil }()
+                let merger: MergeModel? = { if case .tool(let id) = model.page, case .merge = id.kind { return model.mergeModel(id) }; return nil }()
+                let file = kv[1].isEmpty ? nil : URL(fileURLWithPath: kv[1])
                 switch kv[0] {
                 case "page": model.page = kv[1] == "home" ? .home : ToolID(rawValue: kv[1]).map(Page.tool) ?? .home
                 case "search": model.search = v
@@ -126,11 +132,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case "trimWrite": model.trimVideo.writeAll()
                 case "mergeRun":
                     // Bypasses the save panel: merges into the path given.
-                    let m = model.page == .tool(.photosToPDF) ? model.photos : model.merge
-                    let args = (m.mode == .pdfs ? ["merge"] : []) + ["--json", "--no-install"] + m.items.map(\.url.path) + [kv[1]]
+                    guard let m = merger else { break }
+                    let args = (m.mode == .photos ? [] : ["merge"]) + ["--json", "--no-install"] + m.items.map(\.url.path) + [kv[1]]
                     if let c = model.convURL, let out = try? await Conv.run(c, args) {
                         try? out.stdout.write(to: URL(fileURLWithPath: kv[1] + ".json"))
                     }
+                case "mergeAs": merger?.outputExt = kv[1]; await merger?.check()
+                case "qtext": quick?.text = kv[1].replacingOccurrences(of: "\\n", with: "\n").replacingOccurrences(of: "_", with: " "); quick?.changed(now: true); try? await Task.sleep(for: .milliseconds(700))
+                case "qtext2": quick?.text2 = kv[1].replacingOccurrences(of: "\\n", with: "\n").replacingOccurrences(of: "_", with: " "); quick?.changed(now: true); try? await Task.sleep(for: .milliseconds(700))
+                case "qopt":
+                    let o = kv[1].split(separator: ":", maxSplits: 1).map(String.init)
+                    if o.count == 2 { quick?.values[o[0]] = o[1].replacingOccurrences(of: "_", with: " ") } else if o.count == 1 { quick?.values[o[0]] = "" }
+                    quick?.changed(now: true); try? await Task.sleep(for: .milliseconds(700))
+                case "qfile": quick?.useFile = kv[1] == "1"; quick?.changed(now: true); try? await Task.sleep(for: .milliseconds(700))
+                case "pagesKeep": model.pages.keep = v; model.pages.changed()
+                case "pagesDelete": model.pages.delete = v; model.pages.changed()
+                case "pagesTurn": model.pages.turn = kv[1]; model.pages.changed()
+                case "pagesTurnPages": model.pages.turnPages = kv[1]; model.pages.changed()
+                case "pagesWrite": try? await Task.sleep(for: .milliseconds(600)); model.pages.write()
+                case "zipFormat": model.makeArchive.format = kv[1]; model.makeArchive.changed()
+                case "zipLock": model.makeArchive.lock = true; model.makeArchive.password = kv[1]; model.makeArchive.again = kv[1]; model.makeArchive.changed()
+                case "zipMake": try? await Task.sleep(for: .milliseconds(600)); model.makeArchive.make()
+                case "unzipTo": model.openArchive.outputFolder = file; model.openArchive.changed()
+                case "unzipPassword": model.openArchive.password = kv[1]; model.openArchive.changed()
+                case "unzipRun": try? await Task.sleep(for: .milliseconds(600)); model.openArchive.open()
+                case "speakText": model.speak.useFile = false; model.speak.text = v
+                case "speakTo":
+                    // Bypasses the save panel.
+                    if let c = model.convURL, let out = try? await Conv.run(c, ["speak", "--json", "-y", "-", kv[1]], stdin: Data(model.speak.text.utf8)) {
+                        try? out.stdout.write(to: URL(fileURLWithPath: kv[1] + ".json"))
+                    }
+                case "bg": model.beautify.background = kv[1]; model.beautify.changed()
+                case "colorsCode": model.colors.code = kv[1]; model.colors.changed()
+                case "colorsCount": model.colors.count = Int(kv[1]) ?? 6; model.colors.changed()
                 case "splitRanges": model.split.ranges = v; model.split.changed()
                 case "splitRun": model.split.split()
                 case "qrText": model.qr.text = v; model.qr.changed()
@@ -145,6 +179,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case "paste": await job?.paste()
                 case "format": job?.choose(format: kv[1])
                 case "rotate": job?.rotate = kv[1]
+                case "flip": job?.flip = kv[1]
+                case "crop": job?.crop = kv[1]
+                case "compress": job?.compress = kv[1] == "1"
+                case "every": job?.every = kv[1]
+                case "denoise": job?.denoise = kv[1] == "off" ? "" : kv[1]
+                case "audioFile": job?.audioFile = file
+                case "mix": job?.mix = kv[1] == "1"
+                case "mixLevel": job?.mixLevel = kv[1]
+                case "subs": job?.subtitlesFile = file
+                case "pdfPages": job?.pdfPages = kv[1]
+                case "dpi": job?.dpi = kv[1]
+                case "lock": job?.lock = kv[1] == "1"
+                case "lockPassword": job?.lockPassword = kv[1]
+                case "lockAgain": job?.lockAgain = kv[1]
+                case "allowPrint": job?.allowPrint = kv[1] == "1"
+                case "allowCopy": job?.allowCopy = kv[1] == "1"
+                case "unlock": job?.unlock = kv[1] == "1"
+                case "openPassword": job?.openPassword = kv[1]
                 case "copy": job?.copyResult = kv[1] == "1"
                 case "maxSize": job?.maxSize = kv[1]
                 case "resize": job?.resize = kv[1]
@@ -208,9 +260,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .trim:
                 let t = id == .trimAudio ? model.trimAudio : model.trimVideo
                 d += "trim: dur=\(t.duration) video=\(t.hasVideo) targets=\(t.targets) clips=\(t.clips.map { "\($0.start)-\($0.end) \($0.status)" })\n"
-            case .mergePDF, .photosToPDF:
-                let m = id == .mergePDF ? model.merge : model.photos
-                d += "merge(\(m.mode)): \(m.items.map { "\($0.url.lastPathComponent):\($0.pages ?? -1)" }) skipped=\(m.skipped) ready=\(m.ready) warnings=\(m.warnings) problem=\(m.problem ?? "-")\n"
+            case .merge:
+                let m = model.mergeModel(id)
+                d += "merge(\(m.mode)): \(m.items.map { "\($0.url.lastPathComponent):\($0.pages ?? -1)" }) as=\(m.outputExt) skipped=\(m.skipped) ready=\(m.ready) warnings=\(m.warnings) problem=\(m.problem ?? "-") result=\(m.result?.lastPathComponent ?? "-")\n"
+            case .pages:
+                let p = model.pages
+                d += "pages: file=\(p.file?.lastPathComponent ?? "-") n=\(p.pages ?? -1) locked=\(p.locked) planned=\(p.planned?.lastPathComponent ?? "-") (\(p.plannedPages ?? -1)) written=\(p.written?.lastPathComponent ?? "-") problem=\(p.problem ?? "-") warnings=\(p.warnings)\n"
+            case .quick:
+                if let q = model.quick[id] {
+                    d += "quick \(id.rawValue): file=\(q.file?.lastPathComponent ?? "-") useFile=\(q.useFile) values=\(q.values.sorted { $0.key < $1.key })\n"
+                    d += "  disabled=\(q.spec.options.compactMap { o in o.why?(q).map { "\(o.key): \($0)" } })\n"
+                    d += "  command: \(q.command)\n  problem=\(q.problem ?? "-") notes=\(q.notes) saved=\(q.savedFile?.lastPathComponent ?? "-")\n"
+                    d += "  output:\n\(q.output.split(separator: "\n", omittingEmptySubsequences: false).prefix(14).map { "    " + $0 }.joined(separator: "\n"))\n"
+                }
+            case .speak:
+                d += "speak: voices=\(model.speak.voices.count) first=\(model.speak.voices.prefix(3).map(\.name)) ready=\(model.speak.ready) problem=\(model.speak.problem ?? "-")\n"
+            case .beautify:
+                let b = model.beautify
+                d += "beautify: input=\(b.input?.lastPathComponent ?? "-") preview=\(b.preview?.size as Any) size=\(b.size) problem=\(b.problem ?? "-") notes=\(b.notes)\n"
+            case .colors:
+                let c = model.colors
+                d += "colors: \(c.swatches.map { "\($0.hex) \(Int($0.share * 100))%" }) problem=\(c.problem ?? "-")\n  code:\n\(c.codeText)\n"
+            case .wifi:
+                d += "wifi: networks=\(model.wifi.networks.count) problem=\(model.wifi.problem ?? "-")\n"
+            case .makeArchive:
+                let a = model.makeArchive
+                d += "zip: items=\(a.items.map(\.lastPathComponent)) format=\(a.format) pwReason=\(a.passwordReason ?? "-") planned=\(a.planned?.path ?? "-") written=\(a.written?.path ?? "-") result=\(a.result ?? "-") problem=\(a.problem ?? "-") notes=\(a.notes)\n"
+            case .openArchive:
+                let a = model.openArchive
+                d += "unzip: file=\(a.file?.lastPathComponent ?? "-") entries=\(a.entries.count) bytes=\(a.totalBytes) encrypted=\(a.encrypted) ready=\(a.ready) planned=\(a.planned?.path ?? "-") written=\(a.written?.path ?? "-") problem=\(a.problem ?? "-")\n"
             case .split:
                 let s = model.split
                 d += "split: pages=\(s.pages ?? -1) planned=\(s.planned.map { "\(($0.path as NSString).lastPathComponent)\($0.pages ?? [])" }) written=\(s.written.map(\.lastPathComponent)) problem=\(s.problem ?? "-") exists=\(s.exists)\n"
@@ -244,7 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for c in job.preset.controls {
             for f in c.flags { d += "  \(f): \(job.reason(f) ?? "on")\n" }
         }
-        d += "  command: \(job.commandPreview)\n"
+        d += "  command: \(job.commandPreview)\n  env: \(job.passwordEnv.keys.sorted())\n"
         for f in job.files {
             d += "  \(f.url.lastPathComponent) misfit=\(f.misfit ?? "-") -> \(f.plannedOutput?.lastPathComponent ?? "-") problem=\(f.problem ?? "-") warnings=\(f.warnings) status=\(f.status)\n"
         }

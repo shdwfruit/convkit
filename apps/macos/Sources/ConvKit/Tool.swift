@@ -84,12 +84,26 @@ struct RootView: View {
             case .trim:
                 TrimView(trim: id == .trimAudio ? model.trimAudio : model.trimVideo, tool: id,
                          paste: model.pasteURLs)
-            case .mergePDF:
-                MergeView(merge: model.merge, paste: model.pasteURLs)
-            case .photosToPDF:
-                MergeView(merge: model.photos, paste: model.pasteURLs)
+            case .merge:
+                MergeView(merge: model.mergeModel(id), paste: model.pasteURLs)
             case .split:
                 SplitView(split: model.split, paste: model.pasteURLs)
+            case .pages:
+                PagesView(pages: model.pages, paste: model.pasteURLs)
+            case .quick:
+                if let q = model.quick[id] { QuickView(quick: q) }
+            case .speak:
+                SpeakView(speak: model.speak)
+            case .beautify:
+                BeautifyView(beautify: model.beautify, paste: model.pasteURLs)
+            case .colors:
+                ColorsView(colors: model.colors, paste: model.pasteURLs)
+            case .wifi:
+                WifiView(wifi: model.wifi)
+            case .makeArchive:
+                MakeArchiveView(archive: model.makeArchive, paste: model.pasteURLs)
+            case .openArchive:
+                OpenArchiveView(archive: model.openArchive, paste: model.pasteURLs)
             case .scan:
                 ScanView(scan: model.scan) { urls in model.open(.convert, with: urls) }
             case .qr:

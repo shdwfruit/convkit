@@ -245,7 +245,7 @@ struct ToolRow: View {
             HStack(spacing: 8) {
                 ToolIcon(tool: tool, size: 20)
                 Text(tool.title).foregroundStyle(.primary)
-                if showsSection && [.videoSpeed, .audioSpeed, .stripVideo, .stripAudio].contains(tool) {
+                if showsSection && tool.sharesName {
                     Text(tool.category.title).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)

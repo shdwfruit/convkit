@@ -31,11 +31,11 @@ private func pageCount(_ url: URL) -> Int? { PDFDocument(url: url)?.pageCount }
 
 // MARK: - Merge
 
-/// Joins files into one PDF in the order shown: PDFs through `conv merge`, pictures
-/// through plain `conv a.jpg b.png out.pdf`, a page each.
+/// Joins files into one in the order shown: PDFs (and pictures among them), videos or
+/// sound through `conv merge`, and pictures alone through plain `conv a.jpg b.png out.pdf`.
 @Observable
 final class MergeModel {
-    enum Mode { case pdfs, photos }
+    enum Mode { case pdfs, photos, videos, audio }
 
     struct Item: Identifiable, Hashable {
         let id = UUID()
@@ -45,9 +45,14 @@ final class MergeModel {
 
     let mode: Mode
     var conv: URL?
-    /// Extensions taken: pdf, or the pictures conv puts into a PDF.
+    /// Extensions taken, from conv's formats once it's connected.
     var accepts: Set<String>
-    var items: [Item] = []
+    /// What a join can be saved as (videos and sound).
+    var outputs: [String] = []
+    var outputExt = ""
+    var items: [Item] = [] {
+        didSet { if oldValue.first?.url != items.first?.url { pickOutput() } }
+    }
     private(set) var skipped: [String] = []
     private(set) var warnings: [String] = []
     private(set) var problem: String?
@@ -57,11 +62,39 @@ final class MergeModel {
     init(mode: Mode) {
         self.mode = mode
         self.accepts = mode == .pdfs ? ["pdf"] : []
+        switch mode {
+        case .videos: outputs = ["mp4", "mov", "mkv", "webm"]
+        case .audio: outputs = ["m4a", "mp3", "wav", "flac", "aiff", "opus", "ogg"]
+        case .pdfs, .photos: outputs = ["pdf"]
+        }
+        outputExt = outputs[0]
     }
 
-    var title: String { mode == .pdfs ? "Merge PDFs" : "Photos to PDF" }
-    var noun: String { mode == .pdfs ? "PDFs" : "pictures" }
-    private var minimum: Int { mode == .pdfs ? 2 : 1 }
+    var tool: ToolID {
+        switch mode {
+        case .pdfs: .mergePDF
+        case .photos: .photosToPDF
+        case .videos: .joinVideos
+        case .audio: .joinAudio
+        }
+    }
+    var title: String { tool.title }
+    var noun: String {
+        switch mode {
+        case .pdfs: "PDFs"
+        case .photos: "pictures"
+        case .videos: "videos"
+        case .audio: "audio files"
+        }
+    }
+    private var minimum: Int { mode == .photos ? 1 : 2 }
+
+    /// The first file's own format when a join can be saved as it.
+    private func pickOutput() {
+        guard mode == .videos || mode == .audio, let first = items.first else { return }
+        let ext = fileExt(first.url)
+        if outputs.contains(ext) { outputExt = ext }
+    }
 
     @MainActor
     func add(_ urls: [URL]) {
@@ -75,8 +108,14 @@ final class MergeModel {
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
                 : [url]
             for file in files {
-                if accepts.contains(file.pathExtension.lowercased()) {
-                    items.append(Item(url: file, pages: mode == .pdfs ? pageCount(file) : 1))
+                let ext = fileExt(file)
+                if accepts.contains(ext) {
+                    let pages: Int? = switch mode {
+                    case .pdfs: ext == "pdf" ? pageCount(file) : 1
+                    case .photos: 1
+                    case .videos, .audio: nil
+                    }
+                    items.append(Item(url: file, pages: pages))
                 } else if !isDir.boolValue {
                     skipped.append(file.lastPathComponent)
                 }
@@ -94,16 +133,19 @@ final class MergeModel {
     func check() async {
         guard let conv, items.count >= minimum else {
             warnings = []
-            problem = items.count == 1 && mode == .pdfs ? "Add at least one more PDF." : nil
+            problem = items.count == 1 && mode != .photos ? "Add at least one more." : nil
             return
         }
-        let stand = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-merge-check.pdf")
+        let stand = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-merge-check.\(outputExt)")
         guard let out = try? await Conv.run(conv, command + ["--dry-run", "--json", "--no-install"]
             + items.map(\.url.path) + [stand.path]) else { return }
-        let name = { (s: String) in s.replacingOccurrences(of: stand.lastPathComponent, with: "the new PDF") }
+        let name = { (s: String) in s.replacingOccurrences(of: stand.lastPathComponent, with: "the new file") }
         switch mode {
-        case .pdfs:
-            guard let resp = out.decode(PDFResponse.self) else { return }
+        case .pdfs, .videos, .audio:
+            guard let resp = out.decode(PDFResponse.self) else {
+                problem = Conv.stderrMessage(out.stderr)
+                return
+            }
             problem = resp.problem
             warnings = ((resp.entry?.warnings ?? []) + (resp.entry?.notes ?? [])).map(name)
         case .photos:
@@ -116,14 +158,14 @@ final class MergeModel {
         }
     }
 
-    private var command: [String] { mode == .pdfs ? ["merge"] : [] }
+    private var command: [String] { mode == .photos ? [] : ["merge"] }
 
     @MainActor
     func merge() {
         guard let conv, items.count >= minimum else { return }
         let first = items[0].url.deletingPathExtension().lastPathComponent
-        guard let url = askWhereToSave(name: first + (mode == .pdfs ? "-merged.pdf" : ".pdf"), types: ["pdf"])
-        else { return }
+        let name = first + (mode == .photos ? "" : "-merged") + "." + outputExt
+        guard let url = askWhereToSave(name: name, types: [outputExt]) else { return }
         // The save panel has already asked about replacing, so -y is the user's answer.
         let args = command + ["--json", "--no-install", "-y"] + items.map(\.url.path) + [url.path]
         Task { @MainActor in
@@ -134,7 +176,7 @@ final class MergeModel {
                 return
             }
             switch mode {
-            case .pdfs:
+            case .pdfs, .videos, .audio:
                 guard let resp = out.decode(PDFResponse.self) else { problem = Conv.stderrMessage(out.stderr); return }
                 if let p = resp.problem {
                     problem = p
@@ -160,16 +202,31 @@ struct MergeView: View {
     @Bindable var merge: MergeModel
     let paste: () async -> [URL]
 
+    private var dropTitle: String {
+        switch merge.mode {
+        case .pdfs: "Drop PDFs to join"
+        case .photos: "Drop pictures to put in a PDF"
+        case .videos: "Drop videos to join"
+        case .audio: "Drop recordings to join"
+        }
+    }
+
+    private var dropDetail: String {
+        switch merge.mode {
+        case .pdfs: "Joined in the order shown. Text stays selectable and links keep working. A picture among them gets a page the size of the one beside it."
+        case .photos: "A page each, in the order shown. A JPEG goes in as it is, without being re-encoded."
+        case .videos: "One after another, in the order shown. Clips that match are joined without re-encoding; the rest are fitted to the first one's size, never stretched."
+        case .audio: "One after another, in the order shown. A video's sound can go in too."
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if merge.items.isEmpty {
                 VStack(spacing: 14) {
-                    ToolIcon(tool: merge.mode == .pdfs ? .mergePDF : .photosToPDF, size: 52)
-                    Text(merge.mode == .pdfs ? "Drop PDFs to join" : "Drop pictures to put in a PDF")
-                        .font(.title2.weight(.semibold))
-                    Text(merge.mode == .pdfs
-                         ? "They're joined in the order shown. Text stays selectable and links keep working."
-                         : "A page each, in the order shown. A JPEG goes in as it is, without being re-encoded.")
+                    ToolIcon(tool: merge.tool, size: 52)
+                    Text(dropTitle).font(.title2.weight(.semibold))
+                    Text(dropDetail)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 420)
@@ -217,26 +274,49 @@ struct MergeView: View {
                 Button { Task { merge.add(await paste()) } } label: {
                     Label("Paste", systemImage: "doc.on.clipboard")
                 }
-                .help(merge.mode == .pdfs ? "Add PDFs copied in Finder" : "Add pictures copied in Finder, or a copied picture")
-                Button(merge.mode == .pdfs ? "Merge…" : "Make PDF…") { merge.merge() }
+                .help(merge.mode == .photos ? "Add pictures copied in Finder, or a copied picture" : "Add files copied in Finder")
+                Button(merge.mode == .photos ? "Make PDF…" : merge.mode == .pdfs ? "Merge…" : "Join…") { merge.merge() }
                     .buttonStyle(.borderedProminent)
                     .disabled(!merge.ready)
             }
+        }
+        .onChange(of: merge.outputExt) { Task { await merge.check() } }
+    }
+
+    private var countLine: String {
+        let n = merge.items.count
+        switch merge.mode {
+        case .pdfs: return "\(n) files, \(merge.totalPages) pages. Drag to reorder."
+        case .photos: return "\(n == 1 ? "1 page" : "\(n) pages"). Drag to reorder."
+        case .videos, .audio: return "\(n) \(n == 1 ? "file" : "files"). Drag to reorder."
         }
     }
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(merge.mode == .pdfs
-                 ? "\(merge.items.count) PDFs, \(merge.totalPages) pages. Drag to reorder."
-                 : "\(merge.items.count == 1 ? "1 page" : "\(merge.items.count) pages"). Drag to reorder.")
-                .font(.callout).foregroundStyle(.secondary)
+            HStack {
+                Text(countLine).font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                if merge.outputs.count > 1 {
+                    Picker("Save as", selection: $merge.outputExt) {
+                        ForEach(merge.outputs, id: \.self) { Text($0.uppercased()).tag($0) }
+                    }
+                    .fixedSize()
+                }
+            }
             if !merge.skipped.isEmpty { skippedNote }
             if let p = merge.problem {
                 Label(p, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
             }
             ForEach(merge.warnings, id: \.self) {
                 Text($0).font(.caption).foregroundStyle(.orange)
+            }
+            if merge.working {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(merge.mode == .videos ? "Joining. Clips that don't match are encoded once, which takes a while." : "Working…")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
             }
             if let url = merge.result {
                 Button("Saved \(url.lastPathComponent). Show in Finder") {
@@ -251,8 +331,13 @@ struct MergeView: View {
     }
 
     private var skippedNote: some View {
-        Label("Left out, not \(merge.mode == .pdfs ? "a PDF" : "a picture conv puts in a PDF"): \(merge.skipped.joined(separator: ", "))",
-              systemImage: "nosign")
+        let what = switch merge.mode {
+        case .pdfs: "a PDF or a picture"
+        case .photos: "a picture conv puts in a PDF"
+        case .videos: "a video"
+        case .audio: "audio or video"
+        }
+        return Label("Left out, not \(what): \(merge.skipped.joined(separator: ", "))", systemImage: "nosign")
             .font(.caption)
             .foregroundStyle(.secondary)
     }
@@ -260,9 +345,7 @@ struct MergeView: View {
     private func choose() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = merge.mode == .pdfs
-            ? [.pdf]
-            : merge.accepts.compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = merge.accepts.compactMap { UTType(filenameExtension: $0) }
         if panel.runModal() == .OK { merge.add(panel.urls) }
     }
 }
@@ -469,6 +552,213 @@ struct SplitView: View {
         panel.canCreateDirectories = true
         panel.prompt = "Save Here"
         if panel.runModal() == .OK, let url = panel.url { split.outputFolder = url }
+    }
+}
+
+// MARK: - Pages
+
+/// `conv pages`: keep, reorder, delete and turn a PDF's pages into a new PDF.
+@Observable
+final class PagesModel {
+    var conv: URL?
+    private(set) var file: URL?
+    private(set) var pages: Int?
+    private(set) var locked = false
+    /// In the order to write them; empty keeps every page.
+    var keep = ""
+    var delete = ""
+    var turn = ""
+    /// Empty turns every page.
+    var turnPages = ""
+    var password = ""
+
+    private(set) var planned: URL?
+    private(set) var plannedPages: Int?
+    private(set) var warnings: [String] = []
+    private(set) var problem: String?
+    private(set) var written: URL?
+    private(set) var exists = false
+    private(set) var working = false
+    private var task: Task<Void, Never>?
+
+    @MainActor
+    func load(_ url: URL) {
+        file = url
+        let doc = PDFDocument(url: url)
+        pages = doc?.pageCount
+        locked = doc?.isLocked ?? false
+        written = nil
+        changed()
+    }
+
+    private var args: [String]? {
+        guard let file else { return nil }
+        var a = [file.path]
+        a += keep.split(whereSeparator: { $0 == " " }).map(String.init)
+        let del = delete.replacingOccurrences(of: " ", with: "")
+        if !del.isEmpty { a += ["--delete", del] }
+        if !turn.isEmpty {
+            let which = turnPages.replacingOccurrences(of: " ", with: "")
+            a += ["--rotate", which.isEmpty ? turn : "\(turn):\(which)"]
+        }
+        return a
+    }
+
+    var nothingToDo: Bool { keep.trimmingCharacters(in: .whitespaces).isEmpty && delete.isEmpty && turn.isEmpty }
+    private var env: [String: String] { password.isEmpty ? [:] : ["CONVKIT_PASSWORD": password] }
+
+    func changed() {
+        task?.cancel()
+        exists = false
+        guard let conv, let a = args else { return }
+        if nothingToDo {
+            planned = nil
+            warnings = []
+            problem = nil
+            return
+        }
+        task = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled,
+                  let out = try? await Conv.run(conv, ["pages", "--dry-run", "--json", "--no-install"] + a, env: env),
+                  !Task.isCancelled else { return }
+            guard let resp = out.decode(PDFResponse.self) else {
+                problem = Conv.stderrMessage(out.stderr)
+                planned = nil
+                return
+            }
+            problem = resp.problem
+            planned = resp.entry?.output.map(URL.init(fileURLWithPath:))
+            plannedPages = resp.entry?.pages
+            warnings = (resp.entry?.warnings ?? []) + (resp.entry?.notes ?? [])
+        }
+    }
+
+    var ready: Bool { planned != nil && problem == nil && !working }
+
+    @MainActor
+    func write(replace: Bool = false) {
+        guard let conv, let a = args else { return }
+        task?.cancel()
+        task = Task { @MainActor in
+            working = true
+            defer { working = false }
+            guard let out = try? await Conv.run(conv, ["pages", "--json", "--no-install"] + (replace ? ["-y"] : []) + a, env: env),
+                  let resp = out.decode(PDFResponse.self) else {
+                problem = "conv didn't answer."
+                return
+            }
+            if let err = resp.entry?.error ?? resp.error {
+                exists = err.code == "output_exists"
+                problem = AppModel.friendly(err)
+                return
+            }
+            exists = false
+            problem = nil
+            written = resp.entry?.output.map(URL.init(fileURLWithPath:)) ?? planned
+            warnings = (resp.entry?.warnings ?? []) + (resp.entry?.notes ?? [])
+        }
+    }
+}
+
+struct PagesView: View {
+    @Bindable var pages: PagesModel
+    let paste: () async -> [URL]
+
+    var body: some View {
+        Group {
+            if let file = pages.file {
+                HSplitView {
+                    PDFThumbnails(url: file)
+                        .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
+                    controls
+                        .frame(minWidth: 300, idealWidth: 340, maxWidth: 420)
+                }
+            } else {
+                VStack(spacing: 14) {
+                    ToolIcon(tool: .pdfPages, size: 52)
+                    Text("Drop a PDF to arrange").font(.title2.weight(.semibold))
+                    Text("Keep the pages you list in that order, leave some out, or turn them. Bookmarks, links and metadata stay.")
+                        .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
+                    Button("Choose…") { choose() }.controlSize(.large)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let first = urls.first, first.pathExtension.lowercased() == "pdf" else { return false }
+            pages.load(first)
+            return true
+        }
+        .navigationTitle("Arrange Pages")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { choose() } label: { Label("Open", systemImage: "folder") }
+                Button { Task { if let f = await paste().first(where: { $0.pathExtension.lowercased() == "pdf" }) { pages.load(f) } } } label: {
+                    Label("Paste", systemImage: "doc.on.clipboard")
+                }
+                .help("Use a PDF copied in Finder")
+                Button("Save") { pages.write() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!pages.ready)
+            }
+        }
+        .onChange(of: [pages.keep, pages.delete, pages.turn, pages.turnPages, pages.password]) { pages.changed() }
+    }
+
+    private var controls: some View {
+        Form {
+            Section {
+                LabeledContent("File", value: pages.file?.lastPathComponent ?? "")
+                if let p = pages.pages { LabeledContent("Pages", value: "\(p)") }
+                if pages.locked {
+                    SecureField("Password", text: $pages.password, prompt: Text("It's locked"))
+                }
+            }
+            Section {
+                TextField("Keep", text: $pages.keep, prompt: Text("Every page, in order"))
+                    .font(.system(.body, design: .monospaced))
+                TextField("Leave out", text: $pages.delete, prompt: Text("None"))
+                    .font(.system(.body, design: .monospaced))
+            } header: {
+                Text("Pages")
+            } footer: {
+                Text("Keep lists pages in the order to write them: 3 1-2 5-z. z is the last page, 5-1 is reversed, and a page listed twice appears twice. Leave out takes 4,6-7. Numbers are always the original's.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Turn") {
+                Picker("Turn", selection: $pages.turn) {
+                    Text("Don't turn").tag("")
+                    Text("Right (90° clockwise)").tag("right")
+                    Text("Left (90° counterclockwise)").tag("left")
+                    Text("Upside down (180°)").tag("180")
+                }
+                TextField("Which pages", text: $pages.turnPages, prompt: Text("All of them"))
+                    .why(pages.turn.isEmpty ? "Choose a turn first." : nil)
+            }
+            Section(pages.written == nil ? "Will write" : "Wrote") {
+                if pages.nothingToDo {
+                    Text("Say which pages to keep, leave out or turn.").foregroundStyle(.secondary)
+                }
+                if let p = pages.problem {
+                    Label(p, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    if pages.exists { Button("Replace It") { pages.write(replace: true) } }
+                }
+                if let w = pages.written {
+                    Button(w.lastPathComponent) { NSWorkspace.shared.activateFileViewerSelecting([w]) }.buttonStyle(.link)
+                } else if let p = pages.planned {
+                    LabeledContent(p.lastPathComponent, value: pages.plannedPages.map { $0 == 1 ? "1 page" : "\($0) pages" } ?? "")
+                }
+                ForEach(pages.warnings, id: \.self) { Text($0).font(.caption).foregroundStyle(.orange) }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.pdf]
+        if panel.runModal() == .OK, let url = panel.url { pages.load(url) }
     }
 }
 

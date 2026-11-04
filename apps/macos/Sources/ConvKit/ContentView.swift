@@ -17,15 +17,7 @@ struct ConvertView: View {
         }
         .navigationTitle(job.tool.title)
         .toolbar { toolbar }
-        .onChange(of: optionsKey) { job.optionsChanged() }
-    }
-
-    /// Changes whenever any option does, so the preview re-runs.
-    private var optionsKey: String {
-        [job.format, job.maxSize, job.resize, "\(job.upscale)", job.colors, job.fps, job.crf,
-         job.duration, "\(job.useQuality)\(Int(job.quality))",
-         job.speed, "\(job.shiftPitch)", job.start, job.end, "\(job.strip)", job.rotate,
-         job.outputFolder?.path ?? ""].joined(separator: "|")
+        .onChange(of: job.settingsKey) { job.optionsChanged() }
     }
 
     @ToolbarContentBuilder
@@ -185,9 +177,11 @@ struct FileRow: View {
             if let problem = item.problem {
                 line(problem, systemImage: "exclamationmark.circle", color: .secondary)
             } else if let out = item.plannedOutput {
+                // Stills and PDF pages go into a folder, named without an extension.
+                let name = out.pathExtension.isEmpty ? out.lastPathComponent + "/" : out.lastPathComponent
                 Label(item.pasted && job.outputFolder == nil
-                      ? "\(out.lastPathComponent) in \(out.deletingLastPathComponent().lastPathComponent)"
-                      : out.lastPathComponent,
+                      ? "\(name) in \(out.deletingLastPathComponent().lastPathComponent)"
+                      : name,
                       systemImage: "arrow.turn.down.right")
                     .font(.callout)
                     .foregroundStyle(.secondary)

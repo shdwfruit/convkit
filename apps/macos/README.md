@@ -13,28 +13,45 @@ Finding a tool
   way, unless the tool showing takes them.
 
 The tools
-- Video: Compress Video, Convert Video, Trim Video, Video to GIF, Extract
-  Audio, Change Speed, Resize Video, Turn Video, Remove Metadata.
-- Audio: Convert Audio, Trim Audio, Change Speed, Remove Metadata.
-- Images: Convert Image, Resize Image, Turn Image, Remove Location, Make an Icon.
-- Documents: Merge PDFs, Split PDF, Photos to PDF, Convert Document.
-- Text: QR Code, ASCII Art.
-- Developer: Format JSON (`conv fmt` as you type: tidy, pack, sort, check,
-  or write another language), Convert Data (JSON, YAML, TOML and CSV files).
-- Files: Convert Anything (every format and option), Scan Folder.
+- Video: Compress, Convert, Trim, Join, Video to GIF, Video to Images (stills),
+  Extract Audio, Add Audio (replace or mix in a song or voice-over), Burn
+  Subtitles, Crop (9:16, 1:1 or black bars), Turn or Flip, Resize, Change
+  Speed, Remove Metadata.
+- Audio: Convert, Trim, Join, Remove Noise, Change Speed, Remove Metadata.
+- Images: Convert, Resize, Crop, Turn or Flip, Beautify Screenshot, Color
+  Palette, Make an Icon, Remove Location.
+- Documents: Compress PDF, Merge PDFs (pictures among them too), Split PDF,
+  Arrange Pages, PDF to Images, Photos to PDF, Lock PDF, Unlock PDF, Convert
+  Document.
+- Text: QR Code, Read QR Code, Text to Speech, ASCII Art, Word Count, Change
+  Case, Clean Links, Hidden Characters, Compare Text, Lorem Ipsum, Wi-Fi
+  Password.
+- Developer: Format JSON (`conv fmt` as you type), Convert Data, Base64,
+  Checksum, JWT Decoder, Timestamps, UUID.
+- Files: Convert Anything (every format and option), File Info, Zip Files,
+  Open Archive, Scan Folder.
 - conv: Backends (install and update what conv uses), Formats, What's New.
 
 Most tools are Convert with a narrower form: the same `conv FILE .ext --flags`,
 but showing only the options for that job. More Options carries the files
 and settings into Convert Anything.
 
+The small text and developer tools run their conv command as you type and
+show what it prints. Text goes to conv on a pipe, so a long paste or one
+starting with a dash is fine.
+
 Options that don't fit the files are greyed out, and hovering says why: a
 PNG has no quality setting, a picture has no frame rate, End and a length
 can't both be set. Convert Anything greys out everything until a file is
 added. What fits comes from conv itself: `conv capabilities` for each format,
-and what a format's own sources take on the way to it when a file keeps its
-format. A file a tool doesn't take is listed but left out, with a pointer to
-Convert Anything.
+and, when a file keeps its format, what its own sources take on the way to
+it and it takes on the way out. The one exception is a PDF kept as a PDF
+(compress, size, lock, unlock), which `capabilities` doesn't list as a pair.
+A file a tool doesn't take is listed but left out, with a pointer to Convert
+Anything.
+
+Passwords (Lock PDF, Unlock PDF, a locked zip, a JWT secret) go to conv in
+an environment variable, never on its command line.
 
 The app runs the `conv` binary and doesn't copy any of conv's rules. The name
 of each new file, and any problem, come from `conv --dry-run --json` as you

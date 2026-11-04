@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A convert-style tool's form. It shows only the tool's own knobs, and greys out any
 /// that conv wouldn't use for the files in the list, saying why.
@@ -16,10 +17,14 @@ struct OptionsView: View {
         VStack(spacing: 0) {
             Form {
                 formatSection
-                if shows(.maxSize) || shows(.resize) || shows(.quality) || shows(.colors) { sizeSection }
+                if shows(.compress) || shows(.maxSize) || shows(.resize) || shows(.quality) || shows(.colors) { sizeSection }
+                if shows(.pages) || shows(.dpi) { pagesSection }
                 if shows(.fps) || shows(.crf) { videoSection }
-                if shows(.time) || shows(.speed) { timeSection }
-                if shows(.rotate) { turnSection }
+                if shows(.rotate) || shows(.flip) || shows(.crop) { pictureSection }
+                if shows(.time) || shows(.every) || shows(.speed) { timeSection }
+                if shows(.denoise) || shows(.audio) { soundSection }
+                if shows(.subtitles) { subtitlesSection }
+                if shows(.lock) || shows(.unlock) || job.preset.alwaysUnlock { passwordSection }
                 if shows(.strip) || job.preset.alwaysStrip { privacySection }
                 saveSection
                 if let moreOptions {
@@ -46,6 +51,8 @@ struct OptionsView: View {
         Section {
             if let fixed = job.preset.fixedTarget {
                 LabeledContent("Makes", value: fixed.uppercased())
+            } else if case .keep = job.preset.target {
+                LabeledContent("Saves as", value: keptName)
             } else {
                 Picker(job.allowsSame ? "Save as" : "Convert to", selection: Binding(
                     get: { job.format },
@@ -78,8 +85,19 @@ struct OptionsView: View {
         }
     }
 
+    /// "PDF" for a list of PDFs, "Same format" for a mix.
+    private var keptName: String {
+        let names = Set(job.fitting.map { job.caps.name($0.ext).uppercased() })
+        return names.count == 1 ? names.first! : "Same format"
+    }
+
     private var sizeSection: some View {
         Section {
+            if shows(.compress) {
+                Toggle("Shrink big pictures, keep the look", isOn: $job.compress)
+                    .help("Pictures drawn above 225 dpi go to 150 dpi, and high-quality JPEGs are saved again. Text, links, bookmarks and forms stay as they are.")
+                    .why(job.reason("--compress"))
+            }
             if shows(.maxSize) {
                 PresetField(
                     "Keep under", value: $job.maxSize,
@@ -123,7 +141,41 @@ struct OptionsView: View {
         } header: {
             Text("Size")
         } footer: {
-            sectionReason([.maxSize, .resize, .quality, .colors])
+            VStack(alignment: .leading, spacing: 4) {
+                sectionReason([.compress, .maxSize, .resize, .quality, .colors])
+                if shows(.compress) && job.applies("--compress") {
+                    Text("The result is never bigger than the PDF. A size to keep under makes conv try lower resolutions until it fits, and it asks before going below 120 dpi.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var pagesSection: some View {
+        Section {
+            if shows(.pages) {
+                TextField("Pages", text: $job.pdfPages, prompt: Text("Every page"))
+                    .why(job.reason("--pages"))
+            }
+            if shows(.dpi) {
+                PresetField(
+                    "Resolution", value: $job.dpi,
+                    presets: [("150 dpi", ""), ("72 dpi, for screens", "72"), ("300 dpi, for print", "300"),
+                              ("600 dpi", "600")],
+                    placeholder: "36 to 1200"
+                )
+                .why(job.reason("--dpi"))
+            }
+        } header: {
+            Text("Pages")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                sectionReason([.pages, .dpi])
+                if job.applies("--pages") {
+                    Text("Like 1-3,7. z is the last page. One page makes one file; more go into a folder.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -164,6 +216,15 @@ struct OptionsView: View {
                 TextField("Or keep", text: $job.duration, prompt: Text("a length, like 30s"))
                     .why(job.reason("--duration"))
             }
+            if shows(.every) {
+                PresetField(
+                    "A still every", value: $job.every,
+                    presets: [("Not set", ""), ("Second", "1s"), ("2 seconds", "2s"), ("5 seconds", "5s"),
+                              ("10 seconds", "10s"), ("Frame", "frame")],
+                    placeholder: "0.5 or 1:00"
+                )
+                .why(job.reason("--every"))
+            }
             if shows(.speed) {
                 PresetField(
                     "Speed", value: $job.speed,
@@ -180,7 +241,7 @@ struct OptionsView: View {
             Text("Time")
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
-                sectionReason([.time, .speed])
+                sectionReason([.time, .every, .speed])
                 if shows(.time) && job.applies("--start") {
                     Text("Seconds (90), minutes (1:30) or hours (1:02:03). A minus counts from the end: -30 is the last 30 seconds.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -189,19 +250,151 @@ struct OptionsView: View {
         }
     }
 
-    private var turnSection: some View {
+    private var pictureSection: some View {
         Section {
-            Picker("Turn", selection: $job.rotate) {
-                Text("Don't turn").tag("")
-                Text("Right (90° clockwise)").tag("right")
-                Text("Left (90° counterclockwise)").tag("left")
-                Text("Upside down (180°)").tag("180")
+            if shows(.rotate) {
+                Picker("Turn", selection: $job.rotate) {
+                    Text("Don't turn").tag("")
+                    Text("Right (90° clockwise)").tag("right")
+                    Text("Left (90° counterclockwise)").tag("left")
+                    Text("Upside down (180°)").tag("180")
+                }
+                .why(job.reason("--rotate"))
             }
-            .why(job.reason("--rotate"))
+            if shows(.flip) {
+                Picker("Flip", selection: $job.flip) {
+                    Text("Don't flip").tag("")
+                    Text("Mirror, left to right").tag("h")
+                    Text("Top to bottom").tag("v")
+                }
+                .why(job.reason("--flip"))
+            }
+            if shows(.crop) {
+                PresetField(
+                    "Crop", value: $job.crop,
+                    presets: [("Don't crop", ""), ("Square (1:1)", "1:1"), ("Tall, for Stories (9:16)", "9:16"),
+                              ("Wide (16:9)", "16:9"), ("Portrait (4:5)", "4:5"), ("Classic (4:3)", "4:3"),
+                              ("Cut away bars or a border", "auto")],
+                    placeholder: "1280x720+0+140"
+                )
+                .why(job.reason("--crop"))
+            }
         } header: {
-            Text("Turn")
+            Text("Picture")
         } footer: {
-            sectionReason([.rotate])
+            VStack(alignment: .leading, spacing: 4) {
+                sectionReason([.rotate, .flip, .crop])
+                if shows(.crop) && job.applies("--crop") {
+                    Text("A shape keeps the largest box of it in the middle. WxH is a box in the middle, WxH+X+Y one from the top left.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if shows(.rotate) && shows(.flip) && job.applies("--flip") {
+                    Text("With both, the turn comes first.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var soundSection: some View {
+        Section {
+            if shows(.denoise) {
+                Picker("Background noise", selection: $job.denoise) {
+                    if !job.preset.startsOn.contains(.denoise) { Text("Leave it").tag("") }
+                    Text("Take it out").tag("normal")
+                    Text("Take more out (strong)").tag("strong")
+                }
+                .why(job.reason("--denoise"))
+                .help("Takes background noise and mains hum out of a voice. Strong takes more off a very noisy recording, at some cost to the voice.")
+            }
+            if shows(.audio) {
+                FilePickRow(title: "New sound", file: $job.audioFile, types: [.audio, .audiovisualContent])
+                    .why(job.reason("--audio"))
+                if job.audioFile != nil && job.enabled("--audio") {
+                    Toggle("Mix it under the video's own sound", isOn: $job.mix)
+                        .why(job.reason("--mix"))
+                    if job.mix {
+                        PresetField(
+                            "How loud", value: $job.mixLevel,
+                            presets: [("A quarter as loud", ""), ("Half as loud", "50%"), ("As loud", "100%")],
+                            placeholder: "40%"
+                        )
+                    }
+                }
+            }
+        } header: {
+            Text("Sound")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                sectionReason([.denoise, .audio])
+                if shows(.audio) && job.applies("--audio") {
+                    Text("The video's length decides: a longer sound stops at its end, and a shorter one leaves the rest silent. Both are measured first, so the level holds.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var subtitlesSection: some View {
+        Section {
+            FilePickRow(title: "Subtitles", file: $job.subtitlesFile,
+                        types: ["srt", "vtt", "ass"].compactMap { UTType(filenameExtension: $0) })
+                .why(job.reason("--subtitles"))
+        } header: {
+            Text("Subtitles")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                sectionReason([.subtitles])
+                if job.applies("--subtitles") {
+                    Text("An .srt, .vtt or .ass file. Italics and bold are kept, and a cut or speed change moves them with the video.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var passwordSection: some View {
+        let locks = shows(.lock) && !job.preset.alwaysUnlock
+        let unlocks = shows(.unlock) || job.preset.alwaysUnlock
+        Section {
+            if locks {
+                if !job.preset.startsOn.contains(.lock) {
+                    Toggle("Lock with a password", isOn: $job.lock)
+                        .why(job.reason("--password"))
+                }
+                if job.lock {
+                    SecureField("Password", text: $job.lockPassword)
+                        .why(job.reason("--password"))
+                    SecureField("Again", text: $job.lockAgain)
+                        .why(job.reason("--password"))
+                    Toggle("Allow printing", isOn: $job.allowPrint).why(job.reason("--restrict"))
+                    Toggle("Allow copying text", isOn: $job.allowCopy).why(job.reason("--restrict"))
+                    Toggle("Allow editing", isOn: $job.allowEdit).why(job.reason("--restrict"))
+                }
+            }
+            if unlocks {
+                if !job.preset.alwaysUnlock {
+                    Toggle("Remove the password", isOn: $job.unlock)
+                        .why(job.reason("--unlock"))
+                }
+                if job.unlock {
+                    SecureField("Password", text: $job.openPassword, prompt: Text("The one that opens it"))
+                        .why(job.reason("--unlock"))
+                }
+            }
+        } header: {
+            Text("Password")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                sectionReason([.lock, .unlock])
+                if locks && job.lock && job.applies("--password") {
+                    Text("AES-256. The password goes to conv privately, never on a command line. PDF apps honour the restrictions, though nothing forces them to.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if unlocks && job.unlock && job.applies("--unlock") {
+                    Text("Writes a copy without the password and the print, copy and edit restrictions.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -320,6 +513,33 @@ struct PresetField: View {
             TextField(title, text: $value, prompt: Text(placeholder))
                 .labelsHidden()
         }
+    }
+}
+
+/// A file the option needs (a song, a subtitles file): its name, Choose… and Remove.
+struct FilePickRow: View {
+    let title: String
+    @Binding var file: URL?
+    let types: [UTType]
+
+    var body: some View {
+        LabeledContent(title) {
+            HStack(spacing: 6) {
+                if let file {
+                    Text(file.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                        .help(file.path)
+                    Button("Remove") { self.file = nil }
+                }
+                Button(file == nil ? "Choose…" : "Change…") { choose() }
+            }
+        }
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = types
+        if panel.runModal() == .OK, let url = panel.url { file = url }
     }
 }
 

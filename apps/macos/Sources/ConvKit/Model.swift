@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import PDFKit
 
 /// What the detail pane shows.
 enum Page: Hashable {
@@ -27,7 +28,18 @@ final class AppModel {
     let trimAudio = TrimModel()
     let merge = MergeModel(mode: .pdfs)
     let photos = MergeModel(mode: .photos)
+    let joinVideos = MergeModel(mode: .videos)
+    let joinAudio = MergeModel(mode: .audio)
     let split = SplitModel()
+    let pages = PagesModel()
+    let makeArchive = MakeArchiveModel()
+    let openArchive = OpenArchiveModel()
+    let speak = SpeakModel()
+    let beautify = BeautifyModel()
+    let colors = ColorsModel()
+    let wifi = WifiModel()
+    /// The small text and developer tools, one model each.
+    let quick: [ToolID: QuickModel]
     let scan = ScanModel()
     let data = DataModel()
     let backends = BackendsModel()
@@ -66,6 +78,20 @@ final class AppModel {
             jobs[id] = ConvertJob(tool: id, caps: caps)
         }
         self.jobs = jobs
+        var quick: [ToolID: QuickModel] = [:]
+        for id in ToolID.allCases {
+            if let spec = id.quickSpec { quick[id] = QuickModel(tool: id, spec: spec) }
+        }
+        self.quick = quick
+    }
+
+    func mergeModel(_ id: ToolID) -> MergeModel {
+        switch id {
+        case .photosToPDF: photos
+        case .joinVideos: joinVideos
+        case .joinAudio: joinAudio
+        default: merge
+        }
     }
 
     // MARK: Setup
@@ -80,10 +106,18 @@ final class AppModel {
         convURL = url
         caps.conv = url
         for m in [trimVideo, trimAudio] { m.conv = url }
-        for m in [merge, photos] { m.conv = url }
+        for m in [merge, photos, joinVideos, joinAudio] { m.conv = url }
+        for m in quick.values { m.conv = url }
         qr.conv = url
         ascii.conv = url
         split.conv = url
+        pages.conv = url
+        makeArchive.conv = url
+        openArchive.conv = url
+        speak.conv = url
+        beautify.conv = url
+        colors.conv = url
+        wifi.conv = url
         scan.conv = url
         data.conv = url
         backends.conv = url
@@ -98,8 +132,12 @@ final class AppModel {
             subcommands = Self.parseSubcommands(String(decoding: out.stdout, as: UTF8.self))
         }
         await caps.load()
-        // Pictures that go into a PDF one a page.
+        // Pictures that go into a PDF one a page, alone or among PDFs.
         photos.accepts = Set((caps.byExt["pdf"]?.sources ?? []).filter { caps.kind($0) == "image" })
+        merge.accepts = photos.accepts.union(["pdf"])
+        let ofKind = { (k: String) in Set(self.caps.byExt.filter { $0.value.kind == k }.map(\.key)) }
+        joinVideos.accepts = ofKind("video")
+        joinAudio.accepts = ofKind("audio").union(ofKind("video"))
         if case .tool(let id) = page, !available(id) { page = .home }
         for job in jobs.values { await job.refreshTargets() }
     }
@@ -127,6 +165,8 @@ final class AppModel {
         if let t = id.preset?.fixedTarget { return caps.byExt.values.contains { $0.targets?.contains { $0.to == t } ?? false } }
         if id == .convertData { return caps.byExt["json"] != nil }
         if id == .photosToPDF { return !photos.accepts.isEmpty }
+        if id == .makeArchive || id == .openArchive { return caps.byExt["zip"] != nil }
+        if id.preset?.exts == ["pdf"] { return caps.byExt["pdf"] != nil }
         return true
     }
 
@@ -149,6 +189,8 @@ final class AppModel {
             if text.contains(word) { return true }
             let ext = word.hasPrefix(".") ? String(word.dropFirst()) : word
             guard caps.byExt[ext] != nil else { return false }
+            // A join takes several, but one format is enough to say it takes it.
+            if case .merge = id.kind { return available(id) && mergeModel(id).accepts.contains(ext) }
             return fits(id, exts: [ext])
         }
     }
@@ -166,8 +208,9 @@ final class AppModel {
     /// Whether a tool can do something with all of these files.
     func fits(_ id: ToolID, exts: [String], folder: Bool = false) -> Bool {
         guard available(id), !exts.isEmpty || folder else { return false }
-        if folder { return [.scan, .convert, .mergePDF].contains(id) }
+        if folder { return [.scan, .convert, .mergePDF, .makeArchive, .info].contains(id) }
         let kinds = exts.map { caps.kind($0) }
+        let one = exts.count == 1
         switch id.kind {
         case .convert(let p):
             for (ext, kind) in zip(exts, kinds) {
@@ -176,26 +219,48 @@ final class AppModel {
                     guard caps.reaches(ext, t) else { return false }
                 } else if case .pick(let tk, let allowSame, _) = p.target {
                     let offered = caps.targets(ext).contains { tk.isEmpty || caps.kind($0.to).map(tk.contains) == true }
-                    let flags = Set(p.controls.flatMap(\.flags) + (p.alwaysStrip ? ["--strip-metadata"] : []))
-                    let keeps = allowSame && !caps.writeTuning(ext).isDisjoint(with: flags)
+                    let keeps = allowSame && !caps.writeTuning(ext).isDisjoint(with: p.ownFlags)
                     guard offered || keeps else { return false }
+                } else if case .keep = p.target {
+                    guard !caps.writeTuning(ext).isDisjoint(with: p.ownFlags) else { return false }
                 }
             }
             return true
         case .trim:
             let want = id == .trimAudio ? "audio" : "video"
             return exts.count == 1 && kinds[0] == want
-        case .mergePDF:
-            return exts.allSatisfy { $0 == "pdf" }
-        case .photosToPDF:
-            return exts.allSatisfy(photos.accepts.contains)
-        case .split:
+        case .merge:
+            let m = mergeModel(id)
+            guard exts.allSatisfy(m.accepts.contains) else { return false }
+            switch id {
+            case .mergePDF: return exts.count >= 2 && exts.contains("pdf")
+            case .photosToPDF: return true
+            case .joinAudio: return exts.count >= 2 && kinds.contains("audio")
+            default: return exts.count >= 2
+            }
+        case .split, .pages:
             return exts == ["pdf"]
+        case .quick:
+            guard one else { return false }
+            switch id {
+            case .info, .hash: return true
+            case .base64: return kinds[0] == "image"
+            case .readQR: return kinds[0] == "image"
+            default: return false
+            }
+        case .speak:
+            return one && ToolID.speakExts.contains(exts[0])
+        case .beautify, .colors:
+            return one && kinds[0] == "image"
+        case .makeArchive:
+            return true
+        case .openArchive:
+            return one && OpenArchiveModel.exts.contains(exts[0])
         case .ascii:
             return exts.count == 1 && (kinds[0] == "image" || kinds[0] == "video")
         case .data:
             return exts.count == 1 && ToolID.dataExts.contains(exts[0])
-        case .scan, .qr, .backends, .formats, .changelog:
+        case .scan, .qr, .wifi, .backends, .formats, .changelog:
             return false
         }
     }
@@ -207,7 +272,7 @@ final class AppModel {
         guard !urls.isEmpty else { return }
         let fm = FileManager.default
         let folder = urls.contains { var d: ObjCBool = false; return fm.fileExists(atPath: $0.path, isDirectory: &d) && d.boolValue }
-        let exts = urls.map { $0.pathExtension.lowercased() }
+        let exts = urls.map(fileExt)
         await caps.ensure(Set(exts))
         let kinds = Set(exts.compactMap(caps.kind))
         dropped = urls
@@ -217,12 +282,18 @@ final class AppModel {
             let hasPDFs = urls.contains { url in
                 ((try? fm.contentsOfDirectory(atPath: url.path)) ?? []).contains { $0.lowercased().hasSuffix(".pdf") }
             }
-            suggestions = [.scan, .convert].filter(available) + (hasPDFs && available(.mergePDF) ? [.mergePDF] : [])
+            suggestions = [.scan, .makeArchive, .convert].filter(available) + (hasPDFs && available(.mergePDF) ? [.mergePDF] : [])
+                + (urls.count == 1 && available(.info) ? [.info] : [])
             return
         }
-        let fitting = ToolID.allCases.filter { $0 != .convert && fits($0, exts: exts) }
+        // Tools that take any file go last, after the ones made for this kind.
+        let anyFile: [ToolID] = [.convert, .info, .hash, .base64, .makeArchive]
+        // Unlock only for a PDF that has a password.
+        let locked = urls.contains { $0.pathExtension.lowercased() == "pdf" && PDFDocument(url: $0)?.isEncrypted == true }
+        let fitting = ToolID.allCases.filter { !anyFile.contains($0) && fits($0, exts: exts) && ($0 != .unlockPDF || locked) }
         let own = fitting.filter { $0.category.kind.map(kinds.contains) ?? false }
-        suggestions = own + fitting.filter { !own.contains($0) } + (available(.convert) ? [.convert] : [])
+        suggestions = own + fitting.filter { !own.contains($0) }
+            + anyFile.filter { $0 == .convert ? available($0) : fits($0, exts: exts) }
     }
 
     @MainActor
@@ -237,7 +308,7 @@ final class AppModel {
     func open(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
         if case .tool(let id) = page {
-            let exts = urls.map { $0.pathExtension.lowercased() }
+            let exts = urls.map(fileExt)
             if id == .convert || fits(id, exts: exts) {
                 open(id, with: urls)
                 return
@@ -254,13 +325,19 @@ final class AppModel {
         switch id.kind {
         case .convert: jobs[id]?.add(urls)
         case .trim: (id == .trimAudio ? trimAudio : trimVideo).load(first)
-        case .mergePDF: merge.add(urls)
-        case .photosToPDF: photos.add(urls)
+        case .merge: mergeModel(id).add(urls)
         case .split: split.load(first)
+        case .pages: pages.load(first)
         case .ascii: ascii.input = first
         case .data: data.load(first)
         case .scan: Task { await scan.scan(first) }
-        case .qr, .backends, .formats, .changelog: break
+        case .quick: quick[id]?.load(first)
+        case .speak: speak.load(first)
+        case .beautify: beautify.load(first)
+        case .colors: colors.load(first)
+        case .makeArchive: makeArchive.add(urls)
+        case .openArchive: openArchive.load(first)
+        case .qr, .wifi, .backends, .formats, .changelog: break
         }
         if urls == dropped { clearDropped() }
     }
@@ -298,6 +375,10 @@ final class AppModel {
             return "\((path as NSString).lastPathComponent) already exists."
         case "backend_missing":
             return err.message + " Backends, at the bottom of the sidebar, shows how to install it."
+        case "password_protected":
+            return err.message.hasPrefix("wrong password")
+                ? "That password doesn't open it."
+                : "It's locked with a password. Type the password to open it."
         default:
             return err.message
                 .replacingOccurrences(of: "; run `conv capabilities` to list supported pairs", with: "")
