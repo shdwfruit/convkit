@@ -799,6 +799,7 @@ fn copyable_audio_for(to: Format) -> Option<&'static [&'static str]> {
         Format::Mp3 => Some(&["mp3"]),
         Format::Flac => Some(&["flac"]),
         Format::Wav => Some(&["pcm_s16le"]),
+        Format::Aiff => Some(&["pcm_s16be"]),
         // Checked here, not left to the muxer: ffmpeg's `.opus` muxer
         // accepts a Vorbis stream copy and writes a file no Opus player
         // can read.
@@ -885,10 +886,17 @@ pub(crate) fn audio_copy_invocation(
 
     let audio_source = matches!(
         from,
-        Format::Mp3 | Format::M4a | Format::Wav | Format::Flac | Format::Opus | Format::Ogg
+        Format::Mp3
+            | Format::M4a
+            | Format::Wav
+            | Format::Flac
+            | Format::Opus
+            | Format::Ogg
+            | Format::Aiff
     );
-    // WAV and Ogg can't carry an attached picture; everything else keeps it.
-    let art_fits = !matches!(to, Format::Wav | Format::Opus | Format::Ogg);
+    // WAV, AIFF and Ogg carry no attached picture here; everything else
+    // keeps it.
+    let art_fits = !matches!(to, Format::Wav | Format::Aiff | Format::Opus | Format::Ogg);
 
     let mut argv = input_args(cut, input);
     // The probe describes stream order, so map the first audio stream
@@ -903,7 +911,7 @@ pub(crate) fn audio_copy_invocation(
     // keeps the source's header, so a 3 s cut of a 10 s file said it was
     // 10 s long (6.1 and 9.0 alike). Written out again in their own codec,
     // both are just as lossless and are cut to the sample.
-    let lossless = (to == Format::Wav && first.starts_with("pcm_"))
+    let lossless = (matches!(to, Format::Wav | Format::Aiff) && first.starts_with("pcm_"))
         || (to == Format::Flac && *first == "flac");
     if cut.is_some() && lossless {
         push(&mut argv, &["-c:a", first]);

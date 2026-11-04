@@ -60,6 +60,22 @@
   makes the PDF much larger. GIF to PDF works too. HEIC, AVIF, TIFF and
   BMP, and `--quality`, `--resize` and `--rotate`, still go through
   ImageMagick, as does any merge when Typst isn't installed.
+- **Text read aloud.** `conv notes.txt .m4a` reads a text into a sound file
+  (also .mp3, .wav and .aiff), and md, html, docx, odt and rtf are read as
+  their text. `conv speak "Hello" hello.m4a` reads the words given, a pipe,
+  `-f FILE` or `--paste`, and `conv speak --voices` lists the voices.
+  `--voice` and `--rate` pick the voice and the words per minute. macOS uses
+  `say` with the best Premium or Enhanced voice you have, and says how to
+  get one; Windows uses its own voices, and Linux espeak-ng. A Piper voice
+  file (`--voice en_US-lessac-medium.onnx`) reads with Piper anywhere.
+- **Text, web pages and RTF.** `.txt` converts to pdf, docx, html, md and
+  rtf, in UTF-8, UTF-16 or Windows-1252, and docx, odt, rtf, md and html
+  convert to `.txt`. A saved web page converts to pdf, docx, md, txt and rtf
+  without anything being downloaded: a picture on the web becomes a link,
+  and a warning says so. RTF converts to pdf, docx and txt through
+  LibreOffice (pandoc without it), and docx, odt, md and html to RTF.
+- **AIFF.** Audio and video convert to and from `.aiff`, cuts and
+  `--speed` included.
 
 ## 0.6.2 - 2026-11-03
 

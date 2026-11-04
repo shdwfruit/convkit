@@ -129,6 +129,9 @@ pub struct ResolvedVideo {
     /// read of it (`table::import_filter`). `None` renders the default
     /// shape's.
     pub csv_import: Option<String>,
+    /// The voice `Arg::Voice` names, chosen by `speech::choose`. `None`
+    /// reads with the system's own.
+    pub voice: Option<String>,
 }
 
 /// Parses a user frame rate (`24`, `29.97`, `30000/1001`) into a float for

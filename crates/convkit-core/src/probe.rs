@@ -103,6 +103,12 @@ pub struct MediaProbe {
     /// What a CSV or a workbook holds, read by `table::read`. `None` when
     /// the source was not read.
     pub table: Option<crate::table::TableShape>,
+    /// How a .txt source is written, read by `text::read`, or why it is
+    /// not text. `None` when it was not read.
+    pub text: Option<std::result::Result<crate::text::TextInfo, String>>,
+    /// The voices say has and the user's language, read by `speech::read`
+    /// for a conversion that reads text aloud. `None` when not read.
+    pub speech: Option<crate::speech::SpeechProbe>,
 }
 
 /// The two ways a video or audio file records where it was made. Outputs

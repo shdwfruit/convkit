@@ -168,11 +168,25 @@ pub struct Cli {
         allow_hyphen_values = true
     )]
     pub rotate: Option<convkit_core::rotate::Turn>,
+
+    /// The voice that reads text aloud (txt, md, html, docx, odt or rtf to
+    /// m4a, mp3, wav or aiff): a name from `conv speak --voices`, `system`
+    /// for the system's own, or a Piper voice file (.onnx). On macOS conv
+    /// picks the best Premium or Enhanced voice in your language.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "VOICE")]
+    pub voice: Option<String>,
+
+    /// Words per minute for text read aloud, 80 to 450. [default: the
+    /// voice's own, about 175]
+    #[arg(long, value_name = "WPM", value_parser = parse_rate)]
+    pub rate: Option<u16>,
+
     /// Copy what was written to the clipboard, ready to paste: a picture
-    /// as itself (and its file), an md, csv, html, json, yaml or toml file
-    /// as its text, and anything else, or several outputs, as the files.
-    /// Over SSH it goes through the terminal, which takes only a picture or
-    /// text.
+    /// as itself (and its file), an md, csv, html, txt, json, yaml or toml
+    /// file as its text, and anything else, or several outputs, as the
+    /// files. Over SSH it goes through the terminal, which takes only a
+    /// picture or text.
     // Not `global` -- see `dry_run`'s comment.
     #[arg(long)]
     pub copy: bool,
@@ -499,6 +513,21 @@ comments it would lose.
 JSONC (comments, trailing commas, single quotes, unquoted keys) and drops \
 YAML tags, saying what it dropped.")]
     Fmt(FmtArgs),
+    /// Read text aloud into a sound file: `conv speak "Hello" hello.m4a`.
+    #[command(long_about = "\
+Reads TEXT aloud into a sound file, with the speech engine your system has: \
+say on macOS, Windows' own voices, and espeak-ng on Linux (or Piper, with \
+--voice VOICE.onnx). Nothing leaves your machine.
+
+TEXT is what is read: the words given, `-` or a pipe for what is piped in, \
+-f FILE for a file (txt, md, html, docx, odt or rtf), or --paste for the \
+clipboard. OUT is the file to write, or a bare `.ext` (.m4a, .mp3, .wav, \
+.aiff); without it, conv writes speech.mp3, or NAME.mp3 for -f NAME.EXT.
+
+On macOS conv reads with the best Premium or Enhanced voice in your \
+language, and says how to download one when there is none. --voices lists \
+the voices --voice takes.")]
+    Speak(SpeakArgs),
     /// Show what each version of conv added.
     #[command(long_about = "\
 Shows what each version of conv added, newest first, from the changelog \
@@ -605,6 +634,54 @@ refused before anything is written.")]
     /// count, case, chars, lorem and diff.
     #[command(flatten)]
     Tools(crate::commands::tools::Tool),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SpeakArgs {
+    /// What to read: the words themselves, or `-` for what is piped in.
+    /// With -f or --paste, the one path given is OUT.
+    pub text: Option<String>,
+
+    /// The file to write, or a bare `.ext` (.m4a, .mp3, .wav, .aiff).
+    /// [default: speech.mp3]
+    pub output: Option<PathBuf>,
+
+    /// Read this file aloud instead: txt, md, html, docx, odt or rtf.
+    #[arg(short = 'f', long, value_name = "FILE", conflicts_with = "paste")]
+    pub file: Option<PathBuf>,
+
+    /// Read what is on the clipboard: copied text, or one copied file.
+    #[arg(long)]
+    pub paste: bool,
+
+    /// The voice: a name from --voices, `system` for the system's own, or
+    /// a Piper voice file (.onnx).
+    #[arg(long, value_name = "VOICE")]
+    pub voice: Option<String>,
+
+    /// Words per minute, 80 to 450. [default: the voice's own, about 175]
+    #[arg(long, value_name = "WPM", value_parser = parse_rate)]
+    pub rate: Option<u16>,
+
+    /// List the voices --voice takes, and write nothing.
+    #[arg(long, conflicts_with_all = ["file", "paste"])]
+    pub voices: bool,
+
+    /// Write the file into this directory (created if missing).
+    #[arg(short = 'o', long)]
+    pub outdir: Option<PathBuf>,
+
+    /// Overwrite the file if it exists.
+    #[arg(short = 'y', long)]
+    pub overwrite: bool,
+
+    /// Print the commands instead of running them.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Also copy the sound file to the clipboard, ready to paste.
+    #[arg(long)]
+    pub copy: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -757,6 +834,22 @@ fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
     convkit_core::trim::parse_duration(s)
 }
 
+/// Words per minute, in the range every engine reads at.
+fn parse_rate(s: &str) -> Result<u16, String> {
+    use convkit_core::speech::{RATE_MAX, RATE_MIN};
+    let wpm: u16 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("{s:?} is not a number of words per minute, like 200"))?;
+    if !(RATE_MIN..=RATE_MAX).contains(&wpm) {
+        return Err(format!(
+            "{wpm} words per minute is out of range; give {RATE_MIN} to {RATE_MAX} \
+             (most voices read about 175)"
+        ));
+    }
+    Ok(wpm)
+}
+
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
     /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
@@ -780,6 +873,8 @@ impl Cli {
             speed: self.speed,
             shift_pitch: self.shift_pitch,
             rotate: self.rotate,
+            voice: self.voice.clone(),
+            rate: self.rate,
         }
     }
 
@@ -855,6 +950,8 @@ mod tests {
             speed: None,
             shift_pitch: false,
             rotate: None,
+            voice: None,
+            rate: None,
             copy: false,
             paste: false,
             yes: false,

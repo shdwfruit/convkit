@@ -288,38 +288,49 @@ pub(crate) fn copy_text(text: &str) -> CopyReport {
     }
 }
 
-/// `e` with the pasted picture's passing path, in either spelling (macOS
-/// gives /var as /private/var), named as `PASTED`.
-fn tidied(e: &ConvError, pasted: Option<&Path>) -> ConvError {
+/// `e` with a passing input's path, in either spelling (macOS gives /var
+/// as /private/var), named as it is shown.
+fn tidied(e: &ConvError, passing: Option<Passing>) -> ConvError {
     let mut e = e.clone();
-    if let Some(p) = pasted {
+    if let Some((p, shown)) = passing {
         let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         for spelling in [real, p.to_path_buf()] {
-            e.message = e.message.replace(&spelling.display().to_string(), PASTED);
+            e.message = e.message.replace(&spelling.display().to_string(), shown);
         }
     }
     e
 }
 
-/// Warnings already shown, keyed as the results will be: by `PASTED` for
-/// the pasted picture.
-fn renamed(shown: Vec<(PathBuf, String)>, pasted: Option<&Path>) -> Vec<(PathBuf, String)> {
-    match pasted {
-        Some(_) => shown
+/// Warnings already shown, keyed as the results will be: by the passing
+/// input's name.
+fn renamed(shown: Vec<(PathBuf, String)>, passing: Option<Passing>) -> Vec<(PathBuf, String)> {
+    match passing {
+        Some((_, name)) => shown
             .into_iter()
-            .map(|(_, w)| (PathBuf::from(PASTED), w))
+            .map(|(_, w)| (PathBuf::from(name), w))
             .collect(),
         None => shown,
     }
 }
 
+/// An input conv wrote for the run in a passing folder, and how it is
+/// named in what the run prints: a pasted picture, or the text `conv
+/// speak` reads.
+pub(crate) type Passing<'a> = (&'a Path, &'a str);
+
 /// Runs a conversion. `pasted` is the passing path of a picture `--paste`
 /// took from the clipboard.
 fn convert(cli: &Cli, pasted: Option<&Path>) -> i32 {
+    convert_as(cli, pasted.map(|p| (p, PASTED)))
+}
+
+/// Runs a conversion whose input may be a passing one (`Passing`).
+pub(crate) fn convert_as(cli: &Cli, passing: Option<Passing>) -> i32 {
+    let pasted = passing.map(|(p, _)| p);
     let mut jobs = match input::plan_jobs(cli) {
         Ok(jobs) => jobs,
         Err(e) => {
-            render::print_error(cli.json, &tidied(&e, pasted));
+            render::print_error(cli.json, &tidied(&e, passing));
             return e.code.exit_code();
         }
     };
@@ -338,9 +349,9 @@ fn convert(cli: &Cli, pasted: Option<&Path>) -> i32 {
     }
 
     let (allow_extreme, mut shown) = match confirm_extreme(&jobs, cli) {
-        Ok(c) => (c.allowed || cli.yes, renamed(c.shown, pasted)),
+        Ok(c) => (c.allowed || cli.yes, renamed(c.shown, passing)),
         Err(e) => {
-            render::print_error(cli.json, &tidied(&e, pasted));
+            render::print_error(cli.json, &tidied(&e, passing));
             return e.code.exit_code();
         }
     };
@@ -384,11 +395,11 @@ fn convert(cli: &Cli, pasted: Option<&Path>) -> i32 {
                     } else {
                         match confirm_extreme(&retry_jobs, cli) {
                             Ok(c) => {
-                                shown.extend(renamed(c.shown, pasted));
+                                shown.extend(renamed(c.shown, passing));
                                 c.allowed
                             }
                             Err(e) => {
-                                render::print_error(cli.json, &tidied(&e, pasted));
+                                render::print_error(cli.json, &tidied(&e, passing));
                                 print_results(&results, cli, elapsed, &shown, None);
                                 return e.code.exit_code();
                             }
@@ -413,18 +424,18 @@ fn convert(cli: &Cli, pasted: Option<&Path>) -> i32 {
                     // either": report that failure too, but leave
                     // `results`/`code` exactly as the original
                     // `backend_missing` failure already reported them.
-                    render::print_error(cli.json, &tidied(&e, pasted));
+                    render::print_error(cli.json, &tidied(&e, passing));
                     elapsed += redo_start.elapsed();
                 }
             }
         }
     }
 
-    if let Some(picture) = pasted {
+    if let Some((_, name)) = passing {
         for r in &mut results {
-            r.input = PathBuf::from(PASTED);
+            r.input = PathBuf::from(name);
             if let Err(e) = &mut r.result {
-                *e = tidied(e, Some(picture));
+                *e = tidied(e, passing);
             }
         }
     }
@@ -684,6 +695,15 @@ fn probed_for(
     }
     // As `exec::run` does, so the preview shows a turn the tag makes as one.
     convkit_core::rotate::attach(job.from, &job.inputs[0], tuning, &mut probed);
+    // As `exec::run` does, so the preview names the same voice and notes.
+    convkit_core::text::attach(
+        resolver,
+        job.from,
+        job.to,
+        &job.inputs[0],
+        tuning,
+        &mut probed,
+    );
     Ok(probed)
 }
 
@@ -1002,8 +1022,9 @@ mod tests {
             "{}",
             e.message
         );
-        // Nothing in common.
-        let e = say_what("2 files", &[Some(Format::Mov), Some(Format::Docx)]);
+        // Nothing in common. (A video and a document now share the sound
+        // targets: a docx is read aloud into mp3.)
+        let e = say_what("2 files", &[Some(Format::Mov), Some(Format::Xlsx)]);
         assert_eq!(e.code, ErrorCode::UnsupportedPair);
         assert!(e.message.contains("can't make them all into one format"));
     }

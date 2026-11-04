@@ -138,7 +138,8 @@ jobs:
           find ~/apt-archives -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives/ {} +
           sudo apt-get update
           # expect drives conv trim in a pseudo-terminal for its end-to-end test.
-          sudo apt-get install -y -o Acquire::Retries=3 ffmpeg imagemagick libheif-plugin-libde265 libheif-plugin-x265 libreoffice pandoc expect
+          # espeak-ng is the speech engine text is read aloud with on Linux.
+          sudo apt-get install -y -o Acquire::Retries=3 ffmpeg imagemagick libheif-plugin-libde265 libheif-plugin-x265 libreoffice pandoc expect espeak-ng
           # Drop versions an update has replaced, so the cache does not grow
           # by a week's worth of stale packages each week.
           sudo apt-get autoclean

@@ -1743,6 +1743,8 @@ mod tests {
             speed: None,
             shift_pitch: false,
             rotate: None,
+            voice: None,
+            rate: None,
             copy: false,
             paste: false,
             yes: false,

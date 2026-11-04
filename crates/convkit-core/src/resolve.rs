@@ -342,8 +342,13 @@ impl Resolver {
     }
 
     /// Environment variable consulted for this backend, e.g. `CONVKIT_FFMPEG`.
+    /// `espeak-ng` is `CONVKIT_ESPEAK_NG`: a shell cannot export a name
+    /// with a hyphen in it.
     fn env_var(backend: Backend) -> String {
-        format!("CONVKIT_{}", backend.exe_name().to_ascii_uppercase())
+        format!(
+            "CONVKIT_{}",
+            backend.exe_name().to_ascii_uppercase().replace('-', "_")
+        )
     }
 
     /// Platform install locations checked last, for tools that commonly are not
@@ -380,6 +385,14 @@ impl Resolver {
                 vec![PathBuf::from(
                     "/Applications/LibreOffice.app/Contents/MacOS/soffice",
                 )]
+            }
+            // Where every macOS and Windows keeps them, for a PATH that
+            // leaves them out.
+            (Backend::Say, _, true) => vec![PathBuf::from("/usr/bin/say")],
+            (Backend::PowerShell, true, _) => {
+                let root = std::env::var_os("SystemRoot")
+                    .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+                vec![root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe")]
             }
             _ => Vec::new(),
         }
@@ -698,7 +711,17 @@ impl Resolver {
     fn version_of(backend: Backend, path: &Path, timeout: Duration) -> Option<String> {
         let flag = match backend {
             Backend::Ffmpeg | Backend::Ffprobe | Backend::Magick => "-version",
-            Backend::Pandoc | Backend::Soffice | Backend::Typst | Backend::Qpdf => "--version",
+            Backend::Pandoc
+            | Backend::Soffice
+            | Backend::Typst
+            | Backend::Qpdf
+            | Backend::Espeak
+            | Backend::Piper => "--version",
+            // Neither has a version flag. `say --version` is refused, but
+            // `say` with anything else it does not know would read it
+            // aloud, and `powershell --version` starts a shell. Both come
+            // with the system, whose version is theirs.
+            Backend::Say | Backend::PowerShell => return Some("built-in".to_string()),
         };
         let first_line = Self::probe_first_line(backend, path, flag, timeout)?;
         extract_version_token(&first_line).map(str::to_string)
@@ -791,7 +814,7 @@ impl Resolver {
     /// collect the exit status.
     fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().ok()?;
+        let mut child = crate::procutil::spawn(&mut cmd).ok()?;
 
         let deadline = Instant::now() + timeout;
         loop {
@@ -1476,6 +1499,39 @@ mod tests {
     /// The complement: an ordinary, fast-exiting child still gets its
     /// output back — the timeout machinery must not interfere with the
     /// normal, non-hung case.
+    /// A program still open for writing cannot be run on Linux (ETXTBSY),
+    /// which is how a freshly written stub's version came back unknown on
+    /// CI while other tests started processes. Held open here on purpose
+    /// and closed a moment later, it is run once it can be.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_program_busy_for_a_moment_is_still_probed() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("busy.sh");
+        let mut held = std::fs::File::create(&path).unwrap();
+        held.write_all(b"#!/bin/sh\necho \"busy 1.2.3\"\n").unwrap();
+        held.flush().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Busy now, as it was on CI.
+        let busy = Command::new(&path).spawn().map(|mut c| c.wait());
+        assert_eq!(
+            busy.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::ExecutableFileBusy)
+        );
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(held);
+        });
+        let mut cmd = Command::new(&path);
+        cmd.arg("--version");
+        let out = Resolver::run_with_timeout(cmd, Duration::from_secs(5))
+            .expect("run once the file is closed");
+        closer.join().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "busy 1.2.3");
+    }
+
     #[test]
     fn run_with_timeout_returns_output_for_a_child_that_exits_promptly() {
         let dir = tempfile::tempdir().unwrap();

@@ -18,6 +18,18 @@ pub enum Backend {
     /// (`conv merge`, `conv split`). Its upstream builds are a program plus
     /// shared libraries, so it installs as a folder; see `ManagedLayout`.
     Qpdf,
+    /// macOS's own speech engine, which reads text aloud into a file
+    /// (`speech`). Part of every macOS, so never installed.
+    Say,
+    /// Windows PowerShell 5.1, for the speech engine every Windows has,
+    /// System.Speech. Not `pwsh`: PowerShell 7 runs on .NET, which has no
+    /// System.Speech.
+    PowerShell,
+    /// espeak-ng, the speech engine Linux distributions package.
+    Espeak,
+    /// Piper, a neural speech engine, used when `--voice` names one of its
+    /// voice files on any platform.
+    Piper,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,13 +98,33 @@ impl Backend {
             Backend::Pandoc => "pandoc",
             Backend::Typst => "typst",
             Backend::Qpdf => "qpdf",
+            Backend::Say => "say",
+            Backend::PowerShell => "powershell",
+            Backend::Espeak => "espeak-ng",
+            Backend::Piper => "piper",
         }
     }
 
     /// Whether `conv install <backend>` can provision this backend.
-    /// LibreOffice has no relocatable binary and is therefore never managed.
+    /// LibreOffice has no relocatable binary and is therefore never managed;
+    /// the speech engines come with the system or its package manager.
     pub fn is_managed(&self) -> bool {
-        !matches!(self, Backend::Soffice)
+        !matches!(
+            self,
+            Backend::Soffice
+                | Backend::Say
+                | Backend::PowerShell
+                | Backend::Espeak
+                | Backend::Piper
+        )
+    }
+
+    /// Whether this backend reads text aloud (`speech`).
+    pub fn speaks(&self) -> bool {
+        matches!(
+            self,
+            Backend::Say | Backend::PowerShell | Backend::Espeak | Backend::Piper
+        )
     }
 
     /// Where `conv install` puts this backend; see [`ManagedLayout`].
@@ -166,6 +198,24 @@ impl Backend {
             (Backend::Qpdf, PackageManager::Apt) => "sudo apt-get install qpdf",
             (Backend::Qpdf, PackageManager::Dnf) => "sudo dnf install qpdf",
             (Backend::Qpdf, PackageManager::Pacman) => "sudo pacman -S qpdf",
+
+            // Both come with their system; a hint can only say so.
+            (Backend::Say, _) => "say comes with macOS; check that /usr/bin/say is there",
+            (Backend::PowerShell, _) => {
+                "Windows PowerShell comes with Windows; check that powershell.exe is on PATH"
+            }
+
+            (Backend::Espeak, PackageManager::Winget) => "winget install eSpeak-NG.eSpeak-NG",
+            (Backend::Espeak, PackageManager::Scoop) => "scoop install espeak-ng",
+            (Backend::Espeak, PackageManager::Choco) => "choco install espeak-ng",
+            (Backend::Espeak, PackageManager::Brew) => "brew install espeak-ng",
+            (Backend::Espeak, PackageManager::Apt) => "sudo apt-get install espeak-ng",
+            (Backend::Espeak, PackageManager::Dnf) => "sudo dnf install espeak-ng",
+            (Backend::Espeak, PackageManager::Pacman) => "sudo pacman -S espeak-ng",
+
+            // Piper is a Python package everywhere; no system package
+            // manager carries the current one.
+            (Backend::Piper, _) => "pipx install piper-tts",
         }
     }
 
@@ -200,6 +250,12 @@ impl Backend {
             Backend::Pandoc => "install pandoc from https://github.com/jgm/pandoc/releases",
             Backend::Typst => "install typst from https://github.com/typst/typst/releases",
             Backend::Qpdf => "install qpdf from https://github.com/qpdf/qpdf/releases",
+            Backend::Say => "say comes with macOS",
+            Backend::PowerShell => "Windows PowerShell comes with Windows",
+            Backend::Espeak => {
+                "install espeak-ng from https://github.com/espeak-ng/espeak-ng/releases"
+            }
+            Backend::Piper => "install Piper from https://github.com/OHF-Voice/piper1-gpl",
         }
     }
 }

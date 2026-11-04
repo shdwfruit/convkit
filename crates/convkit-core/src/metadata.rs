@@ -82,6 +82,7 @@ pub fn in_place(f: Format) -> Result<(), String> {
         | Format::M4a
         | Format::Flac
         | Format::Wav
+        | Format::Aiff
         | Format::Opus
         | Format::Ogg => Ok(()),
         Format::Heif => {
