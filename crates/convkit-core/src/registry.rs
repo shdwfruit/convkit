@@ -1739,6 +1739,60 @@ const PDF_TO_DOCX: Recipe = Recipe {
     ],
 };
 
+/// A PDF's pages as images. These recipes name the backends each pair
+/// runs, in order, for `backends_for`, `conv capabilities` and the install
+/// prompt; the commands themselves are planned per PDF by
+/// `pdf::raster::plan`, which knows the page count and sizes: qpdf merges
+/// annotations and form fields into the pages, Typst draws them as PNG, and
+/// ffmpeg (JPEG) or ImageMagick (WebP, HEIC) encodes them.
+/// The qpdf step every PDF-to-image pair starts with.
+const PDF_FLATTEN: Step = Step {
+    backend: Backend::Qpdf,
+    args: &[
+        Arg::Lit("--decrypt"),
+        Arg::Lit("--generate-appearances"),
+        Arg::Lit("--flatten-annotations=screen"),
+        Arg::Input,
+        Arg::Output,
+    ],
+    output: OutputMode::Path,
+    intermediate_ext: Some("pdf"),
+};
+
+/// Typst drawing the pages; `last` when it writes the final PNGs.
+const fn pdf_draw(last: bool) -> Step {
+    Step {
+        backend: Backend::Typst,
+        args: &[Arg::Lit("compile"), Arg::Input, Arg::Output],
+        output: OutputMode::Folder,
+        intermediate_ext: if last { None } else { Some("png") },
+    }
+}
+
+/// `encoder` turning the drawn PNGs into the target format.
+const fn pdf_encode(encoder: Backend) -> Step {
+    Step {
+        backend: encoder,
+        args: &[Arg::Input, Arg::Output],
+        output: OutputMode::Folder,
+        intermediate_ext: None,
+    }
+}
+
+const PDF_TO_PNG: Recipe = Recipe {
+    steps: &[PDF_FLATTEN, pdf_draw(true)],
+    warnings: &[],
+};
+const PDF_TO_JPG: Recipe = Recipe {
+    steps: &[PDF_FLATTEN, pdf_draw(false), pdf_encode(Backend::Ffmpeg)],
+    warnings: &[],
+};
+const PDF_TO_WEBP: Recipe = Recipe {
+    steps: &[PDF_FLATTEN, pdf_draw(false), pdf_encode(Backend::Magick)],
+    warnings: &[],
+};
+const PDF_TO_HEIC: Recipe = PDF_TO_WEBP;
+
 /// The notes on an Office 97-2003 file going to its current format. Kept
 /// by `notes_for` only when `office::traits` found a VBA project in the
 /// source, or could not read it.
@@ -2416,6 +2470,10 @@ fn insert_document_family(t: &mut Table) {
     t.insert((Format::Xlsx, Format::Csv), WORKBOOK_TO_CSV);
     t.insert((Format::Ods, Format::Csv), WORKBOOK_TO_CSV);
     t.insert((Format::Pdf, Format::Docx), PDF_TO_DOCX);
+    t.insert((Format::Pdf, Format::Png), PDF_TO_PNG);
+    t.insert((Format::Pdf, Format::Jpg), PDF_TO_JPG);
+    t.insert((Format::Pdf, Format::Webp), PDF_TO_WEBP);
+    t.insert((Format::Pdf, Format::Heic), PDF_TO_HEIC);
     t.insert((Format::Md, Format::Docx), MD_TO_DOCX);
     t.insert((Format::Md, Format::Html), MD_TO_HTML);
     t.insert((Format::Md, Format::Pdf), MD_TO_PDF);
@@ -3420,8 +3478,10 @@ mod tests {
     fn every_image_and_media_recipe_strips_and_only_after_orienting() {
         for (from, to) in all_pairs() {
             // Text read aloud has no metadata to strip: conv makes the
-            // sound, and its ffmpeg step only encodes it.
-            if speaks(from, to) {
+            // sound, and its ffmpeg step only encodes it. A PDF's pages
+            // carry none either, and their recipes only name their backends
+            // (`pdf::raster` plans the commands and refuses the flag).
+            if speaks(from, to) || crate::pdf::raster::is_pair(from, to) {
                 continue;
             }
             let r = lookup(from, to).unwrap();

@@ -127,6 +127,15 @@
   its security and password, and `--qr` writes a code that joins it, as
   does `conv qr --wifi Home`. On macOS the keychain asks first. The
   password is printed only to a terminal unless `--show-password` is given.
+- **A PDF's pages as pictures.** `conv report.pdf .png` saves every page
+  into `report/` as `report-01.png` and on, and a PDF with one page gives
+  one file. JPEG, WebP and HEIC work too. `--pages 1-3,7` picks pages,
+  `--dpi 300` draws them sharper than the default 150, and `--resize` sets
+  their size. Comments, stamps and filled-in form fields show as they do in
+  a viewer. PNG and JPEG run on qpdf, Typst and ffmpeg, which conv
+  installs; WebP and HEIC need ImageMagick. conv asks before writing more
+  than 1,000 files, and when a run needs several backends it can install,
+  it offers each in turn.
 
 ## 0.6.2 - 2026-11-03
 

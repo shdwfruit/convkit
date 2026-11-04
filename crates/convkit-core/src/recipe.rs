@@ -73,11 +73,19 @@ pub struct Tuning {
     /// Make a PDF smaller with the same look (`--compress`). Not a knob but
     /// a job of its own, run by `pdf::compress`.
     pub compress: bool,
+    /// The resolution PDF pages are drawn at (`--dpi`), for a PDF saved as
+    /// images. `None` draws them at `pdf::raster::DEFAULT_DPI`.
+    pub dpi: Option<u32>,
+    /// The pages of a PDF to save as images (`--pages 1-3,7`), as typed.
+    /// Resolved against the page count by `pdf::raster`.
+    pub pages: Option<Vec<crate::pdf::PageRange>>,
 }
 
 impl Tuning {
     pub fn is_empty(&self) -> bool {
-        !self.upscale
+        self.dpi.is_none()
+            && self.pages.is_none()
+            && !self.upscale
             && !self.compress
             && !self.strip_metadata
             && !self.mute
@@ -404,6 +412,11 @@ pub enum OutputMode {
     /// whose only product is the pass log. `exec` checks its exit status
     /// but not for an output file.
     Discard,
+    /// The step writes several files into the folder given to it, which
+    /// `exec` makes first: a PDF's pages, drawn by Typst or encoded by
+    /// ffmpeg or ImageMagick. It succeeds when the folder holds at least
+    /// one non-empty file; the planner knows which ones to expect.
+    Folder,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -953,6 +966,8 @@ mod tests {
             voice: None,
             rate: None,
             compress: false,
+            dpi: None,
+            pages: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],

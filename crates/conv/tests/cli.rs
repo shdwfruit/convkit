@@ -428,13 +428,13 @@ fn a_real_failing_conversion_writes_nothing_to_stdout_and_reports_on_stderr() {
 /// fails to build — a bad job among several others shouldn't erase the
 /// preview for the rest, the same way a real run tolerates one job failing
 /// without losing the others' results. `a.heic -> jpg` has a recipe;
-/// `b.pdf -> jpg` does not (pandoc/soffice don't read PDF into an image), so
+/// `b.docx -> jpg` does not (a document becomes a PDF, not a picture), so
 /// this is a genuine mixed result: exit 4, the first job's plan on stdout,
 /// the second job's error on stderr.
 #[test]
 fn dry_run_previews_every_job_even_when_one_fails_to_build() {
     let assert = conv()
-        .args(["a.heic", "b.pdf", "--to", "jpg", "--dry-run"])
+        .args(["a.heic", "b.docx", "--to", "jpg", "--dry-run"])
         .assert()
         .code(4);
     let output = assert.get_output();
@@ -5132,6 +5132,157 @@ fn an_unlock_batch_asks_once_and_skips_what_has_no_password() {
         .assert()
         .success()
         .stdout(contains("OK 0 unlocked - 1 skipped - 0 failed"));
+}
+
+// --- a PDF's pages as images -------------------------------------------
+
+#[test]
+fn dpi_and_pages_are_refused_where_they_mean_nothing() {
+    conv()
+        .args(["in.png", "out.jpg", "--dpi", "300", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--dpi does not apply to png -> jpg: it sets the resolution a PDF's pages are drawn at",
+        ));
+    conv()
+        .args(["in.pdf", "out.docx", "--pages", "2", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("--pages does not apply to pdf -> docx"));
+    conv()
+        .args(["in.pdf", ".png", "--dpi", "20"])
+        .assert()
+        .code(2)
+        .stderr(contains("20 is not in 36..=1200"));
+    conv()
+        .args(["in.pdf", ".png", "--pages", "1,,3"])
+        .assert()
+        .code(2)
+        .stderr(contains("`1,,3` is not a page list"));
+    conv()
+        .args(["in.pdf", ".png", "--dpi", "300", "--resize", "50%"])
+        .assert()
+        .code(2)
+        .stderr(contains("cannot be used with"));
+}
+
+#[test]
+fn pages_without_a_picture_format_say_what_to_type() {
+    conv()
+        .args(["report.pdf", "--pages", "2,4-5"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--pages saves a PDF's pages as pictures, so it needs their format: conv report.pdf \
+             .png --pages 2,4-5; conv split report.pdf 2 4-5 keeps them as PDFs",
+        ));
+}
+
+/// With nothing installed the preview still shows the three backends a
+/// PDF's pages to JPEG run, and says it could not read the file.
+#[test]
+fn a_pdf_to_jpg_dry_run_with_no_backends_shows_the_template() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("report.pdf"), b"%PDF-1.7 not really").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let out = cmd
+        .current_dir(dir.path())
+        .args(["report.pdf", ".jpg", "--dry-run"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines[0].starts_with("qpdf --decrypt --generate-appearances"),
+        "{stdout}"
+    );
+    assert!(
+        lines[1].starts_with("typst compile --root report.convkit-pages"),
+        "{stdout}"
+    );
+    assert!(
+        lines[2].starts_with("ffmpeg -pattern_type sequence -start_number 1"),
+        "{stdout}"
+    );
+    assert!(
+        lines[3].starts_with("note: conv could not read report.pdf here"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_pdf_to_png_run_with_no_qpdf_names_the_fix() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("report.pdf"), b"%PDF-1.7 not really").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let out = cmd
+        .current_dir(dir.path())
+        .args(["report.pdf", ".png", "--json"])
+        .assert()
+        .code(3);
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let e = &v["results"][0]["error"];
+    assert_eq!(e["code"], "backend_missing");
+    assert_eq!(e["backend"], "qpdf");
+    assert_eq!(e["remediation"]["managed"], "conv install qpdf");
+}
+
+#[test]
+fn capabilities_lists_the_pdf_page_pairs_and_their_flags() {
+    conv()
+        .args(["capabilities", "pdf"])
+        .assert()
+        .success()
+        .stdout(contains("pdf -> png      [--pages --dpi --resize]"))
+        .stdout(contains(
+            "pdf -> jpg      [--pages --dpi --resize --quality]",
+        ));
+}
+
+#[test]
+#[ignore = "requires qpdf, typst and ffmpeg; run with --ignored"]
+fn pdf_pages_end_to_end_name_the_folder_and_count_the_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("report.pdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["report.pdf", ".jpg"])
+        .assert()
+        .success()
+        // The folder is named with the platform's own separator after it.
+        .stdout(contains(format!(
+            "OK report{} - 3 pages - ",
+            std::path::MAIN_SEPARATOR
+        )));
+    for n in 1..=3 {
+        assert!(dir.path().join(format!("report/report-{n}.jpg")).is_file());
+    }
+    // A page picked by number is one file named after it.
+    conv()
+        .current_dir(dir.path())
+        .args(["report.pdf", ".png", "--pages", "2"])
+        .assert()
+        .success()
+        .stdout(contains("OK report-2.png - "));
+    // Again, without -y: the folder's pages are there already.
+    conv()
+        .current_dir(dir.path())
+        .args(["report.pdf", ".jpg"])
+        .assert()
+        .code(2)
+        .stderr(contains("report-1.jpg exists; pass -y to overwrite"));
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["report.pdf", ".jpg", "-y", "--json", "--dpi", "72"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let pages = &v["results"][0]["pages"];
+    assert_eq!(pages["count"], 3);
+    assert_eq!(pages["folder"], true);
+    assert_eq!(pages["dpi"], 72);
+    assert_eq!(pages["files"][2], "report-3.jpg");
 }
 
 #[test]

@@ -153,6 +153,17 @@ opus -> mp3: ffmpeg -i in.opus -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a
 opus -> ogg: ffmpeg -i in.opus -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 opus -> wav: ffmpeg -i in.opus -vn -c:a pcm_s16le -map_metadata 0:s:a:0 -y out.wav
 pdf -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --infilter=writer_pdf_import --convert-to docx:MS Word 2007 XML --outdir . in.pdf
+pdf -> heic: magick out.convkit-pages/png/1-1.png -quality 60 out.convkit-pages/enc/1-1.heic
+pdf -> heic: qpdf --decrypt --generate-appearances --flatten-annotations=screen --warning-exit-0 in.pdf out.convkit-pages/flat.pdf
+pdf -> heic: typst compile --root out.convkit-pages --ignore-system-fonts --diagnostic-format short --ppi 72 out.convkit-pages/layout-1.typ out.convkit-pages/png/1-{p}.png
+pdf -> jpg: ffmpeg -pattern_type sequence -start_number 1 -i out.convkit-pages/png/1-%d.png -c:v mjpeg -q:v 2 -qmin 1 -pix_fmt yuvj444p -start_number 1 -y out.convkit-pages/jpg/1-%d.jpg
+pdf -> jpg: qpdf --decrypt --generate-appearances --flatten-annotations=screen --warning-exit-0 in.pdf out.convkit-pages/flat.pdf
+pdf -> jpg: typst compile --root out.convkit-pages --ignore-system-fonts --diagnostic-format short --ppi 72 out.convkit-pages/layout-1.typ out.convkit-pages/png/1-{p}.png
+pdf -> png: qpdf --decrypt --generate-appearances --flatten-annotations=screen --warning-exit-0 in.pdf out.convkit-pages/flat.pdf
+pdf -> png: typst compile --root out.convkit-pages --ignore-system-fonts --diagnostic-format short --ppi 72 out.convkit-pages/layout-1.typ out.convkit-pages/png/1-{p}.png
+pdf -> webp: magick out.convkit-pages/png/1-1.png -quality 92 out.convkit-pages/enc/1-1.webp
+pdf -> webp: qpdf --decrypt --generate-appearances --flatten-annotations=screen --warning-exit-0 in.pdf out.convkit-pages/flat.pdf
+pdf -> webp: typst compile --root out.convkit-pages --ignore-system-fonts --diagnostic-format short --ppi 72 out.convkit-pages/layout-1.typ out.convkit-pages/png/1-{p}.png
 png -> avif: magick in.png -auto-orient -quality 92 out.avif
 png -> bmp: magick in.png[0] -auto-orient out.bmp
 png -> heic: magick in.png[0] -auto-orient -quality 60 out.heic

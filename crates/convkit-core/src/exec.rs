@@ -145,6 +145,11 @@ pub struct Outcome {
     /// `--json` for every other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<crate::rotate::RotationReport>,
+    /// The pages of a PDF saved as images: one file, or a folder whose
+    /// `bytes` are its files' together. Omitted from `--json` for every
+    /// other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages: Option<crate::pdf::raster::PagesReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -447,6 +452,12 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     // write, leaving an orphaned backend process and an uncleaned scratch
     // directory behind when the user gives up and kills conv (F197).
     winpath::check_output_name(&req.output)?;
+
+    // A PDF's pages may go into a folder, decided once the page count is
+    // read, so what would be replaced is decided there too.
+    if crate::pdf::raster::is_pair(req.from, req.to) {
+        return run_pdf_pages(req, resolver, on_event);
+    }
 
     // I5: enforced here, not only by the CLI's own fast-path check in
     // `batch.rs`, so refuse-by-default (spec §8) holds for every caller of
@@ -764,7 +775,174 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         range,
         speed,
         rotation,
+        pages: None,
     })
+}
+
+/// Saves a PDF's pages as images (`pdf::raster`). Reads the page count with
+/// qpdf, plans where the pages go and refuses what would replace something
+/// or needs consent, all before anything is written. Then, in the scratch
+/// folder: qpdf flattens the annotations and form fields into a copy, Typst
+/// reads the page sizes from it, and the plan made against them draws and
+/// encodes the pages. They move into place last: one file, a new folder in
+/// one rename, or files into a folder already there.
+fn run_pdf_pages(
+    req: &Request,
+    resolver: &Resolver,
+    on_event: &mut dyn FnMut(Event),
+) -> Result<Outcome> {
+    use crate::pdf::raster;
+    let input = &req.inputs[0];
+    let qpdf = resolver.resolve(Backend::Qpdf)?;
+    let mut pdf = raster::read(&qpdf.path, input)?;
+    let first = raster::plan(req.to, &req.inputs, &req.output, Some(&pdf), &req.tuning)?;
+    let report = first.plan.pages.clone().expect("a pages plan has a report");
+    if report.needs_confirmation && !req.allow_extreme {
+        return Err(raster::confirmation_error(input, &report));
+    }
+    let dest = first.plan.output.clone();
+    winpath::check_output_name(&dest)?;
+    if let Some(e) = raster::taken(&dest, &report, req.overwrite) {
+        return Err(e);
+    }
+    // Every backend the run needs is found before any of them runs, so a
+    // missing encoder is asked about before the pages are drawn, and a
+    // Typst too old to draw them is caught here.
+    let typst = resolver.resolve(Backend::Typst)?;
+    if !raster::typst_draws_pages(&typst.version) {
+        return Err(raster::typst_too_old(&typst.version));
+    }
+    for backend in registry::backends_for(req.from, req.to) {
+        resolver
+            .resolve(backend)
+            .map_err(|e| raster::why_needed(e, req.to))?;
+    }
+
+    let dest_dir = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let scratch = make_scratch_dir(dest_dir)?;
+    let mut guard = ScratchGuard::new(scratch.clone());
+    let name = req.output.file_name().ok_or_else(|| {
+        ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!("output path has no file name: {}", req.output.display()),
+        )
+    })?;
+    // Absolute, so an ffmpeg pattern's doubled `%` signs cover the whole
+    // path: the long-path rewriter would otherwise put the working folder in
+    // front of it, with any `%` in that left single.
+    let temp_output = std::path::absolute(scratch.join(name)).map_err(io_err)?;
+    let flatten = raster::plan(req.to, &req.inputs, &temp_output, Some(&pdf), &req.tuning)?;
+    let work = flatten.work.clone();
+    std::fs::create_dir_all(&work).map_err(io_err)?;
+    let mut runner = StepRunner {
+        resolver,
+        guard: &mut guard,
+        on_event,
+        current_input_stem: input
+            .file_stem()
+            .map(|s| s.to_os_string())
+            .unwrap_or_default(),
+        input: input.clone(),
+        notes: Vec::new(),
+        sheet_notes: Vec::new(),
+        backend_output: Vec::new(),
+        backends: Vec::new(),
+    };
+    let estimate = flatten.plan.steps.len();
+    runner
+        .run(&flatten.plan.steps[0], 0, estimate)
+        .map_err(|e| raster::name_the_pdf(e, &work, input))?;
+
+    pdf.sizes = raster::read_sizes(&typst.path, &work, "flat.pdf", pdf.count)
+        .map_err(|e| raster::name_the_pdf(e, &work, input))?;
+    let full = raster::plan(req.to, &req.inputs, &temp_output, Some(&pdf), &req.tuning)?;
+    if !full.exact || full.produced.len() != report.pages.len() {
+        return Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!("conv could not plan the pages of {}", input.display()),
+        ));
+    }
+    let total = full.plan.steps.len();
+    for (index, step) in full.plan.steps.iter().enumerate().skip(1) {
+        runner.run(step, index, total).map_err(|e| match e {
+            e if lacks_heic_encoder(req.to, &e) => ConvError::heic_encoder_missing(),
+            e => raster::name_the_pdf(e, &work, input),
+        })?;
+    }
+    let StepRunner {
+        mut notes,
+        backend_output,
+        backends,
+        ..
+    } = runner;
+
+    let report = full.plan.pages.clone().expect("a pages plan has a report");
+    let mut bytes = 0;
+    for (p, page) in full.produced.iter().zip(&report.pages) {
+        if !is_non_empty(p) {
+            return Err(ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!("page {page} of {} was not drawn", input.display()),
+            ));
+        }
+        bytes += file_len(p)?;
+    }
+    place_pages(&full.produced, &report, &dest, &scratch)?;
+
+    let mut warnings = full.plan.warnings;
+    if let Some(r) = &full.repaired {
+        warnings.retain(|w| w != r);
+        notes.insert(0, r.clone());
+    }
+    Ok(Outcome {
+        output: dest,
+        bytes,
+        warnings,
+        notes,
+        backend_output,
+        backends,
+        remuxed: false,
+        elapsed_ms: 0,
+        sizing: None,
+        enlarged: None,
+        range: None,
+        speed: None,
+        rotation: None,
+        pages: Some(report),
+    })
+}
+
+/// Moves the drawn pages to `dest`: the one file, or a folder of them. A
+/// folder that is not there yet is filled inside `scratch` and moved in one
+/// rename, so it never appears half full; into one already there, each
+/// file moves on its own, and a failed move takes back the files it added.
+fn place_pages(
+    produced: &[PathBuf],
+    report: &crate::pdf::raster::PagesReport,
+    dest: &Path,
+    scratch: &Path,
+) -> Result<()> {
+    if !report.folder {
+        return std::fs::rename(&produced[0], dest).map_err(io_err);
+    }
+    let names = report.files.iter();
+    if !dest.exists() {
+        let staged = scratch.join(dest.file_name().unwrap_or_else(|| OsStr::new("pages")));
+        std::fs::create_dir(&staged).map_err(io_err)?;
+        for (from, name) in produced.iter().zip(names) {
+            std::fs::rename(from, staged.join(name)).map_err(io_err)?;
+        }
+        return std::fs::rename(&staged, dest).map_err(io_err);
+    }
+    let moves: Vec<(PathBuf, PathBuf)> = produced
+        .iter()
+        .cloned()
+        .zip(names.map(|n| dest.join(n)))
+        .collect();
+    crate::pdf::run::place_outputs(&moves, &mut |from, to| std::fs::rename(from, to))
 }
 
 /// Whether a plan's turn is the executor's to make, by resetting the
@@ -875,6 +1053,12 @@ impl StepRunner<'_> {
         // intermediate and a long final output.
         let verbatim_paths = wants_verbatim_paths(step);
 
+        // A step that writes a folder of files finds the folder there:
+        // neither Typst's page template nor ffmpeg's image2 muxer makes one.
+        if step.output_mode == OutputMode::Folder {
+            std::fs::create_dir_all(&step.output).map_err(io_err)?;
+        }
+
         // Constraint: every soffice invocation gets its own isolated
         // profile. It lives in the system temp directory, not under
         // `scratch` (see `make_lo_profile_dir`'s docs) — tracked on `guard`
@@ -962,7 +1146,15 @@ impl StepRunner<'_> {
             let file = std::fs::File::open(stdin).map_err(io_err)?;
             cmd.stdin(file);
         }
-        let out = cmd.output().map_err(|e| {
+        // qpdf on Windows takes an extended-length path only on stdin; see
+        // `qpdf_wants_args_on_stdin`.
+        let given: Vec<OsString> = cmd.get_args().map(OsStr::to_os_string).collect();
+        let out = if step.backend == Backend::Qpdf {
+            crate::procutil::qpdf_output(&resolved.path, &given)
+        } else {
+            cmd.output()
+        }
+        .map_err(|e| {
             ConvError::new(
                 ErrorCode::ConversionFailed,
                 format!("failed to run {}: {e}", resolved.path.display()),
@@ -975,7 +1167,7 @@ impl StepRunner<'_> {
         let declared = step.output.clone();
 
         let produced = match step.output_mode {
-            OutputMode::Path | OutputMode::Discard => declared.clone(),
+            OutputMode::Path | OutputMode::Discard | OutputMode::Folder => declared.clone(),
             OutputMode::OutDir => {
                 let dir = declared
                     .parent()
@@ -1020,7 +1212,11 @@ impl StepRunner<'_> {
 
         // A Discard step (ffmpeg's first pass) keeps nothing, so only its
         // exit status can fail it.
-        let wrote = step.output_mode == OutputMode::Discard || is_non_empty(&produced);
+        let wrote = match step.output_mode {
+            OutputMode::Discard => true,
+            OutputMode::Folder => holds_a_file(&produced),
+            _ => is_non_empty(&produced),
+        };
         if let Some(profile) = &sheet_profile {
             match sheet_pdf::Report::read(profile) {
                 Some(report) => self.sheet_notes.extend(report.notes()),
@@ -1062,7 +1258,7 @@ impl StepRunner<'_> {
                     .map(String::as_str)
                     .chain(step.output.to_str()),
             );
-            let base = if is_non_empty(&produced) || step.output_mode == OutputMode::Discard {
+            let base = if wrote {
                 format!(
                     "{} failed ({}): {detail}",
                     step.backend.exe_name(),
@@ -1103,7 +1299,7 @@ impl StepRunner<'_> {
             });
         }
 
-        if step.output_mode != OutputMode::Discard {
+        if !matches!(step.output_mode, OutputMode::Discard | OutputMode::Folder) {
             if produced != declared {
                 std::fs::rename(&produced, &declared).map_err(io_err)?;
             }
@@ -1267,6 +1463,11 @@ fn remove_if_present(p: &Path) -> Result<()> {
 
 fn is_non_empty(p: &Path) -> bool {
     std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
+}
+
+/// Whether a folder holds at least one non-empty file.
+fn holds_a_file(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| entries.flatten().any(|e| is_non_empty(&e.path())))
 }
 
 /// Every backend `Arg::BackendPath` could possibly name. Small and fixed —

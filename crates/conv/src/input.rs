@@ -1054,8 +1054,38 @@ fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
             expanded.push(path.clone());
         }
     }
+    // A typed-out OUT is the user's explicit choice and is never renamed;
+    // the `.ext` shorthand and every --to output are derived.
+    let explicit_output =
+        cli.to.is_none() && expanded.len() == 2 && !is_extension_shorthand(&expanded[1]);
+    // `--pages` and `--dpi` draw a PDF's pages, so they need the pictures'
+    // format; one PDF and nothing else is not yet a conversion.
+    let page_flag = match (&cli.pages, cli.dpi) {
+        (Some(p), _) => Some(format!("--pages {p}")),
+        (None, Some(d)) => Some(format!("--dpi {d}")),
+        (None, None) => None,
+    };
+    if let (Some(flag), None, [single]) = (page_flag, &cli.to, expanded.as_slice()) {
+        let name = single.display();
+        let split = match &cli.pages {
+            Some(p) => format!(
+                "; conv split {name} {} keeps them as PDFs",
+                p.replace(',', " ")
+            ),
+            None => String::new(),
+        };
+        let does = match cli.pages {
+            Some(_) => "--pages saves a PDF's pages as pictures",
+            None => "--dpi draws a PDF's pages as pictures",
+        };
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!("{does}, so it needs their format: conv {name} .png {flag}{split}"),
+        ));
+    }
     let Some(own) = own else {
-        let jobs = jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?;
+        let mut jobs = jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?;
+        name_pdf_pages(&mut jobs, cli, explicit_output);
         // With `--to`, `--resize` tunes the conversion and names nothing,
         // except where a file already in the `--to` format would be written
         // over itself (`conv *.jpg --to jpg --resize 50%`, the fix several
@@ -1068,10 +1098,6 @@ fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
             None => Ok(jobs),
         };
     };
-    // A typed-out OUT is the user's explicit choice and is never renamed;
-    // the `.ext` shorthand and every --to output are derived.
-    let explicit_output =
-        cli.to.is_none() && expanded.len() == 2 && !is_extension_shorthand(&expanded[1]);
     if cli.to.is_none() {
         refuse_a_batch_without_to(&expanded, explicit_output, &own)?;
     }
@@ -1080,6 +1106,7 @@ fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
         (None, [single]) => vec![own_format_job(single, cli.outdir.as_deref(), &own)?],
         _ => jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?,
     };
+    name_pdf_pages(&mut jobs, cli, explicit_output);
     // A batch writes into a subfolder beside its inputs (`photos/stripped/`,
     // `clips/10mb/`, `talks/1m02s-1m10s/`) unless `-o` says where. These runs
     // take files already in the target format as inputs, so outputs written
@@ -1105,6 +1132,34 @@ fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
         }
     }
     Ok(jobs)
+}
+
+/// Names a PDF's one page picked by number after it, as a single still is
+/// named after its time and `conv split` names a range: `--pages 3` writes
+/// `report-3.png`. Several pages go into the folder the core names after
+/// the output, `report/`, so nothing changes for them here, and a typed-out
+/// OUT keeps its name either way.
+fn name_pdf_pages(jobs: &mut [Job], cli: &Cli, explicit_output: bool) {
+    use convkit_core::pdf::range::PageRef;
+    if explicit_output {
+        return;
+    }
+    let tuning = cli.tuning();
+    let Some([one]) = tuning.pages.as_deref() else {
+        return;
+    };
+    let (PageRef::Num(a), PageRef::Num(b)) = (one.start, one.end) else {
+        return;
+    };
+    if a != b {
+        return;
+    }
+    for job in jobs
+        .iter_mut()
+        .filter(|j| convkit_core::pdf::raster::is_pair(j.from, j.to))
+    {
+        job.output = suffixed_name(&job.output, &a.to_string());
+    }
 }
 
 /// `photos/IMG_2.jpg` + `stripped` -> `photos/stripped/IMG_2.jpg`.
@@ -1787,6 +1842,8 @@ mod tests {
             password: false,
             unlock: false,
             restrict: vec![],
+            pages: None,
+            dpi: None,
             copy: false,
             paste: false,
             yes: false,

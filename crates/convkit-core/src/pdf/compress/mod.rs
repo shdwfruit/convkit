@@ -958,6 +958,7 @@ pub(crate) fn run(
         range: None,
         speed: None,
         rotation: None,
+        pages: None,
     };
 
     // A file already under its target is copied as it is, as video is.
@@ -1152,6 +1153,7 @@ fn plan_with(
         speed: None,
         rotation: None,
         built_in: false,
+        pages: None,
     }
 }
 

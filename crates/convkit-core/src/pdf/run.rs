@@ -260,7 +260,7 @@ fn hide_scratch_paths(plan: &PdfPlan, scratch: &Path, reason: &str) -> String {
 /// Moves each `(produced, target)` pair into place. On the first failure it
 /// removes the targets this call created, so a failed move leaves no mixed
 /// set. Files replaced under `-y` are not restored.
-fn place_outputs(
+pub(crate) fn place_outputs(
     moves: &[(PathBuf, PathBuf)],
     rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<()> {

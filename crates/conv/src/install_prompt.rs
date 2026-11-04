@@ -139,6 +139,8 @@ mod tests {
             password: false,
             unlock: false,
             restrict: vec![],
+            pages: None,
+            dpi: None,
             copy: false,
             paste: false,
             yes,

@@ -1,5 +1,7 @@
+use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
 
 /// Builds a `Command` for spawning `path` as a backend subprocess, with
@@ -77,9 +79,90 @@ pub(crate) fn spawn(cmd: &mut Command) -> std::io::Result<Child> {
     }
 }
 
+/// Whether qpdf must be given `args` on stdin (`@-`) rather than on its
+/// command line. Its Windows build expands wildcards in its arguments, and
+/// the `?` of an extended-length path is one: `\\?\C:\docs\report.pdf`
+/// reaches qpdf as `\\report.pdf` (seen on the Windows CI job). Arguments
+/// qpdf reads from `@-` are taken as they are. A file name on Windows can
+/// hold neither `?` nor `*`, so only such a path ever needs it.
+pub(crate) fn qpdf_wants_args_on_stdin<S: AsRef<OsStr>>(args: &[S]) -> bool {
+    cfg!(windows)
+        && args
+            .iter()
+            .any(|a| a.as_ref().to_string_lossy().contains(['?', '*']))
+}
+
+/// Runs qpdf at `qpdf` with `args`, on stdin when its command line would
+/// mangle them (`qpdf_wants_args_on_stdin`).
+pub(crate) fn qpdf_output(qpdf: &Path, args: &[OsString]) -> std::io::Result<Output> {
+    if qpdf_wants_args_on_stdin(args) {
+        qpdf_with_args_on_stdin(qpdf, args)
+    } else {
+        backend_command(qpdf).args(args).output()
+    }
+}
+
+/// Runs qpdf with `@-` and `args` on stdin, one a line, as qpdf reads an
+/// argument file.
+pub(crate) fn qpdf_with_args_on_stdin(qpdf: &Path, args: &[OsString]) -> std::io::Result<Output> {
+    let mut child = spawn(
+        backend_command(qpdf)
+            .arg("@-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )?;
+    let mut lines = String::new();
+    for a in args {
+        lines.push_str(&a.to_string_lossy());
+        lines.push('\n');
+    }
+    if let Some(mut stdin) = child.stdin.take() {
+        // A qpdf that exits early closes the pipe; its stderr says why.
+        let _ = stdin.write_all(lines.as_bytes());
+    }
+    child.wait_with_output()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qpdf_is_given_its_arguments_on_stdin_only_for_a_wildcard_on_windows() {
+        let args = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(!qpdf_wants_args_on_stdin(&args(&[
+            "--show-npages",
+            "C:\\docs\\a.pdf"
+        ])));
+        assert_eq!(
+            qpdf_wants_args_on_stdin(&args(&["--show-npages", "\\\\?\\C:\\docs\\a.pdf"])),
+            cfg!(windows)
+        );
+    }
+
+    /// The stdin route against a real qpdf, which is how a Windows run
+    /// with long paths reaches it.
+    #[test]
+    #[ignore = "requires qpdf; run with --ignored"]
+    fn qpdf_reads_its_arguments_from_stdin() {
+        let qpdf = crate::Resolver::new()
+            .resolve(crate::Backend::Qpdf)
+            .expect("qpdf")
+            .path;
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/sample.pdf");
+        let out = qpdf_with_args_on_stdin(
+            &qpdf,
+            &[OsString::from("--show-npages"), sample.into_os_string()],
+        )
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "3");
+    }
 
     /// Not much to assert cross-platform about a `Command`'s private
     /// creation-flags field (the standard library exposes no getter), so

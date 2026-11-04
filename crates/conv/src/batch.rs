@@ -126,6 +126,9 @@ pub fn run(jobs: Vec<Job>, cli: &Cli, allow_extreme: bool) -> (Vec<JobResult>, i
     run_each(jobs, cli, allow_extreme)
 }
 
+/// How many PDFs a batch saves the pages of at once without `-j`.
+const PDF_PAGES_AT_ONCE: usize = 2;
+
 /// `run`, with a tuning per job instead of the command line's: `conv trim`
 /// cuts every clip with its own range.
 pub fn run_each(
@@ -134,8 +137,19 @@ pub fn run_each(
     allow_extreme: bool,
 ) -> (Vec<JobResult>, i32, Duration) {
     let batch_start = Instant::now();
+    // Typst draws a PDF's pages on every core and holds a run of them in
+    // memory (about 450 MB), so a batch of PDFs gains little from running
+    // side by side and could run out of memory: two at a time, unless -j
+    // says otherwise.
+    let pdf_pages = jobs
+        .iter()
+        .any(|(job, _)| convkit_core::pdf::raster::is_pair(job.from, job.to));
+    let default_jobs = || match pdf_pages {
+        true => num_cpus_or_one().min(PDF_PAGES_AT_ONCE),
+        false => num_cpus_or_one(),
+    };
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(cli.jobs.unwrap_or_else(num_cpus_or_one))
+        .num_threads(cli.jobs.unwrap_or_else(default_jobs))
         .build()
         .expect("thread pool");
 
@@ -156,12 +170,15 @@ pub fn run_each(
                 // backend resolution and a scratch directory entirely for
                 // the common case — not the only place it's checked.
                 // A data file into its own format is `conv fmt`'s, which
-                // says so before the file it would be written over does.
+                // says so before the file it would be written over does. A
+                // PDF's pages may go into a folder instead, which only the
+                // page count decides; the core checks that itself.
                 let refused =
                     job.from == job.to && convkit_core::data::why_not(job.from, job.to).is_some();
+                let pages = convkit_core::pdf::raster::is_pair(job.from, job.to);
                 let result = if refused {
                     Err(ConvError::unsupported_pair(job.from, job.to))
-                } else if job.output.exists() && !cli.overwrite {
+                } else if job.output.exists() && !cli.overwrite && !pages {
                     Err(ConvError::new(
                         ErrorCode::OutputExists,
                         format!("{} exists; pass -y to overwrite", job.output.display()),
@@ -300,6 +317,7 @@ mod tests {
             range: None,
             speed: None,
             rotation: None,
+            pages: None,
         })
     }
 
@@ -367,6 +385,8 @@ mod tests {
             password: false,
             unlock: false,
             restrict: vec![],
+            pages: None,
+            dpi: None,
             copy: false,
             paste: false,
             yes: false,
