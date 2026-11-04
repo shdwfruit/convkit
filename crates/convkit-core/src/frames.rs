@@ -239,7 +239,9 @@ impl Buckets {
         self.pending.extend_from_slice(bytes);
         let whole = self.pending.len() / BUCKET_BYTES * BUCKET_BYTES;
         let out = self.pending[..whole]
-            .chunks_exact(BUCKET_BYTES)
+            .as_chunks::<BUCKET_BYTES>()
+            .0
+            .iter()
             .map(|b| rms(&samples(b)))
             .collect();
         self.pending.drain(..whole);
@@ -254,7 +256,9 @@ impl Buckets {
 
 fn samples(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|b| i16::from_le_bytes([b[0], b[1]]))
         .collect()
 }

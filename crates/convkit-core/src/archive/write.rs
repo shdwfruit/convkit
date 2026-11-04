@@ -176,10 +176,8 @@ fn write_zip(file: File, items: &[Item], password: Option<&str>) -> Result<()> {
         let secs = time::unix_secs(item.mtime).clamp(0, i64::from(u32::MAX)) as u32;
         let mut ut = vec![1u8];
         ut.extend_from_slice(&secs.to_le_bytes());
-        opts.add_extra_data(0x5455, ut.clone().into_boxed_slice(), false)
-            .map_err(zipped)?;
-        opts.add_extra_data(0x5455, ut.into_boxed_slice(), true)
-            .map_err(zipped)?;
+        opts.add_extra_field(0x5455, &ut, false).map_err(zipped)?;
+        opts.add_extra_field(0x5455, &ut, true).map_err(zipped)?;
         match &item.kind {
             ItemKind::Dir => zip
                 .add_directory(item.name.as_str(), opts)

@@ -452,7 +452,10 @@ fn extract_folder(asset: &Asset, member: &ArchiveMember, bytes: &[u8]) -> Result
         if file.is_dir() {
             continue;
         }
-        let name = file.name().to_string();
+        let name = file
+            .name()
+            .map_err(|e| extract_err(asset, member, e))?
+            .into_owned();
         let Some(rel) = name.strip_prefix(root) else {
             continue;
         };
@@ -799,7 +802,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut buf));
-            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let options = zip::write::SimpleFileOptions::default();
             writer.start_file(member, options).unwrap();
             std::io::Write::write_all(&mut writer, contents).unwrap();
             writer.finish().unwrap();
@@ -850,7 +853,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut buf));
-            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let options = zip::write::SimpleFileOptions::default();
             writer.start_file("bin/ffmpeg.exe", options).unwrap();
             std::io::Write::write_all(&mut writer, b"pretend-ffmpeg").unwrap();
             writer.start_file("bin/ffprobe.exe", options).unwrap();

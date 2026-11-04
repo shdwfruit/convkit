@@ -157,7 +157,7 @@ fn decode_base64(text: &str) -> Result<(Vec<u8>, Alphabet), String> {
             body.len()
         ));
     }
-    if padding > 0 && (kept.len() % 4 != 0 || padding > 2) {
+    if padding > 0 && (!kept.len().is_multiple_of(4) || padding > 2) {
         return Err("the = padding at the end is wrong for this length".to_string());
     }
     let engine = GeneralPurpose::new(

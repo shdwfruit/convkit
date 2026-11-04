@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.7.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["shdwfruit"]
 repository = "https://github.com/shdwfruit/convkit"

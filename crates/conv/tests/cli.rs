@@ -3839,7 +3839,9 @@ fn pitch(ffmpeg: &Path, file: &Path, secs: f64) -> f64 {
     assert!(out.status.success());
     let samples: Vec<i16> = out
         .stdout
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|b| i16::from_le_bytes([b[0], b[1]]))
         .collect();
     let mid = (secs / 2.0 * 44_100.0) as usize;

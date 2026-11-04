@@ -250,7 +250,7 @@ fn sentence(rng: &mut Rng) -> String {
     let mut words: Vec<String> = (0..n).map(|_| rng.word().to_string()).collect();
     // A comma after a word in the first two thirds, in about half of the
     // longer sentences.
-    if n >= 9 && rng.next() % 2 == 0 {
+    if n >= 9 && rng.next().is_multiple_of(2) {
         let at = rng.range(2, n * 2 / 3);
         words[at].push(',');
     }

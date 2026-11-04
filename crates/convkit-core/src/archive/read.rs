@@ -202,7 +202,9 @@ fn read_zip(archive: &Path, password: Option<&str>, sink: &mut dyn Sink) -> Resu
             Ok(s) => s.to_string(),
             Err(_) => {
                 info.dos_names += 1;
-                f.name().to_string()
+                f.name()
+                    .map_err(|e| damaged(archive, "a zip", e))?
+                    .into_owned()
             }
         };
         // Zips made on Windows sometimes separate folders with `\`.

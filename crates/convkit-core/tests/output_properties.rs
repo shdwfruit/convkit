@@ -579,7 +579,9 @@ fn gif_global_color_table(path: &Path) -> Vec<(u8, u8, u8)> {
     let start = 13;
     let end = start + 3 * n;
     data[start..end]
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| (c[0], c[1], c[2]))
         .collect()
 }
@@ -1858,7 +1860,7 @@ fn pdf_pages(path: &Path) -> usize {
 /// The names of the files in a zip (an Office Open XML document).
 fn zip_names(path: &Path) -> Vec<String> {
     let zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
-    zip.file_names().map(str::to_string).collect()
+    zip.file_names().map(|n| n.unwrap().into_owned()).collect()
 }
 
 /// One file inside a zip, as text.
@@ -5792,7 +5794,9 @@ fn a_mix_holds_both_sounds_for_the_length_of_the_clip() {
 /// How many pixels of a frame are near white: subtitle text on a dark
 /// picture.
 fn bright_pixels(((_, _), rgb): &((u32, u32), Vec<u8>)) -> usize {
-    rgb.chunks_exact(3)
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
         .filter(|p| p.iter().all(|&c| c > 200))
         .count()
 }
@@ -5846,7 +5850,9 @@ fn burned_subtitles_show_inside_their_time_only() {
     // The text sits in the bottom half of the picture.
     let ((w, _), rgb) = frame_rgb(&out, 1.5);
     let top_half = rgb[..(w * 180 * 3) as usize]
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter(|p| p.iter().all(|&c| c > 200))
         .count();
     assert!(top_half < 20, "text in the top half: {top_half}");
@@ -6284,7 +6290,9 @@ fn decoded_sound(path: &Path) -> Vec<f32> {
         String::from_utf8_lossy(&out.stderr)
     );
     out.stdout
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }

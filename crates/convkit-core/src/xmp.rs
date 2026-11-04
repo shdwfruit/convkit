@@ -157,14 +157,16 @@ fn raw_profile(mut text: Vec<u8>) -> Option<Vec<u8>> {
         .collect();
     let digit = |i: usize| char::from(text[i]).to_digit(16).map(|d| d as u8);
     let mut bytes = hex
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| Some(digit(p[0])? << 4 | digit(p[1])?))
         .collect::<Option<Vec<u8>>>()?;
     if !plain(&mut bytes) {
         return None;
     }
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    for (b, p) in bytes.iter().zip(hex.chunks_exact(2)) {
+    for (b, p) in bytes.iter().zip(hex.as_chunks::<2>().0) {
         text[p[0]] = HEX[usize::from(b >> 4)];
         text[p[1]] = HEX[usize::from(b & 15)];
     }

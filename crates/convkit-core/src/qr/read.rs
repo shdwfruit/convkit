@@ -74,16 +74,20 @@ impl Picture {
     /// A picture from 8-bit RGBA, not premultiplied.
     pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Picture {
         let lum = |p: &[u8]| (p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000;
-        let clear = rgba.chunks_exact(4).any(|p| p[3] < 255);
+        let clear = rgba.as_chunks::<4>().0.iter().any(|p| p[3] < 255);
         let luma = rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| {
                 let a = p[3] as u32;
                 ((lum(p) * a + 255 * (255 - a)) / 255) as u8
             })
             .collect();
         let over_black = clear.then(|| {
-            rgba.chunks_exact(4)
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
                 .map(|p| 255 - (lum(p) * p[3] as u32 / 255) as u8)
                 .collect()
         });
@@ -185,7 +189,9 @@ fn decode_webp(bytes: &[u8]) -> Result<Picture> {
         Ok(Picture::from_rgba(w, h, &buf))
     } else {
         let rgba: Vec<u8> = buf
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect();
         Ok(Picture::from_rgba(w, h, &rgba))

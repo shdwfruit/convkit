@@ -374,7 +374,9 @@ impl Read for Utf16<'_> {
             let Some(big) = self.big else { continue };
             let whole = self.carry.len() / 2 * 2;
             let units: Vec<u16> = self.carry[..whole]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| {
                     if big {
                         u16::from_be_bytes([c[0], c[1]])
