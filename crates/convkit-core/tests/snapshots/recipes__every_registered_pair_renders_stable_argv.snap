@@ -156,7 +156,7 @@ pdf -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --n
 pdf -> heic: magick out.convkit-pages/png/1-1.png -quality 60 out.convkit-pages/enc/1-1.heic
 pdf -> heic: qpdf --decrypt --generate-appearances --flatten-annotations=screen --warning-exit-0 in.pdf out.convkit-pages/flat.pdf
 pdf -> heic: typst compile --root out.convkit-pages --ignore-system-fonts --diagnostic-format short --ppi 72 out.convkit-pages/layout-1.typ out.convkit-pages/png/1-{p}.png
-pdf -> jpg: ffmpeg -start_number 1 -i out.convkit-pages/png/1-%d.png -c:v mjpeg -q:v 2 -qmin 1 -pix_fmt yuvj444p -start_number 1 -y out.convkit-pages/jpg/1-%d.jpg
+pdf -> jpg: ffmpeg -pattern_type sequence -start_number 1 -i out.convkit-pages/png/1-%d.png -c:v mjpeg -q:v 2 -qmin 1 -pix_fmt yuvj444p -start_number 1 -y out.convkit-pages/jpg/1-%d.jpg
 pdf -> jpg: qpdf --decrypt --generate-appearances --flatten-annotations=screen --warning-exit-0 in.pdf out.convkit-pages/flat.pdf
 pdf -> jpg: typst compile --root out.convkit-pages --ignore-system-fonts --diagnostic-format short --ppi 72 out.convkit-pages/layout-1.typ out.convkit-pages/png/1-{p}.png
 pdf -> png: qpdf --decrypt --generate-appearances --flatten-annotations=screen --warning-exit-0 in.pdf out.convkit-pages/flat.pdf

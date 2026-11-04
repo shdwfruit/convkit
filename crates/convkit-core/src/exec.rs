@@ -1146,7 +1146,15 @@ impl StepRunner<'_> {
             let file = std::fs::File::open(stdin).map_err(io_err)?;
             cmd.stdin(file);
         }
-        let out = cmd.output().map_err(|e| {
+        // qpdf on Windows takes an extended-length path only on stdin; see
+        // `qpdf_wants_args_on_stdin`.
+        let given: Vec<OsString> = cmd.get_args().map(OsStr::to_os_string).collect();
+        let out = if step.backend == Backend::Qpdf {
+            crate::procutil::qpdf_output(&resolved.path, &given)
+        } else {
+            cmd.output()
+        }
+        .map_err(|e| {
             ConvError::new(
                 ErrorCode::ConversionFailed,
                 format!("failed to run {}: {e}", resolved.path.display()),

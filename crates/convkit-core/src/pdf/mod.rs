@@ -71,7 +71,9 @@ pub(crate) fn qpdf_reason(stderr: &str) -> String {
 /// Runs qpdf with `argv`. With `secret` set (some argument holds a
 /// password) the arguments go to qpdf on its standard input, as `qpdf @-`
 /// reads them, one per line, so no password is ever on a command line
-/// another user could read in the process list. `cwd` is where it runs.
+/// another user could read in the process list. So do arguments qpdf's
+/// command line would mangle, an extended-length Windows path among them
+/// (`procutil::qpdf_wants_args_on_stdin`). `cwd` is where it runs.
 pub(crate) fn qpdf_output(
     qpdf: &Path,
     argv: &[String],
@@ -82,7 +84,7 @@ pub(crate) fn qpdf_output(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    if !secret {
+    if !secret && !crate::procutil::qpdf_wants_args_on_stdin(argv) {
         return cmd.args(argv).output();
     }
     if argv.iter().any(|a| a.contains(['\n', '\r'])) {

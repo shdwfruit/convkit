@@ -899,8 +899,8 @@ after the last step is kept and flagged, as for video. `--compress
 
 One file is written beside itself as `scan-compressed.pdf` or
 `deck-2mb.pdf`; a batch needs `--to pdf` and writes into `compressed/` or
-`2mb/`. A PDF with an open password is refused, and one with only an owner
-password keeps its restrictions. A digitally signed PDF asks first, since
+`2mb/`. A PDF with an open password is refused, with `--unlock` as the
+way round, and one with only an owner password keeps its restrictions. A digitally signed PDF asks first, since
 the copy's signature can't stay valid; a form carrying Adobe Reader usage
 rights loses them, with a warning. The copy isn't set up for "fast web
 view" even when the original was, since that would make it bigger.
@@ -945,7 +945,8 @@ only backends conv installs. WebP and HEIC are written by ImageMagick.
 A folder that is already there is fine: the pages go in beside what is
 there, and conv stops only if one of their files exists, which `-y`
 replaces. More than 1,000 files asks first; `--yes` answers for a script.
-Password-protected PDFs aren't supported yet.
+A PDF that needs a password to open is refused; unlock a copy first with
+`conv report.pdf --unlock`.
 
 ## Copy and paste
 

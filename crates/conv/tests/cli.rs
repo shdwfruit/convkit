@@ -5201,7 +5201,10 @@ fn a_pdf_to_jpg_dry_run_with_no_backends_shows_the_template() {
         lines[1].starts_with("typst compile --root report.convkit-pages"),
         "{stdout}"
     );
-    assert!(lines[2].starts_with("ffmpeg -start_number 1"), "{stdout}");
+    assert!(
+        lines[2].starts_with("ffmpeg -pattern_type sequence -start_number 1"),
+        "{stdout}"
+    );
     assert!(
         lines[3].starts_with("note: conv could not read report.pdf here"),
         "{stdout}"

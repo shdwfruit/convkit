@@ -1195,9 +1195,10 @@ fn a_locked_pdf_is_refused_as_password_protected() {
     .unwrap_err();
 
     assert_eq!(e.code, ErrorCode::PasswordProtected);
+    assert_eq!(e.message, "secret.pdf is password-protected");
     assert_eq!(
-        e.message,
-        "secret.pdf is password-protected, and conv can't open it yet"
+        e.remediation.and_then(|r| r.manual).as_deref(),
+        Some("unlock it first, `conv secret.pdf --unlock`, then convert secret-unlocked.pdf")
     );
 }
 
@@ -1241,7 +1242,7 @@ fn pages_are_saved_in_a_destination_that_approaches_max_path() {
     );
 
     for ext in ["jpg", "webp"] {
-        let o = pages(
+        let o = drawn_pages(
             &input,
             &deep.join(format!("report.{ext}")),
             Tuning::default(),

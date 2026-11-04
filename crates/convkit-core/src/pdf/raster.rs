@@ -503,6 +503,11 @@ fn jpeg_step(
 ) -> PlannedStep {
     let jpg = inside(work, "jpg");
     let mut argv = vec![
+        // A numbered sequence, never a glob: the default would read the `?`
+        // of an extended-length Windows path as one, and Windows builds of
+        // ffmpeg have no glob to read it with.
+        "-pattern_type".to_string(),
+        "sequence".to_string(),
         "-start_number".to_string(),
         first.to_string(),
         "-i".to_string(),
@@ -536,7 +541,7 @@ fn jpeg_step(
         pattern_text(work, &format!("jpg/{chunk}-%d.jpg")),
     ]);
     let last = argv.len() - 1;
-    let mut s = step(Backend::Ffmpeg, argv, &[3, last], jpg);
+    let mut s = step(Backend::Ffmpeg, argv, &[5, last], jpg);
     s.output_mode = OutputMode::Folder;
     s
 }
@@ -1236,13 +1241,13 @@ mod tests {
         assert_eq!(
             ffmpeg,
             vec![
-                "ffmpeg -start_number 1 -i report.convkit-pages/png/1-%d.png -frames:v 2 -c:v mjpeg \
+                "ffmpeg -pattern_type sequence -start_number 1 -i report.convkit-pages/png/1-%d.png -frames:v 2 -c:v mjpeg \
                  -q:v 2 -qmin 1 -pix_fmt yuvj444p -start_number 1 -y \
                  report.convkit-pages/jpg/1-%d.jpg",
-                "ffmpeg -start_number 3 -i report.convkit-pages/png/1-%d.png -frames:v 1 -c:v mjpeg \
+                "ffmpeg -pattern_type sequence -start_number 3 -i report.convkit-pages/png/1-%d.png -frames:v 1 -c:v mjpeg \
                  -q:v 2 -qmin 1 -pix_fmt yuvj444p -start_number 3 -y \
                  report.convkit-pages/jpg/1-%d.jpg",
-                "ffmpeg -start_number 4 -i report.convkit-pages/png/1-%d.png -frames:v 1 -c:v mjpeg \
+                "ffmpeg -pattern_type sequence -start_number 4 -i report.convkit-pages/png/1-%d.png -frames:v 1 -c:v mjpeg \
                  -q:v 2 -qmin 1 -pix_fmt yuvj444p -start_number 4 -y \
                  report.convkit-pages/jpg/1-%d.jpg",
             ]
@@ -1494,7 +1499,7 @@ mod tests {
         )
         .unwrap();
         let ffmpeg = &p.plan.steps[2];
-        assert_eq!(ffmpeg.argv[3], "100%% done.convkit-pages/png/1-%d.png");
+        assert_eq!(ffmpeg.argv[5], "100%% done.convkit-pages/png/1-%d.png");
         assert_eq!(p.plan.output, PathBuf::from("100% done"));
     }
 
