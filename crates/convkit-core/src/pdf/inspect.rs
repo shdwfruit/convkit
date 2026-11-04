@@ -443,7 +443,9 @@ fn unescape_name(raw: &[u8]) -> Vec<u8> {
 fn text(bytes: &[u8]) -> String {
     let s = if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         let units: Vec<u16> = rest
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| u16::from_be_bytes([p[0], p[1]]))
             .collect();
         String::from_utf16_lossy(&units)

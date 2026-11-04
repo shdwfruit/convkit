@@ -873,7 +873,9 @@ fn decode_png(path: &Path) -> (u32, u32, Vec<u8>) {
     let rgba = match reader.output_color_type().0 {
         png::ColorType::Rgba => buf,
         png::ColorType::Rgb => buf
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         other => panic!("unexpected PNG colour type {other:?}"),

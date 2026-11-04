@@ -291,10 +291,12 @@ impl Cfb {
         let v3 = sector_size == 512;
         for id in cfb.chain(u32_at(&header, 0x30))? {
             let sector = cfb.sector(id)?;
-            for raw in sector.chunks_exact(128) {
+            for raw in sector.as_chunks::<128>().0 {
                 let name_len = (u16_at(raw, 0x40) as usize).min(64);
                 let units: Vec<u16> = raw[..name_len]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .take_while(|&u| u != 0)
                     .collect();

@@ -272,7 +272,7 @@ fn svg_for(code: &QrCode, logo: Option<&Logo>, px: u32) -> String {
     if let Some(logo) = logo {
         // An odd side centres on the odd-sized code, on whole modules.
         let mut side = (n as f64 * LOGO_FRACTION).ceil() as usize;
-        if side % 2 == 0 {
+        if side.is_multiple_of(2) {
             side += 1;
         }
         let at = QUIET_ZONE + (n - side) / 2;
@@ -350,12 +350,20 @@ fn encode_png(pixmap: &Pixmap, colour: bool) -> Result<Vec<u8>> {
     let (colour_type, pixels): (png::ColorType, Vec<u8>) = if colour {
         let rgb = pixmap
             .data()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
         (png::ColorType::Rgb, rgb)
     } else {
-        let grey = pixmap.data().chunks_exact(4).map(|p| p[0]).collect();
+        let grey = pixmap
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[0])
+            .collect();
         (png::ColorType::Grayscale, grey)
     };
     let failed = |e: png::EncodingError| {

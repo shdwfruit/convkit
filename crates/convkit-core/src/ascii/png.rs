@@ -23,7 +23,7 @@ static ATLAS: LazyLock<Vec<u8>> = LazyLock::new(|| {
         (CELL_W * 94, CELL_H),
         "the glyph atlas's size"
     );
-    img.rgba.chunks_exact(4).map(|p| p[0]).collect()
+    img.rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect()
 });
 
 /// Whether the PNG can draw `c`.

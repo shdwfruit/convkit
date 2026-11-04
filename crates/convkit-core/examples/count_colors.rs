@@ -63,7 +63,7 @@ fn main() {
     // 2^24 bits = 2 MiB, one bit per possible colour.
     let mut seen = vec![0u64; (1usize << 24) / 64];
     let mut unique: u64 = 0;
-    for px in data.chunks_exact(3) {
+    for px in data.as_chunks::<3>().0 {
         let idx = ((px[0] as usize) << 16) | ((px[1] as usize) << 8) | (px[2] as usize);
         let word = idx / 64;
         let bit = 1u64 << (idx % 64);
