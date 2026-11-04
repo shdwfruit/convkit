@@ -1,39 +1,51 @@
 # ConvKit for Mac (prototype)
 
-A SwiftUI toolkit for conv, with a tool in the sidebar for each thing conv does.
+A SwiftUI toolbox for conv. Each tool does one job, and every tool runs on your Mac.
 
-Files
-- Convert: drop or paste files in, pick a format and any of conv's options (size
-  limit, resize, turn, quality, colors, frame rate, CRF, cuts, speed, metadata),
-  press Convert. A copied picture or screenshot can be pasted too, and the result
-  can go straight to the clipboard.
-- Trim: play a video or audio file, mark clips with I and O, write them all.
-  A clip can keep just the sound.
-- Merge PDFs: join PDFs in the order you drag them into.
-- Split PDF: one file a page, or one for each range you type, with the pages shown.
-- Scan Folder: what each file in a folder could become. Send any of them to Convert.
+Finding a tool
+- The sidebar groups the tools under Video, Audio, Images, Documents, Text,
+  Developer and Files. Search at the top matches names, descriptions and
+  formats, so "heic" finds the picture tools and "shrink" finds Compress
+  Video. Return opens the first match.
+- Home shows the popular tools, the ones you used last, and every section.
+- Drop a file on Home and it lists the tools that fit that file. Pick one and
+  the file is already in it. Files opened from Finder or the Dock work the same
+  way, unless the tool showing takes them.
 
-Make
-- QR Code: type a link or text, see the code conv made and checked, save or copy it.
-- ASCII Art: drop a picture, GIF or video, tune the look, copy the text or save it.
+The tools
+- Video: Compress Video, Convert Video, Trim Video, Video to GIF, Extract
+  Audio, Change Speed, Resize Video, Turn Video, Remove Metadata.
+- Audio: Convert Audio, Trim Audio, Change Speed, Remove Metadata.
+- Images: Convert Image, Resize Image, Turn Image, Remove Location, Make an Icon.
+- Documents: Merge PDFs, Split PDF, Photos to PDF, Convert Document.
+- Text: QR Code, ASCII Art.
+- Developer: Format JSON (`conv fmt` as you type: tidy, pack, sort, check,
+  or write another language), Convert Data (JSON, YAML, TOML and CSV files).
+- Files: Convert Anything (every format and option), Scan Folder.
+- conv: Backends (install and update what conv uses), Formats, What's New.
 
-conv
-- Backends: which programs conv uses, where they are, and Install or Update for
-  the ones conv manages.
-- Formats: every format, what it turns into, and which options apply.
-- What's New: the changelog built into conv.
+Most tools are Convert with a narrower form: the same `conv FILE .ext --flags`,
+but showing only the options for that job. More Options carries the files
+and settings into Convert Anything.
 
-A tool only shows when your conv has the command behind it, so new conv
-commands can get a tool without breaking older installs.
+Options that don't fit the files are greyed out, and hovering says why: a
+PNG has no quality setting, a picture has no frame rate, End and a length
+can't both be set. Convert Anything greys out everything until a file is
+added. What fits comes from conv itself: `conv capabilities` for each format,
+and what a format's own sources take on the way to it when a file keeps its
+format. A file a tool doesn't take is listed but left out, with a pointer to
+Convert Anything.
 
-The app runs the `conv` binary and doesn't copy any of conv's rules. In Convert, formats come
-from `conv capabilities`. The name of each new file, and any problem, come
-from `conv --dry-run --json` as you change options. Conversions run with
-`--json`.
+The app runs the `conv` binary and doesn't copy any of conv's rules. The name
+of each new file, and any problem, come from `conv --dry-run --json` as you
+change options. Conversions run with `--json`.
 
 It never overwrites or forces anything on its own. If the new file already
 exists, the row offers Replace. If a size limit is too small, the row shows
 conv's warning and offers Convert Anyway.
+
+A tool only shows when your conv has the command behind it, so new conv
+commands can get a tool without breaking older installs.
 
 ## Build
 

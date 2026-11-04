@@ -1,6 +1,7 @@
 import Observation
 import PDFKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The plan or result of `conv merge` / `conv split`, as their --json reports it.
 struct PDFResponse: Decodable {
@@ -30,76 +31,126 @@ private func pageCount(_ url: URL) -> Int? { PDFDocument(url: url)?.pageCount }
 
 // MARK: - Merge
 
+/// Joins files into one PDF in the order shown: PDFs through `conv merge`, pictures
+/// through plain `conv a.jpg b.png out.pdf`, a page each.
 @Observable
 final class MergeModel {
+    enum Mode { case pdfs, photos }
+
     struct Item: Identifiable, Hashable {
         let id = UUID()
         let url: URL
         let pages: Int?
     }
 
+    let mode: Mode
     var conv: URL?
+    /// Extensions taken: pdf, or the pictures conv puts into a PDF.
+    var accepts: Set<String>
     var items: [Item] = []
+    private(set) var skipped: [String] = []
     private(set) var warnings: [String] = []
     private(set) var problem: String?
     private(set) var result: URL?
     private(set) var working = false
 
+    init(mode: Mode) {
+        self.mode = mode
+        self.accepts = mode == .pdfs ? ["pdf"] : []
+    }
+
+    var title: String { mode == .pdfs ? "Merge PDFs" : "Photos to PDF" }
+    var noun: String { mode == .pdfs ? "PDFs" : "pictures" }
+    private var minimum: Int { mode == .pdfs ? 2 : 1 }
+
     @MainActor
     func add(_ urls: [URL]) {
+        skipped = []
         for url in urls {
             var isDir: ObjCBool = false
             FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-            let pdfs = isDir.boolValue
-                ? ((try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? [])
-                    .filter { $0.pathExtension.lowercased() == "pdf" }
+            let files = isDir.boolValue
+                ? ((try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil,
+                                                                 options: [.skipsHiddenFiles])) ?? [])
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
                 : [url]
-            items += pdfs.map { Item(url: $0, pages: pageCount($0)) }
+            for file in files {
+                if accepts.contains(file.pathExtension.lowercased()) {
+                    items.append(Item(url: file, pages: mode == .pdfs ? pageCount(file) : 1))
+                } else if !isDir.boolValue {
+                    skipped.append(file.lastPathComponent)
+                }
+            }
         }
         result = nil
         Task { await check() }
     }
 
     var totalPages: Int { items.compactMap(\.pages).reduce(0, +) }
+    var ready: Bool { items.count >= minimum && problem == nil && !working }
 
-    /// Dry run with a stand-in output, for conv's warnings (bookmarks, protection).
+    /// Dry run with a stand-in output, for conv's warnings (bookmarks, protection, size).
     @MainActor
     func check() async {
-        guard let conv, items.count >= 2 else {
+        guard let conv, items.count >= minimum else {
             warnings = []
-            problem = items.count == 1 ? "Add at least one more PDF." : nil
+            problem = items.count == 1 && mode == .pdfs ? "Add at least one more PDF." : nil
             return
         }
         let stand = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-merge-check.pdf")
-        guard let out = try? await Conv.run(conv, ["merge", "--dry-run", "--json", "--no-install"]
-            + items.map(\.url.path) + [stand.path]),
-            let resp = out.decode(PDFResponse.self) else { return }
-        problem = resp.problem
-        warnings = (resp.entry?.warnings ?? []).map { $0.replacingOccurrences(of: stand.lastPathComponent, with: "the new PDF") }
-            + (resp.entry?.notes ?? [])
+        guard let out = try? await Conv.run(conv, command + ["--dry-run", "--json", "--no-install"]
+            + items.map(\.url.path) + [stand.path]) else { return }
+        let name = { (s: String) in s.replacingOccurrences(of: stand.lastPathComponent, with: "the new PDF") }
+        switch mode {
+        case .pdfs:
+            guard let resp = out.decode(PDFResponse.self) else { return }
+            problem = resp.problem
+            warnings = ((resp.entry?.warnings ?? []) + (resp.entry?.notes ?? [])).map(name)
+        case .photos:
+            guard let resp = out.decode(DryRunResponse.self) else {
+                problem = Conv.stderrMessage(out.stderr)
+                return
+            }
+            problem = (resp.plans?.first?.error ?? resp.error).map(AppModel.friendly)
+            warnings = (resp.plans?.first?.plan?.warnings ?? []).map(name)
+        }
     }
+
+    private var command: [String] { mode == .pdfs ? ["merge"] : [] }
 
     @MainActor
     func merge() {
-        guard let conv, items.count >= 2 else { return }
-        let first = items[0].url
-        guard let url = askWhereToSave(name: first.deletingPathExtension().lastPathComponent + "-merged.pdf",
-                                       types: ["pdf"]) else { return }
+        guard let conv, items.count >= minimum else { return }
+        let first = items[0].url.deletingPathExtension().lastPathComponent
+        guard let url = askWhereToSave(name: first + (mode == .pdfs ? "-merged.pdf" : ".pdf"), types: ["pdf"])
+        else { return }
         // The save panel has already asked about replacing, so -y is the user's answer.
-        let args = ["merge", "--json", "--no-install", "-y"] + items.map(\.url.path) + [url.path]
+        let args = command + ["--json", "--no-install", "-y"] + items.map(\.url.path) + [url.path]
         Task { @MainActor in
             working = true
             defer { working = false }
-            guard let out = try? await Conv.run(conv, args), let resp = out.decode(PDFResponse.self) else {
+            guard let out = try? await Conv.run(conv, args) else {
                 problem = "conv didn't answer."
                 return
             }
-            if let p = resp.problem {
-                problem = p
-            } else {
-                result = resp.entry?.output.map(URL.init(fileURLWithPath:)) ?? url
-                warnings = (resp.entry?.warnings ?? []) + (resp.entry?.notes ?? [])
+            switch mode {
+            case .pdfs:
+                guard let resp = out.decode(PDFResponse.self) else { problem = Conv.stderrMessage(out.stderr); return }
+                if let p = resp.problem {
+                    problem = p
+                } else {
+                    result = resp.entry?.output.map(URL.init(fileURLWithPath:)) ?? url
+                    warnings = (resp.entry?.warnings ?? []) + (resp.entry?.notes ?? [])
+                }
+            case .photos:
+                guard let resp = out.decode(RunResponse.self) else { problem = Conv.stderrMessage(out.stderr); return }
+                let r = resp.results?.first
+                if let r, r.ok {
+                    result = r.output.map(URL.init(fileURLWithPath:)) ?? url
+                    warnings = (r.warnings ?? []) + (r.notes ?? [])
+                } else {
+                    problem = (r?.error ?? resp.error).map(AppModel.friendly) ?? "conv didn't say what went wrong."
+                }
             }
         }
     }
@@ -113,12 +164,17 @@ struct MergeView: View {
         VStack(spacing: 0) {
             if merge.items.isEmpty {
                 VStack(spacing: 14) {
-                    Image(systemName: "doc.on.doc").font(.system(size: 44, weight: .light))
+                    ToolIcon(tool: merge.mode == .pdfs ? .mergePDF : .photosToPDF, size: 52)
+                    Text(merge.mode == .pdfs ? "Drop PDFs to join" : "Drop pictures to put in a PDF")
+                        .font(.title2.weight(.semibold))
+                    Text(merge.mode == .pdfs
+                         ? "They're joined in the order shown. Text stays selectable and links keep working."
+                         : "A page each, in the order shown. A JPEG goes in as it is, without being re-encoded.")
                         .foregroundStyle(.secondary)
-                    Text("Drop PDFs to join").font(.title2.weight(.semibold))
-                    Text("They're joined in the order shown. Text stays selectable and links keep working.")
-                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 420)
                     Button("Choose…") { choose() }.controlSize(.large)
+                    if !merge.skipped.isEmpty { skippedNote }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -130,7 +186,7 @@ struct MergeView: View {
                                 .resizable().frame(width: 24, height: 24)
                             Text(item.url.lastPathComponent).lineLimit(1).truncationMode(.middle)
                             Spacer()
-                            if let p = item.pages {
+                            if merge.mode == .pdfs, let p = item.pages {
                                 Text(p == 1 ? "1 page" : "\(p) pages").foregroundStyle(.secondary)
                             }
                             Button {
@@ -154,25 +210,28 @@ struct MergeView: View {
             merge.add(urls)
             return true
         }
-        .navigationTitle("Merge PDFs")
+        .navigationTitle(merge.title)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button { choose() } label: { Label("Add PDFs", systemImage: "plus") }
+                Button { choose() } label: { Label("Add \(merge.noun)", systemImage: "plus") }
                 Button { Task { merge.add(await paste()) } } label: {
                     Label("Paste", systemImage: "doc.on.clipboard")
                 }
-                .help("Add PDFs copied in Finder")
-                Button("Merge…") { merge.merge() }
+                .help(merge.mode == .pdfs ? "Add PDFs copied in Finder" : "Add pictures copied in Finder, or a copied picture")
+                Button(merge.mode == .pdfs ? "Merge…" : "Make PDF…") { merge.merge() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(merge.items.count < 2 || merge.problem != nil || merge.working)
+                    .disabled(!merge.ready)
             }
         }
     }
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("\(merge.items.count) PDFs, \(merge.totalPages) pages. Drag to reorder.")
+            Text(merge.mode == .pdfs
+                 ? "\(merge.items.count) PDFs, \(merge.totalPages) pages. Drag to reorder."
+                 : "\(merge.items.count == 1 ? "1 page" : "\(merge.items.count) pages"). Drag to reorder.")
                 .font(.callout).foregroundStyle(.secondary)
+            if !merge.skipped.isEmpty { skippedNote }
             if let p = merge.problem {
                 Label(p, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
             }
@@ -191,10 +250,19 @@ struct MergeView: View {
         .background(.bar)
     }
 
+    private var skippedNote: some View {
+        Label("Left out, not \(merge.mode == .pdfs ? "a PDF" : "a picture conv puts in a PDF"): \(merge.skipped.joined(separator: ", "))",
+              systemImage: "nosign")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
     private func choose() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.pdf]
+        panel.allowedContentTypes = merge.mode == .pdfs
+            ? [.pdf]
+            : merge.accepts.compactMap { UTType(filenameExtension: $0) }
         if panel.runModal() == .OK { merge.add(panel.urls) }
     }
 }
@@ -292,8 +360,7 @@ struct SplitView: View {
                 }
             } else {
                 VStack(spacing: 14) {
-                    Image(systemName: "doc.badge.ellipsis").font(.system(size: 44, weight: .light))
-                        .foregroundStyle(.secondary)
+                    ToolIcon(tool: .splitPDF, size: 52)
                     Text("Drop a PDF to split").font(.title2.weight(.semibold))
                     Text("One file a page, or one file for each range you type.")
                         .foregroundStyle(.secondary)
@@ -303,7 +370,7 @@ struct SplitView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let first = urls.first else { return false }
+            guard let first = urls.first, first.pathExtension.lowercased() == "pdf" else { return false }
             split.load(first)
             return true
         }
@@ -311,7 +378,7 @@ struct SplitView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { choose() } label: { Label("Open", systemImage: "folder") }
-                Button { Task { if let first = await paste().first { split.load(first) } } } label: {
+                Button { Task { if let first = await paste().first(where: { $0.pathExtension.lowercased() == "pdf" }) { split.load(first) } } } label: {
                     Label("Paste", systemImage: "doc.on.clipboard")
                 }
                 .help("Split a PDF copied in Finder")

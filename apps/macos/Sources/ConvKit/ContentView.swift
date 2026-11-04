@@ -4,52 +4,54 @@ import UniformTypeIdentifiers
 
 struct ConvertView: View {
     @Environment(AppModel.self) private var model
+    @Bindable var job: ConvertJob
     @State private var dropHover = false
 
     var body: some View {
         HSplitView {
             fileArea
-                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
-            OptionsView()
+                .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
+            OptionsView(job: job, convVersion: model.convVersion,
+                        moreOptions: job.isGeneral ? nil : { model.moreOptions(from: job) })
                 .frame(minWidth: 300, idealWidth: 330, maxWidth: 400)
         }
-        .navigationTitle("Convert")
+        .navigationTitle(job.tool.title)
         .toolbar { toolbar }
-        .onChange(of: optionsKey) { model.optionsChanged() }
+        .onChange(of: optionsKey) { job.optionsChanged() }
     }
 
     /// Changes whenever any option does, so the preview re-runs.
     private var optionsKey: String {
-        [model.format, model.maxSize, model.resize, "\(model.upscale)", model.colors, model.fps, model.crf,
-         model.duration, "\(model.useQuality)\(Int(model.quality))",
-         model.speed, "\(model.shiftPitch)", model.start, model.end, "\(model.strip)", model.rotate,
-         model.outputFolder?.path ?? ""].joined(separator: "|")
+        [job.format, job.maxSize, job.resize, "\(job.upscale)", job.colors, job.fps, job.crf,
+         job.duration, "\(job.useQuality)\(Int(job.quality))",
+         job.speed, "\(job.shiftPitch)", job.start, job.end, "\(job.strip)", job.rotate,
+         job.outputFolder?.path ?? ""].joined(separator: "|")
     }
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button { pickFiles(model) } label: { Label("Add Files", systemImage: "plus") }
-            Button { Task { await model.paste() } } label: {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button { pickFiles(job) } label: { Label("Add Files", systemImage: "plus") }
+                .help("Add files (⌘O)")
+            Button { Task { await job.paste() } } label: {
                 Label("Paste", systemImage: "doc.on.clipboard")
             }
             .help("Add files copied in Finder, or a copied picture or screenshot (⇧⌘V)")
             .keyboardShortcut("v", modifiers: [.command, .shift])
-            .disabled(model.isRunning)
-            Button { model.clear() } label: { Label("Clear", systemImage: "trash") }
-                .disabled(model.files.isEmpty || model.isRunning)
-        }
-        ToolbarItem(placement: .primaryAction) {
-            if model.isRunning {
-                Button("Stop") { model.cancel() }
+            .disabled(job.isRunning)
+            Button { job.clear() } label: { Label("Clear", systemImage: "trash") }
+                .help("Clear the list")
+                .disabled(job.files.isEmpty || job.isRunning)
+            if job.isRunning {
+                Button("Stop") { job.cancel() }
             } else {
                 Button {
-                    model.convertAll()
+                    job.runAll()
                 } label: {
-                    Text(model.readyCount > 1 ? "Convert \(model.readyCount) Files" : "Convert")
+                    Text(job.readyCount > 1 ? "\(job.preset.action) \(job.readyCount) Files" : job.preset.action)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.readyCount == 0)
+                .disabled(job.readyCount == 0)
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
@@ -66,12 +68,12 @@ struct ConvertView: View {
                 } actions: {
                     SettingsLink { Text("Open Settings") }
                 }
-            } else if model.files.isEmpty {
+            } else if job.files.isEmpty {
                 emptyDrop
             } else {
                 List {
-                    ForEach(model.files) { item in
-                        FileRow(item: item)
+                    ForEach(job.files) { item in
+                        FileRow(job: job, item: item)
                     }
                 }
                 .listStyle(.inset)
@@ -86,14 +88,14 @@ struct ConvertView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            model.add(urls)
+            job.add(urls)
             return true
         } isTargeted: { dropHover = $0 }
-        .onPasteCommand(of: [.fileURL, .image]) { _ in Task { await model.paste() } }
+        .onPasteCommand(of: [.fileURL, .image]) { _ in Task { await job.paste() } }
         .safeAreaInset(edge: .bottom) {
-            if let note = model.pasteProblem ?? model.clipboardNote {
+            if let note = job.pasteProblem ?? job.clipboardNote {
                 HStack {
-                    Image(systemName: model.pasteProblem == nil ? "doc.on.clipboard" : "exclamationmark.circle")
+                    Image(systemName: job.pasteProblem == nil ? "doc.on.clipboard" : "exclamationmark.circle")
                     Text(note).font(.callout)
                     Spacer()
                 }
@@ -105,16 +107,17 @@ struct ConvertView: View {
 
     private var emptyDrop: some View {
         VStack(spacing: 14) {
-            Image(systemName: "arrow.down.doc")
-                .font(.system(size: 44, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("Drop files here")
+            ToolIcon(tool: job.tool, size: 52)
+            Text(job.preset.dropTitle)
                 .font(.title2.weight(.semibold))
-            Text("Videos, pictures, audio, documents. Nothing leaves your Mac.")
+            Text(job.preset.dropDetail)
                 .foregroundStyle(.secondary)
-            Button("Choose Files…") { pickFiles(model) }
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
+            Button("Choose Files…") { pickFiles(job) }
                 .controlSize(.large)
         }
+        .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
     }
@@ -123,7 +126,7 @@ struct ConvertView: View {
 // MARK: - File row
 
 struct FileRow: View {
-    @Environment(AppModel.self) private var model
+    let job: ConvertJob
     let item: FileItem
 
     var body: some View {
@@ -144,14 +147,24 @@ struct FileRow: View {
             trailing
         }
         .padding(.vertical, 4)
+        .opacity(item.misfit == nil ? 1 : 0.6)
         .contextMenu {
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
-            Button("Remove") { model.remove(item) }.disabled(model.isRunning)
+            Button("Remove") { job.remove(item) }.disabled(job.isRunning)
         }
     }
 
     @ViewBuilder
     private var detail: some View {
+        if let misfit = item.misfit {
+            line(misfit, systemImage: "nosign", color: .secondary)
+        } else {
+            status
+        }
+    }
+
+    @ViewBuilder
+    private var status: some View {
         switch item.status {
         case .done(let output, let size):
             Label {
@@ -172,7 +185,7 @@ struct FileRow: View {
             if let problem = item.problem {
                 line(problem, systemImage: "exclamationmark.circle", color: .secondary)
             } else if let out = item.plannedOutput {
-                Label(item.pasted && model.outputFolder == nil
+                Label(item.pasted && job.outputFolder == nil
                       ? "\(out.lastPathComponent) in \(out.deletingLastPathComponent().lastPathComponent)"
                       : out.lastPathComponent,
                       systemImage: "arrow.turn.down.right")
@@ -195,22 +208,22 @@ struct FileRow: View {
                 .controlSize(.small)
         case .exists:
             HStack {
-                Button("Replace") { model.retry(item, extra: ["-y"]) }
+                Button("Replace") { job.retry(item, extra: ["-y"]) }
                     .controlSize(.small)
-                    .disabled(model.isRunning)
+                    .disabled(job.isRunning)
             }
         case .needsConfirm:
-            Button("Convert Anyway") { model.retry(item, extra: ["--yes"]) }
+            Button("Convert Anyway") { job.retry(item, extra: ["--yes"]) }
                 .controlSize(.small)
-                .disabled(model.isRunning)
+                .disabled(job.isRunning)
         default:
             Button {
-                model.remove(item)
+                job.remove(item)
             } label: {
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
-            .disabled(model.isRunning)
+            .disabled(job.isRunning)
             .help("Remove from the list")
         }
     }

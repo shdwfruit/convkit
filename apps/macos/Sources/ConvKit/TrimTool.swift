@@ -1,6 +1,7 @@
 import AVKit
 import Observation
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The window version of `conv trim`: mark clips on a player, and each clip is
 /// written as `conv FILE --start T --end T` would write it.
@@ -174,8 +175,21 @@ struct PlayerView: NSViewRepresentable {
 
 struct TrimView: View {
     @Bindable var trim: TrimModel
+    let tool: ToolID
     let paste: () async -> [URL]
+    private var audioOnly: Bool { tool == .trimAudio }
     @State private var dropHover = false
+    @State private var rejected: String?
+
+    /// Loads a file the tool can play, and says so when it can't.
+    private func take(_ url: URL) {
+        let type = UTType(filenameExtension: url.pathExtension)
+        guard let type, type.conforms(to: audioOnly ? .audio : .audiovisualContent) else {
+            rejected = "\(url.lastPathComponent) isn't \(audioOnly ? "an audio file" : "a video or audio file")."
+            return
+        }
+        trim.load(url)
+    }
 
     var body: some View {
         Group {
@@ -190,9 +204,8 @@ struct TrimView: View {
                 }
             } else {
                 VStack(spacing: 14) {
-                    Image(systemName: "scissors").font(.system(size: 44, weight: .light))
-                        .foregroundStyle(.secondary)
-                    Text("Drop a video or audio file").font(.title2.weight(.semibold))
+                    ToolIcon(tool: tool, size: 52)
+                    Text(audioOnly ? "Drop a recording" : "Drop a video").font(.title2.weight(.semibold))
                     Text("Play it, mark where each clip starts and ends, and write them all.")
                         .foregroundStyle(.secondary)
                     Button("Choose…") { choose() }.controlSize(.large)
@@ -209,17 +222,24 @@ struct TrimView: View {
         }
         .dropDestination(for: URL.self) { urls, _ in
             guard let first = urls.first else { return false }
-            trim.load(first)
+            take(first)
             return true
         } isTargeted: { dropHover = $0 }
-        .navigationTitle("Trim")
+        .alert("\(tool.title) can't play this", isPresented: Binding(
+            get: { rejected != nil }, set: { if !$0 { rejected = nil } }
+        )) {
+            Button("OK") { rejected = nil }
+        } message: {
+            Text(rejected ?? "")
+        }
+        .navigationTitle(tool.title)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { choose() } label: { Label("Open", systemImage: "folder") }
-                Button { Task { if let first = await paste().first { trim.load(first) } } } label: {
+                Button { Task { if let first = await paste().first { take(first) } } } label: {
                     Label("Paste", systemImage: "doc.on.clipboard")
                 }
-                .help("Cut a video or audio file copied in Finder")
+                .help(audioOnly ? "Cut an audio file copied in Finder" : "Cut a video copied in Finder")
                 Button(trim.clips.count > 1 ? "Write \(trim.clips.count) Clips" : "Write Clip") { trim.writeAll() }
                     .buttonStyle(.borderedProminent)
                     .disabled(trim.clips.isEmpty || trim.isRunning)
@@ -320,7 +340,7 @@ struct TrimView: View {
 
     private func choose() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.movie, .audio]
+        panel.allowedContentTypes = audioOnly ? [.audio] : [.movie]
         if panel.runModal() == .OK, let url = panel.url { trim.load(url) }
     }
 }

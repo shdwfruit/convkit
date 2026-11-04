@@ -120,6 +120,7 @@ struct CapabilitiesResponse: Decodable {
     var ok: Bool
     var format: String?
     var kind: String?
+    var sources: [String]?
     var targets: [Target]?
     var error: ConvError?
 }

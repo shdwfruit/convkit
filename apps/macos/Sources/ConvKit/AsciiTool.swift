@@ -150,8 +150,7 @@ struct AsciiView: View {
             (dark ? Color.black : Color.white)
             if ascii.input == nil {
                 VStack(spacing: 12) {
-                    Image(systemName: "photo")
-                        .font(.system(size: 44, weight: .light))
+                    ToolIcon(tool: .ascii, size: 52)
                     Text("Drop a picture, GIF or video").font(.title3.weight(.semibold))
                     Button("Choose…") { choose() }
                 }
@@ -205,7 +204,7 @@ struct AsciiView: View {
                 }
                 Button(ascii.input == nil ? "Choose…" : "Choose Another…") { choose() }
             }
-            Section("Look") {
+            Section {
                 Picker("Style", selection: $ascii.style) {
                     Text("Characters").tag("ascii")
                     Text("Blocks").tag("blocks")
@@ -238,7 +237,14 @@ struct AsciiView: View {
                     ascii.brightness = 0
                     ascii.width = 100
                 }
+            } header: {
+                Text("Look")
+            } footer: {
+                if ascii.input == nil {
+                    Text("Pick a picture first.").font(.caption).foregroundStyle(.secondary)
+                }
             }
+            .disabled(ascii.input == nil)
             if !ascii.warnings.isEmpty {
                 Section {
                     ForEach(ascii.warnings, id: \.self) {

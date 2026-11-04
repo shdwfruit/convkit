@@ -1,116 +1,59 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// One entry in the sidebar. A tool only shows when the conv in use has its subcommand,
-/// so an older conv hides what it can't do.
-enum Tool: String, CaseIterable, Identifiable {
-    case convert, trim, merge, split, scan
-    case qr, ascii
-    case backends, formats, changelog
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .convert: "Convert"
-        case .trim: "Trim"
-        case .merge: "Merge PDFs"
-        case .split: "Split PDF"
-        case .scan: "Scan Folder"
-        case .qr: "QR Code"
-        case .ascii: "ASCII Art"
-        case .backends: "Backends"
-        case .formats: "Formats"
-        case .changelog: "What's New"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .convert: "arrow.triangle.2.circlepath"
-        case .trim: "scissors"
-        case .merge: "doc.on.doc"
-        case .split: "doc.badge.ellipsis"
-        case .scan: "folder.badge.questionmark"
-        case .qr: "qrcode"
-        case .ascii: "textformat.abc"
-        case .backends: "shippingbox"
-        case .formats: "list.bullet.rectangle"
-        case .changelog: "sparkles"
-        }
-    }
-
-    var subtitle: String {
-        switch self {
-        case .convert: "Change format, size, length or speed"
-        case .trim: "Cut clips out of a video or audio file"
-        case .merge: "Join PDFs into one"
-        case .split: "One PDF a page, or a file for each range"
-        case .scan: "See what a folder's files could become"
-        case .qr: "A code for a link or any text"
-        case .ascii: "Turn a picture into text"
-        case .backends: "The programs conv uses, and installing them"
-        case .formats: "Every format and what it turns into"
-        case .changelog: "What each version of conv added"
-        }
-    }
-
-    /// The conv subcommand this tool needs, if any.
-    var subcommand: String? {
-        switch self {
-        case .convert: nil
-        case .trim: "trim"
-        case .merge: "merge"
-        case .split: "split"
-        case .scan: "scan"
-        case .qr: "qr"
-        case .ascii: "ascii"
-        case .backends: "doctor"
-        case .formats: "capabilities"
-        case .changelog: "changelog"
-        }
-    }
-
-    enum Section: String, CaseIterable {
-        case files = "Files"
-        case make = "Make"
-        case conv = "conv"
-    }
-
-    var section: Section {
-        switch self {
-        case .convert, .trim, .merge, .split, .scan: .files
-        case .qr, .ascii: .make
-        case .backends, .formats, .changelog: .conv
-        }
-    }
-}
-
+/// The window: a searchable sidebar of every tool, grouped by what it works on, and
+/// the tool (or Home) beside it.
 struct RootView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
-            List(selection: $model.tool) {
-                ForEach(Tool.Section.allCases, id: \.self) { section in
-                    let tools = model.availableTools.filter { $0.section == section }
+            List(selection: Binding<Page?>(
+                get: { model.page },
+                set: { if let p = $0 { model.page = p } }
+            )) {
+                Label {
+                    Text("Home")
+                } icon: {
+                    TileIcon(symbol: "square.grid.2x2", color: .gray, size: 20)
+                }
+                .tag(Page.home)
+                ForEach(Category.allCases) { category in
+                    let tools = model.tools(in: category)
                     if !tools.isEmpty {
-                        Section(section.rawValue) {
+                        Section(isExpanded: expanded(category)) {
                             ForEach(tools) { tool in
-                                Label(tool.title, systemImage: tool.systemImage)
-                                    .help(tool.subtitle)
-                                    .tag(tool)
+                                Label {
+                                    Text(tool.title)
+                                } icon: {
+                                    ToolIcon(tool: tool, size: 20)
+                                }
+                                .help(tool.subtitle)
+                                .tag(Page.tool(tool))
                             }
+                        } header: {
+                            Text(category.title)
                         }
                     }
                 }
+                if model.isSearching && model.searchResults.isEmpty {
+                    Text("No tool matches “\(model.search)”.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 240)
+            .searchable(text: $model.search, placement: .sidebar, prompt: "Search tools")
+            .onSubmit(of: .search) {
+                if let first = model.searchResults.first { model.page = .tool(first) }
+            }
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
         } detail: {
             detail
+                .id(model.page)
         }
         .alert("Nothing to paste", isPresented: Binding(
-            get: { model.tool != .convert && model.pasteProblem != nil },
+            get: { model.pasteProblem != nil },
             set: { if !$0 { model.pasteProblem = nil } }
         )) {
             Button("OK") { model.pasteProblem = nil }
@@ -119,23 +62,50 @@ struct RootView: View {
         }
     }
 
+    /// Searching opens every section; otherwise the user's folding is kept.
+    private func expanded(_ category: Category) -> Binding<Bool> {
+        Binding(
+            get: { model.isSearching || !model.collapsed.contains(category) },
+            set: { open in
+                if open { model.collapsed.remove(category) } else { model.collapsed.insert(category) }
+            }
+        )
+    }
+
     @ViewBuilder
     private var detail: some View {
-            switch model.tool {
-            case .convert: ConvertView()
-            case .qr: QRView(qr: model.qr)
-            case .ascii: AsciiView(ascii: model.ascii, paste: model.pasteURLs)
-            case .trim: TrimView(trim: model.trim, paste: model.pasteURLs)
-            case .merge: MergeView(merge: model.merge, paste: model.pasteURLs)
-            case .split: SplitView(split: model.split, paste: model.pasteURLs)
-            case .scan: ScanView(scan: model.scan) { urls in
-                    model.tool = .convert
-                    model.add(urls)
-                }
-            case .backends: BackendsView(backends: model.backends)
-            case .formats: FormatsView(formats: model.formats)
-            case .changelog: ChangelogView(changelog: model.changelog)
+        switch model.page {
+        case .home:
+            HomeView()
+        case .tool(let id):
+            switch id.kind {
+            case .convert:
+                if let job = model.jobs[id] { ConvertView(job: job) }
+            case .trim:
+                TrimView(trim: id == .trimAudio ? model.trimAudio : model.trimVideo, tool: id,
+                         paste: model.pasteURLs)
+            case .mergePDF:
+                MergeView(merge: model.merge, paste: model.pasteURLs)
+            case .photosToPDF:
+                MergeView(merge: model.photos, paste: model.pasteURLs)
+            case .split:
+                SplitView(split: model.split, paste: model.pasteURLs)
+            case .scan:
+                ScanView(scan: model.scan) { urls in model.open(.convert, with: urls) }
+            case .qr:
+                QRView(qr: model.qr)
+            case .ascii:
+                AsciiView(ascii: model.ascii, paste: model.pasteURLs)
+            case .data:
+                DataView(data: model.data)
+            case .backends:
+                BackendsView(backends: model.backends)
+            case .formats:
+                FormatsView(formats: model.formats)
+            case .changelog:
+                ChangelogView(changelog: model.changelog)
             }
+        }
     }
 }
 
@@ -149,5 +119,3 @@ func askWhereToSave(name: String, types: [String]) -> URL? {
     panel.isExtensionHidden = false
     return panel.runModal() == .OK ? panel.url : nil
 }
-
-import UniformTypeIdentifiers
