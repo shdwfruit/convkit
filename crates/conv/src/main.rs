@@ -6,6 +6,7 @@ mod commands;
 mod input;
 mod install_prompt;
 mod output;
+mod password;
 mod paste;
 mod picture;
 mod prompt;
@@ -58,6 +59,7 @@ fn main() {
         Some(cli::Command::Merge(args)) => commands::merge::run(&cli, args),
         Some(cli::Command::Split(args)) => commands::split::run(&cli, args),
         Some(cli::Command::Tools(tool)) => commands::tools::run(&cli, tool),
+        Some(cli::Command::Pages(args)) => commands::pages::run(&cli, args),
     };
     std::process::exit(code);
 }

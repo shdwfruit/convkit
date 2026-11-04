@@ -8,6 +8,8 @@ pub mod doctor;
 pub mod fmt;
 pub mod install;
 pub mod merge;
+pub mod pages;
+pub mod pdf_lock;
 pub mod pdf_support;
 pub mod qr;
 pub mod scan;

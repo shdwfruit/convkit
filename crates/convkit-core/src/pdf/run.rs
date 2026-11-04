@@ -3,12 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use super::display_name;
-use super::plan::{PdfJob, PdfPlan};
+use super::plan::PdfPlan;
 use super::range::join_and;
+use super::{display_name, qpdf_output};
 use crate::error::{ConvError, ErrorCode, Result};
 use crate::exec::{self, BackendOutput, Event};
-use crate::procutil::backend_command;
 use crate::resolve::ResolvedBackend;
 use crate::{winpath, Backend};
 
@@ -20,10 +19,14 @@ pub struct WrittenOutput {
     pub bytes: u64,
 }
 
-/// A finished merge or split.
+/// A finished merge, split, page edit or rewrite.
 #[derive(Debug, Clone)]
 pub struct PdfOutcome {
     pub merge: bool,
+    /// Writes one file (a merge, a page edit, a rewrite), not a split.
+    pub one_file: bool,
+    /// The outputs are locked with a password.
+    pub locked: bool,
     pub outputs: Vec<WrittenOutput>,
     /// Printed as `note` lines; JSON `warnings`.
     pub notes: Vec<String>,
@@ -40,7 +43,9 @@ const REPORT_CAP: usize = 16 * 1024;
 /// exists (unless `overwrite`) or names a reserved Windows device. Every
 /// call writes into one scratch folder beside the outputs, which is removed
 /// on every exit path; outputs move into place only after all calls have
-/// succeeded and every output is non-empty.
+/// succeeded and every output is non-empty. A call that carries a password
+/// hands qpdf its arguments on standard input (see `qpdf_output`), and
+/// `StepSpawned` shows it with the passwords as placeholders.
 pub fn run(
     plan: &PdfPlan,
     qpdf: &ResolvedBackend,
@@ -62,6 +67,18 @@ pub fn run(
             ));
         }
     }
+    if plan.lock.is_some() && !can_lock(&qpdf.version) {
+        return Err(ConvError {
+            remediation: Some(crate::error::Remediation {
+                managed: Some("conv install qpdf".to_string()),
+                manual: None,
+            }),
+            ..qpdf_error(format!(
+                "locking a PDF needs qpdf 11.7 or newer, and this one is {}",
+                qpdf.version
+            ))
+        });
+    }
     let dest_dir = plan
         .outputs
         .first()
@@ -71,7 +88,10 @@ pub fn run(
     let scratch = exec::make_scratch_dir(dest_dir)?;
     let _guard = exec::ScratchGuard::new(scratch.clone());
 
-    let commands = plan.commands_into(Some(&scratch));
+    let commands = plan.commands_into(Some(&scratch), true);
+    let shown = plan.commands_into(Some(&scratch), false);
+    let secret = plan.has_secrets();
+    let secrets = plan.secret_args();
     // A relative --qpdf-path would resolve against the scratch folder once
     // the command runs there.
     let program = if plan.runs_in_scratch() {
@@ -82,29 +102,27 @@ pub fn run(
     let total = commands.len();
     let mut backend_output = Vec::new();
     let mut qpdf_warned = false;
-    for (index, argv) in commands.iter().enumerate() {
+    for (index, (argv, shown)) in commands.iter().zip(shown).enumerate() {
         on_event(Event::StepStarted {
             index,
             total,
             backend: Backend::Qpdf,
         });
-        let mut cmd = backend_command(&program);
-        cmd.args(argv);
-        if plan.runs_in_scratch() {
-            cmd.current_dir(&scratch);
-        }
         on_event(Event::StepSpawned {
             index,
             program: program.clone(),
-            argv: argv.clone(),
+            argv: shown,
         });
-        let out = cmd.output().map_err(|e| {
+        let cwd = plan.runs_in_scratch().then_some(scratch.as_path());
+        let out = qpdf_output(&program, argv, secret, cwd).map_err(|e| {
             ConvError::new(
                 ErrorCode::ConversionFailed,
                 format!("failed to run {}: {e}", qpdf.path.display()),
             )
         })?;
-        let report = String::from_utf8_lossy(&out.stderr).into_owned();
+        // qpdf repeats an argument it refuses, so a password it was given
+        // is taken out of what it said before anyone sees it.
+        let report = redact(&String::from_utf8_lossy(&out.stderr), &secrets);
         if !report.trim().is_empty() {
             let tail = exec::tail_str(&report, REPORT_CAP).to_string();
             on_event(Event::StepReport {
@@ -159,22 +177,46 @@ pub fn run(
 
     let mut warnings = plan.warnings.clone();
     if qpdf_warned && !plan.repaired {
-        warnings.push(match &plan.job {
-            PdfJob::Merge { output, .. } => format!(
+        warnings.push(match plan.outputs.as_slice() {
+            [one] => format!(
                 "qpdf reported problems while writing {}; check it.",
-                display_name(output)
+                display_name(&one.path)
             ),
             _ => "qpdf reported problems while writing the split files; check them.".to_string(),
         });
     }
     Ok(PdfOutcome {
         merge: plan.is_merge(),
+        one_file: plan.writes_one_file(),
+        locked: plan.lock.is_some(),
         outputs,
         notes: plan.notes.clone(),
         warnings,
         backend_output,
         version: qpdf.version.clone(),
     })
+}
+
+/// Whether the qpdf at `version` takes the `--user-password=` and
+/// `--owner-password=` options a lock uses: 11.7 added them. A version conv
+/// cannot read is let through, for qpdf to say.
+pub(crate) fn can_lock(version: &str) -> bool {
+    let mut parts = version.split('.').map(|p| p.parse::<u32>());
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= (11, 7),
+        _ => true,
+    }
+}
+
+/// `text` with each `(secret, shown)` argument replaced, longest first.
+pub(crate) fn redact(text: &str, secrets: &[(String, String)]) -> String {
+    let mut pairs: Vec<&(String, String)> = secrets.iter().collect();
+    pairs.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    let mut out = text.to_string();
+    for (from, to) in pairs {
+        out = out.replace(from.as_str(), to);
+    }
+    out
 }
 
 /// A conversion failure attributed to qpdf.
@@ -261,7 +303,10 @@ mod tests {
             path: path.to_path_buf(),
             pages,
             has_bookmarks: false,
+            bookmarked_pages: vec![],
+            encrypted: false,
             restricted: false,
+            password: None,
             damaged: false,
         }
     }
@@ -432,6 +477,120 @@ mod tests {
         );
         assert_eq!(o.backend_output.len(), 1);
         assert!(o.backend_output[0].stderr.contains("something odd"));
+    }
+
+    /// A password reaches qpdf on its standard input, never as an argument,
+    /// and `-v` shows only the placeholder.
+    #[cfg(unix)]
+    #[test]
+    fn a_password_goes_to_qpdf_on_stdin_and_never_on_its_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.pdf");
+        std::fs::write(&input, b"%PDF").unwrap();
+        let mut source = info(&input, 1);
+        source.encrypted = true;
+        source.password = Some(crate::pdf::Password::new("s3cret").unwrap());
+        let plan = crate::pdf::plan::rewrite_plan(
+            &source,
+            &dir.path().join("out.pdf"),
+            crate::pdf::Rewrite::Unlock,
+        )
+        .unwrap();
+        let log = dir.path().join("log");
+        // Records its arguments and stdin, then writes the last line it read
+        // (the output) the way qpdf would.
+        let (_stub_dir, qpdf) = stub_qpdf(&format!(
+            "echo \"$@\" > '{log}.args'\n\
+             cat > '{log}.stdin'\n\
+             last=$(tail -n 1 '{log}.stdin')\n\
+             printf '%%PDF-stub' > \"$last\"",
+            log = log.display()
+        ));
+        let mut spawned = Vec::new();
+
+        run(&plan, &qpdf, false, &mut |e| {
+            if let Event::StepSpawned { argv, .. } = e {
+                spawned = argv;
+            }
+        })
+        .unwrap();
+
+        let args = std::fs::read_to_string(format!("{}.args", log.display())).unwrap();
+        assert_eq!(args.trim(), "@-");
+        let stdin = std::fs::read_to_string(format!("{}.stdin", log.display())).unwrap();
+        let lines: Vec<&str> = stdin.lines().collect();
+        assert_eq!(lines[..2], ["--decrypt", "--password=s3cret"]);
+        assert_eq!(spawned[1], "--password=<password>");
+        assert!(dir.path().join("out.pdf").is_file());
+    }
+
+    #[test]
+    fn locking_needs_qpdf_11_7() {
+        assert!(can_lock("12.4.2") && can_lock("11.7.0") && can_lock("11.10"));
+        assert!(!can_lock("11.6.4") && !can_lock("10.6.3"));
+        assert!(can_lock("stub"), "an unreadable version is left to qpdf");
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = crate::pdf::plan::rewrite_plan(
+            &info(&dir.path().join("a.pdf"), 1),
+            &dir.path().join("a-locked.pdf"),
+            crate::pdf::Rewrite::Lock,
+        )
+        .unwrap();
+        plan.set_lock(
+            crate::pdf::Lock::new(crate::pdf::Password::new("pw").unwrap(), &[]).unwrap(),
+        );
+        let mut old = missing_qpdf();
+        old.version = "11.3.0".into();
+        let e = run(&plan, &old, false, &mut |_| {}).unwrap_err();
+        assert_eq!(
+            e.message,
+            "locking a PDF needs qpdf 11.7 or newer, and this one is 11.3.0"
+        );
+        assert_eq!(
+            e.remediation.unwrap().managed.as_deref(),
+            Some("conv install qpdf")
+        );
+    }
+
+    /// An old qpdf repeats the option it refuses, password and all.
+    #[cfg(unix)]
+    #[test]
+    fn qpdfs_own_words_never_carry_a_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.pdf");
+        std::fs::write(&input, b"%PDF").unwrap();
+        let mut source = info(&input, 1);
+        source.encrypted = true;
+        source.password = Some(crate::pdf::Password::new("old-secret").unwrap());
+        let mut plan = crate::pdf::plan::rewrite_plan(
+            &source,
+            &dir.path().join("out.pdf"),
+            crate::pdf::Rewrite::Lock,
+        )
+        .unwrap();
+        plan.set_lock(
+            crate::pdf::Lock::new(crate::pdf::Password::new("new-secret").unwrap(), &[]).unwrap(),
+        );
+        let (_stub_dir, qpdf) = stub_qpdf(
+            "while read line; do echo \"qpdf: unrecognized argument $line\" >&2; done; exit 2",
+        );
+
+        let mut reports = Vec::new();
+        let e = run(&plan, &qpdf, false, &mut |e| {
+            if let Event::StepReport { report, .. } = e {
+                reports.push(report);
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            e.message,
+            "qpdf failed: unrecognized argument --password=<password>"
+        );
+        let said = reports.join("");
+        assert!(!said.contains("secret"), "{said}");
+        assert!(said.contains("--user-password=<new password>"), "{said}");
     }
 
     #[test]

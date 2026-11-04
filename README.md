@@ -104,6 +104,8 @@ conv ./photos --to jpg -o ./out  # folder input, non-recursive, outputs redirect
 conv a.png b.png out.pdf         # merge two or more images into one PDF
 conv merge a.pdf b.pdf out.pdf   # join PDFs into one
 conv split report.pdf 1-3 4-z    # one PDF per page range
+conv pages report.pdf 3 1-2 5-z  # pick, reorder, delete or turn a PDF's pages
+conv report.pdf --password       # lock a PDF; --unlock removes the password
 conv scan                        # list the files here and what each can become
 conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
@@ -707,8 +709,80 @@ A range is a page (`5`), a span (`1-3`), or uses `z` for the last page
 a folder given to `conv merge` adds every PDF in it, in natural order.
 
 The merged file keeps the first file's bookmarks only, and neither command
-keeps permission restrictions; conv says so when either applies.
-Password-protected PDFs aren't supported yet.
+keeps permission restrictions; conv says so when either applies. A PDF
+that needs a password asks for it; see [Passwords on PDFs](#passwords-on-pdfs).
+
+## Pages of a PDF
+
+`conv pages` writes one PDF from another's pages, the ones you list, in
+that order. It extracts, reorders, deletes and turns pages, on qpdf like
+`merge` and `split`, so nothing is re-rendered.
+
+```console
+$ conv pages report.pdf 3 1-2 5-z
+OK report-3_1-2_5-12.pdf - 11 pages - 16 KB - 0.0s
+  /home/user/Docs/report-3_1-2_5-12.pdf
+
+$ conv pages report.pdf --delete 4,6-7
+OK report-1-3_5_8-12.pdf - 9 pages - 15 KB - 0.0s
+  /home/user/Docs/report-1-3_5_8-12.pdf
+
+$ conv pages scan.pdf --rotate right:2,4
+OK scan-rotated.pdf - 12 pages - 15 KB - 0.0s
+  /home/user/Docs/scan-rotated.pdf
+```
+
+Pages are written as `split` takes them (`5`, `1-3`, `11-z`, `5-1`
+reversed), with spaces or commas between them, and a page listed twice
+appears twice. `--delete` leaves pages out. `--rotate` turns them: `right`,
+`left` or `180` turns every page, and `right:2,4` only those; give it again
+for other turns. A turn adds to the way the page already sits. Every page
+number means the input's page, so `conv pages report.pdf 3 1-2 --rotate
+right:1` turns the page that was first and is now second.
+
+The file is named after the pages in it, with `-rotated` when any turn.
+Name it yourself as the last argument (`conv pages report.pdf 1 z
+cover.pdf`), or put it elsewhere with `-o DIR`. The input's bookmarks, links
+and metadata stay. A bookmark that led to a page you left out stays in the
+list but goes nowhere, and conv says so.
+
+## Passwords on PDFs
+
+`--password` locks a PDF, and `--unlock` writes a copy without its
+password:
+
+```console
+$ conv report.pdf --password
+Password for report-locked.pdf:
+Again, to check:
+OK report-locked.pdf - 12 pages - locked - 16 KB - 0.0s
+  /home/user/Docs/report-locked.pdf
+
+$ conv statement.pdf --unlock
+statement.pdf is locked. Password:
+OK statement-unlocked.pdf - 12 pages - 15 KB - 0.0s
+  /home/user/Docs/statement-unlocked.pdf
+```
+
+The lock is AES-256, the strongest a PDF has. `--restrict print,copy,edit`
+also turns those off for whoever opens it with the password. Apps that
+respect PDF restrictions keep to them, but nothing makes an app do so, so
+the password is what keeps the file private. A PDF that has restrictions
+but opens without a password unlocks without asking. Apple's Preview can't
+open a PDF whose password has characters beyond plain ASCII, such as é or
+ü, so conv warns when yours does.
+
+conv asks for a password without showing it and never takes one on the
+command line, so it stays out of your shell history and the process list.
+A script sets `CONVKIT_PASSWORD` instead. `merge`, `split` and `pages` ask
+too when a PDF needs a password, and write their files unlocked unless
+`--password` locks them as well. When several files share a password, conv
+asks once.
+
+Naming works as it does for `--strip-metadata`: one file gets `-locked` or
+`-unlocked` in its name, a named output is written as named, and `conv
+./statements --to pdf --unlock` writes into an `unlocked` folder, leaving
+out files with nothing to unlock.
 
 ## Copy and paste
 
@@ -1192,7 +1266,7 @@ convkit dispatches to these programs, each invoked as a subprocess:
 | `pandoc` | Markdown, text, HTML and RTF documents; parses docx/odt/rtf for the PDF fallback | Yes | 3.11 |
 | `typst` | JPG/PNG/WebP/GIF → PDF; PDF engine for the docx/odt/rtf → pdf fallback | Yes | 0.15.1 |
 | `soffice` (LibreOffice) | Office documents ⇄ PDF, reading RTF | No — manual install, always | — |
-| `qpdf` | PDF merge and split | Yes | 12.4.2 |
+| `qpdf` | PDF merge, split, pages and passwords | Yes | 12.4.2 |
 | `say`, Windows PowerShell, `espeak-ng`, `piper` | reading text aloud | No — the first two come with the system | — |
 
 Managed versions are pinned per convkit build

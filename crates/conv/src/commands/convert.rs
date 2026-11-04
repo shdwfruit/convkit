@@ -19,6 +19,15 @@ use crate::prompt::{self, Gate};
 use crate::render;
 
 pub fn run(cli: &Cli) -> i32 {
+    // A PDF kept as a PDF, locked or unlocked on qpdf; see
+    // `commands::pdf_lock`.
+    if crate::commands::pdf_lock::wanted(cli) {
+        return crate::commands::pdf_lock::run(cli);
+    }
+    if let Some(e) = crate::commands::pages::rotate_hint(cli) {
+        render::print_error(cli.json, &e);
+        return e.code.exit_code();
+    }
     if !cli.paste {
         return convert(cli, None);
     }

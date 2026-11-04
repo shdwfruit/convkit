@@ -4634,6 +4634,373 @@ fn split_page_by_page_works_with_a_relative_qpdf_path() {
     assert!(dir.path().join("sample-3.pdf").is_file());
 }
 
+// --- conv pages, --password, --unlock -----------------------------------
+
+#[test]
+fn pages_needs_something_to_do() {
+    conv()
+        .args(["pages", "report.pdf"])
+        .assert()
+        .code(2)
+        .stderr(contains("say which pages to keep, delete or turn"));
+}
+
+#[test]
+fn pages_rejects_a_malformed_list_and_a_bad_turn() {
+    conv()
+        .args(["pages", "report.pdf", "1,,3"])
+        .assert()
+        .code(2)
+        .stderr(contains("`1,,3` is not a page list"));
+    conv()
+        .args(["pages", "report.pdf", "--rotate", "up:1"])
+        .assert()
+        .code(2)
+        .stderr(contains("invalid turn 'up'"));
+}
+
+#[test]
+fn pages_checks_the_input_before_looking_for_qpdf() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["pages", "missing.pdf", "1", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(2)
+        .stderr(contains("input not found").and(contains("qpdf").not()));
+}
+
+#[test]
+fn a_password_typed_after_the_flag_is_called_out() {
+    for args in [
+        &["report.pdf", "--password", "hunter2"][..],
+        &[
+            "merge",
+            "a.pdf",
+            "b.pdf",
+            "out.pdf",
+            "--password",
+            "hunter2",
+        ],
+        &["split", "a.pdf", "--password", "hunter2"],
+        &["pages", "a.pdf", "1", "--password", "hunter2"],
+    ] {
+        conv()
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(contains("--password takes no value").and(contains("hunter2 is not a file")));
+    }
+}
+
+#[test]
+fn restrict_needs_password_and_unlock_contradicts_it() {
+    conv()
+        .args(["report.pdf", "--restrict", "print"])
+        .assert()
+        .code(2)
+        .stderr(contains("--password"));
+    conv()
+        .args(["report.pdf", "--password", "--unlock"])
+        .assert()
+        .code(2)
+        .stderr(contains("cannot be used with"));
+    conv()
+        .args(["report.pdf", "--password", "--restrict", "fax"])
+        .assert()
+        .code(2)
+        .stderr(contains("expected print, copy or edit"));
+}
+
+#[test]
+fn password_and_unlock_take_pdfs_only() {
+    conv()
+        .args(["photo.jpg", "--password"])
+        .assert()
+        .code(2)
+        .stderr(contains("--password locks PDFs, and photo.jpg is not one"));
+    conv()
+        .args(["report.pdf", "--unlock", "--quality", "80"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--unlock doesn't combine with --resize, --quality",
+        ));
+    conv()
+        .args(["report.pdf", "--unlock", "--to", "docx"])
+        .assert()
+        .code(2)
+        .stderr(contains("--unlock writes a PDF"));
+}
+
+#[test]
+fn rotating_a_pdf_points_at_conv_pages() {
+    conv()
+        .args(["report.pdf", "--rotate", "right"])
+        .assert()
+        .code(2)
+        .stderr(
+            contains("conv pages turns a PDF's pages")
+                .and(contains("conv pages report.pdf --rotate right")),
+        );
+}
+
+#[test]
+fn unlock_without_qpdf_reports_it_missing_in_results() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.pdf"), b"%PDF").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let out = cmd
+        .current_dir(dir.path())
+        .args(["a.pdf", "--unlock", "--json", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3);
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["results"][0]["error"]["code"], "backend_missing");
+    assert_eq!(v["results"][0]["output"], "a-unlocked.pdf");
+}
+
+fn qpdf_path() -> PathBuf {
+    convkit_core::Resolver::new()
+        .resolve(convkit_core::Backend::Qpdf)
+        .expect("qpdf")
+        .path
+}
+
+/// qpdf's exit status for `args`, run in `dir`.
+fn qpdf_status(dir: &Path, args: &[&str]) -> i32 {
+    std::process::Command::new(qpdf_path())
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap()
+        .status
+        .code()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn lock_and_unlock_end_to_end_with_the_environment_password() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("report.pdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .env("CONVKIT_PASSWORD", "two words")
+        .args(["report.pdf", "--password", "--restrict", "print"])
+        .assert()
+        .success()
+        .stdout(
+            contains("OK report-locked.pdf - 3 pages - locked - ")
+                .and(contains("turns off printing")),
+        );
+    assert_eq!(
+        qpdf_status(dir.path(), &["--requires-password", "report-locked.pdf"]),
+        0
+    );
+    assert_eq!(
+        qpdf_status(
+            dir.path(),
+            &["--password=two words", "--show-npages", "report-locked.pdf"]
+        ),
+        0
+    );
+
+    let out = conv()
+        .current_dir(dir.path())
+        .env("CONVKIT_PASSWORD", "two words")
+        .args(["report-locked.pdf", "--unlock", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["results"][0]["output"], "report-locked-unlocked.pdf");
+    assert_eq!(v["results"][0]["pages"], 3);
+    assert_eq!(v["results"][0]["locked"], false);
+    assert_eq!(
+        qpdf_status(
+            dir.path(),
+            &["--requires-password", "report-locked-unlocked.pdf"]
+        ),
+        2,
+        "not encrypted"
+    );
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn a_locked_pdf_without_a_terminal_or_password_says_how_to_give_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("report.pdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .env("CONVKIT_PASSWORD", "pw")
+        .args(["report.pdf", "secret.pdf", "--password"])
+        .assert()
+        .success();
+    for args in [
+        &["secret.pdf", "--unlock"][..],
+        &["pages", "secret.pdf", "1"],
+        &["split", "secret.pdf"],
+        &["merge", "secret.pdf", "report.pdf", "out.pdf"],
+    ] {
+        conv()
+            .current_dir(dir.path())
+            .env_remove("CONVKIT_PASSWORD")
+            .args(args)
+            .write_stdin("")
+            .assert()
+            .code(1)
+            .stderr(contains("secret.pdf is password-protected").and(contains(
+                "run it in a terminal to be asked for the password, or set CONVKIT_PASSWORD",
+            )));
+    }
+    conv()
+        .current_dir(dir.path())
+        .env("CONVKIT_PASSWORD", "wrong")
+        .args(["secret.pdf", "--unlock"])
+        .assert()
+        .code(1)
+        .stderr(contains("wrong password for secret.pdf"));
+    // Locking needs a password from somewhere, too.
+    conv()
+        .current_dir(dir.path())
+        .env_remove("CONVKIT_PASSWORD")
+        .args(["report.pdf", "--password"])
+        .write_stdin("")
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--password needs a terminal to ask in, or the password in CONVKIT_PASSWORD",
+        ));
+    assert!(!dir.path().join("report-locked.pdf").exists());
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn a_password_never_shows_in_a_dry_run_or_verbose_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("report.pdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .env("CONVKIT_PASSWORD", "s3cret-word")
+        .args(["report.pdf", "locked.pdf", "--password"])
+        .assert()
+        .success();
+    let dry = conv()
+        .current_dir(dir.path())
+        .env("CONVKIT_PASSWORD", "s3cret-word")
+        .args(["pages", "locked.pdf", "2", "--password", "--dry-run"])
+        .assert()
+        .success();
+    let printed = String::from_utf8_lossy(&dry.get_output().stdout).into_owned();
+    assert!(printed.contains("--password=<password>"), "{printed}");
+    assert!(
+        printed.contains("--user-password=<new password>"),
+        "{printed}"
+    );
+    assert!(!printed.contains("s3cret-word"), "{printed}");
+    let real = conv()
+        .current_dir(dir.path())
+        .env("CONVKIT_PASSWORD", "s3cret-word")
+        .args(["pages", "locked.pdf", "2", "-v"])
+        .assert()
+        .success();
+    let said = String::from_utf8_lossy(&real.get_output().stderr).into_owned();
+    assert!(said.contains("--password=<password>"), "{said}");
+    assert!(!said.contains("s3cret-word"), "{said}");
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn pages_end_to_end_reorders_deletes_and_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("report.pdf")).unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["pages", "report.pdf", "3", "1-2"])
+        .assert()
+        .success()
+        .stdout(contains("OK report-3_1-2.pdf - 3 pages - "));
+    conv()
+        .current_dir(dir.path())
+        .args([
+            "pages",
+            "report.pdf",
+            "--delete",
+            "2",
+            "--rotate",
+            "right:3",
+            "-o",
+            "out",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            contains("OK report-1_3-rotated.pdf - 2 pages - ")
+                .and(contains("note  1 bookmark led to a page that was left out")),
+        );
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["pages", "report.pdf", "2", "cover.pdf", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["results"][0]["output"], "cover.pdf");
+    assert_eq!(v["results"][0]["pages"], 1);
+    assert_eq!(v["results"][0]["input"], "report.pdf");
+    conv()
+        .current_dir(dir.path())
+        .args(["pages", "report.pdf", "3", "1-2"])
+        .assert()
+        .code(2)
+        .stderr(contains("report-3_1-2.pdf exists; pass -y to overwrite"));
+}
+
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn an_unlock_batch_asks_once_and_skips_what_has_no_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = dir.path().join("docs");
+    std::fs::create_dir(&docs).unwrap();
+    std::fs::copy(sample_pdf(), docs.join("plain.pdf")).unwrap();
+    for name in ["a.pdf", "b.pdf"] {
+        conv()
+            .current_dir(&docs)
+            .env("CONVKIT_PASSWORD", "pw")
+            .args(["plain.pdf", name, "--password"])
+            .assert()
+            .success();
+    }
+    conv()
+        .current_dir(dir.path())
+        .env("CONVKIT_PASSWORD", "pw")
+        .args(["docs", "--to", "pdf", "--unlock"])
+        .assert()
+        .success()
+        .stdout(
+            contains("OK 2 unlocked - 1 skipped - 0 failed").and(contains(
+                "note  plain.pdf has no password or restrictions, so it was left as it is.",
+            )),
+        );
+    for name in ["a.pdf", "b.pdf"] {
+        let path = docs.join("unlocked").join(name);
+        assert_eq!(
+            qpdf_status(dir.path(), &["--requires-password", path.to_str().unwrap()]),
+            2
+        );
+    }
+    assert!(!docs.join("unlocked/plain.pdf").exists());
+    // A batch of one still says what it did.
+    conv()
+        .current_dir(&docs)
+        .args(["plain.pdf", "--to", "pdf", "--unlock"])
+        .assert()
+        .success()
+        .stdout(contains("OK 0 unlocked - 1 skipped - 0 failed"));
+}
+
 #[test]
 fn paste_stands_in_for_the_file_a_command_takes() {
     conv().args(["trim", "--paste", "a.mp4"]).assert().code(2);

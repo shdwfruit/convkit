@@ -85,6 +85,9 @@ similar = { version = "2.7", default-features = false, features = ["text", "inli
 zune-jpeg = "0.5"
 gif = { version = "0.14", default-features = false, features = ["std"] }
 image-webp = "0.2"
+# The owner password of a restricted PDF lock: random, and never shown.
+# Already in the tree through ring.
+getrandom = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

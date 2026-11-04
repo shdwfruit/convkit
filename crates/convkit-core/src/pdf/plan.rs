@@ -3,8 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use super::range::{coverage, join_and, spans, PageRange, Resolved};
-use super::read::{self, PdfInfo};
+use super::lock::{Lock, Password};
+use super::range::{coverage, join_and, ordered_runs, spans, PageRange, Resolved};
+use super::read::{self, password_arg, AskPassword, PdfInfo};
 use super::{display_name, path_arg};
 use crate::error::{ConvError, ErrorCode, Result};
 
@@ -12,14 +13,17 @@ use crate::error::{ConvError, ErrorCode, Result};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfJob {
     /// The first input is qpdf's primary input, so its bookmarks, metadata
-    /// and form survive; see spec §4.1.
+    /// and form survive; see spec §4.1. `passwords` holds each input's,
+    /// in the same order.
     Merge {
         inputs: Vec<PathBuf>,
+        passwords: Vec<Option<Password>>,
         output: PathBuf,
     },
     /// One qpdf `--split-pages` pass, numbering files as qpdf does.
     SplitPages {
         input: PathBuf,
+        password: Option<Password>,
         dir: PathBuf,
         stem: String,
     },
@@ -27,8 +31,34 @@ pub enum PdfJob {
     /// points at a page the output lacks.
     SplitRanges {
         input: PathBuf,
+        password: Option<Password>,
         ranges: Vec<Resolved>,
     },
+    /// `conv pages`: the input as qpdf's primary input, so its bookmarks,
+    /// metadata and forms stay, with `pages` (source pages in output order;
+    /// `None` keeps every page as it is) and `turns` (clockwise degrees,
+    /// and the output pages turned by that much).
+    Pages {
+        input: PathBuf,
+        password: Option<Password>,
+        output: PathBuf,
+        pages: Option<Vec<u32>>,
+        turns: Vec<(u16, Vec<u32>)>,
+    },
+    /// The input rewritten as it is: unlocked, or locked with the plan's
+    /// `lock`.
+    Rewrite {
+        input: PathBuf,
+        password: Option<Password>,
+        output: PathBuf,
+    },
+}
+
+/// What `plan_rewrite` does to the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rewrite {
+    Lock,
+    Unlock,
 }
 
 /// One file a plan writes, and the source pages in it (for a merge, the
@@ -49,42 +79,175 @@ pub struct PdfPlan {
     pub warnings: Vec<String>,
     /// Some input was damaged and qpdf repaired it while reading.
     pub repaired: bool,
+    /// Locks every output; see `set_lock`.
+    pub lock: Option<Lock>,
+    /// The note that a password-protected input's output is not, which a
+    /// lock takes back.
+    unlocked_note: Option<String>,
+    /// The note that an input's restrictions are dropped, which a lock with
+    /// restrictions of its own takes back: its note says what is off.
+    restricted_note: Option<String>,
+    /// What the outputs are called in a note: `out.pdf`, `The split files`.
+    what: String,
 }
 
-/// Where a merge writes inside the scratch folder.
-const MERGE_SCRATCH: &str = "merged.pdf";
+/// Where a merge, a page edit or a rewrite writes inside the scratch
+/// folder.
+const SINGLE_SCRATCH: &str = "out.pdf";
 
 /// The `--split-pages` template of a real run, relative to the scratch
 /// folder.
 pub(crate) const SPLIT_SCRATCH_TEMPLATE: &str = "p-%d.pdf";
 
+/// Every argument the input `p` needs: its path, then its password.
+fn opened(p: &Path, password: Option<&Password>, reveal: bool) -> Vec<String> {
+    let mut v = vec![path_arg(p)];
+    v.extend(password.map(|pw| password_arg(pw, reveal)));
+    v
+}
+
 impl PdfPlan {
+    pub(crate) fn new(job: PdfJob, outputs: Vec<PlannedOutput>, what: String) -> PdfPlan {
+        PdfPlan {
+            job,
+            outputs,
+            notes: Vec::new(),
+            warnings: Vec::new(),
+            repaired: false,
+            lock: None,
+            unlocked_note: None,
+            restricted_note: None,
+            what,
+        }
+    }
+
     pub fn is_merge(&self) -> bool {
         matches!(self.job, PdfJob::Merge { .. })
     }
 
-    /// qpdf's arguments for each call, writing the final outputs: what
-    /// `--dry-run` prints.
-    pub fn commands(&self) -> Vec<Vec<String>> {
-        self.commands_into(None)
+    /// Writes one file: anything but a split.
+    pub fn writes_one_file(&self) -> bool {
+        !matches!(
+            self.job,
+            PdfJob::SplitPages { .. } | PdfJob::SplitRanges { .. }
+        )
     }
 
-    /// The same calls writing into `scratch` instead, as `run` makes them.
-    pub(crate) fn commands_into(&self, scratch: Option<&Path>) -> Vec<Vec<String>> {
+    /// Locks every output with `lock`. The note that a locked input's
+    /// output is not locked goes, and a restricted lock says what it turns
+    /// off.
+    ///
+    /// A password beyond plain ASCII gets a warning: qpdf writes it as the
+    /// PDF standard says (UTF-8), and poppler, Ghostscript and pypdf open
+    /// the file with it, but Apple's PDF engine, so Preview and Safari,
+    /// accepts no such password at all.
+    pub fn set_lock(&mut self, lock: Lock) {
+        let restricts = !lock.restrict.is_empty();
+        let mut gone: Vec<String> = self.unlocked_note.take().into_iter().collect();
+        if restricts {
+            gone.extend(self.restricted_note.take());
+        }
+        self.notes.retain(|n| !gone.contains(n));
+        if let Some(note) = lock.note(&self.what) {
+            self.notes.push(note);
+        }
+        if !lock.password.expose().is_ascii() {
+            self.warnings.push(
+                "Apple's Preview can't open a PDF whose password has characters beyond plain \
+                 ASCII, such as é or ü; most other PDF apps can."
+                    .to_string(),
+            );
+        }
+        self.lock = Some(lock);
+    }
+
+    /// Whether some call carries a password, so a real run must hand qpdf
+    /// its arguments where no other user can read them.
+    pub(crate) fn has_secrets(&self) -> bool {
+        self.lock.is_some()
+            || match &self.job {
+                PdfJob::Merge { passwords, .. } => passwords.iter().any(Option::is_some),
+                PdfJob::SplitPages { password, .. }
+                | PdfJob::SplitRanges { password, .. }
+                | PdfJob::Pages { password, .. }
+                | PdfJob::Rewrite { password, .. } => password.is_some(),
+            }
+    }
+
+    /// Every argument that carries a password, as qpdf would echo it back in
+    /// an error, with what to show instead.
+    pub(crate) fn secret_args(&self) -> Vec<(String, String)> {
+        let mut v = Vec::new();
+        let mut add = |p: &Password| {
+            v.push((password_arg(p, true), password_arg(p, false)));
+        };
         match &self.job {
-            PdfJob::Merge { inputs, output } => {
-                let out = scratch.map_or_else(|| output.clone(), |s| s.join(MERGE_SCRATCH));
-                let mut argv = vec!["--decrypt".to_string(), path_arg(&inputs[0])];
+            PdfJob::Merge { passwords, .. } => passwords.iter().flatten().for_each(&mut add),
+            PdfJob::SplitPages { password, .. }
+            | PdfJob::SplitRanges { password, .. }
+            | PdfJob::Pages { password, .. }
+            | PdfJob::Rewrite { password, .. } => password.iter().for_each(&mut add),
+        }
+        if let Some(lock) = &self.lock {
+            v.extend(
+                lock.args(true)
+                    .into_iter()
+                    .zip(lock.args(false))
+                    .filter(|(a, b)| a != b),
+            );
+        }
+        v
+    }
+
+    /// qpdf's arguments for each call, writing the final outputs: what
+    /// `--dry-run` prints, with every password shown as a placeholder.
+    pub fn commands(&self) -> Vec<Vec<String>> {
+        self.commands_into(None, false)
+    }
+
+    /// The same calls writing into `scratch` instead, as `run` makes them,
+    /// with the passwords themselves when `reveal` is set.
+    pub(crate) fn commands_into(&self, scratch: Option<&Path>, reveal: bool) -> Vec<Vec<String>> {
+        let single =
+            |output: &PathBuf| scratch.map_or_else(|| output.clone(), |s| s.join(SINGLE_SCRATCH));
+        // `--decrypt` drops the input's own lock; a lock of conv's replaces
+        // it anyway, so it is left out there.
+        let decrypt = || self.lock.is_none().then(|| "--decrypt".to_string());
+        let lock = || {
+            self.lock
+                .as_ref()
+                .map(|l| l.args(reveal))
+                .unwrap_or_default()
+        };
+        match &self.job {
+            PdfJob::Merge {
+                inputs,
+                passwords,
+                output,
+            } => {
+                let mut argv: Vec<String> = decrypt().into_iter().collect();
+                if let Some(p) = &passwords[0] {
+                    argv.push(password_arg(p, reveal));
+                }
+                argv.push(path_arg(&inputs[0]));
                 if inputs.len() > 1 {
                     argv.push("--pages".to_string());
                     argv.push(".".to_string());
-                    argv.extend(inputs[1..].iter().map(|p| path_arg(p)));
+                    for (input, password) in inputs[1..].iter().zip(&passwords[1..]) {
+                        argv.extend(opened(input, password.as_ref(), reveal));
+                    }
                     argv.push("--".to_string());
                 }
-                argv.push(path_arg(&out));
+                argv.extend(lock());
+                argv.push(path_arg(&single(output)));
                 vec![argv]
             }
-            PdfJob::SplitPages { input, dir, stem } => {
+            PdfJob::SplitPages {
+                input,
+                password,
+                dir,
+                stem,
+            } => {
                 // qpdf substitutes the first `%d` anywhere in the template,
                 // so a real run uses the bare template from inside the
                 // scratch folder (see `runs_in_scratch`), where no `%` in
@@ -96,14 +259,19 @@ impl PdfPlan {
                     ),
                     None => (input.clone(), dir.join(format!("{stem}-%d.pdf"))),
                 };
-                vec![vec![
-                    "--decrypt".to_string(),
-                    "--split-pages".to_string(),
-                    path_arg(&input),
-                    path_arg(&template),
-                ]]
+                let mut argv: Vec<String> = decrypt().into_iter().collect();
+                argv.extend(password.as_ref().map(|p| password_arg(p, reveal)));
+                argv.push("--split-pages".to_string());
+                argv.push(path_arg(&input));
+                argv.extend(lock());
+                argv.push(path_arg(&template));
+                vec![argv]
             }
-            PdfJob::SplitRanges { input, ranges } => ranges
+            PdfJob::SplitRanges {
+                input,
+                password,
+                ranges,
+            } => ranges
                 .iter()
                 .enumerate()
                 .map(|(i, r)| {
@@ -111,17 +279,57 @@ impl PdfPlan {
                         Some(s) => s.join(format!("r-{}.pdf", i + 1)),
                         None => self.outputs[i].path.clone(),
                     };
-                    vec![
-                        "--decrypt".to_string(),
-                        "--empty".to_string(),
-                        "--pages".to_string(),
-                        path_arg(input),
-                        r.label(),
-                        "--".to_string(),
-                        path_arg(&out),
-                    ]
+                    let mut argv: Vec<String> = decrypt().into_iter().collect();
+                    argv.push("--empty".to_string());
+                    argv.push("--pages".to_string());
+                    argv.extend(opened(input, password.as_ref(), reveal));
+                    argv.push(r.label());
+                    argv.push("--".to_string());
+                    argv.extend(lock());
+                    argv.push(path_arg(&out));
+                    argv
                 })
                 .collect(),
+            PdfJob::Pages {
+                input,
+                password,
+                output,
+                pages,
+                turns,
+            } => {
+                let mut argv: Vec<String> = decrypt().into_iter().collect();
+                argv.extend(password.as_ref().map(|p| password_arg(p, reveal)));
+                argv.push(path_arg(input));
+                if let Some(pages) = pages {
+                    argv.push("--pages".to_string());
+                    argv.push(".".to_string());
+                    argv.push(ordered_runs(pages).join(","));
+                    argv.push("--".to_string());
+                }
+                // qpdf numbers these by the output's pages. `+` turns from
+                // where each page already is, as `--rotate` does a photo.
+                for (degrees, on) in turns {
+                    argv.push(format!(
+                        "--rotate=+{degrees}:{}",
+                        ordered_runs(on).join(",")
+                    ));
+                }
+                argv.extend(lock());
+                argv.push(path_arg(&single(output)));
+                vec![argv]
+            }
+            PdfJob::Rewrite {
+                input,
+                password,
+                output,
+            } => {
+                let mut argv: Vec<String> = decrypt().into_iter().collect();
+                argv.extend(password.as_ref().map(|p| password_arg(p, reveal)));
+                argv.push(path_arg(input));
+                argv.extend(lock());
+                argv.push(path_arg(&single(output)));
+                vec![argv]
+            }
         }
     }
 
@@ -145,7 +353,9 @@ impl PdfPlan {
     /// width of the page count.
     pub(crate) fn scratch_output(&self, scratch: &Path, i: usize) -> PathBuf {
         match &self.job {
-            PdfJob::Merge { .. } => scratch.join(MERGE_SCRATCH),
+            PdfJob::Merge { .. } | PdfJob::Pages { .. } | PdfJob::Rewrite { .. } => {
+                scratch.join(SINGLE_SCRATCH)
+            }
             PdfJob::SplitPages { .. } => {
                 let width = self.outputs.len().to_string().len();
                 scratch.join(format!("p-{:0width$}.pdf", i + 1))
@@ -167,7 +377,7 @@ fn names_where(infos: &[PdfInfo], pick: impl Fn(&PdfInfo) -> bool) -> Vec<String
     names
 }
 
-fn restricted_note(names: &[String], result: &str) -> String {
+pub(crate) fn restricted_note(names: &[String], result: &str) -> String {
     let verb = if names.len() == 1 {
         "restricts"
     } else {
@@ -179,7 +389,18 @@ fn restricted_note(names: &[String], result: &str) -> String {
     )
 }
 
-fn repaired_warning(names: &[String], check: &str) -> String {
+/// `a.pdf was password-protected; out.pdf isn't. Add --password to lock
+/// it.` `isnt` is the result's half: `out.pdf isn't`, `the split files
+/// aren't`.
+fn unlocked_note(names: &[String], isnt: &str, it: &str) -> String {
+    let verb = if names.len() == 1 { "was" } else { "were" };
+    format!(
+        "{} {verb} password-protected; {isnt}. Add --password to lock {it}.",
+        join_and(names)
+    )
+}
+
+pub(crate) fn repaired_warning(names: &[String], check: &str) -> String {
     if names.len() == 1 {
         format!(
             "{} was damaged and has been repaired; check {check}.",
@@ -215,6 +436,33 @@ fn overlap_note(pages: &[u32]) -> String {
     }
 }
 
+/// The notes and warnings every plan of one input shares: dropped
+/// restrictions, a password the output lacks, and a repair. `subject`
+/// names the result in a sentence: `out.pdf`, or `the split files`
+/// (`plural`).
+pub(crate) fn source_notes(plan: &mut PdfPlan, info: &PdfInfo, subject: &str, plural: bool) {
+    let name = vec![display_name(&info.path)];
+    let (does, isnt, it) = if plural {
+        ("do", "aren't", "them")
+    } else {
+        ("does", "isn't", "it")
+    };
+    if info.restricted {
+        let note = restricted_note(&name, &format!("{subject} {does} not"));
+        plan.notes.push(note.clone());
+        plan.restricted_note = Some(note);
+    }
+    if info.locked() {
+        let note = unlocked_note(&name, &format!("{subject} {isnt}"), it);
+        plan.notes.push(note.clone());
+        plan.unlocked_note = Some(note);
+    }
+    if info.damaged {
+        plan.warnings.push(repaired_warning(&name, subject));
+        plan.repaired = true;
+    }
+}
+
 /// Plans a merge of `infos` (one per input, in order, repeats included).
 pub fn merge_plan(infos: &[PdfInfo], output: &Path) -> Result<PdfPlan> {
     let Some(first) = infos.first() else {
@@ -226,7 +474,18 @@ pub fn merge_plan(infos: &[PdfInfo], output: &Path) -> Result<PdfPlan> {
     let out_name = display_name(output);
     let total: u32 = infos.iter().map(|i| i.pages).sum();
 
-    let mut notes = Vec::new();
+    let mut plan = PdfPlan::new(
+        PdfJob::Merge {
+            inputs: infos.iter().map(|i| i.path.clone()).collect(),
+            passwords: infos.iter().map(|i| i.password.clone()).collect(),
+            output: output.to_path_buf(),
+        },
+        vec![PlannedOutput {
+            path: output.to_path_buf(),
+            pages: (1..=total).collect(),
+        }],
+        out_name.clone(),
+    );
     let dropped = names_where(&infos[1..], |i| i.has_bookmarks && i.path != first.path);
     if !dropped.is_empty() {
         let mut s = format!("Bookmarks from {} are not carried over", join_and(&dropped));
@@ -237,42 +496,33 @@ pub fn merge_plan(infos: &[PdfInfo], output: &Path) -> Result<PdfPlan> {
             ));
         }
         s.push('.');
-        notes.push(s);
+        plan.notes.push(s);
     }
     let restricted = names_where(infos, |i| i.restricted);
     if !restricted.is_empty() {
-        notes.push(restricted_note(
-            &restricted,
-            &format!("{out_name} does not"),
-        ));
+        let note = restricted_note(&restricted, &format!("{out_name} does not"));
+        plan.notes.push(note.clone());
+        plan.restricted_note = Some(note);
+    }
+    let locked = names_where(infos, PdfInfo::locked);
+    if !locked.is_empty() {
+        let note = unlocked_note(&locked, &format!("{out_name} isn't"), "it");
+        plan.notes.push(note.clone());
+        plan.unlocked_note = Some(note);
     }
     if infos.len() == 1 {
-        notes.push(format!(
+        plan.notes.push(format!(
             "Only one input, so {out_name} is a copy of {}.",
             display_name(&first.path)
         ));
     }
 
     let damaged = names_where(infos, |i| i.damaged);
-    let warnings = if damaged.is_empty() {
-        Vec::new()
-    } else {
-        vec![repaired_warning(&damaged, &out_name)]
-    };
-
-    Ok(PdfPlan {
-        job: PdfJob::Merge {
-            inputs: infos.iter().map(|i| i.path.clone()).collect(),
-            output: output.to_path_buf(),
-        },
-        outputs: vec![PlannedOutput {
-            path: output.to_path_buf(),
-            pages: (1..=total).collect(),
-        }],
-        notes,
-        warnings,
-        repaired: !damaged.is_empty(),
-    })
+    if !damaged.is_empty() {
+        plan.warnings.push(repaired_warning(&damaged, &out_name));
+        plan.repaired = true;
+    }
+    Ok(plan)
 }
 
 /// Plans a split of `info` into `dir`: one file per page without ranges,
@@ -298,12 +548,6 @@ pub fn split_plan(info: &PdfInfo, ranges: &[PageRange], dir: &Path) -> Result<Pd
             "{name}'s bookmarks are not carried into the split files."
         ));
     }
-    if info.restricted {
-        notes.push(restricted_note(
-            std::slice::from_ref(&name),
-            "the split files do not",
-        ));
-    }
 
     let (job, outputs) = if ranges.is_empty() {
         let width = info.pages.to_string().len();
@@ -315,6 +559,7 @@ pub fn split_plan(info: &PdfInfo, ranges: &[PageRange], dir: &Path) -> Result<Pd
             .collect();
         let job = PdfJob::SplitPages {
             input: info.path.clone(),
+            password: info.password.clone(),
             dir: dir.to_path_buf(),
             stem,
         };
@@ -352,27 +597,51 @@ pub fn split_plan(info: &PdfInfo, ranges: &[PageRange], dir: &Path) -> Result<Pd
         }
         let job = PdfJob::SplitRanges {
             input: info.path.clone(),
+            password: info.password.clone(),
             ranges: resolved,
         };
         (job, outputs)
     };
 
-    if info.damaged {
-        warnings.push(repaired_warning(
-            std::slice::from_ref(&name),
-            "the split files",
-        ));
-    }
-    Ok(PdfPlan {
-        job,
-        outputs,
-        notes,
-        warnings,
-        repaired: info.damaged,
-    })
+    let mut plan = PdfPlan::new(job, outputs, "Each split file".to_string());
+    plan.notes = notes;
+    plan.warnings = warnings;
+    source_notes(&mut plan, info, "the split files", true);
+    Ok(plan)
 }
 
-fn check_inputs<'a>(inputs: impl IntoIterator<Item = &'a Path>) -> Result<()> {
+/// Plans writing `info` again as `output`: unlocked, or ready for
+/// `set_lock`. Unlocking a file that has nothing to unlock is refused.
+pub fn rewrite_plan(info: &PdfInfo, output: &Path, rewrite: Rewrite) -> Result<PdfPlan> {
+    let name = display_name(&info.path);
+    let out_name = display_name(output);
+    if rewrite == Rewrite::Unlock && !info.encrypted {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!("{name} has no password or restrictions to remove"),
+        ));
+    }
+    let mut plan = PdfPlan::new(
+        PdfJob::Rewrite {
+            input: info.path.clone(),
+            password: info.password.clone(),
+            output: output.to_path_buf(),
+        },
+        vec![PlannedOutput {
+            path: output.to_path_buf(),
+            pages: (1..=info.pages).collect(),
+        }],
+        out_name.clone(),
+    );
+    source_notes(&mut plan, info, &out_name, false);
+    // Unlocking is the point, so the output lacking a password gets no note.
+    if let Some(note) = plan.unlocked_note.take() {
+        plan.notes.retain(|n| n != &note);
+    }
+    Ok(plan)
+}
+
+pub(crate) fn check_inputs<'a>(inputs: impl IntoIterator<Item = &'a Path>) -> Result<()> {
     for input in inputs {
         if !input.is_file() {
             return Err(ConvError::new(
@@ -384,9 +653,14 @@ fn check_inputs<'a>(inputs: impl IntoIterator<Item = &'a Path>) -> Result<()> {
     Ok(())
 }
 
-/// Reads every input with qpdf (each distinct path once) and plans the
-/// merge.
-pub fn plan_merge(qpdf: &Path, inputs: &[PathBuf], output: &Path) -> Result<PdfPlan> {
+/// Opens every input with qpdf (each distinct path once, asking `ask` for
+/// any password) and plans the merge.
+pub fn plan_merge(
+    qpdf: &Path,
+    inputs: &[PathBuf],
+    output: &Path,
+    ask: &mut AskPassword,
+) -> Result<PdfPlan> {
     check_inputs(inputs.iter().map(PathBuf::as_path))?;
     let mut seen: Vec<PdfInfo> = Vec::new();
     let mut infos = Vec::with_capacity(inputs.len());
@@ -394,7 +668,7 @@ pub fn plan_merge(qpdf: &Path, inputs: &[PathBuf], output: &Path) -> Result<PdfP
         let info = match seen.iter().find(|i| &i.path == input) {
             Some(i) => i.clone(),
             None => {
-                let i = read::read(qpdf, input)?;
+                let i = read::open(qpdf, input, ask)?;
                 seen.push(i.clone());
                 i
             }
@@ -404,21 +678,35 @@ pub fn plan_merge(qpdf: &Path, inputs: &[PathBuf], output: &Path) -> Result<PdfP
     merge_plan(&infos, output)
 }
 
-/// Reads `input` with qpdf and plans the split, into `outdir` or next to
+/// Opens `input` with qpdf and plans the split, into `outdir` or next to
 /// the input.
 pub fn plan_split(
     qpdf: &Path,
     input: &Path,
     ranges: &[PageRange],
     outdir: Option<&Path>,
+    ask: &mut AskPassword,
 ) -> Result<PdfPlan> {
     check_inputs([input])?;
-    let info = read::read(qpdf, input)?;
+    let info = read::open(qpdf, input, ask)?;
     let dir = match outdir {
         Some(d) => d.to_path_buf(),
         None => input.parent().map(Path::to_path_buf).unwrap_or_default(),
     };
     split_plan(&info, ranges, &dir)
+}
+
+/// Opens `input` with qpdf and plans writing it again as `output`.
+pub fn plan_rewrite(
+    qpdf: &Path,
+    input: &Path,
+    output: &Path,
+    rewrite: Rewrite,
+    ask: &mut AskPassword,
+) -> Result<PdfPlan> {
+    check_inputs([input])?;
+    let info = read::open(qpdf, input, ask)?;
+    rewrite_plan(&info, output, rewrite)
 }
 
 #[cfg(test)]
@@ -431,9 +719,23 @@ mod tests {
             path: PathBuf::from(path),
             pages,
             has_bookmarks: false,
+            bookmarked_pages: vec![],
+            encrypted: false,
             restricted: false,
+            password: None,
             damaged: false,
         }
+    }
+
+    fn locked(path: &str, pages: u32, password: &str) -> PdfInfo {
+        with(info(path, pages), |i| {
+            i.encrypted = true;
+            i.password = Some(Password::new(password).unwrap());
+        })
+    }
+
+    fn lock(password: &str) -> Lock {
+        Lock::new(Password::new(password).unwrap(), &[]).unwrap()
     }
 
     fn with(mut i: PdfInfo, f: impl FnOnce(&mut PdfInfo)) -> PdfInfo {
@@ -784,13 +1086,13 @@ mod tests {
         let merge =
             merge_plan(&[info("a.pdf", 1), info("b.pdf", 1)], Path::new("out.pdf")).unwrap();
         assert_eq!(
-            merge.commands_into(Some(s))[0].last().unwrap(),
-            &s.join("merged.pdf").to_string_lossy()
+            merge.commands_into(Some(s), true)[0].last().unwrap(),
+            &s.join("out.pdf").to_string_lossy()
         );
-        assert_eq!(merge.scratch_output(s, 0), s.join("merged.pdf"));
+        assert_eq!(merge.scratch_output(s, 0), s.join("out.pdf"));
 
         let pages = split_plan(&info("report.pdf", 12), &[], Path::new("")).unwrap();
-        assert_eq!(pages.commands_into(Some(s))[0][3], "p-%d.pdf");
+        assert_eq!(pages.commands_into(Some(s), true)[0][3], "p-%d.pdf");
         assert!(pages.runs_in_scratch());
         assert!(!merge.runs_in_scratch());
         assert_eq!(pages.scratch_output(s, 0), s.join("p-01.pdf"));
@@ -803,9 +1105,266 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            parts.commands_into(Some(s))[1].last().unwrap(),
+            parts.commands_into(Some(s), true)[1].last().unwrap(),
             &s.join("r-2.pdf").to_string_lossy()
         );
         assert_eq!(parts.scratch_output(s, 1), s.join("r-2.pdf"));
+    }
+
+    // --- passwords ---
+
+    #[test]
+    fn a_merge_opens_each_locked_input_with_its_password_and_notes_the_result_is_not() {
+        let plan = merge_plan(
+            &[
+                locked("a.pdf", 1, "pa"),
+                info("b.pdf", 1),
+                locked("c.pdf", 1, "pc"),
+            ],
+            Path::new("out.pdf"),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.commands(),
+            vec![argv(&[
+                "--decrypt",
+                "--password=<password>",
+                "a.pdf",
+                "--pages",
+                ".",
+                "b.pdf",
+                "c.pdf",
+                "--password=<password>",
+                "--",
+                "out.pdf"
+            ])]
+        );
+        let real = plan.commands_into(None, true).remove(0);
+        assert_eq!(real[1], "--password=pa");
+        assert_eq!(real[7], "--password=pc");
+        assert!(plan.has_secrets());
+        assert_eq!(
+            plan.notes,
+            vec!["a.pdf and c.pdf were password-protected; out.pdf isn't. Add --password to lock it."]
+        );
+    }
+
+    #[test]
+    fn a_plan_without_passwords_has_no_secrets() {
+        let plan = merge_plan(&[info("a.pdf", 1), info("b.pdf", 1)], Path::new("o.pdf")).unwrap();
+        assert!(!plan.has_secrets());
+        assert_eq!(plan.commands(), plan.commands_into(None, true));
+    }
+
+    #[test]
+    fn a_lock_goes_on_every_output_in_place_of_decrypt() {
+        let mut merge = merge_plan(
+            &[locked("a.pdf", 1, "pa"), info("b.pdf", 1)],
+            Path::new("out.pdf"),
+        )
+        .unwrap();
+        merge.set_lock(lock("new"));
+        assert!(merge.notes.is_empty(), "{:?}", merge.notes);
+        assert_eq!(
+            merge.commands(),
+            vec![argv(&[
+                "--password=<password>",
+                "a.pdf",
+                "--pages",
+                ".",
+                "b.pdf",
+                "--",
+                "--encrypt",
+                "--user-password=<new password>",
+                "--owner-password=<new password>",
+                "--bits=256",
+                "--",
+                "out.pdf"
+            ])]
+        );
+
+        let mut pages = split_plan(&info("report.pdf", 2), &[], Path::new("")).unwrap();
+        pages.set_lock(lock("new"));
+        assert!(pages.has_secrets());
+        assert_eq!(
+            pages.commands()[0],
+            argv(&[
+                "--split-pages",
+                "report.pdf",
+                "--encrypt",
+                "--user-password=<new password>",
+                "--owner-password=<new password>",
+                "--bits=256",
+                "--",
+                "report-%d.pdf"
+            ])
+        );
+
+        let mut parts = split_plan(
+            &locked("report.pdf", 4, "p"),
+            &ranges(&["1-2", "3-4"]),
+            Path::new(""),
+        )
+        .unwrap();
+        assert_eq!(
+            parts.notes,
+            vec!["report.pdf was password-protected; the split files aren't. Add --password to lock them."]
+        );
+        parts.set_lock(
+            Lock::new(
+                Password::new("new").unwrap(),
+                &[crate::pdf::Restriction::Print],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            parts.notes,
+            vec![
+                "Each split file opens with the password but turns off printing; PDF apps \
+                  honour that, though nothing forces them to."
+            ]
+        );
+        assert_eq!(
+            parts.commands()[1],
+            argv(&[
+                "--empty",
+                "--pages",
+                "report.pdf",
+                "--password=<password>",
+                "3-4",
+                "--",
+                "--encrypt",
+                "--user-password=<new password>",
+                "--owner-password=<random>",
+                "--bits=256",
+                "--print=none",
+                "--",
+                "report-3-4.pdf"
+            ])
+        );
+    }
+
+    #[test]
+    fn a_restricted_lock_replaces_the_note_that_restrictions_were_dropped() {
+        let source = with(info("r.pdf", 1), |i| {
+            i.encrypted = true;
+            i.restricted = true;
+        });
+        let mut plan = rewrite_plan(&source, Path::new("r-locked.pdf"), Rewrite::Lock).unwrap();
+        plan.set_lock(lock("pw"));
+        assert_eq!(
+            plan.notes,
+            vec!["r.pdf restricts printing, copying or editing; r-locked.pdf does not."],
+            "without restrictions of its own, the lock drops them"
+        );
+        let mut plan = rewrite_plan(&source, Path::new("r-locked.pdf"), Rewrite::Lock).unwrap();
+        plan.set_lock(
+            Lock::new(
+                Password::new("pw").unwrap(),
+                &[crate::pdf::Restriction::Print],
+            )
+            .unwrap(),
+        );
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+        assert!(
+            plan.notes[0].contains("turns off printing"),
+            "{:?}",
+            plan.notes
+        );
+    }
+
+    #[test]
+    fn a_password_preview_cannot_take_gets_a_warning() {
+        let mut plan =
+            rewrite_plan(&info("r.pdf", 1), Path::new("r-locked.pdf"), Rewrite::Lock).unwrap();
+        plan.set_lock(lock("contraseña"));
+        assert_eq!(
+            plan.warnings,
+            vec![
+                "Apple's Preview can't open a PDF whose password has characters beyond plain \
+                  ASCII, such as é or ü; most other PDF apps can."
+            ]
+        );
+        let mut plan =
+            rewrite_plan(&info("r.pdf", 1), Path::new("r-locked.pdf"), Rewrite::Lock).unwrap();
+        plan.set_lock(lock("plain words & 123!"));
+        assert!(plan.warnings.is_empty());
+    }
+
+    // --- rewrite ---
+
+    #[test]
+    fn an_unlock_writes_the_file_again_without_its_password() {
+        let plan = rewrite_plan(
+            &locked("report.pdf", 3, "p"),
+            Path::new("report-unlocked.pdf"),
+            Rewrite::Unlock,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.commands(),
+            vec![argv(&[
+                "--decrypt",
+                "--password=<password>",
+                "report.pdf",
+                "report-unlocked.pdf"
+            ])]
+        );
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        assert_eq!(plan.outputs[0].pages, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn unlocking_a_restricted_file_says_the_restrictions_are_gone() {
+        let source = with(info("report.pdf", 1), |i| {
+            i.encrypted = true;
+            i.restricted = true;
+        });
+        let plan = rewrite_plan(&source, Path::new("r-unlocked.pdf"), Rewrite::Unlock).unwrap();
+        assert_eq!(
+            plan.notes,
+            vec!["report.pdf restricts printing, copying or editing; r-unlocked.pdf does not."]
+        );
+        assert!(!plan.has_secrets());
+    }
+
+    #[test]
+    fn unlocking_a_file_with_nothing_to_unlock_is_refused() {
+        let e =
+            rewrite_plan(&info("report.pdf", 1), Path::new("x.pdf"), Rewrite::Unlock).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInvocation);
+        assert_eq!(
+            e.message,
+            "report.pdf has no password or restrictions to remove"
+        );
+    }
+
+    #[test]
+    fn a_lock_rewrites_the_file_with_the_lock() {
+        let mut plan = rewrite_plan(
+            &info("report.pdf", 1),
+            Path::new("report-locked.pdf"),
+            Rewrite::Lock,
+        )
+        .unwrap();
+        plan.set_lock(lock("pw"));
+        assert_eq!(
+            plan.commands(),
+            vec![argv(&[
+                "report.pdf",
+                "--encrypt",
+                "--user-password=<new password>",
+                "--owner-password=<new password>",
+                "--bits=256",
+                "--",
+                "report-locked.pdf"
+            ])]
+        );
+        let real = plan.commands_into(Some(Path::new("s")), true).remove(0);
+        assert_eq!(real[1..3], ["--encrypt", "--user-password=pw"]);
+        assert_eq!(
+            real.last().unwrap(),
+            &Path::new("s").join("out.pdf").to_string_lossy()
+        );
     }
 }
