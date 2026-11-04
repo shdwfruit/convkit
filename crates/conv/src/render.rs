@@ -89,6 +89,9 @@ pub fn plan_human(plan: &ConversionPlan) -> String {
     if let Some(e) = &plan.enlarged {
         s.push_str(&format!("warning: {}\n", e.warning));
     }
+    if let Some(w) = plan.pages.as_ref().and_then(|p| p.warning.as_ref()) {
+        s.push_str(&format!("warning: {w}\n"));
+    }
     for w in &plan.warnings {
         s.push_str(&format!("note: {w}\n"));
     }
@@ -299,6 +302,9 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     if let Some(r) = &o.rotation {
         v["rotation"] = json!(r);
     }
+    if let Some(p) = &o.pages {
+        v["pages"] = json!(p);
+    }
     v
 }
 
@@ -506,11 +512,18 @@ pub fn conversion_success_human(o: &Outcome, styled: bool) -> String {
         ),
         _ => size_for(o),
     };
-    let mut fields = vec![
-        name,
-        size,
-        human_elapsed(Duration::from_millis(o.elapsed_ms)),
-    ];
+    // A PDF's pages in a folder name the folder, and how many are in it.
+    let mut fields = match o.pages.as_ref().filter(|p| p.folder) {
+        Some(p) => vec![
+            format!("{name}{}", std::path::MAIN_SEPARATOR),
+            format!(
+                "{} pages",
+                convkit_core::pdf::raster::grouped(p.files.len())
+            ),
+        ],
+        None => vec![name],
+    };
+    fields.extend([size, human_elapsed(Duration::from_millis(o.elapsed_ms))]);
     if o.remuxed {
         fields.push("stream copy, no re-encode".to_string());
     }
@@ -924,6 +937,7 @@ mod tests {
             range: None,
             speed: None,
             rotation: None,
+            pages: None,
         }
     }
 

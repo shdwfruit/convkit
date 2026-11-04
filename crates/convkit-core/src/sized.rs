@@ -244,6 +244,7 @@ pub(crate) fn plan(
                 range: p.range.clone(),
                 speed: p.speed.clone(),
                 rotation: copied_rotation,
+                pages: None,
             });
         }
         if let Some(m) = media::stream_mapped_invocation(
@@ -274,6 +275,7 @@ pub(crate) fn plan(
                 range: p.range.clone(),
                 speed: p.speed.clone(),
                 rotation: copied_rotation,
+                pages: None,
             });
         }
     }
@@ -622,6 +624,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
             turn,
             by: crate::rotate::By::Pixels,
         }),
+        pages: None,
     })
 }
 

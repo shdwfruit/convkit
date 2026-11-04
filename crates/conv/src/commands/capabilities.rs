@@ -1,3 +1,4 @@
+use convkit_core::pdf::raster;
 use convkit_core::recipe::ScaleStyle;
 use convkit_core::{registry, Arg, ConvError, Format, Recipe};
 use serde_json::json;
@@ -78,6 +79,10 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     let Some(recipe) = registry::lookup(from, to) else {
         return Vec::new();
     };
+    // A PDF's pages plan their own flags (`pdf::raster::plan`).
+    if raster::is_pair(from, to) {
+        return raster::flags(to);
+    }
     let recipes: Vec<Recipe> = std::iter::once(recipe)
         .chain(registry::alternate(from, to))
         .collect();
@@ -179,7 +184,10 @@ fn push_flag(flags: &mut Vec<&'static str>, flag: &'static str) {
 /// target -- so anything less than every source would claim a flag works
 /// no matter where you start from, when it does not.
 fn common_tuning_flags(sources: &[Format], fmt: Format) -> Vec<&'static str> {
-    let mut sources = sources.iter();
+    // A PDF's pages are drawn rather than converted, and take flags of
+    // their own, which its own line lists; counted here they would take
+    // every picture flag off this line.
+    let mut sources = sources.iter().filter(|&&s| !raster::is_pair(s, fmt));
     let Some(&first) = sources.next() else {
         return Vec::new();
     };
@@ -205,6 +213,17 @@ fn default_anchors_for(from: Format, to: Format) -> Vec<(&'static str, &'static 
     let Some(recipe) = registry::lookup(from, to) else {
         return Vec::new();
     };
+    if raster::is_pair(from, to) {
+        const _: () = assert!(raster::DEFAULT_DPI == 150, "the anchor below says 150");
+        let quality = match raster::default_quality(to) {
+            Some(60) => Some("60"),
+            Some(_) => Some("92"),
+            None => None,
+        };
+        return std::iter::once(("dpi", "150"))
+            .chain(quality.map(|q| ("quality", q)))
+            .collect();
+    }
     let mut anchors = Vec::new();
     for step in recipe.steps {
         for &arg in step.args {
@@ -350,6 +369,7 @@ fn format_detail(cli: &Cli, ext: &str) -> i32 {
             ("crf", "--crf"),
             ("fps", "--fps"),
             ("max_width", "--resize"),
+            ("dpi", "--dpi"),
         ] {
             if let Some(&(_, value)) = top_defaults.iter().find(|&&(k, _)| k == key) {
                 println!("  defaults: {key} {value} (override with {flag})");

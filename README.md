@@ -14,7 +14,7 @@
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
 ImageMagick, LibreOffice, pandoc, Typst, qpdf, or the system's own speech
-engine — and runs it locally: 236 conversion pairs across 40 formats
+engine — and runs it locally: 240 conversion pairs across 40 formats
 (`conv capabilities` is the source of truth). Files never leave your
 machine; only `conv install`/`conv update`, and `conv link --follow` when
 asked, ever touch the network. It also does the small text and developer
@@ -112,6 +112,7 @@ conv merge a.mp4 b.mov out.mp4   # join videos, losslessly when they match
 conv split report.pdf 1-3 4-z    # one PDF per page range
 conv pages report.pdf 3 1-2 5-z  # pick, reorder, delete or turn a PDF's pages
 conv report.pdf --password       # lock a PDF; --unlock removes the password
+conv report.pdf .png             # each page of a PDF as a picture
 conv scan                        # list the files here and what each can become
 conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
@@ -909,6 +910,43 @@ view" even when the original was, since that would make it bigger.
 `suggested`. How the thresholds were chosen is in "Compress PDF" in
 [`docs/defaults-calibration.md`](docs/defaults-calibration.md#compress-pdf).
 
+## PDF pages as pictures
+
+Name a picture format to save a PDF's pages: PNG, JPEG, WebP or HEIC. Each
+page becomes a file in a folder named after the PDF:
+
+```console
+$ conv report.pdf .png
+OK report/ - 12 pages - 3.4 MB - 0.9s
+  /home/user/Docs/report
+```
+
+The files are numbered by page and padded so they sort, `report-01.png` to
+`report-12.png`. A PDF with one page gives one file, `ticket.png`, with no
+folder. `--pages` picks pages, written as for `conv split` with commas
+between them, and a single page is one file named after it:
+
+```console
+conv report.pdf .jpg --pages 1-3,7       # report/report-01.jpg ... report-07.jpg
+conv report.pdf .png --pages 2           # report-2.png
+conv scan.pdf .jpg --dpi 300             # sharper and larger
+conv ./statements --to png -o pages      # pages/march/march-1.png ...
+```
+
+Pages are drawn at 150 dpi, so a Letter page is 1275 x 1650 pixels. `--dpi`
+picks another resolution, and `--resize 1600x` sets each page's size
+instead. `--quality` sets JPEG, WebP and HEIC quality, as for photos.
+
+Comments, highlights, stamps, signatures and filled-in form fields show on
+the pages as they do in a PDF viewer. qpdf merges them into a copy of each
+page, Typst draws it, and for a JPEG ffmpeg encodes it, so PNG and JPEG need
+only backends conv installs. WebP and HEIC are written by ImageMagick.
+
+A folder that is already there is fine: the pages go in beside what is
+there, and conv stops only if one of their files exists, which `-y`
+replaces. More than 1,000 files asks first; `--yes` answers for a script.
+Password-protected PDFs aren't supported yet.
+
 ## Copy and paste
 
 `--paste` takes the input from the clipboard, and `--copy` puts the result
@@ -1314,7 +1352,7 @@ jpg (Image)
     jpg -> png      [--resize --upscale --colors --strip-metadata]
     jpg -> webp     [--resize --upscale --quality --colors --strip-metadata]
     ...
-  as target, accepts: heic heif png webp avif tiff bmp svg
+  as target, accepts: heic heif png webp avif tiff bmp svg pdf
   tuning flags when writing jpg: --resize --upscale --quality --colors --strip-metadata
 
   defaults: quality 92 (override with --quality)
@@ -1363,7 +1401,8 @@ backend's full output to stderr as a job runs.
 `--to <format>` converts many inputs at once — a glob, a list of files, or a
 folder (non-recursive). `-o/--outdir` puts the outputs in another folder,
 as it does for a single named output; `-j/--jobs` sets parallelism
-(default: core count). A batch prints one summary line; per-job
+(default: core count, or 2 for PDFs' pages, which use every core each). A
+batch prints one summary line; per-job
 failures still print in full, on stderr:
 
 ```console
@@ -1386,12 +1425,12 @@ convkit dispatches to these programs, each invoked as a subprocess:
 
 | Backend | Used for | `conv install` | Pinned version |
 |---|---|---|---|
-| `ffmpeg` / `ffprobe` | video, audio, GIF, remux | Yes | 9.0.1 |
-| `magick` (ImageMagick) | images, HEIC (HEIF read-only), HEIC/HEIF/AVIF/TIFF/BMP → PDF, and image → PDF with `--quality`, `--resize`, `--rotate`, or an SVG or ICO in the merge | No — use your package manager | — |
+| `ffmpeg` / `ffprobe` | video, audio, GIF, remux; PDF pages as JPEG | Yes | 9.0.1 |
+| `magick` (ImageMagick) | images, HEIC (HEIF read-only), HEIC/HEIF/AVIF/TIFF/BMP → PDF, image → PDF with `--quality`, `--resize`, `--rotate`, or an SVG or ICO in the merge, and PDF pages as WebP or HEIC | No — use your package manager | — |
 | `pandoc` | Markdown, text, HTML and RTF documents; parses docx/odt/rtf for the PDF fallback | Yes | 3.11 |
-| `typst` | JPG/PNG/WebP/GIF → PDF, and pictures merged among PDFs; PDF engine for the docx/odt/rtf → pdf fallback | Yes | 0.15.1 |
+| `typst` | JPG/PNG/WebP/GIF → PDF, and pictures merged among PDFs; draws PDF pages as pictures; PDF engine for the docx/odt/rtf → pdf fallback | Yes | 0.15.1 |
 | `soffice` (LibreOffice) | Office documents ⇄ PDF, reading RTF | No — manual install, always | — |
-| `qpdf` | PDF merge, split, pages and passwords, and the pages of a merge with pictures | Yes | 12.4.2 |
+| `qpdf` | PDF merge, split, pages and passwords, and the pages of a merge with pictures; merges annotations and form fields into the pages before they are drawn | Yes | 12.4.2 |
 | `say`, Windows PowerShell, `espeak-ng`, `piper` | reading text aloud | No — the first two come with the system | — |
 
 Managed versions are pinned per convkit build
@@ -1522,7 +1561,9 @@ small distilled subset worth a person's attention, usually empty on a clean
 run. A cut adds `range`: where the cut was made, in milliseconds, and the
 times as typed. A turn adds `rotation`: the turn, and `by`, which is `tag`
 when only the orientation tag changed and `pixels` when the picture itself
-was turned. For the full shapes of every command, run it with `--json`
+was turned. A PDF's pages add `pages`: the page count, the pages saved,
+whether they went into a folder (`output` is then the folder), the file
+names, and the dpi. For the full shapes of every command, run it with `--json`
 — the binary is the reference.
 
 ## Troubleshooting

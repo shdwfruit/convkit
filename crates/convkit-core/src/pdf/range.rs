@@ -1,6 +1,6 @@
-//! Page ranges for `conv split` and `conv pages`: what the user typed, `z`
-//! resolved against a real page count, and which pages a set of ranges
-//! leaves out or repeats.
+//! Page ranges for `conv split`, `conv pages` and `--pages`: what the
+//! user typed, `z` resolved against a real page count, and which pages a
+//! set of ranges leaves out or repeats.
 
 use crate::error::{ConvError, ErrorCode, Result};
 
@@ -65,9 +65,10 @@ pub fn parse_range(text: &str) -> Result<PageRange> {
     })
 }
 
-/// Parses a comma list of ranges, as `--delete 4,6-7` and `conv pages`
-/// take them: `4,6-7` is `4` and `6-7`. Each item is a range `parse_range`
-/// reads; an empty item (`1,,3`, `3,`) is refused with the whole list.
+/// Parses a comma list of ranges, as `--delete 4,6-7`, `conv pages` and
+/// `--pages 1-3,7` take them: `4,6-7` is `4` and `6-7`. Each item is a
+/// range `parse_range` reads; an empty item (`1,,3`, `3,`) is refused
+/// with the whole list.
 pub fn parse_list(text: &str) -> Result<Vec<PageRange>> {
     text.split(',')
         .map(|item| match item {

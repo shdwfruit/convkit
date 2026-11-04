@@ -109,6 +109,10 @@ pub struct MediaProbe {
     /// The voices say has and the user's language, read by `speech::read`
     /// for a conversion that reads text aloud. `None` when not read.
     pub speech: Option<crate::speech::SpeechProbe>,
+    /// A PDF's page count and page sizes, for saving its pages as images,
+    /// read by `pdf::raster::read` and `read_sizes`. `None` when the source
+    /// was not read.
+    pub pdf: Option<crate::pdf::raster::PdfPages>,
 }
 
 /// The two ways a video or audio file records where it was made. Outputs

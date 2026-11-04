@@ -133,6 +133,10 @@ pub struct ConversionPlan {
     /// YAML, TOML and CSV (`data`). Skipped when false, like `sizing`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub built_in: bool,
+    /// The pages of a PDF saved as images: one file, or a folder of them
+    /// as `output`. Skipped when absent, like `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages: Option<crate::pdf::raster::PagesReport>,
 }
 
 /// Why a probe-aware media pair re-encoded instead of copying: a video knob.
@@ -182,15 +186,28 @@ pub fn build_tuned(
         ));
     }
 
+    // `--dpi` and `--pages` draw a PDF's pages as images, and mean nothing
+    // anywhere else.
+    crate::pdf::raster::refuse_elsewhere(from, to, tuning)?;
+
     // A data file is converted in process, and none of the knobs apply.
     if registry::is_built_in(from, to) {
         return built_in(from, to, inputs, output, tuning);
     }
 
     // `--compress`, and `--max-size` on a PDF, run on qpdf and conv's own
-    // image pass, not a recipe.
+    // image pass, not a recipe. Before the pages below, so `--max-size` on
+    // a PDF's pages says what it does.
     if crate::pdf::compress::applies(tuning, from, to) {
         return crate::pdf::compress::plan(from, to, inputs, output, tuning);
+    }
+
+    // A PDF's pages as images take the whole conversion, as a size target
+    // does below: what to draw is decided against the page count and sizes
+    // (pdf/raster.rs).
+    if crate::pdf::raster::is_pair(from, to) {
+        let pdf = probe.and_then(|p| p.pdf.as_ref());
+        return crate::pdf::raster::plan(to, inputs, output, pdf, tuning).map(|p| p.plan);
     }
 
     // A password-protected .docx/.xlsx/.pptx is refused before LibreOffice
@@ -468,6 +485,7 @@ pub fn build_tuned(
                     range,
                     speed,
                     rotation,
+                    pages: None,
                 });
             }
         }
@@ -540,6 +558,7 @@ pub fn build_tuned(
         range,
         speed,
         rotation,
+        pages: None,
     })
 }
 
@@ -600,6 +619,7 @@ fn built_in(
         speed: None,
         rotation: None,
         built_in: true,
+        pages: None,
     })
 }
 
@@ -717,6 +737,7 @@ pub fn build_speech(
         speed: None,
         rotation: None,
         built_in: false,
+        pages: None,
     })
 }
 
@@ -1074,6 +1095,7 @@ fn in_place(
         range: None,
         speed: None,
         rotation,
+        pages: None,
     })
 }
 
@@ -3177,6 +3199,8 @@ mod tests {
             voice: None,
             rate: None,
             compress: false,
+            dpi: None,
+            pages: None,
         }
     }
 

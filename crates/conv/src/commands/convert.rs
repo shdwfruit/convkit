@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use convkit_core::pdf::raster;
 use convkit_core::{
     plan, probe, registry, sized, AvailableBackends, Backend, ConvError, ErrorCode, Format,
     MediaProbe, Outcome, Resolver, Tuning,
@@ -357,7 +358,7 @@ pub(crate) fn convert_as(cli: &Cli, passing: Option<Passing>) -> i32 {
         return dry_run(&jobs, cli);
     }
 
-    let (allow_extreme, mut shown) = match confirm_extreme(&jobs, cli) {
+    let (mut allow_extreme, mut shown) = match confirm_extreme(&jobs, cli) {
         Ok(c) => (c.allowed || cli.yes, renamed(c.shown, passing)),
         Err(e) => {
             render::print_error(cli.json, &tidied(&e, passing));
@@ -380,62 +381,72 @@ pub(crate) fn convert_as(cli: &Cli, passing: Option<Passing>) -> i32 {
     // `install_prompt::should_install` is what actually enforces every hard
     // gate (no managed build, `--json`/`--quiet`, `--no-install`, a
     // non-interactive session) before ever asking a question.
-    if let Some(backend) = missing_backend(&results) {
-        if install_prompt::should_install(cli, backend) {
-            let redo_start = Instant::now();
-            match install::install_backend(cli, backend) {
-                Ok(_) => {
-                    let retry_indices: Vec<usize> = results
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, r)| failed_on_missing_backend(&r.result, backend))
-                        .map(|(i, _)| i)
-                        .collect();
-                    let retry_jobs: Vec<input::Job> = retry_indices
-                        .iter()
-                        .map(|&i| original_jobs[i].clone())
-                        .collect();
-                    // An answer already given stands for the retried jobs
-                    // too. Only when the first pass could not preview (it
-                    // needs ffprobe, which may be exactly what was just
-                    // installed) is there nothing to reuse, so ask now.
-                    let allow = if allow_extreme {
-                        true
-                    } else {
-                        match confirm_extreme(&retry_jobs, cli) {
-                            Ok(c) => {
-                                shown.extend(renamed(c.shown, passing));
-                                c.allowed
-                            }
-                            Err(e) => {
-                                render::print_error(cli.json, &tidied(&e, passing));
-                                print_results(&results, cli, elapsed, &shown, None);
-                                return e.code.exit_code();
-                            }
+    //
+    // A retry can stop on the next backend the jobs need (a PDF's pages to
+    // JPEG want qpdf, Typst and ffmpeg), so each new one is offered in turn.
+    // One the user installed and still missing is not offered again.
+    let mut offered: Vec<Backend> = Vec::new();
+    while let Some(backend) = missing_backend(&results).filter(|b| !offered.contains(b)) {
+        offered.push(backend);
+        if !install_prompt::should_install(cli, backend) {
+            break;
+        }
+        let redo_start = Instant::now();
+        match install::install_backend(cli, backend) {
+            Ok(_) => {
+                let retry_indices: Vec<usize> = results
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| failed_on_missing_backend(&r.result, backend))
+                    .map(|(i, _)| i)
+                    .collect();
+                let retry_jobs: Vec<input::Job> = retry_indices
+                    .iter()
+                    .map(|&i| original_jobs[i].clone())
+                    .collect();
+                // An answer already given stands for the retried jobs
+                // too, and for any retry after this one. Only when the
+                // first pass could not preview (it needs ffprobe or qpdf,
+                // which may be exactly what was just installed) is there
+                // nothing to reuse, so ask now.
+                let allow = if allow_extreme {
+                    true
+                } else {
+                    match confirm_extreme(&retry_jobs, cli) {
+                        Ok(c) => {
+                            shown.extend(renamed(c.shown, passing));
+                            allow_extreme = c.allowed;
+                            c.allowed
                         }
-                    };
-                    let (retry_results, _, _) = batch::run(retry_jobs, cli, allow);
-                    for (idx, new_result) in retry_indices.into_iter().zip(retry_results) {
-                        results[idx] = new_result;
+                        Err(e) => {
+                            render::print_error(cli.json, &tidied(&e, passing));
+                            print_results(&results, cli, elapsed, &shown, None);
+                            return e.code.exit_code();
+                        }
                     }
-                    code = batch::exit_code(&results);
-                    // Counts the install download plus the retry itself,
-                    // deliberately excluding the time spent waiting on the
-                    // user's own y/n keypress — that's think time, not
-                    // work, and would make "did it hang?" unanswerable in
-                    // the one place this number matters most.
-                    elapsed += redo_start.elapsed();
+                };
+                let (retry_results, _, _) = batch::run(retry_jobs, cli, allow);
+                for (idx, new_result) in retry_indices.into_iter().zip(retry_results) {
+                    results[idx] = new_result;
                 }
-                Err(e) => {
-                    // The install itself failed (network, checksum, ...).
-                    // "On no ... exit with today's error ... unchanged"
-                    // extends naturally to "the install didn't work
-                    // either": report that failure too, but leave
-                    // `results`/`code` exactly as the original
-                    // `backend_missing` failure already reported them.
-                    render::print_error(cli.json, &tidied(&e, passing));
-                    elapsed += redo_start.elapsed();
-                }
+                code = batch::exit_code(&results);
+                // Counts the install download plus the retry itself,
+                // deliberately excluding the time spent waiting on the
+                // user's own y/n keypress — that's think time, not
+                // work, and would make "did it hang?" unanswerable in
+                // the one place this number matters most.
+                elapsed += redo_start.elapsed();
+            }
+            Err(e) => {
+                // The install itself failed (network, checksum, ...).
+                // "On no ... exit with today's error ... unchanged"
+                // extends naturally to "the install didn't work
+                // either": report that failure too, but leave
+                // `results`/`code` exactly as the original
+                // `backend_missing` failure already reported them.
+                render::print_error(cli.json, &tidied(&e, passing));
+                elapsed += redo_start.elapsed();
+                break;
             }
         }
     }
@@ -487,6 +498,8 @@ struct Asked<'a> {
     suggested: Option<String>,
     /// The `--max-size` plan, whose refusal names the size to try.
     sizing: Option<sized::SizingPlan>,
+    /// The PDF whose pages the question is about, when it is one.
+    pages: Option<raster::PagesReport>,
 }
 
 /// Previews every job a question can be about -- an extreme `--max-size`
@@ -497,9 +510,13 @@ struct Asked<'a> {
 fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvError> {
     let resolver = cli.resolver();
     let tuning = cli.tuning();
-    // Cannot run, and `batch::run` will say so; not worth a question.
-    let runnable = |job: &&input::Job| !job.output.exists() || cli.overwrite;
+    // Cannot run, and `batch::run` will say so; not worth a question. A
+    // PDF's pages are checked against where they go, once the plan says.
+    let runnable = |job: &&input::Job| {
+        !job.output.exists() || cli.overwrite || raster::is_pair(job.from, job.to)
+    };
     let sizing = cli.max_size.is_some();
+    let pages = jobs.iter().any(|j| raster::is_pair(j.from, j.to));
     let asked: Vec<Asked> = if sizing {
         jobs.iter()
             .filter(runnable)
@@ -518,6 +535,7 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
                         warning,
                         suggested: sz.suggested.clone(),
                         sizing: Some(sz.clone()),
+                        pages: None,
                     })
             })
             .collect()
@@ -543,6 +561,41 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
                     warning: e.warning,
                     suggested: None,
                     sizing: None,
+                    pages: None,
+                })
+            })
+            .collect()
+    } else if pages {
+        // A PDF with more than a thousand pages, saved one file a page. Under
+        // --upscale, above, every PDF's job is refused for it anyway.
+        jobs.iter()
+            .filter(runnable)
+            .filter(|job| raster::is_pair(job.from, job.to))
+            .filter_map(|job| {
+                let read = pdf_pages_for(&resolver, job, false)?;
+                let plan = plan::build_tuned(
+                    job.from,
+                    job.to,
+                    &job.inputs,
+                    &job.output,
+                    Some(&MediaProbe {
+                        pdf: Some(read),
+                        ..MediaProbe::default()
+                    }),
+                    None,
+                    &tuning,
+                )
+                .ok()?;
+                let report = plan.pages.filter(|p| p.needs_confirmation)?;
+                if raster::taken(&plan.output, &report, cli.overwrite).is_some() {
+                    return None;
+                }
+                Some(Asked {
+                    job,
+                    warning: report.warning.clone().unwrap_or_default(),
+                    suggested: None,
+                    sizing: None,
+                    pages: Some(report),
                 })
             })
             .collect()
@@ -578,16 +631,20 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
         allowed: true,
         shown,
     };
+    let many_pages = asked.iter().all(|a| a.pages.is_some());
     let what = if sizing {
         "extreme compression"
+    } else if many_pages {
+        "saving over 1,000 pages"
     } else {
         "large upscale"
     };
     let refusal = || {
         if let ([only], 1) = (asked.as_slice(), jobs.len()) {
-            return match &only.sizing {
-                Some(sz) => sized::confirmation_error(&only.job.inputs[0], sz),
-                None => convkit_core::upscale_confirmation_error(&only.job.inputs),
+            return match (&only.sizing, &only.pages) {
+                (Some(sz), _) => sized::confirmation_error(&only.job.inputs[0], sz),
+                (None, Some(p)) => raster::confirmation_error(&only.job.inputs[0], p),
+                (None, None) => convkit_core::upscale_confirmation_error(&only.job.inputs),
             };
         }
         ConvError::new(
@@ -608,8 +665,16 @@ fn confirm_extreme(jobs: &[input::Job], cli: &Cli) -> Result<Confirmation, ConvE
         Gate::Proceed => Ok(allowed),
         Gate::Refuse => Err(refusal()),
         Gate::Ask => {
-            let question = if jobs.len() == 1 {
+            let question = if jobs.len() == 1 && many_pages {
+                "Save them anyway? [y/N] ".to_string()
+            } else if jobs.len() == 1 {
                 "Convert anyway? [y/N] ".to_string()
+            } else if many_pages {
+                format!(
+                    "{} of {} PDFs would each save over 1,000 pages. Save them anyway? [y/N] ",
+                    asked.len(),
+                    jobs.len()
+                )
             } else if sizing {
                 format!(
                     "{} of {} conversions are extreme. Convert anyway? [y/N] ",
@@ -768,6 +833,13 @@ fn probed_for(
     tuning: &Tuning,
     available: Option<&AvailableBackends>,
 ) -> Result<Option<MediaProbe>, ConvError> {
+    // A PDF's pages need its page count and sizes, and nothing else.
+    if raster::is_pair(job.from, job.to) {
+        return Ok(pdf_pages_for(resolver, job, true).map(|read| MediaProbe {
+            pdf: Some(read),
+            ..MediaProbe::default()
+        }));
+    }
     let mut probed = media_probed_for(resolver, job, tuning)?;
     let traits =
         probe::traits_for_notes(resolver, job.from, job.to, &job.inputs, tuning, available);
@@ -810,6 +882,37 @@ fn probed_for(
         &mut probed,
     );
     Ok(probed)
+}
+
+/// What a preview reads of a PDF whose pages are saved as images: the page
+/// count with qpdf, and with `sizes`, each page's size with Typst, which
+/// reads the file where it is and writes nothing. `None` when the file
+/// cannot be read or qpdf is missing; the preview then shows a template,
+/// and the real run reports the cause. Sizes Typst cannot read are left
+/// out, as a template's are.
+fn pdf_pages_for(resolver: &Resolver, job: &input::Job, sizes: bool) -> Option<raster::PdfPages> {
+    let input = &job.inputs[0];
+    if !input.is_file() {
+        return None;
+    }
+    let qpdf = resolver.resolve(Backend::Qpdf).ok()?;
+    let mut read = raster::read(&qpdf.path, input).ok()?;
+    if sizes {
+        let typst = resolver
+            .resolve(Backend::Typst)
+            .ok()
+            .filter(|t| raster::typst_draws_pages(&t.version));
+        let root = input
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = input.file_name().and_then(|n| n.to_str());
+        if let (Some(typst), Some(name)) = (typst, name) {
+            read.sizes =
+                raster::read_sizes(&typst.path, root, name, read.count).unwrap_or_default();
+        }
+    }
+    Some(read)
 }
 
 /// `probed_for` before the image read for notes: the media probe, or an
@@ -1512,6 +1615,7 @@ mod tests {
                 range: None,
                 speed: None,
                 rotation: None,
+                pages: None,
             }),
         }
     }

@@ -222,6 +222,29 @@ pub struct Cli {
         requires = "password"
     )]
     pub restrict: Vec<convkit_core::pdf::Restriction>,
+    /// The pages of a PDF to save as pictures, by split's grammar between
+    /// commas: 5, 1-3, 11-z (z is the last page), as in --pages 1-3,7.
+    /// Every page without it. One page is one file, report-3.png; more go
+    /// into a folder, report/report-01.png and on.
+    // Not `global` -- see `dry_run`'s comment.
+    // Held as typed, so clap does not read the list as several values;
+    // `parse_pages` has already checked it.
+    #[arg(long, value_name = "PAGES", value_parser = parse_pages)]
+    pub pages: Option<String>,
+
+    /// The resolution a PDF's pages are drawn at when saved as pictures,
+    /// 36-1200 [default: 150, which makes a Letter page 1275x1650].
+    /// --resize sets the pixel size instead.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(
+            i64::from(convkit_core::pdf::raster::MIN_DPI)..=i64::from(convkit_core::pdf::raster::MAX_DPI)
+        ),
+        conflicts_with = "resize"
+    )]
+    pub dpi: Option<u32>,
 
     /// Copy what was written to the clipboard, ready to paste: a picture
     /// as itself (and its file), an md, csv, html, txt, json, yaml or toml
@@ -261,7 +284,8 @@ pub struct Cli {
     #[arg(short = 'o', long)]
     pub outdir: Option<PathBuf>,
 
-    /// Parallel jobs in batch mode. Defaults to the core count.
+    /// Parallel jobs in batch mode. Defaults to the core count, and to 2 for
+    /// a batch that saves PDFs' pages, which each use every core.
     // Not `global` -- see `dry_run`'s comment.
     #[arg(short = 'j', long)]
     pub jobs: Option<usize>,
@@ -1070,6 +1094,12 @@ const MAX_GEOMETRY_VALUE: u32 = 65_535;
 /// `!`, `<`, `>` and `^` operators, and letting those through would make
 /// the flag a side-channel into magick semantics this help text never
 /// promised.
+fn parse_pages(s: &str) -> Result<String, String> {
+    convkit_core::pdf::parse_list(s)
+        .map(|_| s.to_string())
+        .map_err(|e| e.message)
+}
+
 fn parse_resize_geometry(s: &str) -> Result<String, String> {
     let all_digits = |t: &str| t.chars().all(|c| c.is_ascii_digit());
     // A dimension of zero passes `all_digits` but is not a size. magick and
@@ -1226,6 +1256,11 @@ impl Cli {
             rotate: self.rotate,
             voice: self.voice.clone(),
             rate: self.rate,
+            dpi: self.dpi,
+            pages: self
+                .pages
+                .as_deref()
+                .and_then(|p| convkit_core::pdf::parse_list(p).ok()),
         }
     }
 
@@ -1307,6 +1342,8 @@ mod tests {
             password: false,
             unlock: false,
             restrict: vec![],
+            pages: None,
+            dpi: None,
             copy: false,
             paste: false,
             yes: false,

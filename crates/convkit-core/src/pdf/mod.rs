@@ -1,7 +1,7 @@
 //! PDF merge, split, page edits and passwords (`conv merge`, `conv
-//! split`, `conv pages`, `--password`, `--unlock`), run on qpdf, and
+//! split`, `conv pages`, `--password`, `--unlock`), run on qpdf;
 //! `--compress` (`compress`), which runs on qpdf and an image pass of its
-//! own.
+//! own; and a PDF's pages saved as images (`raster`), drawn by Typst.
 //!
 //! qpdf rewrites a PDF's structure and never re-renders a page, so text,
 //! links and images come through untouched. This module reads the inputs,
@@ -15,6 +15,7 @@ pub mod lock;
 pub mod pages;
 pub mod plan;
 pub mod range;
+pub mod raster;
 pub mod read;
 pub mod run;
 
