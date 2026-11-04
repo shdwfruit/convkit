@@ -76,6 +76,21 @@
   LibreOffice (pandoc without it), and docx, odt, md and html to RTF.
 - **AIFF.** Audio and video convert to and from `.aiff`, cuts and
   `--speed` included.
+- **`conv beautify` for screenshots.** `conv beautify shot.png` writes
+  `shot-beautified.png`: the screenshot on a gradient, with padding,
+  rounded corners and a soft shadow. `--bg` picks one of six gradients, a
+  colour, your own gradient or `transparent`, and `--padding`, `--radius`
+  and `--no-shadow` change the rest. The screenshot is never scaled, so a
+  Retina one stays sharp, and `conv beautify --paste --copy` goes from the
+  clipboard to the clipboard.
+- **`conv colors` gives a picture's main colours.** It prints about six, with
+  their shares, as HEX, RGB and HSL, with swatches in a terminal. `--at X,Y`
+  gives one pixel's colour, and `--code` writes them as CSS, SwiftUI or
+  Tailwind. It reads every picture conv converts.
+- **`conv wifi` shows a saved network's password.** `conv wifi Home` prints
+  its security and password, and `--qr` writes a code that joins it, as
+  does `conv qr --wifi Home`. On macOS the keychain asks first. The
+  password is printed only to a terminal unless `--show-password` is given.
 
 ## 0.6.2 - 2026-11-03
 

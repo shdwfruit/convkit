@@ -1,6 +1,8 @@
 pub mod ascii;
+pub mod beautify;
 pub mod capabilities;
 pub mod changelog;
+pub mod colors;
 pub mod convert;
 pub mod doctor;
 pub mod fmt;
@@ -13,3 +15,4 @@ pub mod speak;
 pub mod split;
 pub mod tools;
 pub mod update;
+pub mod wifi;

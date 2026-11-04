@@ -376,8 +376,9 @@ With --logo, the image sits in the middle on a white square about a \
 fifth of the code's width, and the code is made to survive losing 30% \
 of itself instead of 15%, so it still scans.")]
     Qr {
-        /// What the code holds: a link or any text.
-        #[arg(required_unless_present = "paste")]
+        /// What the code holds: a link or any text. With --wifi, the
+        /// network's name.
+        #[arg(required_unless_present_any = ["paste", "wifi"])]
         text: Option<String>,
         /// The file to write, or a bare `.ext` for qr.EXT (`.svg`). Without
         /// it, conv writes qr.png.
@@ -408,6 +409,11 @@ of itself instead of 15%, so it still scans.")]
         /// copied picture or file is the logo.
         #[arg(long)]
         paste: bool,
+        /// Make a code that joins a saved Wi-Fi network: TEXT is its name
+        /// (the one this computer is on without it), and the file is
+        /// NAME-wifi.png. See conv wifi.
+        #[arg(long, conflicts_with = "paste")]
+        wifi: bool,
     },
     /// Make ASCII art from a picture: `conv ascii photo.jpg` prints it here.
     #[command(long_about = "\
@@ -528,6 +534,164 @@ On macOS conv reads with the best Premium or Enhanced voice in your \
 language, and says how to download one when there is none. --voices lists \
 the voices --voice takes.")]
     Speak(SpeakArgs),
+    /// Set a screenshot on a background: `conv beautify shot.png` writes
+    /// shot-beautified.png.
+    #[command(long_about = "\
+Sets a screenshot on a background with padding, rounded corners and a soft \
+shadow, ready for a post or a slide: conv beautify shot.png writes \
+shot-beautified.png beside it. With --paste and --copy it goes from the \
+clipboard to the clipboard.
+
+The screenshot itself is copied pixel for pixel, never scaled, so a 2x \
+(Retina) screenshot stays sharp, and the PNG keeps its colour profile and \
+pixel density. --padding and --radius are in points, the pixels of a 1x \
+screen, doubled on a 2x screenshot so it looks the same. Left to conv, they \
+grow with the screenshot.
+
+A picture whose corners are already clear, like a macOS window captured \
+with its shadow, keeps its own shape: conv adds no corners and no second \
+shadow unless --radius or --shadow asks for them.
+
+OUT can be any picture format conv writes; PNG is drawn by conv itself, \
+and the rest are converted from it, which needs ImageMagick.")]
+    Beautify {
+        /// The screenshot: a PNG, JPG or any picture conv reads.
+        #[arg(required_unless_present = "paste")]
+        input: Option<PathBuf>,
+        /// The file to write, or a bare `.ext` for NAME-beautified.EXT.
+        /// Without it, NAME-beautified.png beside the input.
+        output: Option<PathBuf>,
+        /// Write the file into this directory (created if missing).
+        #[arg(short = 'o', long)]
+        outdir: Option<PathBuf>,
+        /// aurora, sunset, candy, ocean, mint, night, transparent, a colour
+        /// like '#1e1e2e', or colours joined by commas for a gradient of
+        /// your own. [default: aurora]
+        #[arg(long, value_name = "BG", value_parser = parse_background)]
+        bg: Option<convkit_core::beautify::Background>,
+        /// Space around the screenshot, in points. [default: 8% of the
+        /// screenshot's size]
+        #[arg(long, value_name = "PT", value_parser = clap::value_parser!(u32).range(0..=10_000))]
+        padding: Option<u32>,
+        /// Corner radius in points; 0 keeps them square. [default: about
+        /// 1% of the screenshot's size]
+        #[arg(long, value_name = "PT", value_parser = clap::value_parser!(u32).range(0..=10_000))]
+        radius: Option<u32>,
+        /// Draw no shadow.
+        #[arg(long, overrides_with = "shadow")]
+        no_shadow: bool,
+        /// Draw the shadow even under a picture with its own shape.
+        #[arg(long, overrides_with = "no_shadow")]
+        shadow: bool,
+        /// Overwrite the file if it exists.
+        #[arg(short = 'y', long)]
+        overwrite: bool,
+        /// Also copy the result to the clipboard, ready to paste.
+        #[arg(long)]
+        copy: bool,
+        /// Take the screenshot from the clipboard: a copied picture, or one
+        /// copied file. The one path given is then OUT. A copied picture is
+        /// written here as clipboard-beautified.png.
+        #[arg(long)]
+        paste: bool,
+        /// Say what would be written, and how big, without writing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Print the main colours of a picture: `conv colors photo.jpg`.
+    #[command(
+        visible_alias = "colours",
+        long_about = "\
+Prints the main colours of a picture, the most common first, each with its \
+share of the picture, as HEX, RGB and HSL, with a swatch of each on a \
+terminal that shows colour. Colours a person would call the same are \
+counted as one, so a picture with few colours gives fewer than asked for.
+
+--at X,Y gives the colour of one pixel instead, counted from the top-left \
+corner as the picture is shown (a phone photo's EXIF turn included). \
+--code writes the colours as code: css (custom properties), swiftui, \
+tailwind (Tailwind 4's @theme) or tailwind3 (tailwind.config.js).
+
+The picture can be any one conv reads; PNG, JPG, GIF, WebP and SVG are read \
+by conv itself, and HEIC, AVIF, TIFF and the rest go through ImageMagick. - \
+or a pipe reads one piped in, and --paste a copied one. --copy puts the \
+result on the clipboard: the HEX values, one a line, or the code."
+    )]
+    Colors {
+        /// The picture; - reads one piped in.
+        input: Option<PathBuf>,
+        /// How many colours, 1 to 16.
+        #[arg(
+            short = 'n',
+            long,
+            value_name = "N",
+            default_value_t = 6,
+            value_parser = clap::value_parser!(u8).range(1..=16)
+        )]
+        count: u8,
+        /// The colour of the pixel at X,Y, from the top-left corner.
+        #[arg(long, value_name = "X,Y", value_parser = parse_point)]
+        at: Option<(u32, u32)>,
+        /// Write the colours as code: css, swiftui, tailwind or tailwind3.
+        #[arg(long, value_name = "LANG", value_parser = parse_code)]
+        code: Option<convkit_core::palette::Code>,
+        /// Also copy the result to the clipboard.
+        #[arg(long)]
+        copy: bool,
+        /// Take the picture from the clipboard: a copied picture, or one
+        /// copied file.
+        #[arg(long, conflicts_with = "input")]
+        paste: bool,
+    },
+    /// Show a saved Wi-Fi network's password, or make a QR code that joins it.
+    #[command(long_about = "\
+Shows a saved Wi-Fi network's name, security and password: the one this \
+computer is on, or NAME. --qr writes a QR code that joins it instead, for a \
+phone to scan.
+
+On macOS the password is in the keychain, and macOS asks you to allow conv \
+to read it, with your login or an administrator's password; conv says so \
+before the prompt appears. macOS hides which network it is on from programs \
+without Location access, so when it does, conv lists the saved networks \
+and asks which. Windows reads it with netsh, and Linux with NetworkManager's \
+nmcli.
+
+The password is printed only to a terminal. In a pipe, a file or --json it \
+is left out unless --show-password is given, so it doesn't end up in a log \
+by accident; --copy puts it on the clipboard instead.")]
+    Wifi {
+        /// The network's name. Without it, the one this computer is on.
+        name: Option<String>,
+        /// List the saved networks.
+        #[arg(long, conflicts_with_all = ["name", "qr", "copy", "show_password"])]
+        list: bool,
+        /// Write a QR code that joins the network instead: NAME-wifi.png, or
+        /// the file or bare `.ext` given.
+        // `--qr` alone is "", which clap's own path parser refuses.
+        #[arg(
+            long,
+            value_name = "OUT",
+            num_args = 0..=1,
+            default_missing_value = "",
+            value_parser = parse_any_path
+        )]
+        qr: Option<PathBuf>,
+        /// Write the code into this directory (created if missing).
+        #[arg(short = 'o', long, requires = "qr")]
+        outdir: Option<PathBuf>,
+        /// Overwrite the code if it exists.
+        #[arg(short = 'y', long, requires = "qr")]
+        overwrite: bool,
+        /// Also copy the password to the clipboard, or with --qr the code.
+        #[arg(long)]
+        copy: bool,
+        /// Print the password into a pipe, a file or --json too.
+        #[arg(long, conflicts_with = "qr")]
+        show_password: bool,
+        /// Print the command that reads the password, without running it.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show what each version of conv added.
     #[command(long_about = "\
 Shows what each version of conv added, newest first, from the changelog \
@@ -828,6 +992,27 @@ fn parse_speed(s: &str) -> Result<convkit_core::speed::Speed, String> {
 
 fn parse_rotate(s: &str) -> Result<convkit_core::rotate::Turn, String> {
     convkit_core::rotate::parse(s)
+}
+
+fn parse_background(s: &str) -> Result<convkit_core::beautify::Background, String> {
+    convkit_core::beautify::Background::parse(s)
+}
+
+fn parse_code(s: &str) -> Result<convkit_core::palette::Code, String> {
+    convkit_core::palette::Code::parse(s)
+}
+
+/// A path, the empty one included.
+fn parse_any_path(s: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(s))
+}
+
+/// `X,Y`: two whole numbers of pixels, from the top-left corner.
+fn parse_point(s: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("expected X,Y in pixels from the top-left corner, like 120,45; got {s:?}");
+    let (x, y) = s.split_once(',').ok_or_else(bad)?;
+    let n = |t: &str| t.trim().parse::<u32>().map_err(|_| bad());
+    Ok((n(x)?, n(y)?))
 }
 
 fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
