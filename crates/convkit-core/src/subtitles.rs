@@ -878,22 +878,56 @@ fn family_list(first: Option<&str>) -> String {
         .join(", ")
 }
 
-/// The system's fonts, loaded once a run.
+/// What to install for fonts, said when they are missing.
+const FONT_FIX: &str = "install a font such as DejaVu Sans or Noto Sans (on Debian and Ubuntu: \
+     apt-get install fonts-dejavu-core fonts-noto-core)";
+
+/// The system's fonts, loaded once a run. resvg's last resort for a family
+/// it cannot find is the generic serif, which fontdb takes to be Times New
+/// Roman; on a system with none of `FAMILIES` and no Times, every line
+/// came out blank. The generic families are set to the first of
+/// `FAMILIES` the system has, or else to any face it has.
 fn fonts() -> Result<Arc<usvg::fontdb::Database>> {
     static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     let db = FONTS.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
         db.load_system_fonts();
+        let has = |name: &str| {
+            db.faces()
+                .any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+        };
+        let fallback = FAMILIES
+            .iter()
+            .find(|f| has(f))
+            .map(|f| f.to_string())
+            .or_else(|| {
+                db.faces()
+                    .find_map(|f| f.families.first().map(|(n, _)| n.clone()))
+            });
+        if let Some(name) = fallback {
+            db.set_sans_serif_family(name.clone());
+            db.set_serif_family(name);
+        }
         Arc::new(db)
     });
     if db.is_empty() {
         return Err(ConvError::new(
             ErrorCode::ConversionFailed,
-            "found no fonts to draw the subtitles with; install a font such as DejaVu Sans \
-             or Noto Sans (on Debian and Ubuntu: apt-get install fonts-dejavu-core)",
+            format!("found no fonts to draw the subtitles with; {FONT_FIX}"),
         ));
     }
     Ok(Arc::clone(db))
+}
+
+/// Whether `c` is drawn as nothing in any font: spaces, and the marks that
+/// only steer direction or joining.
+fn invisible(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_control()
+        || matches!(
+            c,
+            '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}'
+        )
 }
 
 /// Draws `render`'s subtitles into an animated PNG at `path`, the
@@ -901,7 +935,12 @@ fn fonts() -> Result<Arc<usvg::fontdb::Database>> {
 /// (the first whole, as the format asks), cleared when the next comes, and
 /// timed to the millisecond. A frame shows for at most 65.535 s, so a
 /// longer stretch is several.
-pub fn draw(render: &Render, path: &Path) -> Result<()> {
+///
+/// A letter no font on the system has is left out, and the notes returned
+/// name them. If no subtitle has a letter any font can draw, nothing would
+/// show at all, which is an error that says what to install rather than a
+/// video with blank subtitles.
+pub fn draw(render: &Render, path: &Path) -> Result<Vec<String>> {
     let db = fonts()?;
     let opts = usvg::Options {
         fontdb: Arc::clone(&db),
@@ -931,11 +970,17 @@ pub fn draw(render: &Render, path: &Path) -> Result<()> {
     let mut writer = encoder.write_header().map_err(|e| failed("png", &e))?;
     let mut layout = Layout::new(&opts, &db, render.style);
     let mut first = true;
+    let (mut shown, mut missed_all) = (0usize, 0usize);
     for segment in &render.segments {
         let picture = if segment.lines.is_empty() {
             None
         } else {
-            layout.block(&segment.lines, render)?
+            let picture = layout.block(&segment.lines, render)?;
+            if layout.last_missed_all {
+                missed_all += 1;
+            }
+            shown += 1;
+            picture
         };
         let mut left = (segment.end_ms - segment.start_ms).max(1);
         while left > 0 {
@@ -966,7 +1011,34 @@ pub fn draw(render: &Render, path: &Path) -> Result<()> {
             frame().map_err(|e| failed("png", &e))?;
         }
     }
-    writer.finish().map_err(|e| failed("png", &e))
+    writer.finish().map_err(|e| failed("png", &e))?;
+    let name = render.file.display();
+    if shown > 0 && missed_all == shown {
+        return Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!(
+                "no font on this system has the letters of {name}'s subtitles, so none would \
+                 show; {FONT_FIX}, or one for the subtitles' script"
+            ),
+        ));
+    }
+    if layout.missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut letters: Vec<char> = layout.missing.iter().copied().collect();
+    let more = letters.len().saturating_sub(12);
+    letters.truncate(12);
+    let more = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    Ok(vec![format!(
+        "No font on this system has some letters of {name}'s subtitles ({}{more}), so they \
+         are left out; install a font that has them (on Debian and Ubuntu, fonts-noto-core, \
+         and fonts-noto-cjk for Chinese, Japanese and Korean).",
+        letters.into_iter().collect::<String>()
+    )])
 }
 
 /// A drawn block of text: its box in the picture, and its pixels, straight
@@ -1011,6 +1083,10 @@ struct Layout<'a> {
     faces: std::collections::HashMap<&'static str, Option<usvg::fontdb::ID>>,
     /// Whether a face holds a letter, looked up once each.
     holds: std::collections::HashMap<(usvg::fontdb::ID, char), bool>,
+    /// Every letter no font drew, over all the blocks.
+    missing: std::collections::BTreeSet<char>,
+    /// Whether the last block drew none of its letters.
+    last_missed_all: bool,
 }
 
 impl<'a> Layout<'a> {
@@ -1025,6 +1101,8 @@ impl<'a> Layout<'a> {
             style,
             faces: std::collections::HashMap::new(),
             holds: std::collections::HashMap::new(),
+            missing: std::collections::BTreeSet::new(),
+            last_missed_all: false,
         }
     }
 
@@ -1275,7 +1353,49 @@ impl<'a> Layout<'a> {
             )
         })?;
         resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
+        // A letter no font has is laid out as glyph 0 and drawn as nothing,
+        // or not laid out at all when no font could be found for the line.
+        let mut drawn = std::collections::BTreeSet::new();
+        let mut missed = std::collections::BTreeSet::new();
+        glyphs(tree.root(), &mut drawn, &mut missed);
+        let letters: Vec<char> = sets
+            .iter()
+            .flat_map(|s| text_of(&s.line).chars().collect::<Vec<_>>())
+            .filter(|&c| !invisible(c))
+            .collect();
+        let absent: Vec<char> = letters
+            .iter()
+            .copied()
+            .filter(|c| missed.contains(c) || !drawn.contains(c))
+            .collect();
+        self.last_missed_all = !letters.is_empty() && absent.len() == letters.len();
+        self.missing.extend(absent);
         Ok(cut_out(&pixmap, top))
+    }
+}
+
+/// The letters of every text in `group`, as laid out: those a font drew,
+/// and those it had no glyph for.
+fn glyphs(
+    group: &usvg::Group,
+    drawn: &mut std::collections::BTreeSet<char>,
+    missed: &mut std::collections::BTreeSet<char>,
+) {
+    for node in group.children() {
+        match node {
+            usvg::Node::Text(t) => {
+                for glyph in t.layouted().iter().flat_map(|s| &s.positioned_glyphs) {
+                    let set = if glyph.id.0 == 0 {
+                        &mut *missed
+                    } else {
+                        &mut *drawn
+                    };
+                    set.extend(glyph.text.chars().filter(|&c| !invisible(c)));
+                }
+            }
+            usvg::Node::Group(g) => glyphs(g, drawn, missed),
+            _ => {}
+        }
     }
 }
 
@@ -1638,6 +1758,44 @@ mod tests {
         );
         assert_eq!(hold_ends("  a b "), "\u{a0}\u{a0}a b\u{a0}");
         assert_eq!(hold_ends("   "), "\u{a0}\u{a0}\u{a0}");
+    }
+
+    /// Needs a system font. A letter no font has is left out, and said; a
+    /// file none of whose letters any font has is refused rather than burned
+    /// in blank. U+10FFFD is a private-use letter no font maps.
+    #[test]
+    #[ignore = "needs system fonts; run with --ignored"]
+    fn letters_no_font_has_are_said_and_none_at_all_is_refused() {
+        let render = |text: &str| Render {
+            file: PathBuf::from("film.srt"),
+            width: 320,
+            height: 240,
+            style: Style::for_size(320, 240),
+            segments: vec![
+                Segment {
+                    start_ms: 0,
+                    end_ms: 500,
+                    lines: vec![vec![plain(text)]],
+                },
+                Segment {
+                    start_ms: 500,
+                    end_ms: 1500,
+                    lines: Vec::new(),
+                },
+            ],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("subs.apng");
+        assert_eq!(draw(&render("Hello"), &out).unwrap(), Vec::<String>::new());
+        let notes = draw(&render("Hello \u{10FFFD}"), &out).unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("(\u{10FFFD})"), "{notes:?}");
+        let e = draw(&render("\u{10FFFD}\u{10FFFD}"), &out).unwrap_err();
+        assert!(
+            e.message.contains("no font on this system has the letters"),
+            "{e}"
+        );
+        assert!(e.message.contains("fonts-dejavu-core"), "{e}");
     }
 
     /// Needs a system font. Text wider than the picture is wrapped, at

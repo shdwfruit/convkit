@@ -5797,7 +5797,9 @@ fn bright_pixels(((_, _), rgb): &((u32, u32), Vec<u8>)) -> usize {
         .count()
 }
 
-/// A dark 4 s clip, and an SRT with one subtitle from 1 s to 2 s.
+/// A dark 4 s clip, and an SRT with one subtitle from 1 s to 2 s. At
+/// 640x360 a line is 20 px tall, so its letters cover a few hundred pixels
+/// in any font; at 320x240 one Ubuntu font drew 287, too near the bar.
 fn dark_clip_and_subs(dir: &tempfile::TempDir, text: &str) -> (PathBuf, PathBuf) {
     let clip = synth_media(
         dir,
@@ -5805,7 +5807,7 @@ fn dark_clip_and_subs(dir: &tempfile::TempDir, text: &str) -> (PathBuf, PathBuf)
             "-f",
             "lavfi",
             "-i",
-            "color=c=0x202020:size=320x240:rate=25:duration=4",
+            "color=c=0x202020:size=640x360:rate=25:duration=4",
             "-pix_fmt",
             "yuv420p",
             "-c:v",
@@ -5832,7 +5834,7 @@ fn burned_subtitles_show_inside_their_time_only() {
     };
     let outcome = convert_tuned(&clip, &out, &tuning).unwrap();
     assert_eq!(outcome.subtitles.expect("a report").drawn, 1);
-    assert_eq!(probe_dims(&out), (320, 240));
+    assert_eq!(probe_dims(&out), (640, 360));
     let before = bright_pixels(&frame_rgb(&out, 0.5));
     let during = bright_pixels(&frame_rgb(&out, 1.5));
     let after = bright_pixels(&frame_rgb(&out, 2.5));
@@ -5843,7 +5845,7 @@ fn burned_subtitles_show_inside_their_time_only() {
     );
     // The text sits in the bottom half of the picture.
     let ((w, _), rgb) = frame_rgb(&out, 1.5);
-    let top_half = rgb[..(w * 120 * 3) as usize]
+    let top_half = rgb[..(w * 180 * 3) as usize]
         .chunks_exact(3)
         .filter(|p| p.iter().all(|&c| c > 200))
         .count();

@@ -643,7 +643,7 @@ pub fn run(
                 }
                 // A merge stages pictures, and has nothing else to do
                 // first, but anything else runs as exec runs it.
-                other => exec::prepare(other)?,
+                other => notes.extend(exec::prepare(other)?),
             }
         }
         on_event(Event::StepSpawned {

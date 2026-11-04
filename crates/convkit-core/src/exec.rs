@@ -1057,7 +1057,7 @@ impl StepRunner<'_> {
         let resolved = self.resolver.resolve(step.backend)?;
 
         for p in &step.prepare {
-            prepare(p)?;
+            self.notes.extend(prepare(p)?);
         }
 
         // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
@@ -1615,8 +1615,9 @@ pub(crate) fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::hard_link(from, to)
 }
 
-/// Does one thing a step needs done before it runs (`plan::Prepare`).
-pub(crate) fn prepare(p: &plan::Prepare) -> Result<()> {
+/// Does one thing a step needs done before it runs (`plan::Prepare`), and
+/// gives what it has to say: drawn subtitles name a font they fell back on.
+pub(crate) fn prepare(p: &plan::Prepare) -> Result<Vec<String>> {
     match p {
         plan::Prepare::Write { path, contents } => {
             std::fs::write(path, contents).map_err(io_err)?;
@@ -1639,11 +1640,11 @@ pub(crate) fn prepare(p: &plan::Prepare) -> Result<()> {
         // subtitles again.
         plan::Prepare::Subtitles { path, render } => {
             if !path.is_file() {
-                crate::subtitles::draw(render, path)?;
+                return crate::subtitles::draw(render, path);
             }
         }
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
 /// Places `from` at `to` for a step to read: a hard link to the input's

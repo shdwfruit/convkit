@@ -802,6 +802,12 @@ conv talk.mkv .mp4 --subtitles talk.vtt --start 2:00 --end 2:30
 conv clip.mp4 meme.gif --subtitles caption.srt --crop 1:1
 ```
 
+A letter no font on your system has is left out, and a warning names it;
+if none of the letters can be drawn, conv stops and says which fonts to
+install rather than burning in blank subtitles. A minimal Linux system may
+need `fonts-dejavu-core` and `fonts-noto-core` (and `fonts-noto-cjk` for
+Chinese, Japanese and Korean).
+
 One file is named `-subtitled`. A subtitle file belongs to one video, so a
 batch is refused. Drawing them needs no ffmpeg filter beyond `overlay`,
 which every ffmpeg has, so it works with Homebrew's ffmpeg, which can't
