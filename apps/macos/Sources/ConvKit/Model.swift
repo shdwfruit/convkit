@@ -20,8 +20,10 @@ final class AppModel {
     var page: Page = .home {
         didSet { if case .tool(let id) = page { noteRecent(id) } }
     }
-    /// The sidebar's search, which also filters Home.
+    /// The search in the toolbar. Its matches drop down under the top bar.
     var search = ""
+    /// The section whose dropdown is open in the top bar.
+    var menuOpen: Category?
     /// Where an editor opens when a search shortcut ("Crop Video") led to it.
     var editorFocus: EditorSection?
     /// Steps run one into the next; nil when the tool showing isn't part of one.
@@ -57,11 +59,6 @@ final class AppModel {
     private(set) var subcommands: Set<String> = []
     private(set) var recent: [ToolID] = (UserDefaults.standard.stringArray(forKey: "recentTools") ?? [])
         .compactMap(ToolID.init(rawValue:))
-    /// Sections the user folded away in the sidebar.
-    var collapsed: Set<Category> = Set((UserDefaults.standard.stringArray(forKey: "collapsedSections") ?? [])
-        .compactMap(Category.init(rawValue:))) {
-        didSet { UserDefaults.standard.set(collapsed.map(\.rawValue), forKey: "collapsedSections") }
-    }
 
     /// Files dropped on Home, waiting for the user to pick a tool for them.
     private(set) var dropped: [URL] = []
@@ -190,9 +187,17 @@ final class AppModel {
         }
     }
 
-    /// Shows a tool, or the editor a shortcut stands for, at its part.
+    /// A section's tools as its dropdown in the top bar lists them: all of them, with
+    /// the shortcuts left to search.
+    func menuTools(in category: Category) -> [ToolID] {
+        ToolID.allCases.filter { $0.category == category && $0.shortcut == nil && available($0) }
+    }
+
+    /// Shows a tool, or the editor a shortcut stands for, at its part. A search is
+    /// done once something is picked, so it's cleared.
     @MainActor
     func show(_ id: ToolID) {
+        search = ""
         if let s = id.shortcut {
             editorFocus = s.section
             page = .tool(s.editor)
@@ -222,7 +227,7 @@ final class AppModel {
         }
     }
 
-    /// Search matches in sidebar order, for Return in the search field.
+    /// Search matches in top bar order, for Return in the search field.
     var searchResults: [ToolID] { Category.allCases.flatMap(tools(in:)) }
 
     private func noteRecent(_ id: ToolID) {
@@ -539,7 +544,7 @@ final class AppModel {
             let path = err.message.components(separatedBy: " exists;").first ?? err.message
             return "\((path as NSString).lastPathComponent) already exists."
         case "backend_missing":
-            return err.message + " Backends, at the bottom of the sidebar, shows how to install it."
+            return err.message + " Backends, under conv in the top bar, shows how to install it."
         case "password_protected":
             return err.message.hasPrefix("wrong password")
                 ? "That password doesn't open it."

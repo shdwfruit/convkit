@@ -139,6 +139,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .milliseconds(800))
                 case "endChain": model.endChain()
                 case "search": model.search = v
+                case "menu": model.menuOpen = Category(rawValue: kv[1])
+                case "size":
+                    // size=980x560, the window's content size.
+                    let wh = kv[1].split(separator: "x").compactMap { Double($0) }
+                    if wh.count == 2 { window?.setContentSize(NSSize(width: wh[0], height: wh[1])) }
+                case "light": NSApp.appearance = NSAppearance(named: kv[1] == "1" ? .aqua : .darkAqua)
                 case "open": model.open(urls); try? await Task.sleep(for: .milliseconds(400))
                 case "add":
                     if case .tool(let id) = model.page { model.open(id, with: urls) }
@@ -240,6 +246,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let wait = Double(env["CONVKIT_WAIT"] ?? "") ?? 4
             try? await Task.sleep(for: .seconds(wait))
             if let png = env["CONVKIT_RENDER"] { await render(to: png) }
+            // CONVKIT_SHOT=/tmp/w.png: this window only, as it is on screen.
+            if let png = env["CONVKIT_SHOT"], let n = window?.windowNumber {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                p.arguments = ["-x", "-o", "-l", "\(n)", png]
+                try? p.run()
+                p.waitUntilExit()
+            }
             try? dump().write(toFile: path, atomically: true, encoding: .utf8)
             NSApp.terminate(nil)
         }

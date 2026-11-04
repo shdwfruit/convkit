@@ -3,10 +3,12 @@
 A SwiftUI toolbox for conv. Each tool does one job, and every tool runs on your Mac.
 
 Finding a tool
-- The sidebar groups the tools under Video, Audio, Images, Documents, Text,
-  Developer and Files. Search at the top matches names, descriptions and
-  formats, so "heic" finds the picture tools and "shrink" finds Compress
-  Video. Return opens the first match.
+- The bar at the top has Home and one dropdown per section: Video, Audio,
+  Images, Documents, Text, Developer, Files and conv. Each lists its tools
+  with what they do, and the section of the tool you're in is marked.
+- Search in the toolbar matches names, descriptions and formats, so "heic"
+  finds the picture tools and "shrink" finds Compress Video. The matches drop
+  down over the page you're on. Return opens the first one, Escape closes it.
 - Home shows the popular tools, the ones you used last, and every section.
 - Drop a file on Home and it lists the tools that fit that file. Pick one and
   the file is already in it. Files opened from Finder or the Dock work the same

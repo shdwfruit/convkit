@@ -2,8 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Every tool at a glance: a drop target that lists the tools fitting a file, the
-/// popular ones, the ones used lately, then each section in full. The sidebar's
-/// search filters it too.
+/// popular ones, the ones used lately, then each section in full.
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @State private var dropHover = false
@@ -35,38 +34,21 @@ struct HomeContent: View {
 
     var body: some View {
             VStack(alignment: .leading, spacing: 30) {
-                if model.isSearching {
-                    Text("Tools for “\(model.search.trimmingCharacters(in: .whitespaces))”")
-                        .font(.title2.weight(.semibold))
-                } else if model.dropped.isEmpty {
+                if model.dropped.isEmpty {
                     dropPanel
                 } else {
                     suggestions
                 }
-
-                if model.isSearching {
-                    ForEach(Category.allCases) { category in
-                        let tools = model.tools(in: category)
-                        if !tools.isEmpty {
-                            group(title: category.title, symbol: category.symbol, color: category.color,
-                                  tools: tools, count: tools.count)
+                group(title: "Popular", symbol: "star", color: .yellow, tools: model.popular)
+                if !model.recentTools.isEmpty { recent }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Every tool").font(.title3.weight(.semibold))
+                    Masonry(minColumn: 250, spacing: 12) {
+                        ForEach(Category.allCases) { category in
+                            let tools = model.menuTools(in: category)
+                            if !tools.isEmpty { CategoryBlock(category: category, tools: tools) }
                         }
                     }
-                } else {
-                    group(title: "Popular", symbol: "star", color: .yellow, tools: model.popular)
-                    if !model.recentTools.isEmpty { recent }
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Every tool").font(.title3.weight(.semibold))
-                        Masonry(minColumn: 250, spacing: 12) {
-                            ForEach(Category.allCases) { category in
-                                let tools = model.tools(in: category)
-                                if !tools.isEmpty { CategoryBlock(category: category, tools: tools) }
-                            }
-                        }
-                    }
-                }
-                if model.isSearching && model.searchResults.isEmpty {
-                    ContentUnavailableView.search(text: model.search)
                 }
             }
             .padding(.horizontal, 32)
@@ -154,12 +136,11 @@ struct HomeContent: View {
         }
     }
 
-    private func group(title: String, symbol: String, color: Color, tools: [ToolID], count: Int? = nil) -> some View {
+    private func group(title: String, symbol: String, color: Color, tools: [ToolID]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: symbol).foregroundStyle(color)
                 Text(title).font(.title3.weight(.semibold))
-                if let count { Text("\(count)").foregroundStyle(.tertiary) }
             }
             LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
                 ForEach(tools) { tool in
@@ -170,9 +151,11 @@ struct HomeContent: View {
     }
 }
 
-/// A tool on Home: its icon, name and what it does.
+/// A tool on Home or in a section's dropdown: its icon, name and what it does.
 struct ToolTile: View {
     let tool: ToolID
+    /// The tool showing now, marked in the dropdown.
+    var current = false
     let action: () -> Void
     @State private var hover = false
 
@@ -197,7 +180,7 @@ struct ToolTile: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(hover ? Color.primary.opacity(0.07) : .clear)
+                    .fill(hover ? Color.primary.opacity(0.07) : current ? Color.accentColor.opacity(0.14) : .clear)
             }
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }

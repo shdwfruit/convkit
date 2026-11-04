@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The toolbox's sections, in sidebar order.
+/// The toolbox's sections, in the top bar's order.
 enum Category: String, CaseIterable, Identifiable {
     case video, audio, images, documents, text, developer, files, conv
 
