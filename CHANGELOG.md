@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 - 2026-11-04
 
 ### New
 
@@ -157,16 +157,46 @@
   and other scripts set properly, so it works with an ffmpeg that has no
   subtitle filter, as Homebrew's doesn't. A cut or speed change moves them
   with the video. Video and GIF targets; named `-subtitled`.
-
-## 0.6.2 - 2026-11-03
-
-### New
-
 - **A GIF changes speed and cuts as a GIF.** `conv anim.gif --speed 0.5`,
   `conv anim.gif --start 1 --end 3` and `conv trim anim.gif` used to ask
   for `--to mp4`; now the GIF stays a GIF, at its own size and frame
   timing. Browsers play a GIF no faster than 50 fps, so one sped past that
   drops frames to keep its speed, and a note says so.
+- **HEIC as a target.** `conv photo.jpg .heic` writes HEIC through
+  ImageMagick, at a quality that lands near what a phone writes, keeping
+  the colour profile and EXIF with the usual location note.
+  `--strip-metadata` keeps a HEIC as HEIC. It needs a libheif with an HEVC
+  encoder; ImageMagick's Windows build has none, and conv says so and
+  suggests AVIF or JPEG.
+- **`--rotate right|left|180`** turns photos, videos and GIFs. A JPEG kept
+  as JPEG, or an mp4 or mov that is copied, has only its orientation tag
+  reset when that is what was wrong, with nothing re-encoded; otherwise the
+  pixels turn. Either way every app shows the same picture afterwards.
+  Named `-rotated`, and a batch writes into `rotated/`.
+- **Workbooks fit the page.** An xlsx, xls or ods going to PDF has the
+  columns widened whose numbers would print as `###`, and a sheet wider
+  than its page scaled down to the page's width. A workbook that sets its
+  own scale, fit or print range is left alone, and a note says what
+  changed.
+
+### Changed
+
+- **`--resize` alone keeps the format.** `conv photo.jpg --resize 50%`
+  writes `photo-50pct.jpg`, and `conv clip.mp4 --resize 1280` writes
+  `clip-1280w.mp4`, instead of asking for `--to`. A file conv can't resize
+  into its own format is refused with the fix.
+- **WebM encodes about three times faster.** VP9 now runs at libvpx's
+  speed 4 rather than its default of 1. Files come out a little larger at
+  the same `--crf`, with no visible change.
+
+### Fixed
+
+- **Xvid and DivX video is re-encoded into mp4 and mov.** It used to be
+  copied, and the file played in no browser and not in QuickTime. A note
+  says why it was re-encoded; mkv still copies.
+- **On Linux, a program conv had just written or unpacked could fail to
+  start**, as `conv install` does with a new backend. conv now tries again
+  for a moment.
 
 ## 0.6.1 - 2026-10-23
 
