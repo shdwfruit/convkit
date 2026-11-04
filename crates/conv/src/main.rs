@@ -48,6 +48,7 @@ fn main() {
         }) => commands::changelog::run(&cli, version.as_deref(), since.as_deref()),
         Some(cli::Command::Install { backend }) => commands::install::run(&cli, backend),
         Some(cli::Command::Scan { paths }) => commands::scan::run(&cli, paths),
+        Some(cli::Command::Info { files }) => commands::info::run(&cli, files),
         Some(cli::Command::Update { check }) => commands::update::run(&cli, *check),
         Some(cli::Command::Qr { .. }) => commands::qr::run(&cli),
         Some(cli::Command::Fmt(args)) => commands::fmt::run(&cli, args),

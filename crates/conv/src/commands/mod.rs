@@ -6,6 +6,7 @@ pub mod colors;
 pub mod convert;
 pub mod doctor;
 pub mod fmt;
+pub mod info;
 pub mod install;
 pub mod merge;
 pub mod pages;

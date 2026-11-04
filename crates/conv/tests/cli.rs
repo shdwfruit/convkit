@@ -5856,3 +5856,252 @@ fn compress_without_qpdf_is_backend_missing() {
     assert_eq!(v["results"][0]["error"]["backend"], "qpdf", "{v}");
     assert!(!dir.path().join("scan-compressed.pdf").exists());
 }
+
+/// `conv info` needs at least one file.
+#[test]
+fn info_needs_a_file() {
+    conv()
+        .arg("info")
+        .assert()
+        .code(2)
+        .stderr(contains("FILES"));
+}
+
+/// A one-page PDF with a classic cross-reference, offsets computed.
+fn tiny_pdf() -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>",
+        "<< /Producer (Test Producer) >>",
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 5 /Root 1 0 R /Info 4 0 R >>\nstartxref\n{xref}\n%%EOF\n")
+            .as_bytes(),
+    );
+    out
+}
+
+/// With no backends, a PDF is still read in full (conv reads PDFs
+/// itself), and a video gets its format, size and targets, plus the
+/// missing ffprobe with how to install it. The envelope is `ok: false`
+/// and the exit is 3, as for any missing backend.
+#[test]
+fn info_json_without_backends_shows_what_it_can_and_what_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("doc.pdf"), tiny_pdf()).unwrap();
+    std::fs::write(dir.path().join("clip.mp4"), b"not really a video").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    let out = cmd
+        .current_dir(dir.path())
+        .args(["info", "doc.pdf", "clip.mp4", "--json"])
+        .timeout(Duration::from_secs(10))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    let files = v["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    let pdf = &files[0];
+    assert_eq!(pdf["path"], "doc.pdf");
+    assert_eq!(pdf["format"], "pdf");
+    assert_eq!(pdf["kind"], "document");
+    assert_eq!(pdf["pdf"]["pages"], 1);
+    assert_eq!(pdf["pdf"]["page_size"]["width_pt"], 595.0);
+    assert_eq!(pdf["pdf"]["encrypted"], false);
+    assert_eq!(pdf["pdf"]["producer"], "Test Producer");
+    assert_eq!(
+        pdf["targets"],
+        serde_json::json!(["heic", "jpg", "png", "webp", "docx"])
+    );
+    assert_eq!(pdf["missing"], serde_json::json!([]));
+    let clip = &files[1];
+    assert_eq!(clip["bytes"], 18);
+    assert!(clip["media"].is_null());
+    assert!(clip["targets"].as_array().unwrap().contains(&"gif".into()));
+    assert_eq!(clip["missing"][0]["code"], "backend_missing");
+    assert_eq!(clip["missing"][0]["backend"], "ffprobe");
+    assert!(clip["missing"][0]["remediation"]["manual"].is_string());
+}
+
+/// The human block says what is missing and how to get it, under what
+/// could be shown without it.
+#[test]
+fn info_without_ffprobe_says_what_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("clip.mp4"), b"x").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["info", "clip.mp4"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3)
+        .stdout(contains("clip.mp4\n  Format        MP4 video, 1 B\n"))
+        .stdout(contains(
+            "  Missing       ffprobe not found, so streams, duration and bitrate are not shown. Try: ",
+        ))
+        .stdout(contains("  Converts to   mov mkv webm"));
+}
+
+/// A path that is not there is reported, exits 2, and the files that are
+/// there are still described. A folder is read one level deep.
+#[test]
+fn info_reports_a_missing_path_and_describes_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/a.pdf"), tiny_pdf()).unwrap();
+    std::fs::write(dir.path().join("docs/b.zip"), b"zip").unwrap();
+    std::fs::create_dir(dir.path().join("docs/inner")).unwrap();
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["info", "docs", "gone.pdf"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("error: not found: gone.pdf"), "{stderr}");
+    assert!(stdout.contains("  Pages         1\n"), "{stdout}");
+    assert!(
+        stdout.contains("  Page size     A4, 210 x 297 mm\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  Format        .zip is not a format conv knows, 3 B\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("inner"), "{stdout}");
+
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["info", "docs/a.pdf", "gone.pdf", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["files"].as_array().unwrap().len(), 1);
+    let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "invalid_invocation");
+}
+
+/// Needs ffprobe and magick. The fixtures read as what they are: the
+/// iPhone photo's camera, profile and GPS; the clip's streams; the
+/// sideways JPEG's orientation tag; an mp3's tags; a PDF magick wrote.
+#[test]
+#[ignore]
+fn info_reads_real_files() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let dir = tempfile::tempdir().unwrap();
+    let ffmpeg = convkit_core::Resolver::new()
+        .resolve(convkit_core::Backend::Ffmpeg)
+        .expect("this test needs ffmpeg")
+        .path;
+    let ok = std::process::Command::new(&ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+        ])
+        .args([
+            "-metadata",
+            "title=Tone",
+            "-metadata",
+            "artist=Band",
+            "-b:a",
+            "128k",
+        ])
+        .arg(dir.path().join("tone.mp3"))
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let magick = convkit_core::Resolver::new()
+        .resolve(convkit_core::Backend::Magick)
+        .expect("this test needs magick")
+        .path;
+    let ok = std::process::Command::new(&magick)
+        .arg(fixtures.join("rotated.jpg"))
+        .arg(dir.path().join("page.pdf"))
+        .status()
+        .unwrap();
+    assert!(ok.success());
+
+    let out = conv()
+        .arg("info")
+        .arg(fixtures.join("photo.heic"))
+        .arg(fixtures.join("clip.mp4"))
+        .arg(fixtures.join("rotated.jpg"))
+        .arg(dir.path().join("tone.mp3"))
+        .arg(dir.path().join("page.pdf"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // ImageMagick 6 reads no EXIF from a HEIC, and conv says so instead.
+    let heic_exif = text.contains("  Camera        Apple iPhone 14 Pro\n");
+    if heic_exif {
+        for expected in [
+            "  Taken         2025-12-27 13:59:08",
+            "  Location      a GPS position is recorded; --strip-metadata removes it\n",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+    } else {
+        assert!(
+            text.contains("ImageMagick read no camera, date or location from this HEIC"),
+            "{text}"
+        );
+    }
+    for expected in [
+        "  Dimensions    4032 x 3024\n",
+        "Display P3 profile\n",
+        "  Video         h264 (High), 640 x 360, 30 fps, yuv420p",
+        "  Audio         aac (LC), 44.1 kHz, mono",
+        "  Duration      2.0 s\n",
+        "  Dimensions    40 x 20 (shown 20 x 40)\n",
+        "  Orientation   tag 6, shown turned 90° clockwise\n",
+        "  Audio         mp3, 44.1 kHz, mono, 128 kb/s\n",
+        "  Title         Tone\n",
+        "  Artist        Band\n",
+        "  Pages         1\n",
+        "  Encrypted     no\n",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+    }
+
+    let out = conv()
+        .arg("info")
+        .arg(fixtures.join("photo.heic"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let image = &v["files"][0]["image"];
+    assert_eq!(image["coder"], "HEIC");
+    assert_eq!(
+        (image["width"].as_u64(), image["height"].as_u64()),
+        (Some(4032), Some(3024))
+    );
+    assert_eq!(image["location"], heic_exif);
+    assert_eq!(image["profile"], "Display P3");
+}

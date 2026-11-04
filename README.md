@@ -114,6 +114,7 @@ conv pages report.pdf 3 1-2 5-z  # pick, reorder, delete or turn a PDF's pages
 conv report.pdf --password       # lock a PDF; --unlock removes the password
 conv report.pdf .png             # each page of a PDF as a picture
 conv scan                        # list the files here and what each can become
+conv info clip.mp4                # what a file is: streams, size, camera, pages
 conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
@@ -1444,6 +1445,41 @@ name or a bare extension like `--qr .svg`, and `conv qr --wifi Home` makes
 the same code with `conv qr`'s `--size` and `--logo`. A network where each
 person signs in with their own account (WPA Enterprise) has no code to make.
 
+## File info
+
+`conv info` shows what a file is, without changing it:
+
+```console
+$ conv info IMG_0042.heic
+IMG_0042.heic
+  Format        HEIC image, 1.5 MB
+  Dimensions    4032 x 3024
+  Colour        sRGB, 8-bit, Display P3 profile
+  Transparency  no
+  Orientation   tag 1, shown as stored
+  Camera        Apple iPhone 14 Pro
+  Taken         2025-12-27 13:59:08 +09:00
+  Location      a GPS position is recorded; --strip-metadata removes it
+  Converts to   jpg png webp avif tiff bmp pdf
+```
+
+For video and audio it shows the container, duration and bitrate, then each
+stream: codec, size, frame rate, rotation, HDR, sample rate, channels and
+language, with counts of subtitles and chapters. For pictures, the size,
+colour profile, bit depth, transparency, frames, orientation tag, camera,
+date taken and whether a GPS position is recorded. For PDFs, the pages,
+page size, whether it is encrypted, and what made it. Every file ends with
+what conv can convert it into.
+
+Give it several files, a glob or a folder, and it prints one block each.
+Video and audio are read with ffprobe and pictures with ImageMagick; conv
+reads PDFs itself. When a backend is missing, conv shows what it can without
+it and says how to install it, and exits 3. If a picture's contents don't
+match its extension, as with a PNG named `.jpg`, a note says so. ImageMagick
+6, which most Linux distributions ship, reads no camera, date or location
+from a HEIC, and a note says that too, so a photo that records where it was
+taken doesn't look as if it didn't.
+
 ## Discovering formats and capabilities
 
 `conv capabilities` lists every registered pair and the backend(s) behind it:
@@ -1657,7 +1693,7 @@ advances the pinned backend versions.
 
 `--json` works on every command and emits exactly one JSON document: an
 `"ok"` boolean plus one command-specific plural key (`results`, `plans`,
-`backends`, `pairs`, `files`). A conversion writes every job — success or failure —
+`backends`, `pairs`, `files`; `conv scan` and `conv info` use `files`). A conversion writes every job — success or failure —
 into a single `"results"` array on stdout, so a half-failed batch is still
 one parseable document; the exit code signals pass/fail. A success element:
 
