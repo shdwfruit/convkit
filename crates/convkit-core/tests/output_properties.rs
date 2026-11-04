@@ -6216,3 +6216,213 @@ fn a_video_mirrored_by_its_note_is_fixed_without_reencoding() {
     assert_eq!(probe_media(&out).rotation, None);
     assert_eq!(red_corner(&first_frame(&out)), "bottom-right");
 }
+
+// --- --denoise -----------------------------------------------------------
+
+fn denoised(strength: convkit_core::denoise::Strength) -> Tuning {
+    Tuning {
+        denoise: Some(strength),
+        ..Tuning::default()
+    }
+}
+
+/// Six seconds of video whose sound is a voice-like harmonic tone that
+/// sounds in the first half of every second second, over pink noise near
+/// -40 dBFS and a 60 Hz hum with its third harmonic.
+fn noisy_voice_video(dir: &tempfile::TempDir) -> PathBuf {
+    synth_media(
+        dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:r=30:d=6",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc='0.2*(sin(2*PI*150*t)+0.5*sin(2*PI*300*t)+0.3*sin(2*PI*450*t)\
+             +0.2*sin(2*PI*900*t))*lt(mod(t\\,2)\\,1)\
+             +0.016*sin(2*PI*60*t)+0.008*sin(2*PI*180*t)':s=48000:d=6",
+            "-f",
+            "lavfi",
+            "-i",
+            "anoisesrc=color=pink:amplitude=0.03:seed=7:d=6:r=48000",
+            "-filter_complex",
+            "[1:a][2:a]amix=inputs=2:normalize=0[a]",
+            "-map",
+            "0:v",
+            "-map",
+            "[a]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+        ],
+        "talk.mp4",
+    )
+}
+
+/// The first audio track, decoded to 48 kHz mono samples.
+fn decoded_sound(path: &Path) -> Vec<f32> {
+    let resolver = Resolver::new();
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let out = Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-f", "f32le", "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect()
+}
+
+/// The level, in dBFS, of the samples within `spans` (in seconds).
+fn level_db(samples: &[f32], spans: &[(f64, f64)]) -> f64 {
+    let at = |s: f64| ((s * 48_000.0) as usize).min(samples.len());
+    let (sum, n) = spans.iter().fold((0.0, 0usize), |(sum, n), &(a, b)| {
+        let part = &samples[at(a)..at(b)];
+        let energy: f64 = part.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+        (sum + energy, n + part.len())
+    });
+    10.0 * (sum / n as f64).log10()
+}
+
+/// An MD5 of the video stream's packets, which a copy leaves as they were.
+fn video_packets_md5(path: &Path) -> String {
+    let resolver = Resolver::new();
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let out = Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-c", "copy", "-f", "md5", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+const PAUSES: [(f64, f64); 3] = [(1.2, 1.8), (3.2, 3.8), (5.2, 5.8)];
+const VOICE: [(f64, f64); 3] = [(0.2, 0.8), (2.2, 2.8), (4.2, 4.8)];
+
+/// The pauses go measurably quieter, `strong` quieter still, the voice
+/// keeps its level, and the picture is copied packet for packet. On ffmpeg
+/// 9.0 the pauses drop about 15 dB, and 33 dB at `strong`.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn denoise_quiets_the_pauses_keeps_the_voice_and_copies_the_picture() {
+    use convkit_core::denoise::Strength;
+    let dir = tmp();
+    let src = noisy_voice_video(&dir);
+    let normal = dir.path().join("talk-denoised.mp4");
+    let strong = dir.path().join("talk-denoised-strong.mp4");
+    let outcome = convert_tuned(&src, &normal, &denoised(Strength::Normal)).unwrap();
+    assert_eq!(outcome.denoise, Some(Strength::Normal));
+    convert_tuned(&src, &strong, &denoised(Strength::Strong)).unwrap();
+
+    let (before, after, deeper) = (
+        decoded_sound(&src),
+        decoded_sound(&normal),
+        decoded_sound(&strong),
+    );
+    let floor = |s: &[f32]| level_db(s, &PAUSES);
+    let voice = |s: &[f32]| level_db(s, &VOICE);
+    assert!(
+        floor(&after) < floor(&before) - 10.0,
+        "pauses {:.1} -> {:.1} dBFS",
+        floor(&before),
+        floor(&after)
+    );
+    assert!(
+        floor(&deeper) < floor(&after) - 5.0,
+        "strong {:.1} vs {:.1} dBFS",
+        floor(&deeper),
+        floor(&after)
+    );
+    for out in [&after, &deeper] {
+        assert!(
+            (voice(out) - voice(&before)).abs() < 1.0,
+            "voice {:.1} -> {:.1} dBFS",
+            voice(&before),
+            voice(out)
+        );
+    }
+    // As long as the source, to within an AAC frame.
+    assert!(
+        before.len().abs_diff(after.len()) <= 1024,
+        "{} vs {} samples",
+        before.len(),
+        after.len()
+    );
+    assert_eq!(video_packets_md5(&normal), video_packets_md5(&src));
+    assert_eq!(ffprobe_video_codec(&normal), "h264");
+}
+
+/// `afftdn` holds its output back by 25 ms; the chain undoes that, so a
+/// click still lands with the frame it was recorded with.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn denoised_sound_stays_in_sync_with_the_picture() {
+    let dir = tmp();
+    let src = synth_media(
+        &dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:r=30:d=3",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc='if(between(t\\,1\\,1.002)\\,0.9\\,0)+0.003*sin(2*PI*440*t)':s=48000:d=3",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+        ],
+        "click.mp4",
+    );
+    // Into mp4, whose edit list hides the AAC encoder's 1024-sample start
+    // in every ffmpeg. Ubuntu's ffmpeg 6.1 leaves it in an mkv, which then
+    // plays 21 ms late whether or not the sound was denoised.
+    let out = dir.path().join("click-denoised.mp4");
+    convert_tuned(&src, &out, &denoised(Default::default())).unwrap();
+    let click = |path: &Path| {
+        let s = decoded_sound(path);
+        let (i, _) = s.iter().enumerate().fold((0, 0.0f32), |best, (i, &x)| {
+            if x.abs() > best.1 {
+                (i, x.abs())
+            } else {
+                best
+            }
+        });
+        i as f64 / 48.0
+    };
+    let (before, after) = (click(&src), click(&out));
+    assert!(
+        (after - before).abs() < 2.0,
+        "click at {before:.1} ms, then {after:.1} ms"
+    );
+    assert!(probe_media(&out).video_streams == 1);
+}

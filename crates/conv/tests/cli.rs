@@ -3692,6 +3692,154 @@ fn a_sized_speed_change_fits_the_output_length() {
     assert!(std::fs::metadata(&out).unwrap().len() <= 300_000);
 }
 
+// --- --denoise -----------------------------------------------------------
+
+/// Every pair whose output has sound lists --denoise, and nothing else does.
+#[test]
+fn capabilities_lists_denoise_where_there_is_sound() {
+    let row = |from: &str, to: &str| {
+        let out = conv()
+            .args(["capabilities", from, "--json"])
+            .assert()
+            .success();
+        let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+        tuning_row(&v, to).iter().any(|x| x == "--denoise")
+    };
+    for (from, to) in [
+        ("mp4", "mov"),
+        ("mp4", "mkv"),
+        ("mp4", "webm"),
+        ("mp4", "m4a"),
+        ("mov", "mp3"),
+        ("wav", "flac"),
+        ("mp3", "opus"),
+        ("flac", "ogg"),
+    ] {
+        assert!(row(from, to), "{from} -> {to} lacks --denoise");
+    }
+    for (from, to) in [("mp4", "gif"), ("gif", "mp4"), ("png", "jpg")] {
+        assert!(!row(from, to), "{from} -> {to} lists --denoise");
+    }
+}
+
+#[test]
+fn a_denoise_with_no_sound_to_clean_is_refused_by_name() {
+    conv()
+        .args(["photo.png", "out.jpg", "--denoise", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--denoise does not apply to png -> jpg: jpg is a still image",
+        ));
+    conv()
+        .args(["clip.mp4", "clip.gif", "--denoise", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--denoise does not apply to mp4 -> gif: a GIF has no sound",
+        ));
+    conv()
+        .args(["photo.png", "--denoise", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--denoise cleans up the sound of video and audio; photo.png has no sound",
+        ));
+}
+
+/// A bare --denoise never takes the next path as its strength, so a
+/// strength is given with an equals sign, and one given without it is
+/// caught rather than read as a file.
+#[test]
+fn a_strength_is_given_with_an_equals_sign() {
+    conv()
+        .args(["clip.mp4", "--denoise", "strong", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "give a strength with an equals sign: --denoise=strong",
+        ));
+    conv()
+        .args(["clip.mp4", "--denoise=loud", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(contains("expected strong, or no value for the default"));
+}
+
+/// Six seconds of video with a tone that sounds every other second, pauses
+/// between, and pink noise and a 60 Hz hum under all of it.
+fn noisy_talk(dir: &Path, ffmpeg: &Path) -> PathBuf {
+    let talk = dir.join("talk.mp4");
+    let ok = std::process::Command::new(ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:r=30:d=6",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc='0.3*sin(2*PI*220*t)*lt(mod(t\\,2)\\,1)+0.02*sin(2*PI*60*t)':s=48000:d=6",
+            "-f",
+            "lavfi",
+            "-i",
+            "anoisesrc=color=pink:amplitude=0.02:seed=7:d=6:r=48000",
+            "-filter_complex",
+            "[1:a][2:a]amix=inputs=2:normalize=0[a]",
+            "-map",
+            "0:v",
+            "-map",
+            "[a]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-y",
+        ])
+        .arg(&talk)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "could not make the noisy clip");
+    talk
+}
+
+#[test]
+#[ignore]
+fn a_lone_video_is_denoised_into_its_own_format_with_the_picture_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, ffprobe) = media_tools();
+    noisy_talk(dir.path(), &ffmpeg);
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["talk.mp4", "--denoise", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["results"][0]["denoise"], serde_json::json!("normal"));
+    let warnings = v["results"][0]["warnings"].to_string();
+    assert!(
+        warnings.contains("only the sound is re-encoded"),
+        "{warnings}"
+    );
+    let p = probed(&ffprobe, &dir.path().join("talk-denoised.mp4"));
+    assert_eq!(p.kinds, ["video", "audio"]);
+    assert!(close(p.secs, 6.0, 0.1), "{} s", p.secs);
+    // The preview names the same file and the same chain.
+    conv()
+        .current_dir(dir.path())
+        .args(["talk.mp4", "--denoise=strong", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("-c:v copy"))
+        .stdout(contains("afftdn=nt=v:nf=-30:nr=30"))
+        .stdout(contains("talk-denoised-strong.mp4"));
+}
+
 // --- conv trim -----------------------------------------------------------
 
 /// Without a terminal to draw on there is nothing to show, so conv trim

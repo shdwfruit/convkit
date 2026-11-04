@@ -299,6 +299,9 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     if let Some(s) = &o.speed {
         v["speed"] = json!(s);
     }
+    if let Some(d) = &o.denoise {
+        v["denoise"] = json!(d);
+    }
     if let Some(r) = &o.rotation {
         v["rotation"] = json!(r);
     }
@@ -950,6 +953,7 @@ mod tests {
             enlarged: None,
             range: None,
             speed: None,
+            denoise: None,
             rotation: None,
             pages: None,
             crop: None,
@@ -1045,6 +1049,14 @@ mod tests {
             outcome_json(&o)["speed"],
             serde_json::json!({"factor": 0.5, "shift_pitch": true})
         );
+    }
+
+    #[test]
+    fn a_denoised_result_reports_its_strength_and_others_do_not() {
+        let mut o = sample_outcome(10, false, vec![]);
+        assert!(outcome_json(&o).get("denoise").is_none());
+        o.denoise = Some(convkit_core::denoise::Strength::Strong);
+        assert_eq!(outcome_json(&o)["denoise"], serde_json::json!("strong"));
     }
 
     #[test]

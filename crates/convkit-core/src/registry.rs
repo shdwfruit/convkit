@@ -3056,7 +3056,18 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     let subtitled = tuning.subtitles.is_some()
         && (from.kind() == Kind::Video || from == Format::Gif)
         && (crate::sized::is_video_target(to) || to == Format::Gif);
-    sized || webm_knob || cut || retimed || resized_in_place || cropped || new_sound || subtitled
+    // Denoised sound needs to know there is sound, and is filtered while the
+    // probe-aware mapping copies the picture.
+    let denoised = tuning.denoise.is_some() && crate::denoise::takes_denoise(from, to);
+    sized
+        || webm_knob
+        || cut
+        || retimed
+        || resized_in_place
+        || cropped
+        || new_sound
+        || subtitled
+        || denoised
 }
 
 /// What a format cut into itself runs (`conv talk.mp4 --start 1:02`): the
@@ -5197,6 +5208,19 @@ mod tests {
         };
         assert!(requires_probe(Format::Mp3, Format::Flac, &t));
         assert!(requires_probe(Format::Mp4, Format::Mp4, &t));
+        assert!(!requires_probe(Format::Png, Format::Jpg, &t));
+    }
+
+    #[test]
+    fn denoising_needs_the_probe_only_where_there_is_sound() {
+        let t = Tuning {
+            denoise: Some(crate::denoise::Strength::Normal),
+            ..Tuning::default()
+        };
+        assert!(requires_probe(Format::Mp3, Format::Mp3, &t));
+        assert!(requires_probe(Format::Mp4, Format::Mp4, &t));
+        assert!(requires_probe(Format::Mov, Format::M4a, &t));
+        assert!(!requires_probe(Format::Mp4, Format::Gif, &t));
         assert!(!requires_probe(Format::Png, Format::Jpg, &t));
     }
 

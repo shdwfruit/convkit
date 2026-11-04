@@ -119,6 +119,7 @@ conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 conv clip.mp4 --speed 2          # play twice as fast
+conv talk.mp4 --denoise          # take out background noise and hum
 conv IMG_0042.mov --rotate left  # turn a sideways video or photo
 conv clip.mp4 --crop 9:16        # crop to a shape, a box, or auto for black bars
 conv clip.mp4 --audio song.mp3   # replace the sound; add --mix to put it under
@@ -661,6 +662,44 @@ sped up, and `--max-size` sizes the sped-up result:
 conv talk.mp4 clip.gif --start 1:02 --end 1:10 --speed 2
 conv memo.m4a .mp3 --speed 1.25
 conv screen.mov --speed 4 --max-size 10mb
+```
+
+## Cleaning up sound
+
+`--denoise` takes background noise and mains hum out of a voice
+recording, podcast or phone video, offline, with ffmpeg's own filters and
+nothing to download.
+
+```console
+$ conv interview.mp4 --denoise
+OK interview-denoised.mp4 - 88.3 MB - 4.1s
+  /home/user/Videos/interview-denoised.mp4
+  note  The video is copied as it is; only the sound is re-encoded, to AAC at 160 kbps, to clean it up.
+  note  --denoise is tuned for voice: it also cuts everything below 80 Hz, so music loses its deepest bass.
+```
+
+It cuts the hum and rumble below 80 Hz, then runs ffmpeg's FFT denoiser
+tuned for room, fan and mains noise. On test recordings with fan-like
+noise and a 50 or 60 Hz hum, the gaps between sentences got 14 to 24 dB
+quieter and the voice kept its level. A video keeps its picture untouched where
+the target can hold it; only the sound is re-encoded.
+
+For a very noisy recording, `--denoise=strong` takes off another 10 to 15
+dB, at some cost to the voice: it can sound a little thinner. On a
+recording that was already clean, the default changes about as much as a
+64 kbps AAC encode would, so there is little point using it there. It is
+tuned for voice, so music loses its deepest bass.
+
+Naming works as it does for `--strip-metadata`: one file keeps its format
+and gets `-denoised` in its name (`-denoised-strong` for strong), and a
+batch writes into a `denoised` folder. Name an output to change the format
+as well. It goes with the other flags: a cut is cleaned, and a speed change
+retimes the cleaned sound.
+
+```console
+conv memo.m4a .mp3 --denoise
+conv ./episodes --to mp3 --denoise=strong
+conv talk.mp4 --start 1:02 --end 1:10 --speed 1.5 --denoise
 ```
 
 ## Rotating

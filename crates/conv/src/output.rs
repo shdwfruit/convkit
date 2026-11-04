@@ -37,6 +37,7 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> Result<Outcome, ConvError> {
         enlarged: None,
         range: None,
         speed: None,
+        denoise: None,
         rotation: None,
         pages: None,
         crop: None,

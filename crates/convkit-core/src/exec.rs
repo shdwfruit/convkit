@@ -141,6 +141,10 @@ pub struct Outcome {
     /// for every other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<crate::speed::SpeedReport>,
+    /// The strength a `--denoise` conversion cleaned the sound at. Omitted
+    /// from `--json` for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denoise: Option<crate::denoise::Strength>,
     /// The turn a `--rotate` conversion made, and how. Omitted from
     /// `--json` for every other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -740,6 +744,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let enlarged = ran.enlarged.clone();
     let range = ran.range.clone();
     let speed = ran.speed.clone();
+    let denoise = ran.denoise;
     let rotation = ran.rotation;
     let crop = ran.crop.clone();
     let audio = ran.audio.clone();
@@ -802,6 +807,7 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         enlarged,
         range,
         speed,
+        denoise,
         rotation,
         pages: None,
         crop,
@@ -946,6 +952,7 @@ fn run_pdf_pages(
         crop: None,
         audio: None,
         subtitles: None,
+        denoise: None,
     })
 }
 

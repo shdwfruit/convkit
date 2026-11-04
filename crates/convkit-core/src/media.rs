@@ -223,8 +223,8 @@ fn push_video_args(argv: &mut Vec<String>, to: Format, video: &VideoDisposition<
     }
 }
 
-/// Emits the audio arguments for the chosen disposition. `filter` is a
-/// speed change's, which only a re-encode can run.
+/// Emits the audio arguments for the chosen disposition. `filter` is
+/// `--denoise`'s and a speed change's, which only a re-encode can run.
 fn push_audio_args(
     argv: &mut Vec<String>,
     warnings: &mut Vec<String>,
@@ -266,8 +266,8 @@ fn push_soundtrack_args(argv: &mut Vec<String>, to: Format, s: &crate::soundtrac
 }
 
 /// Every audio track at one known rate, so the audio's size is arithmetic,
-/// through `filter` when a speed change gives one. A source with no audio
-/// gets no audio arguments at all.
+/// through `filter` when `--denoise` or a speed change gives one. A source
+/// with no audio gets no audio arguments at all.
 fn reencode_audio_args(
     argv: &mut Vec<String>,
     to: Format,
@@ -330,7 +330,8 @@ fn mapped_invocation(
     let (_, audio_ok) = registry::compat_tables(to)?;
     let cut = resolved.cut.as_ref();
     let retime = resolved.speed.as_ref();
-    let filter = retime.and_then(|r| r.audio.as_deref());
+    let filter = resolved.audio_filter();
+    let filter = filter.as_deref();
 
     let audios = probe.all_audio();
     let subtitles = match retime {
@@ -570,12 +571,12 @@ pub(crate) fn stream_mapped_invocation(
 }
 
 /// What the audio of an ordinary invocation does: fit the target, go, for a
-/// silent clip, or be re-encoded at the target's own rate through a speed
-/// change's filter, which a copy cannot run.
+/// silent clip, or be re-encoded at the target's own rate through
+/// `--denoise`'s or a speed change's filter, which a copy cannot run.
 fn audio_for(to: Format, resolved: &ResolvedVideo) -> AudioDisposition {
     if resolved.mute {
         AudioDisposition::Drop
-    } else if resolved.speed.is_some() {
+    } else if resolved.speed.is_some() || resolved.denoise.is_some() {
         AudioDisposition::Reencode {
             kbps: default_audio_kbps(to),
         }
@@ -744,9 +745,10 @@ pub(crate) fn two_pass_invocations(
         argv
     };
 
+    // Without a rate, the sound is still filtered where it has to be.
     let audio = match audio_kbps {
         Some(kbps) => AudioDisposition::Reencode { kbps },
-        None => AudioDisposition::Fit,
+        None => audio_for(to, resolved),
     };
     let pass2 = mapped_invocation(to, probe, video(2), audio, strip, resolved, input, output)?;
     Some(TwoPass { pass1, pass2 })

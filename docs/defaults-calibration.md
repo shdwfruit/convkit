@@ -1614,3 +1614,160 @@ uses does not.
 
 PDF/A: the claim and the output intent are kept, and a PDF/A-1 input keeps
 its objects out of object streams, but no output was checked with veraPDF.
+
+## Noise and hum (`--denoise`, `denoise.rs`)
+
+Measured 2026-11-03 on macOS with Homebrew's ffmpeg 9.0.1 and ffmpeg
+6.1.6, the version CI runs. Every afftdn, highpass and bandreject number
+below came out the same on both.
+
+The goal was a one-flag cleanup for voice recordings, podcasts and phone
+videos using only filters ffmpeg already has, with no model to download.
+
+### Test clips
+
+Two clean voices made with macOS `say` (Daniel, 21 s, and Samantha, 18 s,
+each with 1.5-1.8 s of silence between sentences), resampled to 48 kHz
+mono, then mixed with noise at set RMS levels. Pink, white and brown noise
+came from `anoisesrc` (fixed seeds); the hum is a sum of sines at the mains
+frequency and its first five harmonics, at -38, -44, -47, -52, -56 and -60
+dBFS.
+
+| clip | noise added | speech-to-noise |
+|---|---|---|
+| pinkhum | pink -42 dBFS + 60 Hz hum | about 16 dB |
+| pink | pink -38 dBFS | about 19 dB |
+| hiss | white -48 dBFS | about 29 dB |
+| hum50 | pink -56 dBFS + 50 Hz hum | about 18 dB |
+| loud | pink -30 dBFS + 60 Hz hum 6 dB louder | about 8 dB |
+| quiet | pink -58 dBFS | about 39 dB |
+| brown | brown -36 dBFS | about 17 dB |
+| clean | none | |
+| music | 20 s of plucked harmonic notes at -22 dBFS, no pauses | |
+
+### What was measured
+
+- **Pause floor**: the RMS level of the output in the pauses, in 20 ms
+  frames where the clean voice is silent, 100 ms clear of speech either
+  side. This is what you hear between sentences, and the main number.
+- **Spectral SNR**: the clean voice's magnitude spectrum against the
+  output's (1024-point Hann frames, hop 256), after aligning the two by
+  cross-correlation, as 10 log10(sum |C|^2 / sum (|Y| - |C|)^2). Magnitude
+  only, so an IIR filter's phase shift is not counted as damage. On the
+  noisy clips higher is better; on the clean voice and the music it
+  measures what the chain does to sound that had no noise to take out. For
+  scale, a 64 kbps AAC encode of the clean voice measures 26.7 dB and 128
+  kbps 35.8 dB.
+- **Hum**: the level in the pauses within 1.5 Hz of the mains frequency and
+  its first four harmonics.
+- **Voice level**: the change in the voice's own RMS, to catch a chain that
+  makes it quieter. Every chain kept, below, is within 0.2 dB.
+
+Each figure is the mean over the two voices. Cells are spectral SNR / pause
+floor in dB; the `hum` column is the pinkhum clip's 60 Hz level.
+
+| chain | pinkhum | hum | pink | hiss | hum50 | loud | quiet | clean | music |
+|---|---|---|---|---|---|---|---|---|---|
+| none | 16.8 / -35.3 | -36.6 | 18.8 / -38.0 | 29.1 / -48.0 | 17.7 / -36.3 | 8.1 / -27.2 | 39.1 / -58.0 | | |
+| `afftdn` (defaults) | 17.0 / -35.5 | -36.6 | 19.3 / -38.7 | 35.0 / -55.8 | 17.7 / -36.4 | 8.2 / -27.2 | 39.6 / -62.1 | 45.4 | 49.4 |
+| `afftdn=nf=-25` | 17.1 / -37.6 | -38.4 | 19.7 / -43.9 | 22.7 / -60.0 | 17.5 / -38.2 | 9.0 / -28.6 | 22.7 / -70.0 | 22.7 | 22.1 |
+| `anlmdn=s=10` | 17.6 / -36.8 | -37.8 | 20.7 / -42.7 | 33.4 / -75.5 | 18.4 / -37.7 | 8.2 / -27.2 | 35.3 / -63.6 | 36.6 | 31.6 |
+| `highpass=f=80` | 19.8 / -38.5 | -40.2 | 20.8 / -40.1 | 25.4 / -48.0 | 21.8 / -41.0 | 11.5 / -29.9 | 27.7 / -60.0 | 27.8 | 30.1 |
+| notches at 50 and 60 Hz and 4 harmonics each | 9.6 / -42.3 | -68.6 | 9.3 / -38.4 | 9.8 / -48.0 | 9.8 / -55.0 | 7.2 / -30.4 | 9.8 / -58.4 | 9.8 | 11.0 |
+| `afftdn=nt=v:nf=-35:nr=20` | 21.5 / -42.3 | -43.2 | 24.4 / -47.9 | 30.1 / -57.8 | 22.7 / -43.9 | 9.2 / -28.5 | 30.9 / -78.0 | 31.0 | 28.1 |
+| **default**: `highpass=f=80,afftdn=nt=v:nf=-35:nr=20` | 23.6 / -52.9 | -54.9 | 23.9 / -51.8 | 25.5 / -57.8 | 24.4 / -60.3 | 13.3 / -32.4 | 25.8 / -80.0 | 25.8 | 26.4 |
+| **strong**: `highpass=f=80,afftdn=nt=v:nf=-30:nr=30` | 22.0 / -68.4 | -70.1 | 22.3 / -63.6 | 22.9 / -69.4 | 22.3 / -71.0 | 16.1 / -37.4 | 22.9 / -90.0 | 22.9 | 22.2 |
+| `highpass=f=80,afftdn=nt=s:nf=-30:nr=20` | 22.8 / -52.8 | -54.5 | 23.5 / -57.6 | 24.5 / -68.0 | 23.4 / -60.0 | 14.8 / -33.9 | 24.5 / -80.0 | 24.5 | 26.0 |
+| `arnndn`, conjoined-burgers model | 19.9 / -57.8 | -62.0 | 22.5 / -53.2 | 26.8 / -63.1 | 22.1 / -47.9 | 15.1 / -48.1 | 30.4 / -62.4 | 31.5 | 28.5 |
+| `arnndn`, leavened-quisling model | 21.4 / -54.6 | -56.6 | 22.1 / -55.9 | 26.8 / -57.2 | 22.5 / -52.8 | 15.8 / -47.0 | 29.7 / -62.3 | 26.5 | 0.7 |
+
+Around the default, afftdn was swept over noise type (`w`, `v`, `s`),
+noise floor (-20 to -40) and reduction (12 to 30), with and without the
+high-pass, about 60 chains, plus `tn=1` and gain smoothing on a few. What
+came out of it:
+
+- **afftdn's defaults do almost nothing to room noise.** They assume white
+  noise at -50 dB, so pink noise at -38 dBFS keeps its floor (-38.7). Its
+  `tn=1` noise tracking settles at the same place whatever floor it starts
+  from (-50.7 on hiss for every `nf`), so it is no fix.
+- **The noise type matters more than the floor.** `nt=v` (vinyl) and `nt=s`
+  (shellac) assume a floor that falls with frequency, as room, fan and
+  mains noise do, and take 6-13 dB more off pink noise than `nt=w` at the
+  same `nf` and `nr`, for about the same cost to the clean voice.
+- **`nf=-35` is the balance.** Lower, the reduction falls away (on
+  pinkhum, -42.3 at -35 and -37.6 at -40, `nt=v:nr=20` without the
+  high-pass). Higher takes more off (-54.4 at -30) but the voice pays: the
+  clean voice measures 25.8 instead of 31.0. That is `strong`'s side of
+  the tradeoff.
+- **Gain smoothing hurt.** `gs=8` cost 2-3 dB of spectral SNR on the voice
+  clips and 7 dB on the music, which it also made 2.3 dB quieter (checked
+  at `nt=w:nf=-20`).
+- **The high-pass is what takes the hum.** At 80 Hz (two poles) it takes the
+  fundamental, and afftdn after it takes the harmonics, together 18 dB at
+  60 Hz and 24 dB at 50 Hz, more than either does alone. It costs music
+  its lowest bass (the high-pass alone measures 30.1 on the music), which
+  is why every denoised conversion carries a note saying it is tuned for
+  voice.
+- **Notches are not worth it.** Narrow notches (Q 20) at both mains
+  families take the hum down 32-37 dB, but they sit on a voice's own
+  harmonics: the voice loses 1.3 dB and measures 9.8 on clean speech, worse
+  than any denoiser. Picking one family would need detecting it first.
+- **`anlmdn` is 10-15 times slower** (1.4-2.8 s for 20 s, against 0.1 s)
+  and takes at most 5 dB off pink noise at any strength up to 10.
+
+### `arnndn`
+
+RNNoise models do well on the loud clip, where they take 10 dB more off
+the floor than `strong`, and they change a clean voice less, but
+everywhere else they take less off the floor than `strong`. They were left
+out:
+
+- On ffmpeg 9.0.1 the last 10 ms of the output are not deterministic: in 7
+  of 8 runs of the same command they were NaN or values up to 7e8, a loud
+  click at the end of the file. ffmpeg 6.1.6 did not do this.
+- They are trained on speech and treat everything else as noise: the
+  leavened-quisling model took 12.8 dB off the music.
+- The models (GregorR/rnnoise-models, about 300 KB each) carry no licence,
+  only a note that the author considers them not subject to copyright.
+- Shipping one means writing it to a temporary file at every run, and a
+  `--dry-run` that names a path that will not exist.
+
+### Strength
+
+`strong` assumes a floor 5 dB louder and allows 30 dB of reduction rather
+than 20. It is a real tradeoff, so it is offered rather than chosen: the
+pauses go 11-16 dB quieter on the moderate clips and 5 dB on the loud one,
+where it is the better choice (16.1 against 13.3), but it costs 3-4 dB of
+spectral SNR on clean speech and music. Keeping `nf=-35` and raising only
+`nr` to 30 was barely deeper than the default (-54.8 and -52.6 against
+-52.9 and -51.8 on pinkhum and pink).
+
+On a recording that was already clean, the default does about what a 64
+kbps AAC encode does (25.8 against 26.7).
+
+### Delay
+
+afftdn delays its output by half its 50 ms window, 25 ms at every sample
+rate (1200 samples at 48 kHz, 1102 at 44.1 kHz, 400 at 16 kHz), and keeps
+the input's timestamps, so a video denoised with it alone has its sound
+25 ms late, and loses its last 25 ms. Measured with a click at 1.000 s in a
+video: 1.025 s after `afftdn`, on 6.1.6 and 9.0.1.
+
+The chain pads 25 ms of silence onto the end (`apad=pad_dur=0.025`), runs
+the filters, moves every timestamp back by 25 ms (`asetpts=PTS-0.025/TB`)
+and drops what now falls before zero (`atrim=start=0`), which is the
+window's warm-up. The click then lands at 1.000 s again, the output is as
+long as the source, and nothing depends on the sample rate.
+`denoised_sound_stays_in_sync_with_the_picture` checks it.
+
+### In conv
+
+With the probe in hand, a video whose picture the target holds keeps it as
+a stream copy, and only its sound is re-encoded, at the rate the target's
+recipes use (AAC 160 kbps, Opus 128 kbps for webm), which a note says. The
+noise comes out before a speed change, so `atempo` retimes the cleaned
+sound. On a synthetic 6 s video (a harmonic tone every other second over
+pink noise and hum), the pauses go from -37.1 to -52.2 dBFS, and to -70.4
+with `strong`, the tone keeps its level within 0.2 dB, and the video's
+packets hash the same as the source's
+(`denoise_quiets_the_pauses_keeps_the_voice_and_copies_the_picture`).

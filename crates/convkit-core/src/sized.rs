@@ -180,6 +180,10 @@ struct Prepared<'a> {
     /// The speed change, carried into every pass. Never copied.
     retime: Option<crate::speed::Retime>,
     speed: Option<crate::speed::SpeedReport>,
+    /// `--denoise`'s chain, carried into every pass, and its strength.
+    /// The sound is never copied; a remux copies only the picture.
+    denoise: Option<&'static str>,
+    strength: Option<crate::denoise::Strength>,
     /// The turn and flip (`--rotate`, `--flip`), carried into every pass.
     turn: Option<crate::rotate::Change>,
     /// Whether the turn brings the picture back to the way it is stored, so
@@ -229,8 +233,9 @@ pub(crate) fn plan(
     let tag_note = p.turn.map(crate::rotate::tag_note);
     if !caps_bind && copy_ok && p.probe.size_bytes.is_some_and(|b| b <= max.bytes) {
         // A byte copy carries every tag along, so a stripped file is
-        // remuxed instead, which clears them.
-        if from == to && p.cut.is_none() && !p.strip {
+        // remuxed instead, which clears them, and so is a denoised one,
+        // whose sound is filtered.
+        if from == to && p.cut.is_none() && !p.strip && p.denoise.is_none() {
             sizing.strategy = Strategy::Copy;
             return Ok(ConversionPlan {
                 from,
@@ -250,6 +255,7 @@ pub(crate) fn plan(
                 enlarged: None,
                 range: p.range.clone(),
                 speed: p.speed.clone(),
+                denoise: None,
                 rotation: copied_rotation,
                 pages: None,
                 crop: p.crop_report.clone(),
@@ -268,6 +274,7 @@ pub(crate) fn plan(
         ) {
             sizing.strategy = Strategy::Remux;
             let mut warnings = m.warnings;
+            warnings.extend(p.denoise.map(|_| crate::denoise::reencoded_note(to)));
             warnings.extend(p.clip_notes.iter().cloned());
             warnings.extend(p.location_note.clone());
             warnings.extend(p.labels_note.clone());
@@ -284,6 +291,7 @@ pub(crate) fn plan(
                 enlarged: None,
                 range: p.range.clone(),
                 speed: p.speed.clone(),
+                denoise: p.strength,
                 rotation: copied_rotation,
                 pages: None,
                 crop: p.crop_report.clone(),
@@ -354,11 +362,12 @@ impl Encoder<'_> {
 }
 
 impl Prepared<'_> {
-    /// How a copied (remuxed) conversion is shaped: the cut and nothing
-    /// else, since a remux changes no picture.
+    /// How a copied (remuxed) conversion is shaped: the cut, and the sound
+    /// denoised, since a remux changes no picture.
     fn copied(&self) -> ResolvedVideo {
         ResolvedVideo {
             cut: self.cut,
+            denoise: self.denoise,
             ..ResolvedVideo::default()
         }
     }
@@ -465,6 +474,11 @@ fn prepare<'a>(
         }
         None => (probe, None, None),
     };
+    let denoise = tuning
+        .denoise
+        .map(|d| crate::denoise::resolve(from, to, d, false, Some(&probe), input))
+        .transpose()?;
+    clip_notes.extend(denoise.map(|_| crate::denoise::VOICE_NOTE.to_string()));
     // A turn back to the stored picture is copied into mp4 or mov with its
     // note reset; any other is planned against the turned picture.
     let change = tuning.change();
@@ -542,6 +556,8 @@ fn prepare<'a>(
         range,
         retime,
         speed,
+        denoise,
+        strength: tuning.denoise,
         turn: change,
         retag,
         crop,
@@ -595,6 +611,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         enlarged: None,
         cut: p.cut,
         speed: p.retime.clone(),
+        denoise: p.denoise,
         turn: p.turn,
         crop: p.crop,
         subtitles: p.subtitles.clone(),
@@ -668,6 +685,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         enlarged: None,
         range: p.range.clone(),
         speed: p.speed.clone(),
+        denoise: p.strength,
         rotation: p
             .turn
             .map(|c| crate::rotate::RotationReport::new(c, crate::rotate::By::Pixels)),
