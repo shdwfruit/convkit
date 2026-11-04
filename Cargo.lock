@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "convkit"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anstyle",
  "anstyle-query",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "convkit-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "base64 0.22.1",
  "bzip2",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "convkit-diff"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "clap",
  "convkit-core",
