@@ -6403,7 +6403,10 @@ fn denoised_sound_stays_in_sync_with_the_picture() {
         ],
         "click.mp4",
     );
-    let out = dir.path().join("click-denoised.mkv");
+    // Into mp4, whose edit list hides the AAC encoder's 1024-sample start
+    // in every ffmpeg. Ubuntu's ffmpeg 6.1 leaves it in an mkv, which then
+    // plays 21 ms late whether or not the sound was denoised.
+    let out = dir.path().join("click-denoised.mp4");
     convert_tuned(&src, &out, &denoised(Default::default())).unwrap();
     let click = |path: &Path| {
         let s = decoded_sound(path);
