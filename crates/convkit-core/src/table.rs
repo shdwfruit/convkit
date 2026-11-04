@@ -207,7 +207,7 @@ pub fn sniff_csv(bytes: &[u8]) -> Option<CsvShape> {
 /// A value whose digits a number would lose: a leading zero (`02134`), more
 /// digits than a double holds (`4111111111111111`), or a leading `+`
 /// (`+447946095800`).
-fn keeps_digits(f: &str) -> bool {
+pub(crate) fn keeps_digits(f: &str) -> bool {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     (f.len() >= 2 && f.starts_with('0') && digits(f))
         || (f.len() >= 16 && digits(f))
@@ -256,7 +256,7 @@ fn decode(bytes: &[u8]) -> Option<(String, Encoding)> {
 }
 
 /// One Windows-1252 byte as a character: Latin-1, except 0x80-0x9F.
-fn windows_1252(b: u8) -> char {
+pub(crate) fn windows_1252(b: u8) -> char {
     const HIGH: [char; 32] = [
         '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž',
         '\u{8F}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}',

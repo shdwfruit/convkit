@@ -21,11 +21,16 @@ pub fn run(cli: &Cli, format: Option<&str>) -> i32 {
         let arr: Vec<serde_json::Value> = pairs
             .iter()
             .map(|&(from, to)| {
-                json!({
+                let mut pair = json!({
                     "from": from,
                     "to": to,
                     "backends": registry::backends_for(from, to),
-                })
+                });
+                // conv converts it itself: no backend, and `built_in`.
+                if registry::is_built_in(from, to) {
+                    pair["built_in"] = json!(true);
+                }
+                pair
             })
             .collect();
         let envelope = json!({ "ok": true, "pairs": arr });
@@ -45,12 +50,12 @@ pub fn run(cli: &Cli, format: Option<&str>) -> i32 {
                 .iter()
                 .map(|b| b.exe_name())
                 .collect();
-            println!(
-                "  {:<6} -> {:<6} {}",
-                from.ext(),
-                to.ext(),
+            let by = if registry::is_built_in(from, to) {
+                "built in".to_string()
+            } else {
                 backends.join(", ")
-            );
+            };
+            println!("  {:<6} -> {:<6} {}", from.ext(), to.ext(), by);
         }
     }
     0
@@ -267,6 +272,7 @@ fn format_detail(cli: &Cli, ext: &str) -> i32 {
                 json!({
                     "to": t,
                     "backends": registry::backends_for(fmt, t),
+                    "built_in": registry::is_built_in(fmt, t),
                     "tuning": tuning_flags_for(fmt, t),
                     "defaults": anchors_json(&default_anchors_for(fmt, t)),
                     "notes": registry::lookup(fmt, t)
@@ -304,7 +310,12 @@ fn format_detail(cli: &Cli, ext: &str) -> i32 {
             } else {
                 format!("   [{}]", flags.join(" "))
             };
-            println!("    {} -> {:<6}{}", fmt.ext(), t.ext(), flags);
+            let by = if registry::is_built_in(fmt, t) {
+                "   built in"
+            } else {
+                ""
+            };
+            println!("    {} -> {:<6}{}{by}", fmt.ext(), t.ext(), flags);
         }
     }
     if sources.is_empty() {
@@ -351,6 +362,12 @@ fn format_detail(cli: &Cli, ext: &str) -> i32 {
     }
     for n in notes {
         println!("  note: {}", shown_note(n));
+    }
+    if matches!(fmt, Format::Json | Format::Yaml | Format::Toml) {
+        println!(
+            "\n  conv converts {} itself, with no backend; conv fmt formats and checks it",
+            fmt.ext()
+        );
     }
     println!(
         "\n  full pair list: conv capabilities; exact command preview: conv <in> <out> --dry-run"

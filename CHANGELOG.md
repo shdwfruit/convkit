@@ -4,6 +4,22 @@
 
 ### New
 
+- **JSON, YAML, TOML and CSV, converted by conv itself.** `conv data.json
+  .yaml`, `conv Cargo.toml .json`, `conv orders.csv .json` and the other
+  ways round run with no backend, keeping every key in its place and every
+  number's digits. What a format can't hold, like a null in TOML or NaN in
+  JSON, is refused with where it is. YAML is read safely, with aliases
+  capped against "billion laughs" files. A CSV's columns of numbers and of
+  true and false become numbers and booleans and the rest stay text, and
+  nested JSON becomes dotted columns. Large JSON and CSV files stream.
+  `--copy` copies a JSON, YAML or TOML result as its text.
+- **`conv fmt`** pretty-prints, packs (`--minify`), sorts (`--sort-keys`)
+  and checks (`--check`) JSON, YAML and TOML from a file, a pipe or
+  `--paste`, and prints it in colour, writes a file, or copies it with
+  `--copy`. An invalid file gets the line, the column, a caret under the
+  spot and the usual cause. `--lenient` reads JSON5 and JSONC, and `--to`
+  converts as it goes.
+
 - **`conv merge` and `conv split` for PDFs.** `conv merge a.pdf b.pdf out.pdf`
   joins PDFs in order; a folder adds every PDF in it. `conv split report.pdf`
   writes one file per page, and `conv split report.pdf 1-3 4-z` one per range

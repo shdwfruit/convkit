@@ -1932,11 +1932,41 @@ fn insert_document_family(t: &mut Table) {
     t.insert((Format::Md, Format::Pdf), MD_TO_PDF);
 }
 
+/// A pair conv converts itself, in process, with no backend: JSON, YAML,
+/// TOML and CSV to one another (`data`). It has no steps; the planner
+/// marks its plan `built_in`, and `exec` runs `data::convert_file`.
+pub const BUILT_IN: Recipe = Recipe {
+    steps: &[],
+    warnings: &[],
+};
+
+const DATA: [Format; 4] = [Format::Json, Format::Yaml, Format::Toml, Format::Csv];
+
+fn insert_data_family(t: &mut Table) {
+    for from in DATA {
+        for to in DATA {
+            let (Some(f), Some(l)) = (crate::data::Lang::of(from), crate::data::Lang::of(to))
+            else {
+                continue;
+            };
+            if crate::data::converts(f, l) {
+                t.insert((from, to), BUILT_IN);
+            }
+        }
+    }
+}
+
+/// Whether conv converts this pair itself, with no backend.
+pub fn is_built_in(from: Format, to: Format) -> bool {
+    lookup(from, to) == Some(BUILT_IN)
+}
+
 static TABLE: LazyLock<Table> = LazyLock::new(|| {
     let mut t = Table::new();
     insert_image_family(&mut t);
     insert_media_family(&mut t);
     insert_document_family(&mut t);
+    insert_data_family(&mut t);
     t
 });
 

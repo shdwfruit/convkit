@@ -12,6 +12,10 @@ fn every_registered_pair_renders_stable_argv() {
         let output = PathBuf::from(format!("out.{}", to.ext()));
         let p = plan::build(from, to, &[input], &output, None, None)
             .unwrap_or_else(|e| panic!("{from:?}->{to:?} failed to plan: {e}"));
+        // A pair conv converts itself has no command to show.
+        if p.built_in {
+            lines.push(format!("{} -> {}: built in", from.ext(), to.ext()));
+        }
         for step in &p.steps {
             lines.push(format!(
                 "{} -> {}: {} {}",
@@ -30,6 +34,11 @@ fn every_registered_pair_renders_stable_argv() {
 fn every_registered_pair_has_at_least_one_step() {
     for (from, to) in registry::all_pairs() {
         let r = registry::lookup(from, to).unwrap();
+        // Data files are converted in process, and only they have none.
+        if registry::is_built_in(from, to) {
+            assert!(r.steps.is_empty(), "{from:?}->{to:?} is built in");
+            continue;
+        }
         assert!(!r.steps.is_empty(), "{from:?}->{to:?} has no steps");
         let last = r.steps.len() - 1;
         for (i, s) in r.steps.iter().enumerate() {

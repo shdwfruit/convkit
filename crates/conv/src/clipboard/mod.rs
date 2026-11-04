@@ -98,7 +98,9 @@ pub fn put_for(outputs: &[PathBuf]) -> Result<Put, String> {
     };
     let format = Format::from_path(one);
     match format {
-        Some(Format::Md | Format::Csv | Format::Html) => {
+        Some(
+            Format::Md | Format::Csv | Format::Html | Format::Json | Format::Yaml | Format::Toml,
+        ) => {
             let bytes =
                 std::fs::read(one).map_err(|e| format!("couldn't read {}: {e}", one.display()))?;
             // Not UTF-8 (a csv from an old spreadsheet): the file itself.

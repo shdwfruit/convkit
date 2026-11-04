@@ -104,6 +104,10 @@ pub struct ConversionPlan {
     /// tag. Skipped when absent, like `sizing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<crate::rotate::RotationReport>,
+    /// conv converts this itself, in process, and `steps` is empty: JSON,
+    /// YAML, TOML and CSV (`data`). Skipped when false, like `sizing`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub built_in: bool,
 }
 
 /// Why a probe-aware media pair re-encoded instead of copying: a video knob.
@@ -151,6 +155,11 @@ pub fn build_tuned(
             ErrorCode::InputNotFound,
             "no input files were given",
         ));
+    }
+
+    // A data file is converted in process, and none of the knobs apply.
+    if registry::is_built_in(from, to) {
+        return built_in(from, to, inputs, output, tuning);
     }
 
     // A password-protected .docx/.xlsx/.pptx is refused before LibreOffice
@@ -389,6 +398,7 @@ pub fn build_tuned(
                 let path_args = vec![media::input_position(&m.argv), m.argv.len() - 1];
                 return Ok(ConversionPlan {
                     from,
+                    built_in: false,
                     to,
                     inputs: inputs.to_vec(),
                     output: output.to_path_buf(),
@@ -468,6 +478,7 @@ pub fn build_tuned(
 
     Ok(ConversionPlan {
         from,
+        built_in: false,
         to,
         inputs: inputs.to_vec(),
         output: output.to_path_buf(),
@@ -478,6 +489,66 @@ pub fn build_tuned(
         range,
         speed,
         rotation,
+    })
+}
+
+/// The plan for a pair conv converts itself: no steps, and every knob
+/// refused, since a data file has no picture, sound or length.
+fn built_in(
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    output: &Path,
+    tuning: &Tuning,
+) -> Result<ConversionPlan> {
+    let timed = [
+        (
+            "--max-size",
+            tuning.max_size.is_some(),
+            "it sizes video targets",
+        ),
+        (
+            "--start, --end and --duration do",
+            tuning.range.is_some(),
+            "they cut video, GIF and audio",
+        ),
+        (
+            "--speed",
+            tuning.speed.is_some(),
+            "it retimes video, GIF and audio",
+        ),
+    ];
+    if let Some((flag, _, why)) = timed.into_iter().find(|(_, given, _)| *given) {
+        let verb = if flag.ends_with(" do") { "" } else { " does" };
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "{flag}{verb} not apply to {} -> {}: {why}",
+                from.ext(),
+                to.ext()
+            ),
+        ));
+    }
+    validate_tuning(
+        &registry::BUILT_IN,
+        from,
+        to,
+        tuning,
+        &ResolvedVideo::default(),
+    )?;
+    Ok(ConversionPlan {
+        from,
+        to,
+        inputs: inputs.to_vec(),
+        output: output.to_path_buf(),
+        steps: Vec::new(),
+        warnings: Vec::new(),
+        sizing: None,
+        enlarged: None,
+        range: None,
+        speed: None,
+        rotation: None,
+        built_in: true,
     })
 }
 
@@ -768,6 +839,7 @@ fn in_place(
     warnings.extend(crate::metadata::labels_note(format, tuning, probe));
     Ok(ConversionPlan {
         from: format,
+        built_in: false,
         to: format,
         inputs: inputs.to_vec(),
         output: output.to_path_buf(),

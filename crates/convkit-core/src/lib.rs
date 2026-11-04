@@ -2,6 +2,7 @@ pub mod ascii;
 pub mod backend;
 pub mod backend_overrides;
 pub mod budget;
+pub mod data;
 pub mod error;
 pub mod exec;
 mod exif;

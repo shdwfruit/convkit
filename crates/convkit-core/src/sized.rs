@@ -208,6 +208,7 @@ pub(crate) fn plan(
             sizing.strategy = Strategy::Copy;
             return Ok(ConversionPlan {
                 from,
+                built_in: false,
                 to,
                 inputs: inputs.to_vec(),
                 output: output.to_path_buf(),
@@ -243,6 +244,7 @@ pub(crate) fn plan(
             warnings.extend(tag_note);
             return Ok(ConversionPlan {
                 from,
+                built_in: false,
                 to,
                 inputs: inputs.to_vec(),
                 output: output.to_path_buf(),
@@ -584,6 +586,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
     sizing.choice = Some(choice);
     Ok(ConversionPlan {
         from: p.from,
+        built_in: false,
         to: p.to,
         inputs: p.inputs.to_vec(),
         output: p.output.to_path_buf(),
