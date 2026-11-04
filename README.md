@@ -83,7 +83,7 @@ first run.
 $ cargo install convkit --locked
 ```
 
-Building from source — which `cargo install` does — requires Rust 1.85+ and
+Building from source — which `cargo install` does — requires Rust 1.88+ and
 a C toolchain on every platform (the HTTPS downloader's `ring` dependency
 compiles C at build time). On Windows that toolchain is the MSVC C++ build
 tools rustup already requires, so nothing extra is needed beyond a working

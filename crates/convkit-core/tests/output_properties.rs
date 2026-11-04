@@ -1858,7 +1858,7 @@ fn pdf_pages(path: &Path) -> usize {
 /// The names of the files in a zip (an Office Open XML document).
 fn zip_names(path: &Path) -> Vec<String> {
     let zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
-    zip.file_names().map(str::to_string).collect()
+    zip.file_names().map(|n| n.unwrap().into_owned()).collect()
 }
 
 /// One file inside a zip, as text.
