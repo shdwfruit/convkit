@@ -51,6 +51,34 @@ csv = "1"
 # Lines up the caret under a data error, where a character can take two
 # columns. Already in the tree through console.
 unicode-width = "0.2"
+# The developer and text tools (conv base64, hash, uuid, jwt, time, link,
+# count, case, chars, lorem, diff), all in-process. md-5, sha1 and hmac are
+# the RustCrypto releases on the same digest as sha2 above, so they add no
+# second copy of it.
+md-5 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+# 1.26 is the newest uuid that builds on this workspace's Rust 1.85.
+uuid = { version = "~1.26", features = ["v4", "v7"] }
+# Dates, offsets and time zones from the system's tz database (bundled on
+# Windows, which has none).
+jiff = "0.2"
+# Words, sentences and grapheme clusters by Unicode's own rules (UAX #29),
+# so CJK text and emoji count right.
+unicode-segmentation = "1"
+# Character names, general categories and scripts for conv chars.
+unicode_names2 = "4"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category", "emoji"] }
+unicode-script = "0.5"
+# Reading percent-encoded URLs and data: URIs. Already in the tree through
+# ureq.
+percent-encoding = "2"
+# Splitting words for camelCase, snake_case and the rest. Already in the
+# tree through clap's derive macros.
+heck = "0.5"
+# Line diffs with the changed words inside changed lines. Already in the
+# tree as insta's.
+similar = { version = "2.7", default-features = false, features = ["text", "inline", "unicode"] }
 
 [dev-dependencies]
 tempfile = "3"

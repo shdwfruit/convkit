@@ -487,6 +487,8 @@ pub fn copied_note(put: &Put, how: &Copied) -> String {
             .into_owned()
     };
     let what = match put {
+        // Text a tool printed rather than read from a file.
+        Put::Text { file, .. } if file.as_os_str().is_empty() => "the result".to_string(),
         Put::Text { file, .. } => format!("the text of {}", name(file)),
         Put::Picture { file, .. } => name(file),
         Put::Files(files) if files.len() == 1 => name(&files[0]),

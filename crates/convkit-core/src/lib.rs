@@ -31,6 +31,7 @@ pub mod size;
 pub mod sized;
 pub mod speed;
 pub mod table;
+pub mod tools;
 pub mod trim;
 mod video;
 pub mod winpath;
