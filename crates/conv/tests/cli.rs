@@ -5247,7 +5247,11 @@ fn pdf_pages_end_to_end_name_the_folder_and_count_the_pages() {
         .args(["report.pdf", ".jpg"])
         .assert()
         .success()
-        .stdout(contains("OK report/ - 3 pages - "));
+        // The folder is named with the platform's own separator after it.
+        .stdout(contains(format!(
+            "OK report{} - 3 pages - ",
+            std::path::MAIN_SEPARATOR
+        )));
     for n in 1..=3 {
         assert!(dir.path().join(format!("report/report-{n}.jpg")).is_file());
     }
