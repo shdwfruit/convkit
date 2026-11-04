@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='One command for everyday file conversion, offline'
+            Description='A free, offline toolbox for the file and text jobs you would pay an app for or hand to a website'
             Manufacturer='shdwfruit'
             InstallerVersion='450'
             Languages='1033'
