@@ -5,4 +5,4 @@ target/
 docs/local/
 
 # Rendered launch video and its build files
-brag-output/
+brag-output*/

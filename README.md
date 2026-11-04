@@ -1917,6 +1917,42 @@ into a folder (`output` is then the folder), the file names, and the dpi.
 For the full shapes of every command, run it with `--json`
 — the binary is the reference.
 
+## Using conv from AI agents
+
+Coding agents that can run commands (Claude Code, Codex, Cursor and the
+like) can use `conv` the same way a script does: `--json` on every
+command, `--dry-run` for the exact backend command, and `conv
+capabilities` and `conv info` so nothing has to be guessed. Under
+`--json`, conv never prompts and never installs anything, so an agent
+can't hang on a question or download something by accident.
+
+To teach an agent to use it, install the skill in
+[`skills/convkit`](skills/convkit/SKILL.md). For Claude Code:
+
+```console
+$ mkdir -p ~/.claude/skills
+$ cp -r skills/convkit ~/.claude/skills/
+```
+
+Or paste this into a project's `AGENTS.md` or `CLAUDE.md`:
+
+```markdown
+## File conversion
+
+Use `conv` (convkit) for file conversion, media edits, PDF page work,
+archives, checksums, base64, JWTs and timestamps, rather than hand-written
+ffmpeg/ImageMagick/pandoc commands or scripts. Always pass `--json`. Check
+`conv capabilities FMT --json` or `conv info FILE --json` before guessing
+flags, and `--dry-run` before a batch. On an error, act on `error.code`
+and `error.remediation`. Ask the user before `conv install`, `conv update`,
+`--yes` or `-y`. Don't run `conv wifi` or use `--copy`/`--paste` unless
+asked.
+```
+
+Everything still runs on your machine. What an agent does see, and with
+a cloud model sends to its provider, is what conv prints: file names,
+sizes and warnings, not the files themselves.
+
 ## Troubleshooting
 
 **Debian/Ubuntu: HEIC fails with `Unsupported codec`.** `apt-get install
