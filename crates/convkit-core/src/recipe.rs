@@ -63,6 +63,13 @@ pub struct Tuning {
     /// the probe's orientation by `plan::build_tuned`; a turn of the pixels
     /// reaches argv through `ResolvedVideo::turn`.
     pub rotate: Option<crate::rotate::Turn>,
+    /// The voice that reads text aloud (`--voice`): a name, `system`, or a
+    /// Piper voice file, which reads with Piper. Chosen by
+    /// `speech::choose`; it reaches argv through `ResolvedVideo::voice`.
+    pub voice: Option<String>,
+    /// Words per minute for text read aloud (`--rate`), spelled for each
+    /// engine by `Arg::Rate`.
+    pub rate: Option<u16>,
 }
 
 impl Tuning {
@@ -80,7 +87,65 @@ impl Tuning {
             && self.fps.is_none()
             && self.crf.is_none()
             && self.max_size.is_none()
+            && self.voice.is_none()
+            && self.rate.is_none()
     }
+}
+
+/// A file conv writes for a step to read, just before it runs, beside the
+/// step's output (`staged_path`). `plan` adds the `Prepare` that writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Staged {
+    /// A .txt source as an HTML page for pandoc (`text::page`).
+    TextPage,
+    /// The text a speech engine reads aloud (`text::speakable`): the .txt
+    /// source, or what pandoc made of a document.
+    SpeechText,
+    /// The Lua filter that keeps pandoc from downloading pictures
+    /// (`offline::FILTER`).
+    OfflineFilter,
+    /// conv's System.Speech script (`speech::SAPI_SCRIPT`).
+    SapiScript,
+}
+
+impl Staged {
+    fn suffix(self) -> &'static str {
+        match self {
+            Staged::TextPage => "convkit-text.html",
+            Staged::SpeechText => "convkit-speech.txt",
+            Staged::OfflineFilter => "convkit-offline.lua",
+            Staged::SapiScript => "convkit-speak.ps1",
+        }
+    }
+}
+
+/// Where a step writing `output` finds `staged`: beside it, named after
+/// the conversion's output (`notes.convkit-speech.txt` for a step writing
+/// `notes.convkit-step0.aiff`).
+pub fn staged_path(output: &Path, staged: Staged) -> std::path::PathBuf {
+    let name = output
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = match name.find(".convkit-step") {
+        Some(i) => name[..i].to_string(),
+        None => Path::new(&name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    output.with_file_name(format!("{stem}.{}", staged.suffix()))
+}
+
+/// How an engine takes `--rate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateStyle {
+    /// Words per minute after this flag: say's `-r`, espeak-ng's `-s`.
+    Wpm(&'static str),
+    /// System.Speech's -10 to 10 (`speech::sapi_rate`), after `-Rate`.
+    Sapi,
+    /// Piper's `--length_scale` (`speech::piper_length_scale`).
+    LengthScale,
 }
 
 /// How a recipe spells its width cap, and what it scales with.
@@ -308,6 +373,18 @@ pub enum Arg {
     /// known at execution time") but have different shapes, so they stay
     /// separate mechanisms rather than one forced into the other.
     BackendPath(Backend),
+    /// The path of a file conv writes for this step (`Staged`), beside the
+    /// step's output.
+    Staged(Staged),
+    /// The voice after this flag (`-v`, `--model`, `-Voice`), when one was
+    /// chosen (`ResolvedVideo::voice`); nothing otherwise, so the engine
+    /// reads with the system's own.
+    Voice(&'static str),
+    /// `--rate`, spelled as this engine takes it; nothing without the flag.
+    Rate(RateStyle),
+    /// Renders nothing: the step reads this staged file on its standard
+    /// input (`PlannedStep::stdin`), as Piper reads its text.
+    Stdin(Staged),
 }
 
 /// How a step names its result, which determines what `exec` must do afterwards.
@@ -566,6 +643,34 @@ impl Step {
                 // a placeholder the executor swaps for a resolved executable,
                 // and rewriting it as a path would break that substitution.
                 Arg::BackendPath(backend) => argv.push(backend.path_placeholder()),
+                Arg::Staged(staged) => {
+                    path_args.push(argv.len());
+                    argv.push(staged_path(output, *staged).to_string_lossy().into_owned());
+                }
+                Arg::Voice(flag) => {
+                    if let Some(voice) = &video.voice {
+                        argv.push((*flag).to_string());
+                        // A Piper voice is a file.
+                        if crate::speech::is_piper_voice(voice) {
+                            path_args.push(argv.len());
+                        }
+                        argv.push(voice.clone());
+                    }
+                }
+                Arg::Rate(style) => {
+                    if let Some(wpm) = tuning.rate {
+                        let (flag, value) = match style {
+                            RateStyle::Wpm(flag) => (*flag, wpm.to_string()),
+                            RateStyle::Sapi => ("-Rate", crate::speech::sapi_rate(wpm).to_string()),
+                            RateStyle::LengthScale => {
+                                ("--length_scale", crate::speech::piper_length_scale(wpm))
+                            }
+                        };
+                        argv.push(flag.to_string());
+                        argv.push(value);
+                    }
+                }
+                Arg::Stdin(_) => {}
             }
         }
         Rendered { argv, path_args }
@@ -841,6 +946,8 @@ mod tests {
             speed: None,
             shift_pitch: false,
             rotate: None,
+            voice: None,
+            rate: None,
         };
         let r = TUNABLE.render_full(
             &[Path::new("in.png")],

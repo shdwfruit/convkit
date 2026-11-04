@@ -34,6 +34,7 @@ pub enum Format {
     Flac,
     Opus,
     Ogg,
+    Aiff,
     // Images (Gif is an image; gif<->video routing is the registry's business)
     Gif,
     Heic,
@@ -53,6 +54,8 @@ pub enum Format {
     Pptx,
     Odt,
     Ods,
+    Rtf,
+    Txt,
     // Office 97-2003, as sources only
     Doc,
     Xls,
@@ -90,6 +93,7 @@ const TABLE: &[(Format, Kind, &[&str], &[&str])] = &[
     (Format::Flac, Kind::Audio, &["flac"], &[]),
     (Format::Opus, Kind::Audio, &["opus"], &[]),
     (Format::Ogg, Kind::Audio, &["ogg", "oga"], &[]),
+    (Format::Aiff, Kind::Audio, &["aiff", "aif"], &[]),
     (Format::Gif, Kind::Image, &["gif"], &[]),
     (Format::Heic, Kind::Image, &["heic"], &[]),
     (Format::Heif, Kind::Image, &["heif"], &[]),
@@ -107,6 +111,8 @@ const TABLE: &[(Format, Kind, &[&str], &[&str])] = &[
     (Format::Pptx, Kind::Document, &["pptx"], &[]),
     (Format::Odt, Kind::Document, &["odt"], &[]),
     (Format::Ods, Kind::Document, &["ods"], &[]),
+    (Format::Rtf, Kind::Document, &["rtf"], &[]),
+    (Format::Txt, Kind::Document, &["txt", "text"], &[]),
     (Format::Doc, Kind::Document, &["doc"], &[]),
     (Format::Xls, Kind::Document, &["xls"], &[]),
     (Format::Ppt, Kind::Document, &["ppt"], &[]),

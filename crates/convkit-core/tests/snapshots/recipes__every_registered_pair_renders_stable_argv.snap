@@ -2,6 +2,13 @@
 source: crates/convkit-core/tests/recipes.rs
 expression: "lines.join(\"\\n\")"
 ---
+aiff -> flac: ffmpeg -i in.aiff -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
+aiff -> m4a: ffmpeg -i in.aiff -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
+aiff -> mp3: ffmpeg -i in.aiff -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
+aiff -> ogg: ffmpeg -i in.aiff -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
+aiff -> opus: ffmpeg -i in.aiff -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
+aiff -> wav: ffmpeg -i in.aiff -vn -c:a pcm_s16le -y out.wav
+avi -> aiff: ffmpeg -i in.avi -vn -c:a pcm_s16be -y out.aiff
 avi -> flac: ffmpeg -i in.avi -vn -c:a flac -y out.flac
 avi -> gif: ffmpeg -i in.avi -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
 avi -> m4a: ffmpeg -i in.avi -vn -c:a aac -b:a 192k -y out.m4a
@@ -34,6 +41,9 @@ csv -> yaml: built in
 doc -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to docx:MS Word 2007 XML --outdir . in.doc
 doc -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.doc
 docx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.docx
+docx -> rtf: pandoc in.docx --standalone --resource-path . --lua-filter out.convkit-offline.lua -o out.rtf
+docx -> txt: pandoc in.docx -t plain --wrap=none -o out.txt
+flac -> aiff: ffmpeg -i in.flac -vn -c:a pcm_s16be -y out.aiff
 flac -> m4a: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
 flac -> mp3: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
 flac -> ogg: ffmpeg -i in.flac -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
@@ -56,6 +66,12 @@ heif -> pdf: magick in.heif -auto-orient -compress jpeg -quality 92 out.pdf
 heif -> png: magick in.heif[0] -auto-orient out.png
 heif -> tiff: magick in.heif -auto-orient out.tiff
 heif -> webp: magick in.heif -auto-orient -quality 92 out.webp
+html -> docx: pandoc in.html -f html+raw_html --standalone --resource-path . --lua-filter out.convkit-offline.lua -o out.docx
+html -> md: pandoc in.html -f html+raw_html -t gfm-raw_html --wrap=none --lua-filter out.convkit-offline.lua -o out.md
+html -> pdf: pandoc in.html -f html+raw_html --standalone --resource-path . --lua-filter out.convkit-offline.lua -o out.convkit-step0.docx
+html -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . out.convkit-step0.docx
+html -> rtf: pandoc in.html -f html+raw_html --standalone --resource-path . --lua-filter out.convkit-offline.lua -o out.rtf
+html -> txt: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.txt
 ico -> png: magick in.ico[0] out.png
 jpg -> avif: magick in.jpg -auto-orient -quality 92 out.avif
 jpg -> bmp: magick in.jpg[0] -auto-orient out.bmp
@@ -68,6 +84,7 @@ jpg -> webp: magick in.jpg -auto-orient -quality 92 out.webp
 json -> csv: built in
 json -> toml: built in
 json -> yaml: built in
+m4a -> aiff: ffmpeg -i in.m4a -vn -c:a pcm_s16be -y out.aiff
 m4a -> flac: ffmpeg -i in.m4a -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
 m4a -> mp3: ffmpeg -i in.m4a -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
 m4a -> ogg: ffmpeg -i in.m4a -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
@@ -77,6 +94,9 @@ md -> docx: pandoc in.md --standalone --resource-path . -o out.docx
 md -> html: pandoc in.md --standalone --resource-path . -o out.html
 md -> pdf: pandoc in.md --standalone --resource-path . -o out.convkit-step0.docx
 md -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . out.convkit-step0.docx
+md -> rtf: pandoc in.md --standalone --resource-path . --lua-filter out.convkit-offline.lua -o out.rtf
+md -> txt: pandoc in.md -t plain --wrap=none -o out.txt
+mkv -> aiff: ffmpeg -i in.mkv -vn -c:a pcm_s16be -y out.aiff
 mkv -> flac: ffmpeg -i in.mkv -vn -c:a flac -y out.flac
 mkv -> gif: ffmpeg -i in.mkv -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
 mkv -> m4a: ffmpeg -i in.mkv -vn -c:a aac -b:a 192k -y out.m4a
@@ -87,6 +107,7 @@ mkv -> ogg: ffmpeg -i in.mkv -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=ch
 mkv -> opus: ffmpeg -i in.mkv -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 mkv -> wav: ffmpeg -i in.mkv -vn -c:a pcm_s16le -y out.wav
 mkv -> webm: ffmpeg -i in.mkv -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+mov -> aiff: ffmpeg -i in.mov -vn -c:a pcm_s16be -y out.aiff
 mov -> flac: ffmpeg -i in.mov -vn -c:a flac -y out.flac
 mov -> gif: ffmpeg -i in.mov -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
 mov -> m4a: ffmpeg -i in.mov -vn -c:a aac -b:a 192k -y out.m4a
@@ -97,11 +118,13 @@ mov -> ogg: ffmpeg -i in.mov -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=ch
 mov -> opus: ffmpeg -i in.mov -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 mov -> wav: ffmpeg -i in.mov -vn -c:a pcm_s16le -y out.wav
 mov -> webm: ffmpeg -i in.mov -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+mp3 -> aiff: ffmpeg -i in.mp3 -vn -c:a pcm_s16be -y out.aiff
 mp3 -> flac: ffmpeg -i in.mp3 -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
 mp3 -> m4a: ffmpeg -i in.mp3 -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
 mp3 -> ogg: ffmpeg -i in.mp3 -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 mp3 -> opus: ffmpeg -i in.mp3 -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 mp3 -> wav: ffmpeg -i in.mp3 -vn -c:a pcm_s16le -y out.wav
+mp4 -> aiff: ffmpeg -i in.mp4 -vn -c:a pcm_s16be -y out.aiff
 mp4 -> flac: ffmpeg -i in.mp4 -vn -c:a flac -y out.flac
 mp4 -> gif: ffmpeg -i in.mp4 -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
 mp4 -> m4a: ffmpeg -i in.mp4 -vn -c:a aac -b:a 192k -y out.m4a
@@ -115,11 +138,15 @@ mp4 -> webm: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 
 ods -> csv: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to csv:Text - txt - csv (StarCalc):44,34,76,1,,1033,false,true,false,false,false,0 --outdir . in.ods
 ods -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore macro:///Convkit.Sheets.ToPdf("in.ods","out.pdf")
 odt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.odt
+odt -> rtf: pandoc in.odt --standalone --resource-path . --lua-filter out.convkit-offline.lua -o out.rtf
+odt -> txt: pandoc in.odt -t plain --wrap=none -o out.txt
+ogg -> aiff: ffmpeg -i in.ogg -vn -c:a pcm_s16be -map_metadata 0:s:a:0 -y out.aiff
 ogg -> flac: ffmpeg -i in.ogg -map 0:a -map 0:v? -c:v copy -c:a flac -map_metadata 0:s:a:0 -y out.flac
 ogg -> m4a: ffmpeg -i in.ogg -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -map_metadata 0:s:a:0 -y out.m4a
 ogg -> mp3: ffmpeg -i in.ogg -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -map_metadata 0:s:a:0 -y out.mp3
 ogg -> opus: ffmpeg -i in.ogg -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 ogg -> wav: ffmpeg -i in.ogg -vn -c:a pcm_s16le -map_metadata 0:s:a:0 -y out.wav
+opus -> aiff: ffmpeg -i in.opus -vn -c:a pcm_s16be -map_metadata 0:s:a:0 -y out.aiff
 opus -> flac: ffmpeg -i in.opus -map 0:a -map 0:v? -c:v copy -c:a flac -map_metadata 0:s:a:0 -y out.flac
 opus -> m4a: ffmpeg -i in.opus -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -map_metadata 0:s:a:0 -y out.m4a
 opus -> mp3: ffmpeg -i in.opus -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -map_metadata 0:s:a:0 -y out.mp3
@@ -137,6 +164,9 @@ png -> webp: magick in.png -auto-orient -quality 92 out.webp
 ppt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.ppt
 ppt -> pptx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pptx:Impress MS PowerPoint 2007 XML --outdir . in.ppt
 pptx -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.pptx
+rtf -> docx: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to docx:MS Word 2007 XML --outdir . in.rtf
+rtf -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.rtf
+rtf -> txt: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
 svg -> ico: magick -density 384 -background none in.svg -gravity center -resize 256x256 -extent 256x256 -define icon:png-compression-size=256 -define icon:auto-resize=256,128,64,48,32,24,16 out.ico
 svg -> jpg: magick -density 384 -background white in.svg -alpha remove -alpha off -flatten -quality 92 out.jpg
 svg -> png: magick -density 384 -background none in.svg out.png
@@ -149,11 +179,19 @@ tiff -> png: magick in.tiff[0] -auto-orient out.png
 tiff -> webp: magick in.tiff -auto-orient -quality 92 out.webp
 toml -> json: built in
 toml -> yaml: built in
+txt -> docx: pandoc out.convkit-text.html -f html --standalone -o out.docx
+txt -> html: pandoc out.convkit-text.html -f html --standalone -o out.html
+txt -> md: pandoc out.convkit-text.html -f html -t gfm --wrap=none -o out.md
+txt -> pdf: pandoc out.convkit-text.html -f html --standalone -o out.convkit-step0.docx
+txt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . out.convkit-step0.docx
+txt -> rtf: pandoc out.convkit-text.html -f html --standalone -o out.rtf
+wav -> aiff: ffmpeg -i in.wav -vn -c:a pcm_s16be -y out.aiff
 wav -> flac: ffmpeg -i in.wav -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
 wav -> m4a: ffmpeg -i in.wav -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
 wav -> mp3: ffmpeg -i in.wav -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a 2 -y out.mp3
 wav -> ogg: ffmpeg -i in.wav -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 wav -> opus: ffmpeg -i in.wav -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
+webm -> aiff: ffmpeg -i in.webm -vn -c:a pcm_s16be -y out.aiff
 webm -> flac: ffmpeg -i in.webm -vn -c:a flac -y out.flac
 webm -> gif: ffmpeg -i in.webm -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
 webm -> m4a: ffmpeg -i in.webm -vn -c:a aac -b:a 192k -y out.m4a

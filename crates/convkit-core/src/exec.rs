@@ -339,6 +339,11 @@ fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
             // qpdf's reports never become distilled notes: `pdf` writes its
             // own sentences (spec section 4.3).
             Backend::Qpdf => false,
+            // say, espeak-ng and conv's System.Speech script print nothing
+            // when they work, so whatever they say is the report.
+            Backend::Say | Backend::Espeak | Backend::PowerShell => true,
+            // Piper logs every voice it loads; only its errors matter.
+            Backend::Piper => line.to_ascii_lowercase().contains("error"),
         }
     };
 
@@ -530,6 +535,15 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     // How a JPEG, mp4 or mov shows its stored picture, for a turn that may
     // only need its note reset. A plain file read, no backend.
     crate::rotate::attach(req.from, &req.inputs[0], &req.tuning, &mut probed);
+    // How a .txt is written, and the voices text is read aloud with.
+    crate::text::attach(
+        resolver,
+        req.from,
+        req.to,
+        &req.inputs[0],
+        &req.tuning,
+        &mut probed,
+    );
 
     let dest_dir = req
         .output
@@ -827,6 +841,17 @@ impl StepRunner<'_> {
                 plan::Prepare::Stage { from, to, strip } => {
                     stage_file(from, to, *strip, hard_link)?;
                 }
+                plan::Prepare::Text {
+                    from,
+                    to,
+                    form,
+                    source,
+                } => match form {
+                    plan::TextForm::Page { title } => {
+                        crate::text::write_page(from, to, title, source)?;
+                    }
+                    plan::TextForm::Speech => crate::text::write_speakable(from, to, source)?,
+                },
             }
         }
 
@@ -920,6 +945,12 @@ impl StepRunner<'_> {
                 .collect(),
         });
 
+        // Piper reads the text it speaks on stdin. Every other step reads
+        // nothing there, which `output` already arranges.
+        if let Some(stdin) = &step.stdin {
+            let file = std::fs::File::open(stdin).map_err(io_err)?;
+            cmd.stdin(file);
+        }
         let out = cmd.output().map_err(|e| {
             ConvError::new(
                 ErrorCode::ConversionFailed,
@@ -1050,6 +1081,10 @@ impl StepRunner<'_> {
 
         self.notes
             .extend(classify_backend_noise(step.backend, &step_report));
+        // What the offline filter left out of a document, said once.
+        if step.backend == Backend::Pandoc {
+            self.notes.extend(crate::offline::note(&step_report));
+        }
         if !step_report.trim().is_empty() {
             self.backend_output.push(BackendOutput {
                 backend: step.backend,
@@ -2827,6 +2862,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             intermediate_ext: None,
             path_args: Vec::new(),
             prepare,
+            stdin: None,
         }
     }
 
@@ -3258,6 +3294,7 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             intermediate_ext: None,
             path_args,
             prepare: Vec::new(),
+            stdin: None,
         }
     }
 

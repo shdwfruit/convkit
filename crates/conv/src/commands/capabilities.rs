@@ -141,6 +141,12 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     if convkit_core::sized::is_video_target(to) {
         push_flag(&mut flags, "--max-size");
     }
+    if has(|a| matches!(a, Arg::Voice(_))) {
+        push_flag(&mut flags, "--voice");
+    }
+    if has(|a| matches!(a, Arg::Rate(_))) {
+        push_flag(&mut flags, "--rate");
+    }
     flags
 }
 

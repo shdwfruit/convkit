@@ -636,6 +636,7 @@ fn ffmpeg_step(argv: Vec<String>, mode: OutputMode, output: PathBuf) -> PlannedS
         intermediate_ext: None,
         path_args,
         prepare: Vec::new(),
+        stdin: None,
     }
 }
 

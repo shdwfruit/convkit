@@ -52,11 +52,24 @@ fn truncate_column(s: &str, width: usize) -> String {
 /// the same remediation `Resolver::resolve` already computes for a missing
 /// backend (which itself calls `PackageManager::detect()` to pick the
 /// manual hint).
+/// Every backend doctor reports: the seven, this system's speech engine,
+/// and Piper when it is installed. Piper is only ever asked for by name
+/// (`--voice VOICE.onnx`), so a missing one is nothing to fix.
+fn backends(resolver: &convkit_core::Resolver) -> Vec<Backend> {
+    let mut all = BACKENDS.to_vec();
+    all.push(convkit_core::speech::Engine::host().backend());
+    if resolver.resolve(Backend::Piper).is_ok() {
+        all.push(Backend::Piper);
+    }
+    all
+}
+
 pub fn run(cli: &Cli) -> i32 {
     let resolver = cli.resolver();
+    let backends = backends(&resolver);
 
     if cli.json {
-        let arr: Vec<serde_json::Value> = BACKENDS
+        let arr: Vec<serde_json::Value> = backends
             .iter()
             .map(|&b| match resolver.resolve(b) {
                 Ok(r) => json!({
@@ -83,7 +96,7 @@ pub fn run(cli: &Cli) -> i32 {
         let envelope = json!({ "ok": true, "backends": arr });
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
     } else {
-        for &b in &BACKENDS {
+        for &b in &backends {
             match resolver.resolve(b) {
                 Ok(r) => println!(
                     "{:<9} {:<10} {:<28} ({})",

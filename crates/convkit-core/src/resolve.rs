@@ -342,8 +342,13 @@ impl Resolver {
     }
 
     /// Environment variable consulted for this backend, e.g. `CONVKIT_FFMPEG`.
+    /// `espeak-ng` is `CONVKIT_ESPEAK_NG`: a shell cannot export a name
+    /// with a hyphen in it.
     fn env_var(backend: Backend) -> String {
-        format!("CONVKIT_{}", backend.exe_name().to_ascii_uppercase())
+        format!(
+            "CONVKIT_{}",
+            backend.exe_name().to_ascii_uppercase().replace('-', "_")
+        )
     }
 
     /// Platform install locations checked last, for tools that commonly are not
@@ -380,6 +385,14 @@ impl Resolver {
                 vec![PathBuf::from(
                     "/Applications/LibreOffice.app/Contents/MacOS/soffice",
                 )]
+            }
+            // Where every macOS and Windows keeps them, for a PATH that
+            // leaves them out.
+            (Backend::Say, _, true) => vec![PathBuf::from("/usr/bin/say")],
+            (Backend::PowerShell, true, _) => {
+                let root = std::env::var_os("SystemRoot")
+                    .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+                vec![root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe")]
             }
             _ => Vec::new(),
         }
@@ -698,7 +711,17 @@ impl Resolver {
     fn version_of(backend: Backend, path: &Path, timeout: Duration) -> Option<String> {
         let flag = match backend {
             Backend::Ffmpeg | Backend::Ffprobe | Backend::Magick => "-version",
-            Backend::Pandoc | Backend::Soffice | Backend::Typst | Backend::Qpdf => "--version",
+            Backend::Pandoc
+            | Backend::Soffice
+            | Backend::Typst
+            | Backend::Qpdf
+            | Backend::Espeak
+            | Backend::Piper => "--version",
+            // Neither has a version flag. `say --version` is refused, but
+            // `say` with anything else it does not know would read it
+            // aloud, and `powershell --version` starts a shell. Both come
+            // with the system, whose version is theirs.
+            Backend::Say | Backend::PowerShell => return Some("built-in".to_string()),
         };
         let first_line = Self::probe_first_line(backend, path, flag, timeout)?;
         extract_version_token(&first_line).map(str::to_string)

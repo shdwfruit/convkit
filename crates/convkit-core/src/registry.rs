@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use crate::recipe::{ScaleStyle, VideoChainSpec};
+use crate::recipe::{RateStyle, ScaleStyle, Staged, VideoChainSpec};
+use crate::speech::Engine;
 use crate::{Arg, AvailableBackends, Backend, Format, Kind, OutputMode, Recipe, Step, Tuning};
 
 /// JPEG/WebP/AVIF quality. Visually transparent without bloat; see spec §7.4.
@@ -1376,6 +1377,33 @@ const TO_WAV: Recipe = Recipe {
     warnings: &[WAV_DEPTH_NOTE],
 };
 
+/// `TO_AIFF`'s note, the same as WAV's: AIFF holds 16-bit PCM here too.
+const AIFF_DEPTH_NOTE: &str = "A 24-bit source is downconverted to 16-bit PCM by pcm_s16be.";
+
+/// AIFF is WAV with its bytes the other way round (big-endian PCM), which
+/// is what Apple's own apps write, so it gets WAV's recipe in that order.
+/// It drops cover art as WAV does: ffmpeg only writes a picture into an
+/// AIFF's ID3 chunk when asked to write the chunk at all, and Logic and
+/// GarageBand, which AIFF is for, ignore it there.
+const TO_AIFF: Recipe = Recipe {
+    steps: &[step!(
+        Backend::Ffmpeg,
+        [
+            Arg::Trim,
+            Arg::Lit("-i"),
+            Arg::Input,
+            Arg::Lit("-vn"),
+            Arg::Lit("-c:a"),
+            Arg::Lit("pcm_s16be"),
+            Arg::AudioFilter(None),
+            Arg::StripMetadata,
+            Arg::Lit("-y"),
+            Arg::Output,
+        ]
+    )],
+    warnings: &[AIFF_DEPTH_NOTE],
+};
+
 /// The note for an audio source going to opus or ogg. `notes_for` keeps it
 /// only when the probe saw a picture, or could not tell. Shared with the
 /// stream-copy path in `media.rs`.
@@ -1532,6 +1560,7 @@ const AUDIO_TARGETS: &[(Format, Recipe)] = &[
     (Format::Flac, TO_FLAC),
     (Format::Opus, TO_OPUS),
     (Format::Ogg, TO_OGG),
+    (Format::Aiff, TO_AIFF),
 ];
 
 /// Same target formats, but for an *audio* source: mp3/m4a/flac preserve an
@@ -1545,6 +1574,7 @@ const AUDIO_TARGETS_KEEP_ART: &[(Format, Recipe)] = &[
     (Format::Flac, TO_FLAC_KEEP_ART),
     (Format::Opus, TO_OPUS_ART),
     (Format::Ogg, TO_OGG_ART),
+    (Format::Aiff, TO_AIFF),
 ];
 
 const AUDIO: &[Format] = &[
@@ -1554,6 +1584,7 @@ const AUDIO: &[Format] = &[
     Format::Flac,
     Format::Opus,
     Format::Ogg,
+    Format::Aiff,
 ];
 
 /// `avi` is deliberately never inserted as a *target* below, only ever as a
@@ -1595,11 +1626,11 @@ fn insert_media_family(t: &mut Table) {
             if from == to {
                 continue;
             }
-            // A WAV source holds no cover art, so it gets the opus/ogg
-            // recipes without the note about dropping it.
+            // A WAV or AIFF source holds no cover art conv reads, so it
+            // gets the opus/ogg recipes without the note about dropping it.
             let recipe = match (from, to) {
-                (Format::Wav, Format::Opus) => TO_OPUS,
-                (Format::Wav, Format::Ogg) => TO_OGG,
+                (Format::Wav | Format::Aiff, Format::Opus) => TO_OPUS,
+                (Format::Wav | Format::Aiff, Format::Ogg) => TO_OGG,
                 _ => recipe,
             };
             t.insert((from, to), recipe);
@@ -1864,6 +1895,464 @@ const MD_TO_PDF: Recipe = Recipe {
     warnings: &[],
 };
 
+// --- Text, HTML and RTF --------------------------------------------------------
+//
+// pandoc reads and writes these. Two things it does on its own are turned
+// off (see `offline`): an HTML source is read as `html+raw_html`, since
+// pandoc's plain HTML reader downloads every iframe's page, and a writer
+// that puts pictures in the file (docx, rtf) runs the offline filter,
+// which links to a picture on the web instead of downloading it. A .txt
+// source is read by conv itself, in whatever encoding it was saved, and
+// handed to pandoc as an HTML page (`Staged::TextPage`).
+
+/// A pandoc step: reading `$read`, writing `-o`, with `$args` between.
+macro_rules! pandoc {
+    ([$($arg:expr),* $(,)?]) => {
+        Step {
+            backend: Backend::Pandoc,
+            args: &[$($arg,)* Arg::Lit("-o"), Arg::Output],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        }
+    };
+    ([$($arg:expr),* $(,)?], intermediate_ext: $ext:expr) => {
+        Step {
+            backend: Backend::Pandoc,
+            args: &[$($arg,)* Arg::Lit("-o"), Arg::Output],
+            output: OutputMode::Path,
+            intermediate_ext: Some($ext),
+        }
+    };
+}
+
+/// Plain text, one paragraph a line (`--wrap=none`): pandoc's default
+/// wraps at 72 columns, which breaks every sentence in an editor and makes
+/// a speech engine pause mid-sentence.
+const TO_TXT: Recipe = Recipe {
+    steps: &[pandoc!([
+        Arg::Input,
+        Arg::Lit("-t"),
+        Arg::Lit("plain"),
+        Arg::Lit("--wrap=none"),
+    ])],
+    warnings: &[],
+};
+
+const HTML_TO_TXT: Recipe = Recipe {
+    steps: &[pandoc!([
+        Arg::Input,
+        Arg::Lit("-f"),
+        Arg::Lit("html+raw_html"),
+        Arg::Lit("-t"),
+        Arg::Lit("plain"),
+        Arg::Lit("--wrap=none"),
+    ])],
+    warnings: &[],
+};
+
+/// Markdown as GitHub, Obsidian and most editors read it, without the HTML
+/// a web page is wrapped in: `-raw_html` drops the `<div>`s and `<span>`s
+/// that would otherwise come through around every paragraph, and the
+/// filter the other tags (see `offline`). What they held is kept.
+const HTML_TO_MD: Recipe = Recipe {
+    steps: &[pandoc!([
+        Arg::Input,
+        Arg::Lit("-f"),
+        Arg::Lit("html+raw_html"),
+        Arg::Lit("-t"),
+        Arg::Lit("gfm-raw_html"),
+        Arg::Lit("--wrap=none"),
+        Arg::Lit("--lua-filter"),
+        Arg::Staged(Staged::OfflineFilter),
+    ])],
+    warnings: &[HTML_MD_NOTE],
+};
+
+const HTML_MD_NOTE: &str =
+    "The page's styling, scripts, forms, embedded videos and frames are left out.";
+
+/// A web page as a document, its pictures beside it found where the page
+/// points (`--resource-path`, as for Markdown) and those on the web linked
+/// to (`--lua-filter`).
+const HTML_TO_DOCX: Recipe = Recipe {
+    steps: &[pandoc!([
+        Arg::Input,
+        Arg::Lit("-f"),
+        Arg::Lit("html+raw_html"),
+        Arg::Lit("--standalone"),
+        Arg::Lit("--resource-path"),
+        Arg::InputDir,
+        Arg::Lit("--lua-filter"),
+        Arg::Staged(Staged::OfflineFilter),
+    ])],
+    warnings: &[HTML_LAYOUT_NOTE],
+};
+
+const HTML_TO_RTF: Recipe = HTML_TO_DOCX;
+
+/// A web page's look is in its stylesheets, which pandoc does not read.
+const HTML_LAYOUT_NOTE: &str = "The page's text, headings, lists, tables, links and pictures \
+     come through; its styling and layout do not.";
+
+/// The same, as a PDF: through .docx and LibreOffice, as Markdown goes.
+const HTML_TO_PDF: Recipe = Recipe {
+    steps: &[
+        pandoc!(
+            [
+                Arg::Input,
+                Arg::Lit("-f"),
+                Arg::Lit("html+raw_html"),
+                Arg::Lit("--standalone"),
+                Arg::Lit("--resource-path"),
+                Arg::InputDir,
+                Arg::Lit("--lua-filter"),
+                Arg::Staged(Staged::OfflineFilter),
+            ],
+            intermediate_ext: "docx"
+        ),
+        soffice_step!("pdf"),
+    ],
+    warnings: &[HTML_LAYOUT_NOTE],
+};
+
+/// A .txt source, as the page conv writes from it (`text::page`).
+const TXT_TO_DOC: Recipe = Recipe {
+    steps: &[pandoc!([
+        Arg::Staged(Staged::TextPage),
+        Arg::Lit("-f"),
+        Arg::Lit("html"),
+        Arg::Lit("--standalone"),
+    ])],
+    warnings: &[],
+};
+
+const TXT_TO_MD: Recipe = Recipe {
+    steps: &[pandoc!([
+        Arg::Staged(Staged::TextPage),
+        Arg::Lit("-f"),
+        Arg::Lit("html"),
+        Arg::Lit("-t"),
+        Arg::Lit("gfm"),
+        Arg::Lit("--wrap=none"),
+    ])],
+    warnings: &[],
+};
+
+const TXT_TO_PDF: Recipe = Recipe {
+    steps: &[
+        pandoc!(
+            [
+                Arg::Staged(Staged::TextPage),
+                Arg::Lit("-f"),
+                Arg::Lit("html"),
+                Arg::Lit("--standalone"),
+            ],
+            intermediate_ext: "docx"
+        ),
+        soffice_step!("pdf"),
+    ],
+    warnings: &[],
+};
+
+/// A document into RTF or .docx, through the offline filter: a .docx or
+/// Markdown file can point at a picture on the web too.
+const DOC_TO_RTF: Recipe = Recipe {
+    steps: &[pandoc!([
+        Arg::Input,
+        Arg::Lit("--standalone"),
+        Arg::Lit("--resource-path"),
+        Arg::InputDir,
+        Arg::Lit("--lua-filter"),
+        Arg::Staged(Staged::OfflineFilter),
+    ])],
+    warnings: &[],
+};
+
+/// RTF is read by LibreOffice, which lays it out as Word does. pandoc's
+/// RTF reader moves a list that comes just before a table to the top of
+/// the document (pandoc 3.10, on RTF from TextEdit), so it only stands in
+/// when LibreOffice is missing (`FALLBACK_TABLE`), and says so.
+const RTF_TO_DOCX: Recipe = Recipe {
+    steps: &[soffice_step!("docx:MS Word 2007 XML")],
+    warnings: &[],
+};
+
+/// LibreOffice's "Text (encoded)" export: UTF-8, `\n` line ends, and no
+/// byte-order mark (the fifth token). A paragraph is a line, and a list
+/// keeps its bullets.
+const RTF_TO_TXT: Recipe = Recipe {
+    steps: &[soffice_step!("txt:Text (encoded):UTF8,LF,,,false")],
+    warnings: &[],
+};
+
+/// The fallbacks' note: what pandoc loses that LibreOffice keeps.
+const PANDOC_RTF_NOTE: &str = "pandoc read the RTF, as LibreOffice isn't installed: fonts, \
+     colours and some of the layout are dropped, and a list just before a table can move. \
+     Install LibreOffice for a faithful copy.";
+
+const PANDOC_RTF_TO_DOCX: Recipe = Recipe {
+    steps: DOC_TO_RTF.steps,
+    warnings: &[PANDOC_RTF_NOTE],
+};
+
+const PANDOC_RTF_TO_TXT: Recipe = Recipe {
+    steps: TO_TXT.steps,
+    warnings: &[PANDOC_RTF_NOTE],
+};
+
+// --- Text read aloud -----------------------------------------------------------
+//
+// A document is reduced to plain text by pandoc, a .txt is read by conv,
+// and either is made safe for the engine (`text::speakable`), which reads
+// it into an AIFF or WAV that ffmpeg makes the target from. Each engine's
+// recipe is built once (`SPEECH`); the table holds the system's.
+
+/// What can be read aloud, and into what.
+const SPEECH_SOURCES: &[Format] = &[
+    Format::Txt,
+    Format::Md,
+    Format::Html,
+    Format::Docx,
+    Format::Odt,
+    Format::Rtf,
+];
+const SPEECH_TARGETS: &[Format] = &[Format::M4a, Format::Mp3, Format::Wav, Format::Aiff];
+
+/// RTF as the plain text to read, by LibreOffice, as `RTF_TO_TXT`.
+const RTF_PLAIN_FOR_SPEECH: Step = Step {
+    backend: Backend::Soffice,
+    args: &[
+        Arg::Lit("--headless"),
+        Arg::Lit("--norestore"),
+        Arg::Lit("--convert-to"),
+        Arg::Lit("txt:Text (encoded):UTF8,LF,,,false"),
+        Arg::Lit("--outdir"),
+        Arg::OutDir,
+        Arg::Input,
+    ],
+    output: OutputMode::OutDir,
+    intermediate_ext: Some("txt"),
+};
+
+/// A document as the plain text to read.
+const PLAIN_FOR_SPEECH: Step = pandoc!(
+    [
+        Arg::Input,
+        Arg::Lit("-t"),
+        Arg::Lit("plain"),
+        Arg::Lit("--wrap=none"),
+    ],
+    intermediate_ext: "txt"
+);
+
+const HTML_PLAIN_FOR_SPEECH: Step = pandoc!(
+    [
+        Arg::Input,
+        Arg::Lit("-f"),
+        Arg::Lit("html+raw_html"),
+        Arg::Lit("-t"),
+        Arg::Lit("plain"),
+        Arg::Lit("--wrap=none"),
+    ],
+    intermediate_ext: "txt"
+);
+
+/// macOS's `say`, into AIFF, the one format every voice writes. It reads
+/// the text from a file (`-f`): given on the command line, a long text
+/// would pass the argument limit, and from a terminal say keeps only the
+/// last line.
+const SAY: Step = Step {
+    backend: Backend::Say,
+    args: &[
+        Arg::Voice("-v"),
+        Arg::Rate(RateStyle::Wpm("-r")),
+        Arg::Lit("-o"),
+        Arg::Output,
+        Arg::Lit("-f"),
+        Arg::Staged(Staged::SpeechText),
+    ],
+    output: OutputMode::Path,
+    intermediate_ext: Some("aiff"),
+};
+
+/// espeak-ng into WAV (`-w`). `-b 1`: the text is UTF-8, which espeak-ng
+/// otherwise guesses at.
+const ESPEAK: Step = Step {
+    backend: Backend::Espeak,
+    args: &[
+        Arg::Voice("-v"),
+        Arg::Rate(RateStyle::Wpm("-s")),
+        Arg::Lit("-b"),
+        Arg::Lit("1"),
+        Arg::Lit("-w"),
+        Arg::Output,
+        Arg::Lit("-f"),
+        Arg::Staged(Staged::SpeechText),
+    ],
+    output: OutputMode::Path,
+    intermediate_ext: Some("wav"),
+};
+
+/// System.Speech through conv's script (`speech::SAPI_SCRIPT`).
+const SAPI: Step = Step {
+    backend: Backend::PowerShell,
+    args: &[
+        Arg::Lit("-NoProfile"),
+        Arg::Lit("-NonInteractive"),
+        Arg::Lit("-ExecutionPolicy"),
+        Arg::Lit("Bypass"),
+        Arg::Lit("-File"),
+        Arg::Staged(Staged::SapiScript),
+        Arg::Lit("-In"),
+        Arg::Staged(Staged::SpeechText),
+        Arg::Lit("-Out"),
+        Arg::Output,
+        Arg::Voice("-Voice"),
+        Arg::Rate(RateStyle::Sapi),
+    ],
+    output: OutputMode::Path,
+    intermediate_ext: Some("wav"),
+};
+
+/// Piper, with the voice file `--voice` named (`--model`), reading its
+/// text on stdin, which every version of it takes.
+const PIPER: Step = Step {
+    backend: Backend::Piper,
+    args: &[
+        Arg::Voice("--model"),
+        Arg::Rate(RateStyle::LengthScale),
+        Arg::Lit("--output_file"),
+        Arg::Output,
+        Arg::Stdin(Staged::SpeechText),
+    ],
+    output: OutputMode::Path,
+    intermediate_ext: Some("wav"),
+};
+
+/// The engine's sound into the target. A voice is mono and has nothing
+/// above 11 kHz, so the music rates conv uses elsewhere would only make
+/// the file bigger: 64 kb/s AAC and LAME's `-q:a 4` (about 50 kb/s for a
+/// voice) sound the same as the engine's own file.
+const SPEECH_M4A: Step = step!(
+    Backend::Ffmpeg,
+    [
+        Arg::Lit("-i"),
+        Arg::Input,
+        Arg::Lit("-c:a"),
+        Arg::Lit("aac"),
+        Arg::Lit("-b:a"),
+        Arg::Lit("64k"),
+        Arg::Lit("-y"),
+        Arg::Output,
+    ]
+);
+const SPEECH_MP3: Step = step!(
+    Backend::Ffmpeg,
+    [
+        Arg::Lit("-i"),
+        Arg::Input,
+        Arg::Lit("-c:a"),
+        Arg::Lit("libmp3lame"),
+        Arg::Lit("-q:a"),
+        Arg::Lit("4"),
+        Arg::Lit("-y"),
+        Arg::Output,
+    ]
+);
+const SPEECH_WAV: Step = step!(
+    Backend::Ffmpeg,
+    [
+        Arg::Lit("-i"),
+        Arg::Input,
+        Arg::Lit("-c:a"),
+        Arg::Lit("pcm_s16le"),
+        Arg::Lit("-y"),
+        Arg::Output,
+    ]
+);
+const SPEECH_AIFF: Step = step!(
+    Backend::Ffmpeg,
+    [
+        Arg::Lit("-i"),
+        Arg::Input,
+        Arg::Lit("-c:a"),
+        Arg::Lit("pcm_s16be"),
+        Arg::Lit("-y"),
+        Arg::Output,
+    ]
+);
+
+/// Every engine's recipe for every pair it reads, built once, and for an
+/// RTF source the one pandoc reads it in when LibreOffice is missing
+/// (`speech_fallback`). The step lists are leaked: there are 112 of them,
+/// made once a process.
+static SPEECH: LazyLock<BTreeMap<(Engine, Format, Format, bool), Recipe>> = LazyLock::new(|| {
+    let mut t = BTreeMap::new();
+    for engine in Engine::all() {
+        let speak = match engine {
+            Engine::Say => SAY,
+            Engine::Sapi => SAPI,
+            Engine::Espeak => ESPEAK,
+            Engine::Piper => PIPER,
+        };
+        for &from in SPEECH_SOURCES {
+            for &to in SPEECH_TARGETS {
+                let encode = match to {
+                    Format::M4a => SPEECH_M4A,
+                    Format::Mp3 => SPEECH_MP3,
+                    Format::Wav => SPEECH_WAV,
+                    _ => SPEECH_AIFF,
+                };
+                for fallback in [false, true] {
+                    let steps: Vec<Step> = match (from, fallback) {
+                        (Format::Txt, false) => vec![speak, encode],
+                        (Format::Html, false) => vec![HTML_PLAIN_FOR_SPEECH, speak, encode],
+                        (Format::Rtf, false) => vec![RTF_PLAIN_FOR_SPEECH, speak, encode],
+                        (Format::Rtf, true) => vec![PLAIN_FOR_SPEECH, speak, encode],
+                        (_, false) => vec![PLAIN_FOR_SPEECH, speak, encode],
+                        (_, true) => continue,
+                    };
+                    let recipe = Recipe {
+                        steps: Box::leak(steps.into_boxed_slice()),
+                        warnings: if fallback { &[PANDOC_RTF_NOTE] } else { &[] },
+                    };
+                    t.insert((engine, from, to, fallback), recipe);
+                }
+            }
+        }
+    }
+    t
+});
+
+/// Whether `from -> to` reads text aloud.
+pub fn speaks(from: Format, to: Format) -> bool {
+    SPEECH_SOURCES.contains(&from) && SPEECH_TARGETS.contains(&to)
+}
+
+/// The recipe that reads `from` aloud into `to` with `engine`. The table
+/// holds the system's (`Engine::host`); `plan` takes Piper's when
+/// `--voice` names one of its voices, and the snapshot renders all four.
+pub fn speech_recipe(engine: Engine, from: Format, to: Format) -> Option<Recipe> {
+    SPEECH.get(&(engine, from, to, false)).copied()
+}
+
+/// The recipe for `from -> to` when LibreOffice is missing: an RTF source
+/// read by pandoc. `None` for every other source, which LibreOffice never
+/// reads.
+pub fn speech_fallback(engine: Engine, from: Format, to: Format) -> Option<Recipe> {
+    SPEECH.get(&(engine, from, to, true)).copied()
+}
+
+fn insert_speech_family(t: &mut Table) {
+    for &from in SPEECH_SOURCES {
+        for &to in SPEECH_TARGETS {
+            if let Some(r) = speech_recipe(Engine::host(), from, to) {
+                t.insert((from, to), r);
+            }
+        }
+    }
+}
+
 const OFFICE_SOURCES: &[Format] = &[
     Format::Docx,
     Format::Xlsx,
@@ -1930,6 +2419,30 @@ fn insert_document_family(t: &mut Table) {
     t.insert((Format::Md, Format::Docx), MD_TO_DOCX);
     t.insert((Format::Md, Format::Html), MD_TO_HTML);
     t.insert((Format::Md, Format::Pdf), MD_TO_PDF);
+
+    // Text and RTF out of every document pandoc reads well, and HTML and
+    // .txt in.
+    for from in [Format::Docx, Format::Odt, Format::Md] {
+        t.insert((from, Format::Txt), TO_TXT);
+    }
+    for from in [Format::Docx, Format::Odt, Format::Md] {
+        t.insert((from, Format::Rtf), DOC_TO_RTF);
+    }
+    t.insert((Format::Html, Format::Txt), HTML_TO_TXT);
+    t.insert((Format::Html, Format::Md), HTML_TO_MD);
+    t.insert((Format::Html, Format::Docx), HTML_TO_DOCX);
+    t.insert((Format::Html, Format::Rtf), HTML_TO_RTF);
+    t.insert((Format::Html, Format::Pdf), HTML_TO_PDF);
+    for to in [Format::Docx, Format::Html, Format::Rtf] {
+        t.insert((Format::Txt, to), TXT_TO_DOC);
+    }
+    t.insert((Format::Txt, Format::Md), TXT_TO_MD);
+    t.insert((Format::Txt, Format::Pdf), TXT_TO_PDF);
+    // LibreOffice lays RTF out as Word does; pandoc + Typst stand in
+    // without it, as for docx and odt.
+    t.insert((Format::Rtf, Format::Pdf), OFFICE_TO_PDF);
+    t.insert((Format::Rtf, Format::Docx), RTF_TO_DOCX);
+    t.insert((Format::Rtf, Format::Txt), RTF_TO_TXT);
 }
 
 /// A pair conv converts itself, in process, with no backend: JSON, YAML,
@@ -1967,6 +2480,7 @@ static TABLE: LazyLock<Table> = LazyLock::new(|| {
     insert_media_family(&mut t);
     insert_document_family(&mut t);
     insert_data_family(&mut t);
+    insert_speech_family(&mut t);
     t
 });
 
@@ -1983,6 +2497,9 @@ static FALLBACK_TABLE: LazyLock<Table> = LazyLock::new(|| {
     let mut t = Table::new();
     t.insert((Format::Docx, Format::Pdf), PANDOC_TYPST_TO_PDF);
     t.insert((Format::Odt, Format::Pdf), PANDOC_TYPST_TO_PDF);
+    t.insert((Format::Rtf, Format::Pdf), PANDOC_TYPST_TO_PDF);
+    t.insert((Format::Rtf, Format::Docx), PANDOC_RTF_TO_DOCX);
+    t.insert((Format::Rtf, Format::Txt), PANDOC_RTF_TO_TXT);
     t
 });
 
@@ -1995,6 +2512,8 @@ static FALLBACK_TABLE: LazyLock<Table> = LazyLock::new(|| {
 pub fn fallback_backends(from: Format, to: Format) -> &'static [Backend] {
     if FALLBACK_TABLE.contains_key(&(from, to)) {
         &[Backend::Soffice, Backend::Pandoc, Backend::Typst]
+    } else if from == Format::Rtf && speaks(from, to) {
+        &[Backend::Soffice, Backend::Pandoc]
     } else if lookup(from, to) == Some(TYPST_IMG_TO_PDF) {
         &[Backend::Typst, Backend::Magick]
     } else {
@@ -2010,6 +2529,21 @@ pub fn lookup(from: Format, to: Format) -> Option<Recipe> {
 /// pair but `docx`/`odt` → `pdf`.
 pub fn lookup_fallback(from: Format, to: Format) -> Option<Recipe> {
     FALLBACK_TABLE.get(&(from, to)).copied()
+}
+
+/// Every backend `recipe` runs or names (`Arg::BackendPath`): what has to
+/// be installed for a fallback to stand in.
+pub fn recipe_backends(recipe: &Recipe) -> Vec<Backend> {
+    let mut out = Vec::new();
+    for step in recipe.steps {
+        out.push(step.backend);
+        for arg in step.args {
+            if let Arg::BackendPath(b) = arg {
+                out.push(*b);
+            }
+        }
+    }
+    out
 }
 
 /// True when `from -> to` has a second recipe to fall back to when a
@@ -2052,15 +2586,21 @@ pub fn needs_probe(from: Format, to: Format) -> bool {
     // varies: aac, alac, even mp3.
     let audio_target = matches!(
         to,
-        Format::M4a | Format::Mp3 | Format::Flac | Format::Wav | Format::Opus | Format::Ogg
+        Format::M4a
+            | Format::Mp3
+            | Format::Flac
+            | Format::Wav
+            | Format::Opus
+            | Format::Ogg
+            | Format::Aiff
     );
     // Ogg varies too (vorbis, opus, rarely flac), and an opus file is
     // always opus, so each can be copied into the other, and flac out of
     // an Ogg FLAC. Either one also tells a wav target that its 24-bit note
     // does not apply.
     let ogg_source = match from {
-        Format::Ogg => matches!(to, Format::Opus | Format::Flac | Format::Wav),
-        Format::Opus => matches!(to, Format::Ogg | Format::Wav),
+        Format::Ogg => matches!(to, Format::Opus | Format::Flac | Format::Wav | Format::Aiff),
+        Format::Opus => matches!(to, Format::Ogg | Format::Wav | Format::Aiff),
         _ => false,
     };
     // An opus/ogg target drops cover art, and says so only for a source
@@ -2318,7 +2858,7 @@ pub(crate) fn notes_for(recipe: &Recipe, probe: Option<&crate::MediaProbe>) -> V
                 FIRST_FRAME_NOTE => frames.then_some(note),
                 GIF_BUFFER_NOTE => long.then_some(note),
                 COVER_ART_DROPPED_NOTE => art.then_some(note),
-                WAV_DEPTH_NOTE => (!float_source).then_some(note),
+                WAV_DEPTH_NOTE | AIFF_DEPTH_NOTE => (!float_source).then_some(note),
                 DOC_MACROS_NOTE | XLS_MACROS_NOTE | PPT_MACROS_NOTE => macros.then_some(note),
                 ICON_SQUARE_NOTE => (!square).then_some(note),
                 ICO_LARGEST_NOTE => (!one_size).then_some(note),
@@ -2461,6 +3001,7 @@ pub fn same_format_recipe(f: Format) -> Option<Recipe> {
         Format::Flac => Some(TO_FLAC_KEEP_ART),
         Format::Opus => Some(TO_OPUS),
         Format::Ogg => Some(TO_OGG),
+        Format::Aiff => Some(TO_AIFF),
         _ => None,
     }
 }
@@ -2878,6 +3419,11 @@ mod tests {
     #[test]
     fn every_image_and_media_recipe_strips_and_only_after_orienting() {
         for (from, to) in all_pairs() {
+            // Text read aloud has no metadata to strip: conv makes the
+            // sound, and its ffmpeg step only encodes it.
+            if speaks(from, to) {
+                continue;
+            }
             let r = lookup(from, to).unwrap();
             for s in r.steps {
                 let strip = s.args.iter().position(|a| *a == Arg::StripMetadata);

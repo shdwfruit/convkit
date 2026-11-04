@@ -17,6 +17,7 @@ mod media;
 pub mod metadata;
 mod mov;
 pub mod office;
+pub mod offline;
 pub mod pdf;
 pub mod plan;
 pub mod probe;
@@ -29,8 +30,10 @@ pub mod rotate;
 mod sheet_pdf;
 pub mod size;
 pub mod sized;
+pub mod speech;
 pub mod speed;
 pub mod table;
+pub mod text;
 pub mod tools;
 pub mod trim;
 mod video;
@@ -45,7 +48,7 @@ pub use format::{Format, Kind};
 pub use plan::build as build_plan;
 pub use plan::{ConversionPlan, PlannedStep};
 pub use probe::MediaProbe;
-pub use recipe::{Arg, OutputMode, Recipe, Step, Tuning};
+pub use recipe::{Arg, OutputMode, RateStyle, Recipe, Staged, Step, Tuning};
 pub use resolve::{AvailableBackends, ResolvedBackend, Resolver, Source};
 pub use video::{
     confirmation_error as upscale_confirmation_error, resolve as resolve_video, Enlargement,

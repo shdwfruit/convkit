@@ -53,6 +53,11 @@ pub struct PlannedStep {
     /// that reads its inputs where they are.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prepare: Vec<Prepare>,
+    /// A file the step reads on its standard input, as Piper reads the
+    /// text it speaks. `None` for every other step, which reads nothing
+    /// there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin: Option<PathBuf>,
 }
 
 /// Something exec does just before running a step, so the step finds
@@ -70,6 +75,26 @@ pub enum Prepare {
         to: PathBuf,
         strip: bool,
     },
+    /// A text file decoded as conv reads text (`text::decode`) and written
+    /// as UTF-8 in `form`. `from` is the step's own input, a .txt source or
+    /// what pandoc made of a document; `source` is the user's file, which a
+    /// failure names.
+    Text {
+        from: PathBuf,
+        to: PathBuf,
+        form: TextForm,
+        source: PathBuf,
+    },
+}
+
+/// What `Prepare::Text` writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextForm {
+    /// An HTML page pandoc reads (`text::page`), with this title.
+    Page { title: String },
+    /// The text a speech engine reads aloud (`text::speakable`).
+    Speech,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -185,6 +210,24 @@ pub fn build_tuned(
             format!(
                 "--rotate turns a picture, and {} has no video stream",
                 inputs[0].display()
+            ),
+        ));
+    }
+
+    // Text read aloud is planned on its own: its engine depends on the
+    // voice, and it takes no other knob.
+    if registry::speaks(from, to) {
+        let engine = crate::speech::Engine::for_voice(tuning.voice.as_deref());
+        return build_speech(engine, from, to, inputs, output, probe, available, tuning);
+    }
+    if let Some(flag) = speech_flag(tuning) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "{flag} does not apply to {} -> {}: it is for text read aloud, a txt, md, \
+                 html, docx, odt or rtf file to m4a, mp3, wav or aiff",
+                from.ext(),
+                to.ext()
             ),
         ));
     }
@@ -411,6 +454,7 @@ pub fn build_tuned(
                         intermediate_ext: None,
                         path_args,
                         prepare: Vec::new(),
+                        stdin: None,
                     }],
                     warnings: m.warnings,
                     sizing: None,
@@ -452,7 +496,8 @@ pub fn build_tuned(
     }
 
     // Only the notes that apply to this source, as far as the probe knows.
-    let mut warnings = registry::notes_for(&recipe, probe);
+    let mut warnings = text_notes(from, inputs, probe, false)?;
+    warnings.extend(registry::notes_for(&recipe, probe));
     warnings.extend(typst_missing);
     warnings.extend(registry::gif_note(&recipe, inputs));
     // Mirrors the dynamic branch above (`m.warnings.extend(resolved.notes...)`)
@@ -549,6 +594,123 @@ fn built_in(
         speed: None,
         rotation: None,
         built_in: true,
+    })
+}
+
+/// The speech flag given, if any: `--voice` or `--rate`.
+fn speech_flag(tuning: &Tuning) -> Option<&'static str> {
+    if tuning.voice.is_some() {
+        Some("--voice")
+    } else if tuning.rate.is_some() {
+        Some("--rate")
+    } else {
+        None
+    }
+}
+
+/// The first flag given that text read aloud does not take.
+fn not_for_speech(tuning: &Tuning) -> Option<&'static str> {
+    [
+        ("--resize", tuning.resize.is_some()),
+        ("--upscale", tuning.upscale),
+        ("--quality", tuning.quality.is_some()),
+        ("--colors", tuning.colors.is_some()),
+        ("--fps", tuning.fps.is_some()),
+        ("--crf", tuning.crf.is_some()),
+        ("--max-size", tuning.max_size.is_some()),
+        ("--strip-metadata", tuning.strip_metadata),
+        ("--start, --end and --duration", tuning.range.is_some()),
+        ("--speed", tuning.speed.is_some()),
+        ("--shift-pitch", tuning.shift_pitch),
+        ("--rotate", tuning.rotate.is_some()),
+        ("--mute", tuning.mute),
+    ]
+    .into_iter()
+    .find_map(|(flag, given)| given.then_some(flag))
+}
+
+/// What a .txt source's read says: refused when it is not text (or, read
+/// aloud, holds nothing), and a note when it was read as Windows-1252.
+/// Nothing for any other source, or one that was not read.
+fn text_notes(
+    from: Format,
+    inputs: &[PathBuf],
+    probe: Option<&MediaProbe>,
+    spoken: bool,
+) -> Result<Vec<String>> {
+    if from != Format::Txt {
+        return Ok(Vec::new());
+    }
+    match probe.and_then(|p| p.text.as_ref()) {
+        Some(Err(why)) => Err(crate::text::not_text(&inputs[0], why)),
+        Some(Ok(info)) if spoken && info.empty => Err(crate::text::nothing_to_read(&inputs[0])),
+        Some(Ok(info)) if info.encoding == crate::text::Encoding::Windows1252 => {
+            Ok(vec![crate::text::WINDOWS_1252_NOTE.to_string()])
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Plans text read aloud with `engine`: the document reduced to plain text
+/// by pandoc (a .txt is read by conv), read into AIFF or WAV, and that made
+/// into the target by ffmpeg. `build_tuned` calls this with the engine the
+/// voice picks; the snapshot calls it with each. An RTF source is read by
+/// LibreOffice, or by pandoc when `available` says LibreOffice is missing
+/// and pandoc is not.
+#[allow(clippy::too_many_arguments)]
+pub fn build_speech(
+    engine: crate::speech::Engine,
+    from: Format,
+    to: Format,
+    inputs: &[PathBuf],
+    output: &Path,
+    probe: Option<&MediaProbe>,
+    available: Option<&AvailableBackends>,
+    tuning: &Tuning,
+) -> Result<ConversionPlan> {
+    if let Some(flag) = not_for_speech(tuning) {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "{flag} does not apply to {} -> {}: text read aloud takes --voice and --rate",
+                from.ext(),
+                to.ext()
+            ),
+        ));
+    }
+    let pandoc_reads =
+        available.is_some_and(|a| !a.has(Backend::Soffice) && a.has(Backend::Pandoc));
+    let recipe = pandoc_reads
+        .then(|| registry::speech_fallback(engine, from, to))
+        .flatten()
+        .or_else(|| registry::speech_recipe(engine, from, to))
+        .ok_or_else(|| ConvError::unsupported_pair(from, to))?;
+    let mut warnings = text_notes(from, inputs, probe, true)?;
+    warnings.extend(recipe.warnings.iter().map(|w| (*w).to_string()));
+    let chosen = crate::speech::choose(
+        engine,
+        tuning.voice.as_deref(),
+        probe.and_then(|p| p.speech.as_ref()),
+    )?;
+    warnings.extend(chosen.note);
+    let resolved = ResolvedVideo {
+        voice: chosen.voice,
+        ..ResolvedVideo::default()
+    };
+    let steps = render_steps(&recipe, inputs, output, tuning, &resolved, &[]);
+    Ok(ConversionPlan {
+        from,
+        to,
+        inputs: inputs.to_vec(),
+        output: output.to_path_buf(),
+        steps,
+        warnings,
+        sizing: None,
+        enlarged: None,
+        range: None,
+        speed: None,
+        rotation: None,
+        built_in: false,
     })
 }
 
@@ -661,6 +823,7 @@ fn render_steps(
                 *index += 1;
             }
         }
+        let (prepare, stdin) = staged_for(step, inputs_here[0], &step_outputs[i], &inputs[0]);
         steps.push(PlannedStep {
             backend: step.backend,
             program: step.backend.exe_name().to_string(),
@@ -669,10 +832,64 @@ fn render_steps(
             output: step_outputs[i].clone(),
             intermediate_ext: step.intermediate_ext.map(str::to_owned),
             path_args,
-            prepare: Vec::new(),
+            prepare,
+            stdin,
         });
     }
     steps
+}
+
+/// What exec writes for a step's `Arg::Staged` and `Arg::Stdin` slots, and
+/// the file the step reads on stdin. `input` is the step's own input,
+/// `output` its output, and `source` the user's file.
+fn staged_for(
+    step: &crate::Step,
+    input: &Path,
+    output: &Path,
+    source: &Path,
+) -> (Vec<Prepare>, Option<PathBuf>) {
+    use crate::recipe::{staged_path, Staged};
+    let mut prepare = Vec::new();
+    let mut stdin = None;
+    for arg in step.args {
+        let staged = match arg {
+            Arg::Staged(s) => *s,
+            Arg::Stdin(s) => {
+                stdin = Some(staged_path(output, *s));
+                *s
+            }
+            _ => continue,
+        };
+        let path = staged_path(output, staged);
+        prepare.push(match staged {
+            Staged::TextPage => Prepare::Text {
+                from: input.to_path_buf(),
+                to: path,
+                form: TextForm::Page {
+                    title: source
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                },
+                source: source.to_path_buf(),
+            },
+            Staged::SpeechText => Prepare::Text {
+                from: input.to_path_buf(),
+                to: path,
+                form: TextForm::Speech,
+                source: source.to_path_buf(),
+            },
+            Staged::OfflineFilter => Prepare::Write {
+                path,
+                contents: crate::offline::FILTER.to_string(),
+            },
+            Staged::SapiScript => Prepare::Write {
+                path,
+                contents: crate::speech::SAPI_SCRIPT.to_string(),
+            },
+        });
+    }
+    (prepare, stdin)
 }
 
 /// The plain `--convert-to pdf` step for a workbook, which prints it as it
@@ -815,6 +1032,7 @@ fn in_place(
                 intermediate_ext: None,
                 path_args,
                 prepare: Vec::new(),
+                stdin: None,
             };
             (vec![step], m.warnings, None)
         }
@@ -1142,10 +1360,17 @@ fn select(
         }
     }
 
+    // A fallback stands in only when everything it needs is there:
+    // pandoc and Typst for a document to PDF, pandoc alone for RTF.
     if let Some(avail) = available {
-        if !avail.has(Backend::Soffice) && avail.has(Backend::Pandoc) && avail.has(Backend::Typst) {
+        if !avail.has(Backend::Soffice) {
             if let Some(fallback) = registry::lookup_fallback(from, to) {
-                return Some(fallback);
+                if registry::recipe_backends(&fallback)
+                    .iter()
+                    .all(|b| avail.has(*b))
+                {
+                    return Some(fallback);
+                }
             }
         }
     }
@@ -1333,7 +1558,7 @@ mod tests {
             .iter()
             .filter_map(|prep| match prep {
                 Prepare::Stage { strip, .. } => Some(*strip),
-                Prepare::Write { .. } => None,
+                Prepare::Write { .. } | Prepare::Text { .. } => None,
             })
             .collect();
         assert_eq!(strips, [true, false], "the jpg is stripped, the png linked");
@@ -2943,6 +3168,8 @@ mod tests {
             speed: None,
             shift_pitch: false,
             rotate: None,
+            voice: None,
+            rate: None,
         }
     }
 

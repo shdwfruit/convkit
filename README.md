@@ -13,13 +13,14 @@
 
 One command for everyday file conversion. `conv` maps a source format and a
 target format onto an expert-tuned invocation of the right backend — ffmpeg,
-ImageMagick, LibreOffice, pandoc, Typst, or qpdf — and runs it locally: 176
-conversion pairs across 37 formats (`conv capabilities` is the source of
-truth). Files never leave your machine; only `conv install`/`conv update`,
-and `conv link --follow` when asked, ever touch the network. It also does
-the small text and developer chores (base64, checksums, JWTs, timestamps,
-tracking-free links and more) that people otherwise paste into a website;
-see [Text and developer tools](#text-and-developer-tools).
+ImageMagick, LibreOffice, pandoc, Typst, qpdf, or the system's own speech
+engine — and runs it locally: 236 conversion pairs across 40 formats
+(`conv capabilities` is the source of truth). Files never leave your
+machine; only `conv install`/`conv update`, and `conv link --follow` when
+asked, ever touch the network. It also does the small text and developer
+chores (base64, checksums, JWTs, timestamps, tracking-free links and more)
+that people otherwise paste into a website; see
+[Text and developer tools](#text-and-developer-tools).
 
 ```console
 $ conv clip.mkv clip.mp4
@@ -116,6 +117,8 @@ conv qr "https://example.com"    # make a QR code, written as qr.png
 conv ascii photo.jpg             # print a picture as ASCII art
 conv data.json .yaml             # JSON, YAML, TOML and CSV, converted with no backend
 conv fmt data.json               # pretty-print and check JSON, YAML or TOML
+conv notes.txt .m4a              # read a text aloud into a sound file
+conv speak "Hello" hello.m4a     # read the words given aloud
 conv changelog --since 0.5.1     # what's new since the version you had
 conv hash a.iso --check 3f2a...  # does the download match?
 conv link --paste --copy         # the copied link, without its tracking
@@ -714,7 +717,7 @@ conv --paste .jpg                 # a copied picture -> clipboard.jpg here
 conv --paste --to png             # files copied in Finder or Explorer -> PNGs beside them
 conv --paste                      # save a copied picture as it is, as clipboard.png
 conv photo.heic .jpg --copy       # paste the JPEG into a chat, a mail or a folder
-conv notes.md .html --copy        # an md, csv, html, json, yaml or toml result is copied as its text
+conv notes.md .html --copy        # an md, csv, html, txt, json, yaml or toml result is copied as its text
 conv --paste --to jpg --copy      # convert what's on the clipboard, in place
 ```
 
@@ -867,6 +870,7 @@ when conv can't tell. `--lenient` reads JSON5 and JSONC (comments,
 trailing commas, single quotes, unquoted keys) and drops YAML tags, saying
 what it dropped; conversions always read that way. conv won't write over a
 file whose comments it would lose.
+
 ## Text and developer tools
 
 The small jobs people search for and do on a website, often by pasting a
@@ -935,6 +939,60 @@ exits 0, 1 or 2, as diff does.
 - `conv diff` takes CRLF and LF line endings as the same and says when
   they differ; `--eol` counts them as a change. `--unified` leaves out the
   word marks, for `patch` and `git apply`.
+
+## Text, web pages and RTF
+
+Plain text, web pages and RTF convert to and from the usual documents:
+
+```console
+conv notes.txt .docx             # also .pdf, .html, .md and .rtf
+conv report.docx .txt            # from docx, odt, rtf, md and html
+conv page.html .pdf              # a saved web page; also .docx, .md, .txt, .rtf
+conv letter.rtf .docx            # also .pdf and .txt; docx, odt, md and html go to .rtf
+```
+
+A `.txt` can be in any encoding Windows or macOS saves: UTF-8 with or
+without a byte-order mark, UTF-16 ("Unicode" in Notepad), or Windows-1252,
+which conv says it read the file as. Blank lines separate paragraphs and
+line breaks are kept; a file without blank lines gets a paragraph a line.
+Anything else is a binary file and is refused.
+
+A web page's text, headings, lists, tables, links and pictures come
+through, but not its styling. conv downloads nothing a page points at: a
+picture on the web becomes a link to it in a .docx, .rtf or .pdf, and a
+warning says how many there were. Pictures saved beside the page are kept.
+LibreOffice reads RTF; without it, pandoc does, with a note on what it
+loses. A PDF goes through .docx and LibreOffice, as Markdown does.
+
+## Reading text aloud
+
+conv reads a text into a sound file with the speech engine your system
+already has, so nothing leaves your machine:
+
+```console
+conv notes.txt .m4a              # also .mp3, .wav and .aiff
+conv chapter.docx .mp3           # md, html, docx, odt and rtf are read as their text
+conv speak "Back in five minutes" away.m4a
+conv speak --paste               # what you copied, as speech.mp3
+pbpaste | conv speak - notes.mp3 # or anything piped in
+conv speak --voices              # the voices --voice takes
+```
+
+`conv speak` takes the words themselves, `-` or a pipe, `-f FILE`, or
+`--paste`, and writes `speech.mp3` unless you name a file or a `.ext`.
+`--voice` picks the voice and `--rate` the words per minute (80 to 450,
+about 175 by default); both work on any conversion that reads aloud.
+
+On macOS conv uses `say`, with the best Premium or Enhanced voice for your
+language when you have one, and tells you how to download one when you
+don't (System Settings > Accessibility > Spoken Content > System voice >
+Manage Voices). Windows uses its own voices through PowerShell, and Linux
+uses espeak-ng (`sudo apt-get install espeak-ng`). espeak-ng sounds
+robotic; for a natural voice anywhere, install
+[Piper](https://github.com/OHF-Voice/piper1-gpl), download a
+[voice](https://huggingface.co/rhasspy/piper-voices) and pass its file:
+`--voice en_US-lessac-medium.onnx`. A long text is read whole; `say` reads
+about six times faster than it plays.
 
 ## Discovering formats and capabilities
 
@@ -1032,16 +1090,17 @@ name instead: `a.jpg` and `a.png` with `--to webp` write `a-jpg.webp` and
 
 ## Backends
 
-convkit dispatches to seven binaries, each invoked as a subprocess:
+convkit dispatches to these programs, each invoked as a subprocess:
 
 | Backend | Used for | `conv install` | Pinned version |
 |---|---|---|---|
 | `ffmpeg` / `ffprobe` | video, audio, GIF, remux | Yes | 9.0.1 |
 | `magick` (ImageMagick) | images, HEIC (HEIF read-only), HEIC/HEIF/AVIF/TIFF/BMP → PDF, and image → PDF with `--quality`, `--resize`, `--rotate`, or an SVG or ICO in the merge | No — use your package manager | — |
-| `pandoc` | Markdown → HTML/DOCX; parses docx/odt for the PDF fallback | Yes | 3.11 |
-| `typst` | JPG/PNG/WebP/GIF → PDF; PDF engine for the docx/odt → pdf fallback | Yes | 0.15.1 |
-| `soffice` (LibreOffice) | Office documents ⇄ PDF | No — manual install, always | — |
+| `pandoc` | Markdown, text, HTML and RTF documents; parses docx/odt/rtf for the PDF fallback | Yes | 3.11 |
+| `typst` | JPG/PNG/WebP/GIF → PDF; PDF engine for the docx/odt/rtf → pdf fallback | Yes | 0.15.1 |
+| `soffice` (LibreOffice) | Office documents ⇄ PDF, reading RTF | No — manual install, always | — |
 | `qpdf` | PDF merge and split | Yes | 12.4.2 |
+| `say`, Windows PowerShell, `espeak-ng`, `piper` | reading text aloud | No — the first two come with the system | — |
 
 Managed versions are pinned per convkit build
 (`crates/convkit-core/src/manifest.rs`), checksum-verified, and cover all
@@ -1052,25 +1111,26 @@ as a folder (`convkit/bin/qpdf/`), since it ships shared libraries; its Linux
 build needs glibc 2.34 or newer, so on older systems install your
 distribution's `qpdf` instead.
 
-When LibreOffice is missing, `docx → pdf` and `odt → pdf` fall back to
-pandoc + Typst — lower fidelity, and the result says so in a warning. That
-fallback exists only for those two pairs: `xlsx`/`pptx` → pdf and the second
-step of `md → pdf` need LibreOffice specifically. Markdown is one-directional
-— `md → html` and `md → docx` exist; there is no `html`/`docx` → `md`.
+When LibreOffice is missing, `docx`, `odt` and `rtf` → `pdf` fall back to
+pandoc + Typst — lower fidelity, and the result says so in a warning — and
+pandoc reads RTF for `.docx`, `.txt` and speech. `xlsx`/`pptx` → pdf and the
+second step of `md`, `txt` and `html` → `pdf` need LibreOffice specifically.
+Markdown comes from `html` and `txt`; there is no `docx` → `md`.
 
 ### Resolution order
 
 Each backend resolves in this order, first match wins:
 
 1. `--<backend>-path` (e.g. `--ffmpeg-path /opt/ffmpeg`) — one such flag per
-   backend
+   backend, except the speech engines
 2. `CONVKIT_<BACKEND>` (e.g. `CONVKIT_FFMPEG=/opt/ffmpeg`) — the executable
-   name, uppercased
+   name, uppercased, with `-` as `_` (`CONVKIT_ESPEAK_NG`)
 3. The managed directory `conv install` writes to
    (`%LOCALAPPDATA%\convkit\bin` on Windows, `$XDG_DATA_HOME/convkit/bin` or
    `~/.local/share/convkit/bin` elsewhere)
 4. `PATH`
-5. Well-known install locations (LibreOffice's default Windows/macOS paths)
+5. Well-known install locations (LibreOffice's default Windows/macOS paths,
+   `say` and Windows PowerShell)
 
 An override or env var naming a path that doesn't exist is a hard error
 naming the flag and the bad path — it never silently falls through to the

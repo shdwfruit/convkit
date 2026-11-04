@@ -1,0 +1,324 @@
+---
+source: crates/convkit-core/tests/recipes.rs
+expression: "lines.join(\"\\n\")"
+---
+Espeak (no soffice): rtf -> aiff: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak (no soffice): rtf -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Espeak (no soffice): rtf -> aiff: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Espeak (no soffice): rtf -> m4a: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak (no soffice): rtf -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Espeak (no soffice): rtf -> m4a: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Espeak (no soffice): rtf -> mp3: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak (no soffice): rtf -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Espeak (no soffice): rtf -> mp3: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Espeak (no soffice): rtf -> wav: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak (no soffice): rtf -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Espeak (no soffice): rtf -> wav: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: docx -> aiff: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: docx -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Espeak: docx -> aiff: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: docx -> m4a: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: docx -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Espeak: docx -> m4a: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: docx -> mp3: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: docx -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Espeak: docx -> mp3: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: docx -> wav: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: docx -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Espeak: docx -> wav: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: html -> aiff: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: html -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Espeak: html -> aiff: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: html -> m4a: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: html -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Espeak: html -> m4a: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: html -> mp3: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: html -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Espeak: html -> mp3: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: html -> wav: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: html -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Espeak: html -> wav: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: md -> aiff: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: md -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Espeak: md -> aiff: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: md -> m4a: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: md -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Espeak: md -> m4a: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: md -> mp3: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: md -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Espeak: md -> mp3: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: md -> wav: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: md -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Espeak: md -> wav: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: odt -> aiff: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: odt -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Espeak: odt -> aiff: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: odt -> m4a: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: odt -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Espeak: odt -> m4a: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: odt -> mp3: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: odt -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Espeak: odt -> mp3: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: odt -> wav: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: odt -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Espeak: odt -> wav: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Espeak: rtf -> aiff: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: rtf -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Espeak: rtf -> aiff: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Espeak: rtf -> m4a: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: rtf -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Espeak: rtf -> m4a: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Espeak: rtf -> mp3: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: rtf -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Espeak: rtf -> mp3: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Espeak: rtf -> wav: espeak-ng -b 1 -w out.convkit-step1.wav -f out.convkit-speech.txt
+Espeak: rtf -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Espeak: rtf -> wav: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Espeak: txt -> aiff: espeak-ng -b 1 -w out.convkit-step0.wav -f out.convkit-speech.txt
+Espeak: txt -> aiff: ffmpeg -i out.convkit-step0.wav -c:a pcm_s16be -y out.aiff
+Espeak: txt -> m4a: espeak-ng -b 1 -w out.convkit-step0.wav -f out.convkit-speech.txt
+Espeak: txt -> m4a: ffmpeg -i out.convkit-step0.wav -c:a aac -b:a 64k -y out.m4a
+Espeak: txt -> mp3: espeak-ng -b 1 -w out.convkit-step0.wav -f out.convkit-speech.txt
+Espeak: txt -> mp3: ffmpeg -i out.convkit-step0.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Espeak: txt -> wav: espeak-ng -b 1 -w out.convkit-step0.wav -f out.convkit-speech.txt
+Espeak: txt -> wav: ffmpeg -i out.convkit-step0.wav -c:a pcm_s16le -y out.wav
+Piper (no soffice): rtf -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Piper (no soffice): rtf -> aiff: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Piper (no soffice): rtf -> aiff: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper (no soffice): rtf -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Piper (no soffice): rtf -> m4a: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Piper (no soffice): rtf -> m4a: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper (no soffice): rtf -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Piper (no soffice): rtf -> mp3: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Piper (no soffice): rtf -> mp3: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper (no soffice): rtf -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Piper (no soffice): rtf -> wav: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Piper (no soffice): rtf -> wav: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: docx -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Piper: docx -> aiff: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Piper: docx -> aiff: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: docx -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Piper: docx -> m4a: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Piper: docx -> m4a: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: docx -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Piper: docx -> mp3: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Piper: docx -> mp3: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: docx -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Piper: docx -> wav: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Piper: docx -> wav: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: html -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Piper: html -> aiff: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Piper: html -> aiff: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: html -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Piper: html -> m4a: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Piper: html -> m4a: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: html -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Piper: html -> mp3: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Piper: html -> mp3: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: html -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Piper: html -> wav: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Piper: html -> wav: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: md -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Piper: md -> aiff: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Piper: md -> aiff: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: md -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Piper: md -> m4a: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Piper: md -> m4a: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: md -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Piper: md -> mp3: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Piper: md -> mp3: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: md -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Piper: md -> wav: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Piper: md -> wav: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: odt -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Piper: odt -> aiff: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Piper: odt -> aiff: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: odt -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Piper: odt -> m4a: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Piper: odt -> m4a: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: odt -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Piper: odt -> mp3: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Piper: odt -> mp3: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: odt -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Piper: odt -> wav: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Piper: odt -> wav: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: rtf -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Piper: rtf -> aiff: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: rtf -> aiff: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Piper: rtf -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Piper: rtf -> m4a: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: rtf -> m4a: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Piper: rtf -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Piper: rtf -> mp3: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: rtf -> mp3: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Piper: rtf -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Piper: rtf -> wav: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step1.wav
+Piper: rtf -> wav: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Piper: txt -> aiff: ffmpeg -i out.convkit-step0.wav -c:a pcm_s16be -y out.aiff
+Piper: txt -> aiff: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step0.wav
+Piper: txt -> m4a: ffmpeg -i out.convkit-step0.wav -c:a aac -b:a 64k -y out.m4a
+Piper: txt -> m4a: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step0.wav
+Piper: txt -> mp3: ffmpeg -i out.convkit-step0.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Piper: txt -> mp3: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step0.wav
+Piper: txt -> wav: ffmpeg -i out.convkit-step0.wav -c:a pcm_s16le -y out.wav
+Piper: txt -> wav: piper --model en_US-lessac-medium.onnx --output_file out.convkit-step0.wav
+Sapi (no soffice): rtf -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Sapi (no soffice): rtf -> aiff: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Sapi (no soffice): rtf -> aiff: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi (no soffice): rtf -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Sapi (no soffice): rtf -> m4a: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Sapi (no soffice): rtf -> m4a: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi (no soffice): rtf -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Sapi (no soffice): rtf -> mp3: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Sapi (no soffice): rtf -> mp3: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi (no soffice): rtf -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Sapi (no soffice): rtf -> wav: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Sapi (no soffice): rtf -> wav: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: docx -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Sapi: docx -> aiff: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: docx -> aiff: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: docx -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Sapi: docx -> m4a: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: docx -> m4a: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: docx -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Sapi: docx -> mp3: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: docx -> mp3: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: docx -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Sapi: docx -> wav: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: docx -> wav: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: html -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Sapi: html -> aiff: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: html -> aiff: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: html -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Sapi: html -> m4a: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: html -> m4a: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: html -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Sapi: html -> mp3: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: html -> mp3: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: html -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Sapi: html -> wav: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: html -> wav: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: md -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Sapi: md -> aiff: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: md -> aiff: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: md -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Sapi: md -> m4a: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: md -> m4a: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: md -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Sapi: md -> mp3: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: md -> mp3: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: md -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Sapi: md -> wav: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: md -> wav: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: odt -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Sapi: odt -> aiff: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: odt -> aiff: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: odt -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Sapi: odt -> m4a: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: odt -> m4a: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: odt -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Sapi: odt -> mp3: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: odt -> mp3: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: odt -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Sapi: odt -> wav: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Sapi: odt -> wav: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: rtf -> aiff: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16be -y out.aiff
+Sapi: rtf -> aiff: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: rtf -> aiff: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Sapi: rtf -> m4a: ffmpeg -i out.convkit-step1.wav -c:a aac -b:a 64k -y out.m4a
+Sapi: rtf -> m4a: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: rtf -> m4a: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Sapi: rtf -> mp3: ffmpeg -i out.convkit-step1.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Sapi: rtf -> mp3: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: rtf -> mp3: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Sapi: rtf -> wav: ffmpeg -i out.convkit-step1.wav -c:a pcm_s16le -y out.wav
+Sapi: rtf -> wav: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step1.wav
+Sapi: rtf -> wav: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Sapi: txt -> aiff: ffmpeg -i out.convkit-step0.wav -c:a pcm_s16be -y out.aiff
+Sapi: txt -> aiff: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step0.wav
+Sapi: txt -> m4a: ffmpeg -i out.convkit-step0.wav -c:a aac -b:a 64k -y out.m4a
+Sapi: txt -> m4a: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step0.wav
+Sapi: txt -> mp3: ffmpeg -i out.convkit-step0.wav -c:a libmp3lame -q:a 4 -y out.mp3
+Sapi: txt -> mp3: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step0.wav
+Sapi: txt -> wav: ffmpeg -i out.convkit-step0.wav -c:a pcm_s16le -y out.wav
+Sapi: txt -> wav: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File out.convkit-speak.ps1 -In out.convkit-speech.txt -Out out.convkit-step0.wav
+Say (no soffice): rtf -> aiff: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16be -y out.aiff
+Say (no soffice): rtf -> aiff: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Say (no soffice): rtf -> aiff: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say (no soffice): rtf -> m4a: ffmpeg -i out.convkit-step1.aiff -c:a aac -b:a 64k -y out.m4a
+Say (no soffice): rtf -> m4a: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Say (no soffice): rtf -> m4a: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say (no soffice): rtf -> mp3: ffmpeg -i out.convkit-step1.aiff -c:a libmp3lame -q:a 4 -y out.mp3
+Say (no soffice): rtf -> mp3: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Say (no soffice): rtf -> mp3: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say (no soffice): rtf -> wav: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16le -y out.wav
+Say (no soffice): rtf -> wav: pandoc in.rtf -t plain --wrap=none -o out.convkit-step0.txt
+Say (no soffice): rtf -> wav: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: docx -> aiff: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16be -y out.aiff
+Say: docx -> aiff: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Say: docx -> aiff: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: docx -> m4a: ffmpeg -i out.convkit-step1.aiff -c:a aac -b:a 64k -y out.m4a
+Say: docx -> m4a: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Say: docx -> m4a: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: docx -> mp3: ffmpeg -i out.convkit-step1.aiff -c:a libmp3lame -q:a 4 -y out.mp3
+Say: docx -> mp3: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Say: docx -> mp3: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: docx -> wav: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16le -y out.wav
+Say: docx -> wav: pandoc in.docx -t plain --wrap=none -o out.convkit-step0.txt
+Say: docx -> wav: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: html -> aiff: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16be -y out.aiff
+Say: html -> aiff: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Say: html -> aiff: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: html -> m4a: ffmpeg -i out.convkit-step1.aiff -c:a aac -b:a 64k -y out.m4a
+Say: html -> m4a: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Say: html -> m4a: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: html -> mp3: ffmpeg -i out.convkit-step1.aiff -c:a libmp3lame -q:a 4 -y out.mp3
+Say: html -> mp3: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Say: html -> mp3: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: html -> wav: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16le -y out.wav
+Say: html -> wav: pandoc in.html -f html+raw_html -t plain --wrap=none -o out.convkit-step0.txt
+Say: html -> wav: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: md -> aiff: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16be -y out.aiff
+Say: md -> aiff: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Say: md -> aiff: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: md -> m4a: ffmpeg -i out.convkit-step1.aiff -c:a aac -b:a 64k -y out.m4a
+Say: md -> m4a: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Say: md -> m4a: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: md -> mp3: ffmpeg -i out.convkit-step1.aiff -c:a libmp3lame -q:a 4 -y out.mp3
+Say: md -> mp3: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Say: md -> mp3: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: md -> wav: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16le -y out.wav
+Say: md -> wav: pandoc in.md -t plain --wrap=none -o out.convkit-step0.txt
+Say: md -> wav: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: odt -> aiff: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16be -y out.aiff
+Say: odt -> aiff: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Say: odt -> aiff: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: odt -> m4a: ffmpeg -i out.convkit-step1.aiff -c:a aac -b:a 64k -y out.m4a
+Say: odt -> m4a: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Say: odt -> m4a: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: odt -> mp3: ffmpeg -i out.convkit-step1.aiff -c:a libmp3lame -q:a 4 -y out.mp3
+Say: odt -> mp3: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Say: odt -> mp3: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: odt -> wav: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16le -y out.wav
+Say: odt -> wav: pandoc in.odt -t plain --wrap=none -o out.convkit-step0.txt
+Say: odt -> wav: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: rtf -> aiff: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16be -y out.aiff
+Say: rtf -> aiff: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: rtf -> aiff: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Say: rtf -> m4a: ffmpeg -i out.convkit-step1.aiff -c:a aac -b:a 64k -y out.m4a
+Say: rtf -> m4a: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: rtf -> m4a: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Say: rtf -> mp3: ffmpeg -i out.convkit-step1.aiff -c:a libmp3lame -q:a 4 -y out.mp3
+Say: rtf -> mp3: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: rtf -> mp3: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Say: rtf -> wav: ffmpeg -i out.convkit-step1.aiff -c:a pcm_s16le -y out.wav
+Say: rtf -> wav: say -o out.convkit-step1.aiff -f out.convkit-speech.txt
+Say: rtf -> wav: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to txt:Text (encoded):UTF8,LF,,,false --outdir . in.rtf
+Say: txt -> aiff: ffmpeg -i out.convkit-step0.aiff -c:a pcm_s16be -y out.aiff
+Say: txt -> aiff: say -o out.convkit-step0.aiff -f out.convkit-speech.txt
+Say: txt -> m4a: ffmpeg -i out.convkit-step0.aiff -c:a aac -b:a 64k -y out.m4a
+Say: txt -> m4a: say -o out.convkit-step0.aiff -f out.convkit-speech.txt
+Say: txt -> mp3: ffmpeg -i out.convkit-step0.aiff -c:a libmp3lame -q:a 4 -y out.mp3
+Say: txt -> mp3: say -o out.convkit-step0.aiff -f out.convkit-speech.txt
+Say: txt -> wav: ffmpeg -i out.convkit-step0.aiff -c:a pcm_s16le -y out.wav
+Say: txt -> wav: say -o out.convkit-step0.aiff -f out.convkit-speech.txt

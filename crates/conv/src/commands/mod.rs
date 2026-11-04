@@ -9,6 +9,7 @@ pub mod merge;
 pub mod pdf_support;
 pub mod qr;
 pub mod scan;
+pub mod speak;
 pub mod split;
 pub mod tools;
 pub mod update;
