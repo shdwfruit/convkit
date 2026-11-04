@@ -585,7 +585,10 @@ mod tests {
         std::fs::write(&pic, b"x").unwrap();
         let text = pic.to_str().unwrap();
         let hint = names_a_picture(text).unwrap();
-        assert!(hint.contains(&format!("conv qr --read {text}")), "{hint}");
+        // Quoted as a shell needs it: a Windows path is.
+        let command =
+            render::command_line_human("conv", &["qr".into(), "--read".into(), text.into()]);
+        assert!(hint.ends_with(&format!("run: {command}")), "{hint}");
         // Not a file here, or not a picture: no hint.
         assert_eq!(names_a_picture("menu.png-that-is-not-here.png"), None);
         let doc = dir.path().join("notes.txt");
