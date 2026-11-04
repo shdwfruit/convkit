@@ -29,7 +29,12 @@ lzma-rs = "0.3"
 # base64 embeds the logo in the SVG; both are already in the tree, through
 # resvg and ureq.
 qrcode = { version = "0.14", default-features = false }
-resvg = { version = "0.48", default-features = false, features = ["raster-images"] }
+# `text`, `system-fonts` and `memmap-fonts` draw burned-in subtitles with
+# the system's own fonts: shaping, fallback and right-to-left text.
+resvg = { version = "0.48", default-features = false, features = ["raster-images", "text", "system-fonts", "memmap-fonts"] }
+unicode-bidi = "0.3"
+# Which system font holds a line's letters; already in through resvg.
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
 rqrr = { version = "0.10", default-features = false }
 png = "0.18"
 base64 = "0.22"

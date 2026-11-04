@@ -13,10 +13,11 @@ use convkit_core::{Resolver, Tuning};
 pub struct Cli {
     /// Input paths, then optionally an output path or a bare `.ext`. With
     /// `--max-size`, `--compress`, `--strip-metadata`,
-    /// `--start`/`--end`/`--duration`, `--speed` or `--rotate`, a lone input
-    /// keeps its format and is written as NAME-SUFFIX.EXT (`clip.mp4` ->
-    /// `clip-10mb.mp4`, `scan-compressed.pdf`, `photo-stripped.jpg`,
-    /// `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`, `photo-rotated.jpg`).
+    /// `--start`/`--end`/`--duration`, `--speed`, `--rotate` or `--crop`, a
+    /// lone input keeps its format and is written as NAME-SUFFIX.EXT
+    /// (`clip.mp4` -> `clip-10mb.mp4`, `scan-compressed.pdf`,
+    /// `photo-stripped.jpg`, `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`,
+    /// `photo-rotated.jpg`, `photo-cropped.jpg`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -222,6 +223,7 @@ pub struct Cli {
         requires = "password"
     )]
     pub restrict: Vec<convkit_core::pdf::Restriction>,
+
     /// The pages of a PDF to save as pictures, by split's grammar between
     /// commas: 5, 1-3, 11-z (z is the last page), as in --pages 1-3,7.
     /// Every page without it. One page is one file, report-3.png; more go
@@ -245,6 +247,54 @@ pub struct Cli {
         conflicts_with = "resize"
     )]
     pub dpi: Option<u32>,
+
+    /// Keep part of the picture as it is shown (after its orientation and
+    /// --rotate, before --resize): WxH+X+Y, a box from the top left; WxH, a
+    /// box in the middle; W:H, the largest box of that shape, e.g. 16:9,
+    /// 1:1 or 9:16; or auto, which cuts away black bars around a video or a
+    /// plain border around a picture. Images, video and GIFs. A lone input
+    /// keeps its format: photo.jpg -> photo-cropped.jpg; a --to batch
+    /// writes into a cropped folder, e.g. cropped/photo.jpg, unless -o is
+    /// given.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "BOX", value_parser = parse_crop)]
+    pub crop: Option<convkit_core::crop::Spec>,
+
+    /// Put this file's sound on the video in place of its own: a song, a
+    /// voice-over, or another video's sound. The video is stream-copied
+    /// where nothing else changes it. A sound longer than the video stops
+    /// where it ends; a shorter one leaves the rest silent. Video targets
+    /// (mp4, mov, mkv, webm). A lone input keeps its format:
+    /// clip.mp4 -> clip-audio.mp4.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "FILE")]
+    pub audio: Option<PathBuf>,
+
+    /// Mix --audio's sound under the video's own instead of replacing it,
+    /// at LEVEL of the video's loudness: --mix is a quarter as loud
+    /// (25%), --mix=50% half. Both are measured first, so the level holds
+    /// whatever each was recorded at. Named NAME-mixed.EXT.
+    // `require_equals` so `--mix clip.mp4` leaves the path a path. Not
+    // `global` -- see `dry_run`'s comment.
+    #[arg(
+        long,
+        value_name = "LEVEL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "25%",
+        requires = "audio",
+        value_parser = parse_mix_level
+    )]
+    pub mix: Option<convkit_core::soundtrack::Level>,
+
+    /// Burn the subtitles of an .srt, .vtt or .ass file into the picture:
+    /// white with a black outline, near the bottom, sized to the picture,
+    /// in the system's fonts, right-to-left text included. A cut or speed
+    /// change moves them with the video. Video and GIF targets. A lone
+    /// input keeps its format: clip.mp4 -> clip-subtitled.mp4.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "FILE")]
+    pub subtitles: Option<PathBuf>,
 
     /// Copy what was written to the clipboard, ready to paste: a picture
     /// as itself (and its file), an md, csv, html, txt, json, yaml or toml
@@ -1210,6 +1260,14 @@ fn parse_restriction(s: &str) -> Result<convkit_core::pdf::Restriction, String> 
     convkit_core::pdf::Restriction::parse(s)
 }
 
+fn parse_mix_level(s: &str) -> Result<convkit_core::soundtrack::Level, String> {
+    convkit_core::soundtrack::parse_level(s)
+}
+
+fn parse_crop(s: &str) -> Result<convkit_core::crop::Spec, String> {
+    convkit_core::crop::parse(s)
+}
+
 fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
     convkit_core::trim::parse_duration(s)
 }
@@ -1233,8 +1291,8 @@ fn parse_rate(s: &str) -> Result<u16, String> {
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
     /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
-    /// `--max-size`/`--start`/`--end`/`--duration`/`--speed`/`--rotate` was
-    /// passed.
+    /// `--max-size`/`--start`/`--end`/`--duration`/`--speed`/`--rotate`/
+    /// `--crop` was passed.
     pub fn tuning(&self) -> Tuning {
         Tuning {
             resize: self.resize.clone(),
@@ -1261,6 +1319,15 @@ impl Cli {
                 .pages
                 .as_deref()
                 .and_then(|p| convkit_core::pdf::parse_list(p).ok()),
+            crop: self.crop,
+            audio: self
+                .audio
+                .as_ref()
+                .map(|path| convkit_core::soundtrack::Request {
+                    path: path.clone(),
+                    mix: self.mix,
+                }),
+            subtitles: self.subtitles.clone(),
         }
     }
 
@@ -1274,6 +1341,18 @@ impl Cli {
     /// contradiction is a usage error before anything runs, like clap's
     /// own.
     pub fn check(&self) -> Result<(), String> {
+        // `--mix 30%` left the level a path: say how to write it.
+        if self.mix.is_some() {
+            if let Some(level) = self.paths.iter().find(|p| {
+                let s = p.to_string_lossy();
+                convkit_core::soundtrack::parse_level(&s).is_ok() && s.ends_with('%')
+            }) {
+                return Err(format!(
+                    "--mix takes its level after an =: write --mix={}",
+                    level.display()
+                ));
+            }
+        }
         if self.paste && self.paths.len() > 1 {
             return Err(
                 "--paste takes the input from the clipboard; give at most the output's name or .ext"
@@ -1344,6 +1423,10 @@ mod tests {
             restrict: vec![],
             pages: None,
             dpi: None,
+            crop: None,
+            audio: None,
+            mix: None,
+            subtitles: None,
             copy: false,
             paste: false,
             yes: false,

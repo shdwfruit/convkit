@@ -1576,6 +1576,92 @@ fn capabilities_lists_rotate_where_there_is_a_picture() {
     assert!(jpg.contains("--rotate"), "{stdout}");
 }
 
+/// `--crop` is listed where a turn is, but not into an icon.
+#[test]
+fn capabilities_lists_crop_where_there_is_a_picture() {
+    let assert = conv().args(["capabilities", "mp4"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for pair in ["mp4 -> gif", "mp4 -> webm", "mp4 -> mov"] {
+        let line = stdout.lines().find(|l| l.contains(pair)).unwrap();
+        assert!(line.contains("--crop"), "{pair}: {stdout}");
+    }
+    let mp3 = stdout.lines().find(|l| l.contains("mp4 -> mp3")).unwrap();
+    assert!(!mp3.contains("--crop"), "{stdout}");
+    let assert = conv().args(["capabilities", "png"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let jpg = stdout.lines().find(|l| l.contains("png -> jpg")).unwrap();
+    assert!(jpg.contains("--crop"), "{stdout}");
+    let ico = stdout.lines().find(|l| l.contains("png -> ico")).unwrap();
+    assert!(!ico.contains("--crop"), "{stdout}");
+}
+
+/// A crop that is no box is a usage error naming the forms.
+#[test]
+fn a_crop_that_is_no_box_is_a_usage_error() {
+    conv()
+        .args(["clip.mp4", "--crop", "16x9x2"])
+        .assert()
+        .code(2)
+        .stderr(contains("expected WxH+X+Y"));
+}
+
+/// `--audio` and `--mix` go on video into video, and not on sound or GIFs.
+#[test]
+fn capabilities_lists_audio_on_video_targets() {
+    let assert = conv().args(["capabilities", "mov"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let mp4 = stdout.lines().find(|l| l.contains("mov -> mp4")).unwrap();
+    assert!(mp4.contains("--audio --mix"), "{stdout}");
+    for pair in ["mov -> gif", "mov -> m4a"] {
+        let line = stdout.lines().find(|l| l.contains(pair)).unwrap();
+        assert!(!line.contains("--audio"), "{pair}: {stdout}");
+    }
+}
+
+/// `--mix 50%` leaves the level a path; conv says to write `--mix=50%`.
+#[test]
+fn a_mix_level_without_an_equals_sign_says_how_to_write_it() {
+    conv()
+        .args(["clip.mp4", "--audio", "song.mp3", "--mix", "50%"])
+        .assert()
+        .code(2)
+        .stderr(contains("write --mix=50%"));
+    conv()
+        .args(["clip.mp4", "--mix"])
+        .assert()
+        .code(2)
+        .stderr(contains("--audio"));
+}
+
+/// `--subtitles` goes where there is a picture, GIFs included.
+#[test]
+fn capabilities_lists_subtitles_on_video_and_gif_targets() {
+    let assert = conv().args(["capabilities", "mkv"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for pair in ["mkv -> mp4", "mkv -> gif", "mkv -> webm"] {
+        let line = stdout.lines().find(|l| l.contains(pair)).unwrap();
+        assert!(line.contains("--subtitles"), "{pair}: {stdout}");
+    }
+    let flac = stdout.lines().find(|l| l.contains("mkv -> flac")).unwrap();
+    assert!(!flac.contains("--subtitles"), "{stdout}");
+}
+
+/// One subtitle file goes into one video: a batch is refused before
+/// anything runs.
+#[test]
+fn subtitles_for_a_batch_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.mp4", "b.mp4", "subs.srt"] {
+        std::fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    conv()
+        .current_dir(dir.path())
+        .args(["a.mp4", "b.mp4", "--to", "mkv", "--subtitles", "subs.srt"])
+        .assert()
+        .code(2)
+        .stderr(contains("burns one file's subtitles into one video"));
+}
+
 /// A dry run of a turn the tag makes shows no command, and says why.
 #[test]
 fn dry_run_of_a_photo_whose_tag_the_turn_undoes_runs_nothing() {

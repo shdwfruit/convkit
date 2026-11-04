@@ -119,6 +119,9 @@ conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
 conv clip.mp4 --speed 2          # play twice as fast
 conv IMG_0042.mov --rotate left  # turn a sideways video or photo
+conv clip.mp4 --crop 9:16        # crop to a shape, a box, or auto for black bars
+conv clip.mp4 --audio song.mp3   # replace the sound; add --mix to put it under
+conv clip.mp4 --subtitles subs.srt # burn subtitles into the picture
 conv trim talk.mp4               # find clips in the terminal and cut them
 conv --paste .jpg                # convert the picture or files you copied
 conv photo.heic .jpg --copy      # convert, then copy the result to paste anywhere
@@ -693,6 +696,122 @@ conv ./scans --to png --rotate 180
 conv photo.jpg --rotate right --resize 50%
 conv screen.mov clip.gif --rotate left --resize 480x
 ```
+
+## Cropping
+
+`--crop` keeps part of a photo, video or GIF. Give it a box, a shape, or
+`auto`:
+
+```console
+$ conv clip.mp4 --crop 9:16
+OK clip-cropped.mp4 - 3.1 MB - 4.2s
+  /home/user/Videos/clip-cropped.mp4
+  note  The video is re-encoded to crop it.
+```
+
+- `1280x720+0+140` is a box 1280 wide and 720 tall, 0 from the left and
+  140 from the top. `1280x720` alone is the same box in the middle.
+- `16:9`, `1:1` or `9:16` is the largest box of that shape, in the middle.
+- `auto` cuts away the black bars around a video, or the plain border
+  around a picture, and the note says what it kept.
+
+The numbers are of the picture as you see it, after its orientation tag
+and any `--rotate`, and the crop comes before `--resize`, so the size fits
+what was kept. A box that runs past the edge stops at it, and a video's box
+is kept to even sides, which its encoder needs; a note says when either
+changes the box. `auto` looks at frames from across a video, so a fade from
+black or a dark scene doesn't narrow the box.
+
+A cropped video is re-encoded, and a JPEG, WebP, AVIF or HEIC kept in its
+format is re-encoded at its usual quality, which a note says. A GIF kept as
+a GIF is cropped frame by frame. Naming works as it does for `--rotate`:
+one file gets `-cropped` in its name (`photo-rotated-cropped-50pct.jpg`
+with both and a size), and a batch writes into a `cropped` folder:
+
+```console
+conv movie.mkv .mp4 --crop auto
+conv IMG_0042.heic .jpg --crop 1:1 --resize 1080x
+conv screen.mov clip.gif --crop 800x600+120+80
+conv ./scans --to png --crop auto
+```
+
+## New sound
+
+`--audio` puts a file's sound on a video in place of its own: a song, a
+voice-over, or the sound of another video. The picture is copied, not
+re-encoded, and so is the new sound when the video's format holds it:
+
+```console
+$ conv clip.mp4 --audio song.mp3
+OK clip-audio.mp4 - 21.4 MB - 0.2s - stream copy, no re-encode
+  /home/user/Videos/clip-audio.mp4
+  note  song.mp3 runs 3:42; it stops where the video ends, at 0:48.
+```
+
+`--mix` plays it under the video's own sound instead, a quarter as loud.
+Both are measured first, so a song mastered loud sits under quiet phone
+speech the same way it sits under a loud recording. `--mix=50%` makes it
+half as loud as the video's sound, `--mix=100%` as loud. A mix is
+re-encoded, and only the video's first audio track is mixed.
+
+The video's length decides. A new sound that runs longer stops where the
+video ends, and one that runs shorter leaves the rest silent, or the
+video's own sound alone in a mix; nothing loops. A note says which.
+`--start` and `--end` cut the video, and the new sound starts with the
+clip. `--speed` changes the video and its own sound, and the new sound
+plays at its own speed:
+
+```console
+conv talk.mov .mp4 --audio voiceover.m4a
+conv clip.mp4 --audio song.mp3 --mix --start 0:05 --end 0:35
+conv screen.mkv --audio music.flac --mix=40% --speed 2
+```
+
+One file is named `-audio`, or `-mixed`, and a batch writes into an
+`audio` or `mixed` folder. It works into mp4, mov, mkv and webm, not into
+a GIF, which has no sound, and not with `--max-size` yet: add the sound
+first, then size the result.
+
+## Burning in subtitles
+
+`--subtitles` draws an .srt, .vtt or .ass file's subtitles onto the
+picture, so they show in any player and on any site:
+
+```console
+$ conv talk.mp4 --subtitles talk.srt
+OK talk-subtitled.mp4 - 38.2 MB - 41.0s
+  /home/user/Videos/talk-subtitled.mp4
+  note  The video is re-encoded to draw the subtitles on it.
+```
+
+They are white with a black outline, centred near the bottom, a size
+that suits the picture, and wrapped to fit inside it. Italics and bold
+come through. conv draws the text itself, in your system's fonts: a line
+in Arabic, Hebrew, Chinese or any other script is set in a font that has
+it, and right-to-left lines read right to left. An ASS file keeps its
+text, not its styles or positions, and a note says so. A file that is not
+UTF-8 is read as UTF-16 by its mark, or as Windows-1252.
+
+The times are the video's: `--start` and `--end` move the subtitles with
+the clip and leave out the ones outside it, and `--speed` speeds them up
+with it. They go on after `--rotate` and `--crop`, and `--resize` scales
+them with the picture. GIFs take them too:
+
+```console
+conv talk.mkv .mp4 --subtitles talk.vtt --start 2:00 --end 2:30
+conv clip.mp4 meme.gif --subtitles caption.srt --crop 1:1
+```
+
+A letter no font on your system has is left out, and a warning names it;
+if none of the letters can be drawn, conv stops and says which fonts to
+install rather than burning in blank subtitles. A minimal Linux system may
+need `fonts-dejavu-core` and `fonts-noto-core` (and `fonts-noto-cjk` for
+Chinese, Japanese and Korean).
+
+One file is named `-subtitled`. A subtitle file belongs to one video, so a
+batch is refused. Drawing them needs no ffmpeg filter beyond `overlay`,
+which every ffmpeg has, so it works with Homebrew's ffmpeg, which can't
+draw subtitles itself.
 
 ## Merge and split
 

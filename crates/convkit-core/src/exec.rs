@@ -150,6 +150,18 @@ pub struct Outcome {
     /// other conversion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pages: Option<crate::pdf::raster::PagesReport>,
+    /// The box a `--crop` kept; see `ConversionPlan::crop`. Omitted from
+    /// `--json` for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crop: Option<crate::crop::CropReport>,
+    /// The new sound an `--audio` conversion put on the video; see
+    /// `ConversionPlan::audio`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<crate::soundtrack::AudioReport>,
+    /// The subtitles a `--subtitles` conversion burned in; see
+    /// `ConversionPlan::subtitles`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitles: Option<crate::subtitles::SubtitlesReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -566,6 +578,19 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         &req.tuning,
         &mut probed,
     );
+    // A picture's size, and the border `--crop auto` finds, for a crop.
+    crate::crop::attach(resolver, req.from, &req.inputs[0], &req.tuning, &mut probed)?;
+    // The subtitles `--subtitles` burns in.
+    crate::subtitles::attach(req.from, req.to, &req.tuning, &mut probed)?;
+    // What `--audio` brings, and how loud a mix's two sounds are.
+    crate::soundtrack::attach(
+        resolver,
+        req.from,
+        req.to,
+        &req.inputs[0],
+        &req.tuning,
+        &mut probed,
+    )?;
 
     let dest_dir = req
         .output
@@ -716,6 +741,9 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     let range = ran.range.clone();
     let speed = ran.speed.clone();
     let rotation = ran.rotation;
+    let crop = ran.crop.clone();
+    let audio = ran.audio.clone();
+    let subtitles = ran.subtitles.clone();
     let mut warnings = ran.warnings;
     warnings.extend(sheet_notes);
     // Only the written PDF says what Typst's lossless pages cost, so it is
@@ -776,6 +804,9 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         speed,
         rotation,
         pages: None,
+        crop,
+        audio,
+        subtitles,
     })
 }
 
@@ -912,6 +943,9 @@ fn run_pdf_pages(
         speed: None,
         rotation: None,
         pages: Some(report),
+        crop: None,
+        audio: None,
+        subtitles: None,
     })
 }
 
@@ -1022,26 +1056,8 @@ impl StepRunner<'_> {
         });
         let resolved = self.resolver.resolve(step.backend)?;
 
-        for prepare in &step.prepare {
-            match prepare {
-                plan::Prepare::Write { path, contents } => {
-                    std::fs::write(path, contents).map_err(io_err)?;
-                }
-                plan::Prepare::Stage { from, to, strip } => {
-                    stage_file(from, to, *strip, hard_link)?;
-                }
-                plan::Prepare::Text {
-                    from,
-                    to,
-                    form,
-                    source,
-                } => match form {
-                    plan::TextForm::Page { title } => {
-                        crate::text::write_page(from, to, title, source)?;
-                    }
-                    plan::TextForm::Speech => crate::text::write_speakable(from, to, source)?,
-                },
-            }
+        for p in &step.prepare {
+            self.notes.extend(prepare(p)?);
         }
 
         // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
@@ -1597,6 +1613,38 @@ fn io_err(e: std::io::Error) -> ConvError {
 
 pub(crate) fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::hard_link(from, to)
+}
+
+/// Does one thing a step needs done before it runs (`plan::Prepare`), and
+/// gives what it has to say: drawn subtitles name a font they fell back on.
+pub(crate) fn prepare(p: &plan::Prepare) -> Result<Vec<String>> {
+    match p {
+        plan::Prepare::Write { path, contents } => {
+            std::fs::write(path, contents).map_err(io_err)?;
+        }
+        plan::Prepare::Stage { from, to, strip } => {
+            stage_file(from, to, *strip, hard_link)?;
+        }
+        plan::Prepare::Text {
+            from,
+            to,
+            form,
+            source,
+        } => match form {
+            plan::TextForm::Page { title } => {
+                crate::text::write_page(from, to, title, source)?;
+            }
+            plan::TextForm::Speech => crate::text::write_speakable(from, to, source)?,
+        },
+        // Drawn once a run: a retried size target plans the same
+        // subtitles again.
+        plan::Prepare::Subtitles { path, render } => {
+            if !path.is_file() {
+                return crate::subtitles::draw(render, path);
+            }
+        }
+    }
+    Ok(Vec::new())
 }
 
 /// Places `from` at `to` for a step to read: a hard link to the input's

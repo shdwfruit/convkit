@@ -132,6 +132,11 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
     // in webm's transcode, as `--resize` does.
     if has(|a| matches!(a, Arg::Rotate | Arg::VideoChain(_))) || to == Format::Webm {
         push_flag(&mut flags, "--rotate");
+        // A crop goes where a turn does, but not from a picture conv draws
+        // at its own size, nor into an icon, whose sizes are fixed.
+        if !matches!(from, Format::Svg | Format::Ico) && to != Format::Ico {
+            push_flag(&mut flags, "--crop");
+        }
     }
     // A speed change applies wherever a cut does: both need a timeline.
     if has(|a| matches!(a, Arg::Trim)) {
@@ -140,6 +145,18 @@ fn tuning_flags_for(from: Format, to: Format) -> Vec<&'static str> {
         push_flag(&mut flags, "--duration");
         push_flag(&mut flags, "--speed");
         push_flag(&mut flags, "--shift-pitch");
+    }
+    // Subtitles are drawn by the filter chain, which every video and GIF
+    // target composes (webm's at run time, as `--resize` is).
+    let picture_source = from.kind() == convkit_core::Kind::Video || from == Format::Gif;
+    if picture_source && (has(|a| matches!(a, Arg::VideoChain(_))) || to == Format::Webm) {
+        push_flag(&mut flags, "--subtitles");
+    }
+    // A new sound is a second input the probe-aware paths map, from any
+    // video into any video target, so it is keyed on the pair's kinds.
+    if from.kind() == convkit_core::Kind::Video && convkit_core::sized::is_video_target(to) {
+        push_flag(&mut flags, "--audio");
+        push_flag(&mut flags, "--mix");
     }
     // --max-size is a policy over a whole video conversion rather than a
     // slot in one recipe, so it is keyed on the target, not scanned.

@@ -85,6 +85,13 @@ pub enum Prepare {
         form: TextForm,
         source: PathBuf,
     },
+    /// Subtitles drawn into the animated PNG the step lays over the
+    /// picture (`subtitles::draw`). Summarised in `--json`.
+    Subtitles {
+        path: PathBuf,
+        #[serde(serialize_with = "crate::subtitles::serialize_shared")]
+        render: std::sync::Arc<crate::subtitles::Render>,
+    },
 }
 
 /// What `Prepare::Text` writes.
@@ -137,6 +144,18 @@ pub struct ConversionPlan {
     /// as `output`. Skipped when absent, like `sizing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pages: Option<crate::pdf::raster::PagesReport>,
+    /// The box a `--crop` conversion keeps. Skipped when absent, like
+    /// `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crop: Option<crate::crop::CropReport>,
+    /// The new sound an `--audio` conversion puts on the video. Skipped
+    /// when absent, like `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<crate::soundtrack::AudioReport>,
+    /// The subtitles a `--subtitles` conversion burns in. Skipped when
+    /// absent, like `sizing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitles: Option<crate::subtitles::SubtitlesReport>,
 }
 
 /// Why a probe-aware media pair re-encoded instead of copying: a video knob.
@@ -222,20 +241,28 @@ pub fn build_tuned(
         return Err(ConvError::password_protected(&inputs[0], from));
     }
 
-    // A turn needs a picture: a video file the probe found none in is
-    // refused, rather than re-encoded with nothing turned.
-    if tuning.rotate.is_some()
-        && from.kind() == crate::Kind::Video
-        && probe.is_some_and(|p| p.video_streams == 0 && p.video_codec.is_none())
-    {
+    // A turn or a crop needs a picture: a video file the probe found none
+    // in is refused, rather than re-encoded with nothing changed.
+    let picture_flag = match (tuning.rotate, tuning.crop) {
+        (Some(_), _) => Some("--rotate turns"),
+        (None, Some(_)) => Some("--crop crops"),
+        (None, None) => None,
+    };
+    if let Some(flag) = picture_flag.filter(|_| {
+        from.kind() == crate::Kind::Video
+            && probe.is_some_and(|p| p.video_streams == 0 && p.video_codec.is_none())
+    }) {
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
             format!(
-                "--rotate turns a picture, and {} has no video stream",
+                "{flag} a picture, and {} has no video stream",
                 inputs[0].display()
             ),
         ));
     }
+    crate::crop::refuse(from, to, inputs.len(), tuning)?;
+    crate::soundtrack::refuse(tuning, from, to)?;
+    crate::subtitles::refuse(tuning, from, to)?;
 
     // Text read aloud is planned on its own: its engine depends on the
     // voice, and it takes no other knob.
@@ -319,6 +346,22 @@ pub fn build_tuned(
         .zip(probe)
         .map(|(t, p)| crate::rotate::turned_probe(t, p));
     let probe = turned.as_ref().or(probe);
+    // And everything after a crop against what it kept.
+    let cropped = crate::crop::resolve(tuning, from, to, probe, &inputs[0])?;
+    let probe = cropped.as_ref().and_then(|c| c.probe.as_ref()).or(probe);
+    clip_notes.extend(cropped.iter().flat_map(|c| c.notes.iter().cloned()));
+    let crop = cropped.as_ref().map(|c| c.report.clone());
+    // A new sound goes on the output as it plays: after the cut and the
+    // speed change, which it takes no part in.
+    let sound = crate::soundtrack::resolve(tuning, from, to, probe, &inputs[0])?;
+    clip_notes.extend(sound.iter().flat_map(|s| s.notes.iter().cloned()));
+    let audio = sound.as_ref().map(|s| s.report.clone());
+    // Subtitles go on the picture as it comes out: their times moved by
+    // the cut and the speed change, their size the cropped picture's.
+    let subs =
+        crate::subtitles::resolve(tuning, from, to, probe, cut.as_ref(), tuning.speed, output)?;
+    clip_notes.extend(subs.iter().flat_map(|s| s.notes.iter().cloned()));
+    let subtitles = subs.as_ref().map(|s| s.report.clone());
     if tuning.mute && !crate::sized::is_video_target(to) {
         let why = if to == Format::Gif {
             "gif has no sound to drop".to_string()
@@ -334,6 +377,9 @@ pub fn build_tuned(
     resolved.cut = cut;
     resolved.speed = retimed.as_ref().map(|r| r.retime.clone());
     resolved.turn = tuning.rotate;
+    resolved.crop = cropped.as_ref().and_then(|c| c.rect);
+    resolved.soundtrack = sound.map(|s| s.soundtrack);
+    resolved.subtitles = subs.and_then(|s| s.burn);
     resolved.mute = tuning.mute;
     resolved.ogg_tags = media::is_ogg(from) && !media::is_ogg(to);
     // An icon pair adds what it read of the source (`icon::resolve`); with
@@ -359,9 +405,17 @@ pub fn build_tuned(
         // A format cut, retimed, turned or resized into itself is no
         // registered pair, so it reaches the probe-aware paths by its range,
         // speed, turn or size instead.
-        let same_format = from == to && (reencoded || tuning.rotate.is_some());
-        if same_format || (registry::lookup(from, to).is_some() && registry::needs_probe(from, to))
-        {
+        let same_format = from == to
+            && (reencoded
+                || tuning.rotate.is_some()
+                || tuning.crop.is_some()
+                || tuning.audio.is_some()
+                || tuning.subtitles.is_some());
+        // Only the probe-aware paths map a second input, so a new sound
+        // takes them on any pair.
+        let probed_pair = registry::lookup(from, to).is_some()
+            && (registry::needs_probe(from, to) || tuning.audio.is_some());
+        if same_format || probed_pair {
             // A video knob changes the picture, and ffmpeg refuses a filter
             // alongside -c:v copy -- so consult the tuning before choosing
             // the path, not after. Choosing first is why `select()` below
@@ -390,7 +444,9 @@ pub fn build_tuned(
                 .is_some_and(|t| crate::rotate::undoes_note(t, probe))
                 && matches!(to, Format::Mp4 | Format::Mov);
             let turns_pixels = tuning.rotate.is_some() && !retag;
-            let wants_video = knob || resolved.speed.is_some() || turns_pixels;
+            let crops = resolved.crop.is_some();
+            let draws = resolved.subtitles.is_some();
+            let wants_video = knob || resolved.speed.is_some() || turns_pixels || crops || draws;
             let strip = tuning.strip_metadata;
             // A copy can only make some cuts exactly (see
             // `trim::Cut::why_not_copied`); any other re-encodes the video to
@@ -407,14 +463,16 @@ pub fn build_tuned(
                 .video_codec
                 .as_deref()
                 .and_then(|v| registry::why_not_remuxed(from, to, v));
-            // The turn is why the video is re-encoded only where nothing
-            // else would have re-encoded it.
-            let turn_alone = turns_pixels
-                && copyable
+            // The turn or the crop is why the video is re-encoded only where
+            // nothing else would have re-encoded it. A crop says so for both.
+            let picture_alone = copyable
                 && !knob
                 && resolved.speed.is_none()
                 && not_copied.is_none()
                 && unplayable.is_none();
+            let turn_alone = turns_pixels && !crops && !draws && picture_alone;
+            let crop_alone = crops && !draws && picture_alone;
+            let subtitles_alone = draws && picture_alone;
             let dynamic = if wants_video || not_copied.is_some() || unplayable.is_some() {
                 media::transcoded_invocation(
                     to, p, &resolved, tuning.crf, strip, &inputs[0], output,
@@ -457,11 +515,18 @@ pub fn build_tuned(
                     .extend(crate::metadata::labels_note(to, tuning, probe));
                 let rotation = rotation_for(tuning, to, video_copied);
                 m.warnings.extend(rotation_note(rotation, turn_alone));
+                if crop_alone {
+                    m.warnings.push(crate::crop::VIDEO_NOTE.to_string());
+                }
+                if subtitles_alone {
+                    m.warnings.push(crate::subtitles::VIDEO_NOTE.to_string());
+                }
                 // Every invocation `media.rs` builds opens with `-i <input>`,
                 // after a cut's `-ss`/`-t` when there is one, and closes with
                 // the output path: those are the path positions the Windows
                 // long-path rewriter needs.
-                let path_args = vec![media::input_position(&m.argv), m.argv.len() - 1];
+                let mut path_args = media::input_positions(&m.argv);
+                path_args.push(m.argv.len() - 1);
                 return Ok(ConversionPlan {
                     from,
                     built_in: false,
@@ -476,7 +541,7 @@ pub fn build_tuned(
                         output: output.to_path_buf(),
                         intermediate_ext: None,
                         path_args,
-                        prepare: Vec::new(),
+                        prepare: resolved.subtitles.iter().map(|b| b.prepare()).collect(),
                         stdin: None,
                     }],
                     warnings: m.warnings,
@@ -486,6 +551,9 @@ pub fn build_tuned(
                     speed,
                     rotation,
                     pages: None,
+                    crop,
+                    audio,
+                    subtitles,
                 });
             }
         }
@@ -493,9 +561,13 @@ pub fn build_tuned(
 
     let recipe = select(from, to, probe, available)
         .or_else(|| {
-            (from == to && (reencoded || tuning.rotate.is_some()))
-                .then(|| registry::same_format_recipe(to))
-                .flatten()
+            (from == to
+                && (reencoded
+                    || tuning.rotate.is_some()
+                    || tuning.crop.is_some()
+                    || tuning.subtitles.is_some()))
+            .then(|| registry::same_format_recipe(to))
+            .flatten()
         })
         .ok_or_else(|| ConvError::unsupported_pair(from, to))?;
     let recipe = if tuning.strip_metadata {
@@ -517,6 +589,10 @@ pub fn build_tuned(
     // output, with the layout that places them.
     if recipe == registry::TYPST_IMG_TO_PDF {
         steps[0].prepare = crate::layout::image_pages(inputs, output, tuning.strip_metadata);
+    }
+    // The subtitles are drawn before the step that lays them over.
+    if let (Some(burn), Some(first)) = (&resolved.subtitles, steps.first_mut()) {
+        first.prepare.push(burn.prepare());
     }
 
     // Only the notes that apply to this source, as far as the probe knows.
@@ -559,6 +635,9 @@ pub fn build_tuned(
         speed,
         rotation,
         pages: None,
+        crop,
+        audio,
+        subtitles,
     })
 }
 
@@ -620,6 +699,9 @@ fn built_in(
         rotation: None,
         built_in: true,
         pages: None,
+        crop: None,
+        audio: None,
+        subtitles: None,
     })
 }
 
@@ -649,6 +731,9 @@ fn not_for_speech(tuning: &Tuning) -> Option<&'static str> {
         ("--speed", tuning.speed.is_some()),
         ("--shift-pitch", tuning.shift_pitch),
         ("--rotate", tuning.rotate.is_some()),
+        ("--crop", tuning.crop.is_some()),
+        ("--audio", tuning.audio.is_some()),
+        ("--subtitles", tuning.subtitles.is_some()),
         ("--mute", tuning.mute),
     ]
     .into_iter()
@@ -738,6 +823,9 @@ pub fn build_speech(
         rotation: None,
         built_in: false,
         pages: None,
+        crop: None,
+        audio: None,
+        subtitles: None,
     })
 }
 
@@ -779,6 +867,16 @@ fn rotation_note(
 /// pixels turn, or that another knob re-encodes, takes the media paths
 /// instead, and so does one resized, since scaling it means re-encoding it.
 fn rewrites_in_place(format: Format, probe: Option<&MediaProbe>, tuning: &Tuning) -> bool {
+    // A new sound is a second input, which only the media paths map, and
+    // subtitles are drawn by ffmpeg's filter chain.
+    if tuning.audio.is_some() || tuning.subtitles.is_some() {
+        return false;
+    }
+    // A picture is cropped by its recipe here; a video is re-encoded on the
+    // media paths, which a crop always needs.
+    if tuning.crop.is_some() {
+        return format.kind() != crate::Kind::Video;
+    }
     let Some(turn) = tuning.rotate else {
         let resized = tuning.resize.is_some();
         let video_resized = resized && crate::sized::is_video_target(format);
@@ -960,7 +1058,10 @@ fn in_place(
     if tuning.rotate.is_some() {
         crate::rotate::in_place(format).map_err(invalid)?;
     }
-    if !tuning.strip_metadata && tuning.rotate.is_none() {
+    if tuning.crop.is_some() {
+        crate::crop::in_place(format).map_err(invalid)?;
+    }
+    if !tuning.strip_metadata && tuning.rotate.is_none() && tuning.crop.is_none() {
         registry::resize_in_place(format).map_err(invalid)?;
     }
     let others = Tuning {
@@ -974,24 +1075,39 @@ fn in_place(
     let by_tag = tuning
         .rotate
         .is_some_and(|t| crate::rotate::undoes_note(t, probe))
+        && tuning.crop.is_none()
         && match format {
             Format::Jpg => !tuning.strip_metadata && others.is_empty(),
             Format::Mp4 | Format::Mov => true,
             _ => false,
         };
-    if format == Format::Gif && !others.is_empty() {
+    // A gif kept as gif is turned and cropped frame by frame, and nothing
+    // else.
+    let gif_others = Tuning {
+        crop: None,
+        ..others.clone()
+    };
+    if format == Format::Gif && !gif_others.is_empty() {
+        let (flag, verb) = if tuning.rotate.is_some() {
+            ("--rotate", "turns")
+        } else {
+            ("--crop", "crops")
+        };
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
-            "--rotate on a gif kept as gif turns its frames and changes nothing else; \
-             add --to mp4 to change it as well",
+            format!(
+                "{flag} on a gif kept as gif {verb} its frames and changes nothing else; \
+                 add --to mp4 to change it as well"
+            ),
         ));
     }
-    let recipe = match tuning.rotate {
+    let recipe = match (tuning.rotate, tuning.crop) {
         _ if by_tag => None,
-        Some(_) => registry::turn_recipe_for(format),
-        None => registry::image_recipe_for(format),
+        (Some(_), _) | (_, Some(_)) => registry::turn_recipe_for(format),
+        (None, None) => registry::image_recipe_for(format),
     };
     let kept = probe.map_or(&[][..], |p| p.kept_tags.as_slice());
+    let mut crop_report = None;
     let (steps, mut warnings, enlarged) = match recipe {
         Some(recipe) => {
             // A resize alone keeps the metadata, as a conversion to the
@@ -1012,15 +1128,20 @@ fn in_place(
                 .rotate
                 .zip(probe)
                 .map(|(t, p)| crate::rotate::turned_probe(t, p));
-            let mut resolved =
-                crate::video::resolve(tuning, turned.as_ref().or(probe), target_for(format));
+            let shown = turned.as_ref().or(probe);
+            let cropped = crate::crop::resolve(tuning, format, format, shown, &inputs[0])?;
+            let shown = cropped.as_ref().and_then(|c| c.probe.as_ref()).or(shown);
+            let mut resolved = crate::video::resolve(tuning, shown, target_for(format));
             resolved.turn = tuning.rotate;
+            resolved.crop = cropped.as_ref().and_then(|c| c.rect);
+            crop_report = cropped.as_ref().map(|c| c.report.clone());
             validate_tuning(&recipe, format, format, tuning, &resolved)?;
             let steps = render_steps(&recipe, inputs, output, tuning, &resolved, kept);
             let mut warnings = registry::notes_for(&recipe, probe);
+            warnings.extend(cropped.iter().flat_map(|c| c.notes.iter().cloned()));
             warnings.extend(resolved.notes.iter().cloned());
             // A resize alone re-encodes as any conversion to the format
-            // does, which goes unsaid; a strip or a turn says it.
+            // does, which goes unsaid; a strip, a turn or a crop says it.
             if matches!(
                 format,
                 Format::Jpg | Format::Webp | Format::Avif | Format::Heic
@@ -1029,6 +1150,12 @@ fn in_place(
                     warnings.push(crate::metadata::reencode_note(format, tuning));
                 } else if tuning.rotate.is_some() {
                     warnings.push(crate::rotate::image_note(format, tuning));
+                } else if tuning.crop.is_some() {
+                    warnings.push(crate::crop::image_note(
+                        format,
+                        tuning,
+                        resolved.crop.is_some(),
+                    ));
                 }
             }
             (steps, warnings, resolved.enlarged)
@@ -1096,6 +1223,9 @@ fn in_place(
         speed: None,
         rotation,
         pages: None,
+        crop: crop_report,
+        audio: None,
+        subtitles: None,
     })
 }
 
@@ -1344,6 +1474,59 @@ fn validate_tuning(
         }
         return Err(crate::rotate::not_applicable(from, to));
     }
+    if tuning.crop.is_some() && !has_slot(|a| matches!(a, Arg::Rotate | Arg::VideoChain(_))) {
+        // webm crops only in the probe-aware transcode, as it turns.
+        if to == Format::Webm {
+            return Err(ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!(
+                    "--crop on {} -> webm needs ffprobe to read the source, and it could \
+                     not; check that ffprobe is installed and the input is a readable video",
+                    from.ext()
+                ),
+            ));
+        }
+        return Err(crate::crop::not_applicable(from, to));
+    }
+    if tuning.subtitles.is_some()
+        && !probe_routed_webm
+        && !has_slot(|a| matches!(a, Arg::VideoChain(_)))
+    {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--subtitles does not apply to {} -> {}: it draws text onto video and GIFs",
+                from.ext(),
+                to.ext()
+            ),
+        ));
+    }
+    if tuning.subtitles.is_some() && probe_routed_webm && resolved.subtitles.is_some() {
+        return Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            format!(
+                "--subtitles on {} -> webm needs ffprobe to read the source, and it could not; \
+                 check that ffprobe is installed and the input is a readable video",
+                from.ext()
+            ),
+        ));
+    }
+    // No static recipe maps a second input: a new sound reaching one means
+    // the probe-aware path had no probe to map from.
+    if tuning.audio.is_some() {
+        if crate::sized::is_video_target(to) && from.kind() == crate::Kind::Video {
+            return Err(ConvError::new(
+                ErrorCode::ConversionFailed,
+                format!(
+                    "--audio on {} -> {} needs ffprobe to read the source, and it could not; \
+                     check that ffprobe is installed and the input is a readable video",
+                    from.ext(),
+                    to.ext()
+                ),
+            ));
+        }
+        return Err(crate::soundtrack::not_applicable(from, to));
+    }
     if tuning.strip_metadata && !has_slot(|a| matches!(a, Arg::StripMetadata)) {
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
@@ -1586,7 +1769,7 @@ mod tests {
             .iter()
             .filter_map(|prep| match prep {
                 Prepare::Stage { strip, .. } => Some(*strip),
-                Prepare::Write { .. } | Prepare::Text { .. } => None,
+                Prepare::Write { .. } | Prepare::Text { .. } | Prepare::Subtitles { .. } => None,
             })
             .collect();
         assert_eq!(strips, [true, false], "the jpg is stripped, the png linked");
@@ -3201,6 +3384,9 @@ mod tests {
             compress: false,
             dpi: None,
             pages: None,
+            crop: None,
+            audio: None,
+            subtitles: None,
         }
     }
 
@@ -5470,5 +5656,542 @@ mod tests {
             assert!(has(argv, ["-c:v", "libx264"]), "{argv:?}");
             assert_eq!(by(&plan)["by"], "pixels");
         }
+    }
+
+    // --- Crop: --crop -------------------------------------------------------
+
+    fn cropped(spec: &str) -> Tuning {
+        Tuning {
+            crop: Some(crate::crop::parse(spec).unwrap()),
+            ..Tuning::default()
+        }
+    }
+
+    /// A picture's size, read as `crop::attach` reads it.
+    fn photo_probe(w: u32, h: u32) -> MediaProbe {
+        MediaProbe {
+            width: Some(w),
+            height: Some(h),
+            ..MediaProbe::default()
+        }
+    }
+
+    /// The crop comes after the turn and before every size, so `--resize`
+    /// fits what was kept, and a crop alone says it is why the video was
+    /// re-encoded.
+    #[test]
+    fn a_video_crop_comes_after_the_turn_and_before_the_size() {
+        use crate::rotate::Turn;
+        let plan = turned_plan(
+            Format::Mp4,
+            Format::Mp4,
+            &cropped("1:1"),
+            Some(&clip_probe(60)),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            value(argv, "-vf").starts_with("crop=720:720:280:0,"),
+            "{argv:?}"
+        );
+        assert!(has(argv, ["-c:v", "libx264"]), "{argv:?}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "The video is re-encoded to crop it."),
+            "{:?}",
+            plan.warnings
+        );
+        let report = serde_json::to_value(plan.crop.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            report,
+            serde_json::json!({"asked": "1:1", "box": {"w": 720, "h": 720, "x": 280, "y": 0}})
+        );
+        // Turned a quarter, the 1280x720 clip is 720x1280, and the box is
+        // in that picture; 360x fits what the crop kept.
+        let t = Tuning {
+            rotate: Some(Turn::Right),
+            resize: Some("360x".into()),
+            ..cropped("720x720+0+100")
+        };
+        let plan = turned_plan(Format::Mov, Format::Mp4, &t, Some(&clip_probe(60))).unwrap();
+        let vf = value(&plan.steps[0].argv, "-vf");
+        assert!(
+            vf.starts_with(r"transpose=clock,crop=720:720:0:100,scale=w=min(360\,iw):h=-2,"),
+            "{vf}"
+        );
+        // A crop with a knob re-encodes for the knob, and says that.
+        assert!(
+            !plan
+                .warnings
+                .iter()
+                .any(|w| w == "The video is re-encoded to crop it."),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_gif_target_crops_ahead_of_its_frame_rate_and_size() {
+        let plan = turned_plan(
+            Format::Mp4,
+            Format::Gif,
+            &cropped("9:16"),
+            Some(&clip_probe(5)),
+        )
+        .unwrap();
+        let vf = value(&plan.steps[0].argv, "-vf");
+        assert!(vf.starts_with("crop=404:720:438:0,fps=15,"), "{vf}");
+    }
+
+    /// ImageMagick crops right after the turn, and `+repage` forgets the
+    /// box's old place on the page.
+    #[test]
+    fn an_image_is_cropped_after_it_is_turned() {
+        use crate::rotate::Turn;
+        let t = Tuning {
+            rotate: Some(Turn::Left),
+            ..cropped("100x50+10+20")
+        };
+        let plan =
+            turned_plan(Format::Heic, Format::Png, &t, Some(&photo_probe(400, 300))).unwrap();
+        let argv = &plan.steps[0].argv;
+        let at = argv.iter().position(|a| a == "-rotate").unwrap();
+        assert_eq!(
+            argv[at..at + 5],
+            ["-rotate", "270", "-crop", "100x50+10+20", "+repage"],
+            "{argv:?}"
+        );
+        // Into its own lossy format, the note says it was re-encoded.
+        let plan = turned_plan(
+            Format::Jpg,
+            Format::Jpg,
+            &cropped("1:1"),
+            Some(&photo_probe(400, 300)),
+        )
+        .unwrap();
+        assert!(
+            plan.steps[0]
+                .argv
+                .windows(3)
+                .any(|w| w == ["-crop", "300x300+50+0", "+repage"]),
+            "{:?}",
+            plan.steps
+        );
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "The jpg is re-encoded at quality 92 to crop it."),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_gif_is_cropped_into_itself_frame_by_frame() {
+        let plan = turned_plan(
+            Format::Gif,
+            Format::Gif,
+            &cropped("1:1"),
+            Some(&photo_probe(200, 100)),
+        )
+        .unwrap();
+        let argv = &plan.steps[0].argv;
+        assert_eq!(plan.steps[0].backend, Backend::Magick);
+        assert!(
+            argv.windows(4)
+                .any(|w| w == ["-coalesce", "-crop", "100x100+50+0", "+repage"]),
+            "{argv:?}"
+        );
+        // A gif kept as gif takes nothing else.
+        let t = Tuning {
+            colors: Some(16),
+            ..cropped("1:1")
+        };
+        let e =
+            turned_plan(Format::Gif, Format::Gif, &t, Some(&photo_probe(200, 100))).unwrap_err();
+        assert!(e.message.starts_with("--crop on a gif kept as gif"), "{e}");
+    }
+
+    #[test]
+    fn crop_is_refused_where_there_is_no_picture_or_no_size() {
+        for (from, to) in [(Format::Mp4, Format::Mp3), (Format::Docx, Format::Pdf)] {
+            let e = turned_plan(from, to, &cropped("1:1"), Some(&clip_probe(5))).unwrap_err();
+            assert_eq!(e.code, crate::ErrorCode::InvalidInvocation, "{from:?}");
+            assert!(
+                e.message.contains("it crops images, video and GIFs"),
+                "{from:?}: {}",
+                e.message
+            );
+        }
+        let silent = MediaProbe {
+            video_codec: None,
+            video_streams: 0,
+            ..clip_probe(5)
+        };
+        let e = turned_plan(Format::Mp4, Format::Mp4, &cropped("1:1"), Some(&silent)).unwrap_err();
+        assert!(e.message.starts_with("--crop crops a picture"), "{e}");
+        for (from, to) in [(Format::Svg, Format::Png), (Format::Png, Format::Ico)] {
+            let e = turned_plan(from, to, &cropped("1:1"), Some(&photo_probe(64, 64))).unwrap_err();
+            assert_eq!(e.code, crate::ErrorCode::InvalidInvocation, "{from:?}");
+        }
+        // A picture whose size was not read cannot be cropped to a shape.
+        let e = turned_plan(Format::Png, Format::Jpg, &cropped("1:1"), None).unwrap_err();
+        assert!(e.message.contains("which --crop needs"), "{e}");
+    }
+
+    #[test]
+    fn a_shape_the_picture_already_has_changes_nothing() {
+        let plan = turned_plan(
+            Format::Mkv,
+            Format::Mp4,
+            &cropped("16:9"),
+            Some(&clip_probe(5)),
+        )
+        .unwrap();
+        assert!(
+            has(&plan.steps[0].argv, ["-c:v", "copy"]),
+            "{:?}",
+            plan.steps
+        );
+        assert!(
+            plan.warnings.iter().any(|w| w.contains("already 16:9")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_sized_video_is_encoded_cropped() {
+        let t = Tuning {
+            max_size: Some(crate::size::parse("1mb").unwrap()),
+            ..cropped("1:1")
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&clip_probe(10))).unwrap();
+        assert_eq!(plan.steps.len(), 2, "two passes: {:?}", plan.steps);
+        for step in &plan.steps {
+            assert!(
+                value(&step.argv, "-vf").starts_with("crop=720:720:280:0"),
+                "{:?}",
+                step.argv
+            );
+        }
+    }
+
+    // --- New sound: --audio, --mix ------------------------------------------
+
+    fn sounded(mix: Option<u16>) -> Tuning {
+        Tuning {
+            audio: Some(crate::soundtrack::Request {
+                path: p("song.mp3"),
+                mix: mix.map(crate::soundtrack::Level),
+            }),
+            ..Tuning::default()
+        }
+    }
+
+    /// `clip_probe` with a new sound read: `codec`, `secs` long, measured
+    /// 10 LU louder than the clip's own.
+    fn with_song(probe: MediaProbe, codec: &str, secs: u64) -> MediaProbe {
+        MediaProbe {
+            soundtrack: Some(crate::soundtrack::Read {
+                codec: Some(codec.into()),
+                duration_ms: Some(secs * 1000),
+                loudness: Some((Some(-200), Some(-100))),
+            }),
+            ..probe
+        }
+    }
+
+    #[test]
+    fn a_new_sound_replaces_the_old_and_the_video_is_copied() {
+        let probe = with_song(clip_probe(60), "mp3", 200);
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &sounded(None), Some(&probe)).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert_eq!(
+            argv[..6],
+            ["-i", "in.mp4", "-t", "60", "-i", "song.mp3"],
+            "{argv:?}"
+        );
+        assert!(has(argv, ["-map", "1:a:0"]), "{argv:?}");
+        assert!(!has(argv, ["-map", "0:a?"]), "{argv:?}");
+        assert!(
+            has(argv, ["-c:v", "copy"]) && has(argv, ["-c:a", "copy"]),
+            "{argv:?}"
+        );
+        // Both inputs are paths, for the Windows long-path rewrite.
+        assert_eq!(plan.steps[0].path_args, [1, 5, argv.len() - 1]);
+        let report = serde_json::to_value(plan.audio.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            report,
+            serde_json::json!({"file": "song.mp3", "mode": "replace", "copied": true})
+        );
+        // mkv keeps every other stream and drops only the old sound.
+        let plan = turned_plan(Format::Mp4, Format::Mkv, &sounded(None), Some(&probe)).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert!(
+            argv.windows(8)
+                .any(|w| w == ["-map", "0", "-map", "-0:d", "-map", "-0:a", "-map", "1:a:0"]),
+            "{argv:?}"
+        );
+    }
+
+    /// The cut is the video's: the new sound starts with the clip, and is
+    /// read only as long as the clip runs. A speed change leaves it alone.
+    #[test]
+    fn a_new_sound_starts_with_the_clip_and_keeps_its_own_speed() {
+        let probe = with_song(clip_probe(60), "aac", 200);
+        let t = Tuning {
+            range: Some(
+                crate::trim::Range::new(
+                    Some(crate::trim::parse_time("10").unwrap()),
+                    Some(crate::trim::parse_time("30").unwrap()),
+                    None,
+                )
+                .unwrap()
+                .unwrap(),
+            ),
+            speed: Some(crate::speed::parse("2").unwrap()),
+            ..sounded(None)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&probe)).unwrap();
+        let argv = &plan.steps[0].argv;
+        assert_eq!(
+            argv[..10],
+            ["-ss", "10", "-t", "20", "-i", "in.mp4", "-t", "10", "-i", "song.mp3"],
+            "{argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "-af"),
+            "no filter on the new sound: {argv:?}"
+        );
+        assert!(!argv.iter().any(|a| a == "-copypriorss:a"), "{argv:?}");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.ends_with("song.mp3 plays at its own speed.")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_mix_runs_the_videos_sound_through_its_speed_and_the_new_one_under_it() {
+        let probe = with_song(clip_probe(60), "mp3", 30);
+        let t = Tuning {
+            speed: Some(crate::speed::parse("2").unwrap()),
+            ..sounded(Some(25))
+        };
+        let plan = turned_plan(Format::Mp4, Format::Webm, &t, Some(&probe)).unwrap();
+        let argv = &plan.steps[0].argv;
+        let graph = value(argv, "-filter_complex");
+        assert!(graph.starts_with("[0:a:0]atempo=2"), "{graph}");
+        assert!(
+            graph.contains("[1:a:0]volume=-22.0dB[convkit_new]"),
+            "10 LU louder, then a quarter as loud: {graph}"
+        );
+        assert!(
+            graph.ends_with(",aformat=channel_layouts=7.1|5.1|stereo|mono[convkit_mix]"),
+            "{graph}"
+        );
+        assert!(has(argv, ["-map", "[convkit_mix]"]), "{argv:?}");
+        assert!(has(argv, ["-c:a", "libopus"]), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "-af"), "{argv:?}");
+        // 30 s of song under a 60 s clip played at 2x: they end together.
+        assert!(
+            !plan.warnings.iter().any(|w| w.contains("song.mp3 ends")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_new_sound_is_refused_without_a_video_to_put_it_on() {
+        let probe = with_song(clip_probe(5), "mp3", 5);
+        for (from, to) in [(Format::Mp4, Format::Mp3), (Format::Mp4, Format::Gif)] {
+            let e = turned_plan(from, to, &sounded(None), Some(&probe)).unwrap_err();
+            assert!(e.message.starts_with("--audio does not apply"), "{e}");
+        }
+        let e = turned_plan(Format::Mp4, Format::Mp4, &sounded(None), None).unwrap_err();
+        assert!(e.message.contains("needs ffprobe"), "{e}");
+        // A strip as well still maps the new sound rather than copying.
+        let t = Tuning {
+            strip_metadata: true,
+            ..sounded(None)
+        };
+        let plan = turned_plan(Format::Mp4, Format::Mp4, &t, Some(&probe)).unwrap();
+        assert!(
+            has(&plan.steps[0].argv, ["-map", "1:a:0"]),
+            "{:?}",
+            plan.steps
+        );
+    }
+
+    // --- Subtitles: --subtitles ---------------------------------------------
+
+    fn subtitled() -> Tuning {
+        Tuning {
+            subtitles: Some(p("film.srt")),
+            ..Tuning::default()
+        }
+    }
+
+    /// `clip_probe` with a subtitle file read: one cue from 1 s to 3 s.
+    fn with_subs(probe: MediaProbe) -> MediaProbe {
+        use crate::subtitles::{Cue, Kind, Span, Track};
+        MediaProbe {
+            subtitle_file: Some(std::sync::Arc::new(Track {
+                kind: Kind::Srt,
+                encoding: None,
+                cues: vec![Cue {
+                    start_ms: 1000,
+                    end_ms: 3000,
+                    lines: vec![vec![Span {
+                        text: "Hi".into(),
+                        italic: false,
+                        bold: false,
+                    }]],
+                }],
+            })),
+            ..probe
+        }
+    }
+
+    fn drawn(step: &PlannedStep) -> Option<&crate::subtitles::Render> {
+        step.prepare.iter().find_map(|p| match p {
+            Prepare::Subtitles { render, .. } => Some(render.as_ref()),
+            _ => None,
+        })
+    }
+
+    /// The subtitles go on after the turn and the crop and before the size,
+    /// drawn at the size the crop left, before the step runs.
+    #[test]
+    fn subtitles_are_laid_over_the_cropped_picture_before_it_is_sized() {
+        let t = Tuning {
+            resize: Some("640x".into()),
+            ..Tuning {
+                crop: Some(crate::crop::parse("1:1").unwrap()),
+                ..subtitled()
+            }
+        };
+        let plan = turned_plan(
+            Format::Mov,
+            Format::Mp4,
+            &t,
+            Some(&with_subs(clip_probe(60))),
+        )
+        .unwrap();
+        let step = &plan.steps[0];
+        let vf = value(&step.argv, "-vf");
+        assert!(
+            vf.starts_with(
+                "crop=720:720:280:0,null[convkit_v];movie=filename=out.convkit-subs.apng:\
+                 format_name=apng,format=rgba[convkit_s];[convkit_v][convkit_s]overlay="
+            ),
+            "{vf}"
+        );
+        assert!(
+            vf.contains(r"eof_action=pass:format=yuv420,scale=w=min(640\,iw)"),
+            "{vf}"
+        );
+        let render = drawn(step).expect("drawn before the step");
+        assert_eq!((render.width, render.height), (720, 720));
+        assert_eq!(
+            serde_json::to_value(plan.subtitles.as_ref().unwrap()).unwrap(),
+            serde_json::json!({"file": "film.srt", "drawn": 1})
+        );
+    }
+
+    #[test]
+    fn subtitles_alone_say_why_the_video_is_reencoded() {
+        let plan = turned_plan(
+            Format::Mp4,
+            Format::Mp4,
+            &subtitled(),
+            Some(&with_subs(clip_probe(60))),
+        )
+        .unwrap();
+        assert!(
+            has(&plan.steps[0].argv, ["-c:v", "libx264"]),
+            "{:?}",
+            plan.steps
+        );
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w == "The video is re-encoded to draw the subtitles on it."),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// A GIF draws them ahead of its frame rate and size, and a cut moves
+    /// them: the cue at 1 s is at 0.5 s of a clip from 0.5 s.
+    #[test]
+    fn a_gif_draws_subtitles_ahead_of_its_rate_and_a_cut_moves_them() {
+        let t = Tuning {
+            range: crate::trim::Range::new(
+                Some(crate::trim::parse_time("0.5").unwrap()),
+                None,
+                None,
+            )
+            .unwrap(),
+            ..subtitled()
+        };
+        let plan = turned_plan(
+            Format::Mp4,
+            Format::Gif,
+            &t,
+            Some(&with_subs(clip_probe(5))),
+        )
+        .unwrap();
+        let step = &plan.steps[0];
+        let vf = value(&step.argv, "-vf");
+        assert!(vf.starts_with("null[convkit_v];movie="), "{vf}");
+        assert!(vf.contains("format=yuv420,fps=15,"), "{vf}");
+        let render = drawn(step).expect("drawn before the step");
+        let shown: Vec<(u64, u64)> = render
+            .segments
+            .iter()
+            .filter(|s| !s.lines.is_empty())
+            .map(|s| (s.start_ms, s.end_ms))
+            .collect();
+        assert_eq!(shown, [(500, 2500)]);
+    }
+
+    #[test]
+    fn a_sized_video_draws_its_subtitles_before_the_first_pass() {
+        let t = Tuning {
+            max_size: Some(crate::size::parse("1mb").unwrap()),
+            ..subtitled()
+        };
+        let plan = turned_plan(
+            Format::Mp4,
+            Format::Mp4,
+            &t,
+            Some(&with_subs(clip_probe(10))),
+        )
+        .unwrap();
+        assert!(drawn(&plan.steps[0]).is_some(), "{:?}", plan.steps);
+        for step in &plan.steps {
+            assert!(
+                value(&step.argv, "-vf").contains("[convkit_s]overlay="),
+                "{:?}",
+                step.argv
+            );
+        }
+    }
+
+    #[test]
+    fn subtitles_are_refused_without_a_picture() {
+        let probe = with_subs(clip_probe(5));
+        let e = turned_plan(Format::Mp4, Format::M4a, &subtitled(), Some(&probe)).unwrap_err();
+        assert!(
+            e.message.contains("it draws text onto video and GIFs"),
+            "{e}"
+        );
+        let e = turned_plan(Format::Mp4, Format::Mp4, &subtitled(), None).unwrap_err();
+        assert!(e.message.contains("needs ffprobe"), "{e}");
     }
 }

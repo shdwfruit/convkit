@@ -5424,3 +5424,463 @@ fn a_heic_is_turned_into_a_heic() {
     assert_eq!(identify_format(&out, "%[orientation]"), "TopLeft");
     assert_eq!(&std::fs::read(&out).unwrap()[4..12], b"ftypheic");
 }
+
+// --- Crop: --crop -------------------------------------------------------------
+
+/// One frame of `path` at `at` seconds as packed RGB, with its size.
+fn frame_rgb(path: &Path, at: f64) -> ((u32, u32), Vec<u8>) {
+    let resolver = Resolver::new();
+    require_backend(&resolver, Backend::Ffmpeg);
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let dims = probe_dims(path);
+    let out = Command::new(&ffmpeg)
+        .args(["-v", "error", "-ss", &format!("{at:.3}"), "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffmpeg: {e}"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout.len(), (dims.0 * dims.1 * 3) as usize);
+    (dims, out.stdout)
+}
+
+/// The mean of each channel over the rows `rows` of an RGB frame.
+fn mean_rgb(((w, _), rgb): &((u32, u32), Vec<u8>), rows: std::ops::Range<u32>) -> [f64; 3] {
+    let mut sum = [0f64; 3];
+    let mut n = 0f64;
+    for y in rows {
+        for x in 0..*w {
+            let i = ((y * w + x) * 3) as usize;
+            for c in 0..3 {
+                sum[c] += f64::from(rgb[i + c]);
+            }
+            n += 1.0;
+        }
+    }
+    sum.map(|s| s / n)
+}
+
+/// A clip letterboxed with black bars is cut to its picture by `auto`, and
+/// nothing black is left at the top or the bottom.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn auto_crops_the_black_bars_off_a_video() {
+    let dir = tmp();
+    let src = synth_media(
+        &dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x180:rate=25:duration=2",
+            "-vf",
+            "pad=w=320:h=240:x=0:y=30:color=black",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+        ],
+        "letterbox.mp4",
+    );
+    let out = dir.path().join("out.mp4");
+    let tuning = Tuning {
+        crop: Some(convkit_core::crop::Spec::Auto),
+        ..Tuning::default()
+    };
+    let outcome = convert_tuned(&src, &out, &tuning).unwrap();
+    assert_eq!(probe_dims(&out), (320, 180));
+    let report = outcome.crop.expect("a crop report");
+    assert_eq!(
+        report.rect,
+        Some(convkit_core::crop::Rect {
+            w: 320,
+            h: 180,
+            x: 0,
+            y: 30
+        })
+    );
+    let frame = frame_rgb(&out, 1.0);
+    for rows in [0..4, 176..180] {
+        let m = mean_rgb(&frame, rows.clone());
+        assert!(
+            m.iter().sum::<f64>() > 60.0,
+            "rows {rows:?} still black: {m:?}"
+        );
+    }
+}
+
+/// A box is in the picture as it is shown: the fixture is stored 40x20,
+/// blue on the left and red on the right, and tagged to show a quarter
+/// turn right, so its top 20x20 as shown is all blue.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_box_is_cut_from_the_picture_as_it_is_shown() {
+    let dir = tmp();
+    let out = dir.path().join("top.png");
+    let tuning = Tuning {
+        crop: Some(convkit_core::crop::parse("20x20+0+0").unwrap()),
+        ..Tuning::default()
+    };
+    convert_tuned(&fixture("rotated.jpg"), &out, &tuning).unwrap();
+    assert_eq!(imagemagick_dimensions(&out), (20, 20));
+    let resolver = Resolver::new();
+    let magick = resolver.resolve(Backend::Magick).unwrap().path;
+    let colours = run_identify(
+        &magick,
+        &[
+            "-format",
+            "%[fx:mean.r] %[fx:mean.b]",
+            &out.display().to_string(),
+        ],
+    );
+    let mut it = colours
+        .split_whitespace()
+        .map(|v| v.parse::<f64>().unwrap());
+    let (r, b) = (it.next().unwrap(), it.next().unwrap());
+    assert!(b > 0.9 && r < 0.1, "not the blue half: r {r} b {b}");
+    // Turned right as well, the box is of the turned picture: the top of a
+    // 40x20 picture whose left half is red.
+    let out = dir.path().join("turned.png");
+    let tuning = Tuning {
+        rotate: Some(convkit_core::rotate::Turn::Right),
+        crop: Some(convkit_core::crop::parse("20x20+0+0").unwrap()),
+        ..Tuning::default()
+    };
+    convert_tuned(&fixture("rotated.jpg"), &out, &tuning).unwrap();
+    let colours = run_identify(
+        &magick,
+        &[
+            "-format",
+            "%[fx:mean.r] %[fx:mean.b]",
+            &out.display().to_string(),
+        ],
+    );
+    let mut it = colours
+        .split_whitespace()
+        .map(|v| v.parse::<f64>().unwrap());
+    let (r, b) = (it.next().unwrap(), it.next().unwrap());
+    assert!(r > 0.9 && b < 0.1, "not the red half: r {r} b {b}");
+}
+
+/// An aspect ratio keeps the middle of the picture, on video, GIF and
+/// photo targets alike, and a plain border comes off a picture.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn an_aspect_ratio_and_a_border_crop_land_on_the_right_size() {
+    let dir = tmp();
+    let src = synth_video(&dir, 320, 180, 25);
+    let square = Tuning {
+        crop: Some(convkit_core::crop::parse("1:1").unwrap()),
+        ..Tuning::default()
+    };
+    let out = dir.path().join("square.mp4");
+    convert_tuned(&src, &out, &square).unwrap();
+    assert_eq!(probe_dims(&out), (180, 180));
+    let tall = Tuning {
+        crop: Some(convkit_core::crop::parse("9:16").unwrap()),
+        ..Tuning::default()
+    };
+    let out = dir.path().join("tall.gif");
+    convert_tuned(&src, &out, &tall).unwrap();
+    assert_eq!(imagemagick_dimensions(&out), (100, 180));
+
+    let bordered = synth_image(
+        &dir,
+        &[
+            "-size",
+            "200x100",
+            "xc:white",
+            "-fill",
+            "red",
+            "-draw",
+            "rectangle 30,20 149,79",
+        ],
+        "bordered.png",
+    );
+    let out = dir.path().join("trimmed.png");
+    let auto = Tuning {
+        crop: Some(convkit_core::crop::Spec::Auto),
+        ..Tuning::default()
+    };
+    convert_tuned(&bordered, &out, &auto).unwrap();
+    assert_eq!(imagemagick_dimensions(&out), (120, 60));
+}
+
+// --- New sound: --audio, --mix ------------------------------------------------
+
+/// The mean volume of `path`'s sound around `freq` Hz, in dB: how much of
+/// a tone at that pitch it holds.
+fn band_level(path: &Path, freq: u32) -> f64 {
+    let resolver = Resolver::new();
+    let ffmpeg = resolver.resolve(Backend::Ffmpeg).unwrap().path;
+    let out = Command::new(&ffmpeg)
+        .args(["-hide_banner", "-nostats", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:a:0",
+            "-af",
+            &format!("bandpass=f={freq}:width_type=q:w=20,volumedetect"),
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&out.stderr);
+    let line = log
+        .lines()
+        .find(|l| l.contains("mean_volume:"))
+        .unwrap_or_else(|| panic!("no volumedetect in {log}"));
+    line.split("mean_volume:")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .trim_end_matches("dB")
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// A 4 s clip with a 440 Hz tone of its own, and a 660 Hz song.
+fn clip_and_song(dir: &tempfile::TempDir, song_secs: u32) -> (PathBuf, PathBuf) {
+    let clip = synth_media(
+        dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=25:duration=4",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=4",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+        ],
+        "clip.mp4",
+    );
+    let song = synth_media(
+        dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=660:duration={song_secs}"),
+            "-ac",
+            "2",
+            "-c:a",
+            "libmp3lame",
+        ],
+        "song.mp3",
+    );
+    (clip, song)
+}
+
+fn duration_secs(path: &Path) -> f64 {
+    probe_media(path).duration_ms.unwrap() as f64 / 1000.0
+}
+
+/// Replacing keeps the picture and copies the new sound as it is, cut at
+/// the video's end; the old sound is gone.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_new_sound_replaces_the_old_and_stops_with_the_video() {
+    let dir = tmp();
+    let (clip, song) = clip_and_song(&dir, 10);
+    let out = dir.path().join("out.mp4");
+    let tuning = Tuning {
+        audio: Some(convkit_core::soundtrack::Request {
+            path: song.clone(),
+            mix: None,
+        }),
+        ..Tuning::default()
+    };
+    let outcome = convert_tuned(&clip, &out, &tuning).unwrap();
+    assert!(outcome.remuxed, "the picture and the mp3 are copied");
+    let p = probe_media(&out);
+    assert_eq!(p.video_codec.as_deref(), Some("h264"));
+    assert_eq!(p.audio_codecs, ["mp3"]);
+    assert!(
+        (duration_secs(&out) - 4.0).abs() < 0.15,
+        "{}",
+        duration_secs(&out)
+    );
+    assert!(band_level(&out, 660) > band_level(&out, 440) + 15.0);
+
+    // A shorter one leaves the rest silent, and says so.
+    let (_, short) = clip_and_song(&dir, 1);
+    let tuning = Tuning {
+        audio: Some(convkit_core::soundtrack::Request {
+            path: short,
+            mix: None,
+        }),
+        ..Tuning::default()
+    };
+    let out = dir.path().join("short.mkv");
+    let outcome = convert_tuned(&clip, &out, &tuning).unwrap();
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.contains("silent from there")),
+        "{:?}",
+        outcome.warnings
+    );
+    let streams = probe_media(&out);
+    assert_eq!((streams.video_streams, streams.audio_codecs.len()), (1, 1));
+    assert!(
+        (duration_secs(&out) - 4.0).abs() < 0.15,
+        "{}",
+        duration_secs(&out)
+    );
+}
+
+/// A mix holds both sounds, the new one under the old, for as long as the
+/// clip runs, and a cut and a speed change apply to the clip alone.
+#[test]
+#[ignore = "requires backends; run with --ignored"]
+fn a_mix_holds_both_sounds_for_the_length_of_the_clip() {
+    let dir = tmp();
+    let (clip, song) = clip_and_song(&dir, 10);
+    let out = dir.path().join("mixed.mp4");
+    let tuning = Tuning {
+        audio: Some(convkit_core::soundtrack::Request {
+            path: song,
+            mix: Some(convkit_core::soundtrack::DEFAULT_LEVEL),
+        }),
+        range: convkit_core::trim::Range::new(
+            Some(convkit_core::trim::parse_time("1").unwrap()),
+            None,
+            None,
+        )
+        .unwrap(),
+        speed: Some(convkit_core::speed::parse("1.5").unwrap()),
+        ..Tuning::default()
+    };
+    let outcome = convert_tuned(&clip, &out, &tuning).unwrap();
+    let report = outcome.audio.expect("an audio report");
+    assert_eq!(report.mode, "mix");
+    let p = probe_media(&out);
+    assert_eq!(p.audio_codecs, ["aac"]);
+    assert_eq!(p.video_streams, 1);
+    // 3 s of clip at 1.5x is 2 s.
+    assert!(
+        (duration_secs(&out) - 2.0).abs() < 0.15,
+        "{}",
+        duration_secs(&out)
+    );
+    let (own, new) = (band_level(&out, 440), band_level(&out, 660));
+    // Equal tones to begin with, the new one a quarter as loud: 12 dB under.
+    assert!(
+        (own - new - 12.0).abs() < 3.0,
+        "own {own} dB, new {new} dB: not a quarter as loud"
+    );
+}
+
+// --- Subtitles: --subtitles ---------------------------------------------------
+
+/// How many pixels of a frame are near white: subtitle text on a dark
+/// picture.
+fn bright_pixels(((_, _), rgb): &((u32, u32), Vec<u8>)) -> usize {
+    rgb.chunks_exact(3)
+        .filter(|p| p.iter().all(|&c| c > 200))
+        .count()
+}
+
+/// A dark 4 s clip, and an SRT with one subtitle from 1 s to 2 s. At
+/// 640x360 a line is 20 px tall, so its letters cover a few hundred pixels
+/// in any font; at 320x240 one Ubuntu font drew 287, too near the bar.
+fn dark_clip_and_subs(dir: &tempfile::TempDir, text: &str) -> (PathBuf, PathBuf) {
+    let clip = synth_media(
+        dir,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x202020:size=640x360:rate=25:duration=4",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+        ],
+        "dark.mp4",
+    );
+    let subs = dir.path().join("subs.srt");
+    std::fs::write(&subs, format!("1\n00:00:01,000 --> 00:00:02,000\n{text}\n")).unwrap();
+    (clip, subs)
+}
+
+/// The text is there inside the subtitle's time and not outside it, and a
+/// cut moves it with the video.
+#[test]
+#[ignore = "requires backends and a system font; run with --ignored"]
+fn burned_subtitles_show_inside_their_time_only() {
+    let dir = tmp();
+    let (clip, subs) = dark_clip_and_subs(&dir, "WWW MMM WWW");
+    let out = dir.path().join("out.mp4");
+    let tuning = Tuning {
+        subtitles: Some(subs.clone()),
+        ..Tuning::default()
+    };
+    let outcome = convert_tuned(&clip, &out, &tuning).unwrap();
+    assert_eq!(outcome.subtitles.expect("a report").drawn, 1);
+    assert_eq!(probe_dims(&out), (640, 360));
+    let before = bright_pixels(&frame_rgb(&out, 0.5));
+    let during = bright_pixels(&frame_rgb(&out, 1.5));
+    let after = bright_pixels(&frame_rgb(&out, 2.5));
+    assert!(during > 300, "too little text inside the cue: {during}");
+    assert!(
+        before < 20 && after < 20,
+        "text outside the cue: {before}, {after}"
+    );
+    // The text sits in the bottom half of the picture.
+    let ((w, _), rgb) = frame_rgb(&out, 1.5);
+    let top_half = rgb[..(w * 180 * 3) as usize]
+        .chunks_exact(3)
+        .filter(|p| p.iter().all(|&c| c > 200))
+        .count();
+    assert!(top_half < 20, "text in the top half: {top_half}");
+
+    // Cut from 1 s and played at 2x, the subtitle runs from 0 to 0.5 s.
+    let out = dir.path().join("cut.mp4");
+    let tuning = Tuning {
+        subtitles: Some(subs),
+        range: convkit_core::trim::Range::new(
+            Some(convkit_core::trim::parse_time("1").unwrap()),
+            None,
+            None,
+        )
+        .unwrap(),
+        speed: Some(convkit_core::speed::parse("2").unwrap()),
+        ..Tuning::default()
+    };
+    convert_tuned(&clip, &out, &tuning).unwrap();
+    assert!(bright_pixels(&frame_rgb(&out, 0.25)) > 300);
+    assert!(bright_pixels(&frame_rgb(&out, 0.9)) < 20);
+}
+
+/// Right-to-left text and a GIF target draw as well.
+#[test]
+#[ignore = "requires backends and a system font; run with --ignored"]
+fn right_to_left_subtitles_draw_into_a_gif() {
+    let dir = tmp();
+    let (clip, subs) = dark_clip_and_subs(&dir, "שלום עולם. مرحبا");
+    let out = dir.path().join("out.gif");
+    let tuning = Tuning {
+        subtitles: Some(subs),
+        ..Tuning::default()
+    };
+    convert_tuned(&clip, &out, &tuning).unwrap();
+    assert!(bright_pixels(&frame_rgb(&out, 1.5)) > 100);
+    assert!(bright_pixels(&frame_rgb(&out, 0.5)) < 20);
+}

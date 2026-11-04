@@ -297,7 +297,10 @@ pub(crate) fn image_pdf_variant(
     tuning: &Tuning,
     available: Option<&AvailableBackends>,
 ) -> Recipe {
-    let reencodes = tuning.quality.is_some() || tuning.resize.is_some() || tuning.rotate.is_some();
+    let reencodes = tuning.quality.is_some()
+        || tuning.resize.is_some()
+        || tuning.rotate.is_some()
+        || tuning.crop.is_some();
     let foreign = inputs.iter().any(|i| !typst_reads(i));
     if recipe == TYPST_IMG_TO_PDF && (reencodes || foreign || typst_absent(available)) {
         IMG_TO_PDF
@@ -362,6 +365,8 @@ pub(crate) fn magick_reason(to: Format, inputs: &[PathBuf], tuning: &Tuning) -> 
         "--resize"
     } else if tuning.rotate.is_some() {
         "--rotate"
+    } else if tuning.crop.is_some() {
+        "--crop"
     } else {
         return None;
     };
@@ -2732,7 +2737,7 @@ fn recipe_read_for(
         .or_else(|| {
             if from != to {
                 None
-            } else if tuning.strip_metadata || tuning.rotate.is_some() {
+            } else if tuning.strip_metadata || tuning.rotate.is_some() || tuning.crop.is_some() {
                 turn_recipe_for(to)
             } else if tuning.resize.is_some() {
                 image_recipe_for(to)
@@ -3036,7 +3041,22 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     // filter slot at all).
     let resized_in_place =
         from == to && tuning.resize.is_some() && crate::sized::is_video_target(to);
-    sized || webm_knob || cut || retimed || resized_in_place
+    // A crop is decided against the video's displayed size, and only the
+    // probe-aware transcode crops a video into its own format or a webm.
+    // A GIF ffmpeg converts is read the same way, so its size needs no
+    // ImageMagick.
+    let cropped = tuning.crop.is_some()
+        && (from.kind() == Kind::Video || (from == Format::Gif && to != Format::Gif))
+        && (from == to || lookup(from, to).is_some());
+    // A new sound is mapped from the probe, and planned against the
+    // video's length.
+    let new_sound =
+        tuning.audio.is_some() && from.kind() == Kind::Video && crate::sized::is_video_target(to);
+    // Subtitles are drawn at the picture's size and placed in its time.
+    let subtitled = tuning.subtitles.is_some()
+        && (from.kind() == Kind::Video || from == Format::Gif)
+        && (crate::sized::is_video_target(to) || to == Format::Gif);
+    sized || webm_knob || cut || retimed || resized_in_place || cropped || new_sound || subtitled
 }
 
 /// What a format cut into itself runs (`conv talk.mp4 --start 1:02`): the
