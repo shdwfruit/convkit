@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use convkit_core::archive::ArchiveFormat;
 use convkit_core::{registry, ConvError, ErrorCode, Format, Kind};
 use serde_json::json;
 
@@ -16,6 +17,23 @@ struct Row {
     /// than an omission.
     format: Option<Format>,
     targets: Vec<Format>,
+    /// An archive conv opens or makes: what it can become instead.
+    archive: Option<ArchiveFormat>,
+}
+
+/// What an archive can become: a folder (unpacked), or another archive
+/// format conv writes. A RAR can become nothing; conv can't open it.
+fn archive_targets(a: ArchiveFormat) -> Vec<&'static str> {
+    if !a.can_read() {
+        return Vec::new();
+    }
+    std::iter::once("folder")
+        .chain(
+            ArchiveFormat::all()
+                .filter(|f| f.can_write() && *f != a)
+                .map(|f| f.ext()),
+        )
+        .collect()
 }
 
 /// Answers "what is in front of me, and what could it become" for the files
@@ -157,10 +175,15 @@ fn row_for(path: &Path, pairs: &[(Format, Format)]) -> Row {
             .collect(),
         None => Vec::new(),
     };
+    let archive = match format {
+        Some(_) => None,
+        None => ArchiveFormat::from_path(path),
+    };
     Row {
         path: path.to_path_buf(),
         format,
         targets,
+        archive,
     }
 }
 
@@ -228,18 +251,43 @@ fn print_human(rows: &[Row]) {
         .collect();
     let name_width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
 
+    // "Archive" is a character wider than the other labels; the column
+    // widens only when one is listed.
+    let kind_width = if rows.iter().any(|r| r.archive.is_some()) {
+        7
+    } else {
+        6
+    };
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for (row, name) in rows.iter().zip(&names) {
-        let line = match row.format {
-            None => format!("{name:<name_width$}  --"),
-            Some(format) => {
+        let line = match (row.format, row.archive) {
+            (None, Some(a)) => {
+                let targets = archive_targets(a);
+                if targets.is_empty() {
+                    format!(
+                        "{name:<name_width$}  {:<kind_width$}  conv can't open it",
+                        "Archive"
+                    )
+                } else {
+                    format!(
+                        "{name:<name_width$}  {:<kind_width$}  -> {}",
+                        "Archive",
+                        targets.join(" ")
+                    )
+                }
+            }
+            (None, None) => format!("{name:<name_width$}  --"),
+            (Some(format), _) => {
                 let kind = kind_label(format.kind());
                 if row.targets.is_empty() {
-                    format!("{name:<name_width$}  {kind:<6}  no conversions")
+                    format!("{name:<name_width$}  {kind:<kind_width$}  no conversions")
                 } else {
                     let targets: Vec<&str> = row.targets.iter().map(|t| t.ext()).collect();
-                    format!("{name:<name_width$}  {kind:<6}  -> {}", targets.join(" "))
+                    format!(
+                        "{name:<name_width$}  {kind:<kind_width$}  -> {}",
+                        targets.join(" ")
+                    )
                 }
             }
         };
@@ -293,14 +341,24 @@ fn display_name(path: &Path) -> String {
 fn print_json(rows: &[Row], problems: &[String]) {
     let files: Vec<serde_json::Value> = rows
         .iter()
-        .map(|row| {
-            json!({
+        .map(|row| match row.archive {
+            Some(a) => {
+                let targets = archive_targets(a);
+                json!({
+                    "path": row.path.to_string_lossy(),
+                    "format": a,
+                    "kind": "archive",
+                    "convertible": !targets.is_empty(),
+                    "targets": targets,
+                })
+            }
+            None => json!({
                 "path": row.path.to_string_lossy(),
                 "format": row.format,
                 "kind": row.format.map(|f| f.kind()),
                 "convertible": !row.targets.is_empty(),
                 "targets": row.targets,
-            })
+            }),
         })
         .collect();
     let envelope = json!({ "ok": problems.is_empty(), "files": files });

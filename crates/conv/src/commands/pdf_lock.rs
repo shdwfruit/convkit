@@ -122,15 +122,28 @@ fn refuse_other_flags(cli: &Cli, way: &Way) -> Result<(), ConvError> {
 /// A path this run can take as an input.
 fn check_pdf(p: &Path, way: &Way) -> Result<(), ConvError> {
     if Format::from_path(p) == Some(Format::Pdf) {
-        Ok(())
-    } else {
-        Err(invalid(format!(
-            "{} {}s PDFs, and {} is not one",
-            way.flag,
-            way.verb,
-            name_of(p)
-        )))
+        return Ok(());
     }
+    let e = invalid(format!(
+        "{} {}s PDFs, and {} is not one",
+        way.flag,
+        way.verb,
+        name_of(p)
+    ));
+    // Anything else is locked by putting it in a zip.
+    if way.flag != "--password" {
+        return Err(e);
+    }
+    Err(ConvError {
+        remediation: Some(convkit_core::Remediation {
+            managed: None,
+            manual: Some(format!(
+                "to lock it in a zip instead: conv {} .zip --password",
+                p.display()
+            )),
+        }),
+        ..e
+    })
 }
 
 /// Where each input goes, by the rules of a file changed in place: see the

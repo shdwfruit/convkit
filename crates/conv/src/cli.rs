@@ -217,9 +217,10 @@ pub struct Cli {
     pub rate: Option<u16>,
 
     /// Lock a PDF with a password (AES-256), written as NAME-locked.pdf, or
-    /// into a locked folder with --to pdf. conv asks for it twice without
-    /// showing it, or reads CONVKIT_PASSWORD; it never takes one on the
-    /// command line, where it would stay in your shell history.
+    /// into a locked folder with --to pdf; or lock a new zip (AES-256). conv
+    /// asks for it twice without showing it, or reads CONVKIT_PASSWORD; it
+    /// never takes one on the command line, where it would stay in your
+    /// shell history.
     // A flag, not an option with a value, for exactly that reason. Not
     // `global` -- see `dry_run`'s comment.
     #[arg(long)]

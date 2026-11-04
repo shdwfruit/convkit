@@ -16,9 +16,25 @@ strsim = "0.11"
 which = "8"
 ureq = "2"
 sha2 = "0.10"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# Also archives (`archive`): deflate64 is what Windows uses for a zip over
+# 2 GB, and aes-crypto reads and writes AES-256 password zips.
+zip = { version = "2", default-features = false, features = ["deflate", "deflate64", "aes-crypto"] }
 tar = "0.4"
 flate2 = "1"
+# Archives. lzma-rust2 writes and reads .tar.xz in pure Rust (lzma-rs below
+# only decodes, and its encoder does not search for matches); bzip2's default
+# backend is the Rust port of libbz2; sevenz-rust2 reads 7z, on the same
+# lzma-rust2. zstd is the one C library: the pure-Rust ruzstd only encodes at
+# its "fastest" level, which made a .tar.zst larger than the same .tar.gz
+# (271 KB against 211 KB, where zstd -3 makes 47 KB). It builds with the C
+# toolchain ring already needs. filetime is already in the tree through tar.
+lzma-rust2 = { version = "0.15", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
+bzip2 = "0.6"
+zstd = { version = "0.13", default-features = false }
+# ~0.20.0 and 0.20.1 in the lock: 0.20.2 moved to lzma-rust2 0.16, which
+# brings a second sha2 and digest into the tree.
+sevenz-rust2 = { version = "~0.20.0", default-features = false, features = ["aes256", "bzip2"] }
+filetime = "0.2"
 # Pure-Rust xz/LZMA decoder (`#![forbid(unsafe_code)]`, no C dependency) so
 # `Packaging::TarXz` doesn't need `xz2`/`liblzma-sys`, which link C and would
 # make the Windows build fragile.
@@ -103,6 +119,14 @@ jpeg-decoder = { version = "0.3", default-features = false }
 jpeg-encoder = { version = "0.7", default-features = false, features = ["std", "simd"] }
 fast_image_resize = { version = "6", default-features = false, features = ["std"] }
 
+# Archives: a zip's plain DOS time is local time, read and written with
+# mktime/localtime_r, and an archive's quarantine mark is copied to what it
+# unpacks (macOS). Already in the tree through several crates.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
+# The archive tests write 7z fixtures; the encoder stays out of the build.
+sevenz-rust2 = { version = "~0.20.0", default-features = false, features = ["aes256", "bzip2", "compress", "util"] }
 insta = { version = "1", features = ["yaml"] }

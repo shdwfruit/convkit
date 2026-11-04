@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod ascii;
 pub mod beautify;
 pub mod capabilities;

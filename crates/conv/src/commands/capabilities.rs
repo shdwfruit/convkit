@@ -1,3 +1,4 @@
+use convkit_core::archive::ArchiveFormat;
 use convkit_core::pdf::raster;
 use convkit_core::recipe::ScaleStyle;
 use convkit_core::{registry, Arg, ConvError, Format, Recipe};
@@ -19,7 +20,7 @@ pub fn run(cli: &Cli, format: Option<&str>) -> i32 {
     let pairs = registry::all_pairs();
 
     if cli.json {
-        let arr: Vec<serde_json::Value> = pairs
+        let mut arr: Vec<serde_json::Value> = pairs
             .iter()
             .map(|&(from, to)| {
                 let mut pair = json!({
@@ -34,6 +35,12 @@ pub fn run(cli: &Cli, format: Option<&str>) -> i32 {
                 pair
             })
             .collect();
+        // Archives need no backend: an empty list, and `built_in`.
+        arr.extend(
+            archive_pairs().into_iter().map(
+                |(from, to)| json!({ "from": from, "to": to, "backends": [], "built_in": true }),
+            ),
+        );
         let envelope = json!({ "ok": true, "pairs": arr });
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
     } else {
@@ -58,6 +65,83 @@ pub fn run(cli: &Cli, format: Option<&str>) -> i32 {
             };
             println!("  {:<6} -> {:<6} {}", from.ext(), to.ext(), by);
         }
+        println!();
+        println!("Archive:");
+        for (from, to) in archive_pairs() {
+            println!("  {from:<7} -> {to:<7} built in");
+        }
+    }
+    0
+}
+
+/// Every archive pair: each archive conv opens to a folder and to every
+/// format it writes, and a folder (or any files) to every format it writes.
+fn archive_pairs() -> Vec<(&'static str, &'static str)> {
+    let writable: Vec<ArchiveFormat> = ArchiveFormat::all().filter(|f| f.can_write()).collect();
+    let mut pairs = Vec::new();
+    for from in ArchiveFormat::all().filter(|f| f.can_read()) {
+        pairs.push((from.ext(), "folder"));
+        for to in writable.iter().filter(|t| **t != from) {
+            pairs.push((from.ext(), to.ext()));
+        }
+    }
+    for to in &writable {
+        pairs.push(("folder", to.ext()));
+    }
+    pairs
+}
+
+/// `conv capabilities zip`: what an archive format opens to and is made
+/// from.
+fn archive_detail(cli: &Cli, format: ArchiveFormat) -> i32 {
+    let ext = format.ext();
+    let pairs = archive_pairs();
+    let to: Vec<&str> = pairs.iter().filter(|p| p.0 == ext).map(|p| p.1).collect();
+    let from: Vec<&str> = pairs.iter().filter(|p| p.1 == ext).map(|p| p.0).collect();
+    let note = match format {
+        ArchiveFormat::SevenZ => Some("read only: conv opens 7z but doesn't make it"),
+        ArchiveFormat::Rar => Some(
+            "conv can't open RAR (there is no free decoder it can build in); The Unarchiver, Keka, 7-Zip or unar open it",
+        ),
+        ArchiveFormat::Zip => Some("--password locks a new zip with AES-256"),
+        _ => None,
+    };
+    if cli.json {
+        let v = json!({
+            "ok": true,
+            "format": ext,
+            "kind": "archive",
+            "extensions": format.exts(),
+            "converts_to": to,
+            "accepts_from": from,
+            "built_in": true,
+            "notes": note.into_iter().collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&v).unwrap());
+        return 0;
+    }
+    if format.can_read() {
+        println!("{ext} (Archive, built in: no backend needed)");
+    } else {
+        println!("{ext} (Archive)");
+    }
+    println!();
+    if to.is_empty() {
+        println!("  as source: conv can't open it");
+    } else {
+        println!("  as source, opens to: {}", to.join(" "));
+    }
+    if from.is_empty() {
+        println!("  as target: conv doesn't make it");
+    } else {
+        println!("  as target, made from: {}", from.join(" "));
+    }
+    if format.exts().len() > 1 {
+        println!("  also spelled: {}", format.exts()[1..].join(" "));
+    }
+    if let Some(n) = note {
+        println!();
+        println!("  note: {n}");
     }
     0
 }
@@ -285,6 +369,11 @@ fn anchors_json(anchors: &[(&'static str, &'static str)]) -> serde_json::Value {
 /// One format's view: sources, targets, per-target tuning flags, defaults,
 /// and the fidelity notes its recipes carry.
 fn format_detail(cli: &Cli, ext: &str) -> i32 {
+    if Format::from_ext(ext).is_none() {
+        if let Some(a) = ArchiveFormat::from_name(ext) {
+            return archive_detail(cli, a);
+        }
+    }
     let Some(fmt) = Format::from_ext(ext) else {
         let e = ConvError::unknown_format(ext);
         render::print_error(cli.json, &e);

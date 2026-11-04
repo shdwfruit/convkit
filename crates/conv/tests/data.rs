@@ -100,7 +100,13 @@ fn capabilities_lists_the_data_pairs_as_built_in() {
             "{from} -> {to} in {built:?}"
         );
     }
-    assert_eq!(built.len(), 10, "{built:?}");
+    // Archives are built in too; of the data formats, these are all.
+    let data = ["json", "yaml", "toml", "csv"];
+    let ours = built
+        .iter()
+        .filter(|(f, _)| data.contains(&f.as_str()))
+        .count();
+    assert_eq!(ours, 10, "{built:?}");
     conv(dir.path())
         .args(["capabilities", "json"])
         .assert()

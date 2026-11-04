@@ -41,15 +41,21 @@ pub enum ErrorCode {
     /// language. Its own code, rather than `ConversionFailed`, so a script
     /// can tell a file to fix from a conversion that went wrong.
     InvalidData,
+    /// An archive holds an entry that would land outside the folder it is
+    /// unpacked into: a `../` or absolute name, or a link pointing out of
+    /// it (zip-slip). Nothing is unpacked. Its own code so a script can
+    /// tell a hostile archive from a damaged one.
+    UnsafeArchive,
 }
 
 impl ErrorCode {
     /// Process exit code. Values are fixed by the spec; do not renumber.
     pub fn exit_code(&self) -> i32 {
         match self {
-            ErrorCode::ConversionFailed | ErrorCode::PasswordProtected | ErrorCode::InvalidData => {
-                1
-            }
+            ErrorCode::ConversionFailed
+            | ErrorCode::PasswordProtected
+            | ErrorCode::InvalidData
+            | ErrorCode::UnsafeArchive => 1,
             ErrorCode::UnsupportedPair
             | ErrorCode::UnknownFormat
             | ErrorCode::InputNotFound
@@ -439,6 +445,7 @@ mod tests {
         assert_eq!(ErrorCode::InvalidInvocation.exit_code(), 2);
         assert_eq!(ErrorCode::ConfirmationRequired.exit_code(), 2);
         assert_eq!(ErrorCode::PasswordProtected.exit_code(), 1);
+        assert_eq!(ErrorCode::UnsafeArchive.exit_code(), 1);
     }
 
     #[test]
