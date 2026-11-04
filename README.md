@@ -1475,7 +1475,10 @@ Give it several files, a glob or a folder, and it prints one block each.
 Video and audio are read with ffprobe and pictures with ImageMagick; conv
 reads PDFs itself. When a backend is missing, conv shows what it can without
 it and says how to install it, and exits 3. If a picture's contents don't
-match its extension, as with a PNG named `.jpg`, a note says so.
+match its extension, as with a PNG named `.jpg`, a note says so. ImageMagick
+6, which most Linux distributions ship, reads no camera, date or location
+from a HEIC, and a note says that too, so a photo that records where it was
+taken doesn't look as if it didn't.
 
 ## Discovering formats and capabilities
 

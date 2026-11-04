@@ -242,6 +242,9 @@ pub fn describe(path: &Path, resolver: &Resolver) -> FileInfo {
                     if let Some(note) = mismatch_note(format, &image.coder) {
                         info.notes.push(note);
                     }
+                    if matches!(format, Format::Heic | Format::Heif) && no_exif(&image) {
+                        info.notes.push(HEIC_EXIF_NOTE.to_string());
+                    }
                     info.image = Some(image);
                 }
                 None => info.error = Some(unreadable("ImageMagick", path)),
@@ -537,6 +540,18 @@ fn bit_depth_of(pix_fmt: &str) -> Option<u32> {
 
 // ---------------------------------------------------------------------------
 // Pictures
+
+/// Said of a HEIC ImageMagick read no EXIF from. ImageMagick 6, which
+/// most Linux distributions ship, reads none from a HEIC, so a photo that
+/// records where it was taken would otherwise look as if it didn't.
+pub const HEIC_EXIF_NOTE: &str = "ImageMagick read no camera, date or location from this HEIC; \
+     ImageMagick 6, as most Linux distributions ship it, can't, so the photo may still \
+     record where it was taken.";
+
+/// Whether ImageMagick gave none of a picture's EXIF.
+fn no_exif(image: &ImageInfo) -> bool {
+    image.camera.is_none() && image.taken.is_none() && !image.location
+}
 
 /// What `-ping` prints for each frame, tab-separated. A property the file
 /// lacks prints as nothing (with a warning on stderr, which is dropped).

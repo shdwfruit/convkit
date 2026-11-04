@@ -6057,12 +6057,24 @@ fn info_reads_real_files() {
         "{text}{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // ImageMagick 6 reads no EXIF from a HEIC, and conv says so instead.
+    let heic_exif = text.contains("  Camera        Apple iPhone 14 Pro\n");
+    if heic_exif {
+        for expected in [
+            "  Taken         2025-12-27 13:59:08",
+            "  Location      a GPS position is recorded; --strip-metadata removes it\n",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+    } else {
+        assert!(
+            text.contains("ImageMagick read no camera, date or location from this HEIC"),
+            "{text}"
+        );
+    }
     for expected in [
         "  Dimensions    4032 x 3024\n",
         "Display P3 profile\n",
-        "  Camera        Apple iPhone 14 Pro\n",
-        "  Taken         2025-12-27 13:59:08",
-        "  Location      a GPS position is recorded; --strip-metadata removes it\n",
         "  Video         h264 (High), 640 x 360, 30 fps, yuv420p",
         "  Audio         aac (LC), 44.1 kHz, mono",
         "  Duration      2.0 s\n",
@@ -6090,6 +6102,6 @@ fn info_reads_real_files() {
         (image["width"].as_u64(), image["height"].as_u64()),
         (Some(4032), Some(3024))
     );
-    assert_eq!(image["location"], true);
+    assert_eq!(image["location"], heic_exif);
     assert_eq!(image["profile"], "Display P3");
 }
