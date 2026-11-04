@@ -123,6 +123,7 @@ conv IMG_0042.mov --rotate left  # turn a sideways video or photo
 conv clip.mp4 --crop 9:16        # crop to a shape, a box, or auto for black bars
 conv clip.mp4 --audio song.mp3   # replace the sound; add --mix to put it under
 conv clip.mp4 --subtitles subs.srt # burn subtitles into the picture
+conv selfie.jpg --flip h         # mirror a photo or video
 conv trim talk.mp4               # find clips in the terminal and cut them
 conv --paste .jpg                # convert the picture or files you copied
 conv photo.heic .jpg --copy      # convert, then copy the result to paste anywhere
@@ -699,6 +700,35 @@ conv photo.jpg --rotate right --resize 50%
 conv screen.mov clip.gif --rotate left --resize 480x
 ```
 
+## Flipping
+
+`--flip` mirrors a photo or video as it is shown: `horizontal` (or `h`)
+swaps left and right, and `vertical` (or `v`) swaps top and bottom.
+
+```console
+$ conv selfie.jpg --flip h
+OK selfie-flipped.jpg - 2.4 MB - 0.3s
+  /home/user/Pictures/selfie-flipped.jpg
+  note  The jpg is re-encoded at quality 92 to flip it.
+```
+
+It works like `--rotate`. The picture itself is flipped and the tag set to
+match, so the file looks the same in every app. A JPEG, MP4 or MOV whose tag
+was what mirrored it only has the tag reset. Otherwise a video, a JPEG, WebP,
+AVIF or HEIC is re-encoded, which a note says, and an animated GIF is flipped
+frame by frame.
+
+One file gets `-flipped` in its name, and a batch writes into a `flipped`
+folder. With `--rotate` as well, the turn comes first and the flip is of the
+turned picture, so `horizontal` is always left and right as you see the
+result; the name gets `-rotated-flipped`:
+
+```console
+conv ./frames --to png --flip v
+conv webcam.mov .mp4 --flip h
+conv IMG_0042.jpg --rotate right --flip h
+```
+
 ## Cropping
 
 `--crop` keeps part of a photo, video or GIF. Give it a box, a shape, or
@@ -717,8 +747,8 @@ OK clip-cropped.mp4 - 3.1 MB - 4.2s
 - `auto` cuts away the black bars around a video, or the plain border
   around a picture, and the note says what it kept.
 
-The numbers are of the picture as you see it, after its orientation tag
-and any `--rotate`, and the crop comes before `--resize`, so the size fits
+The numbers are of the picture as you see it, after its orientation tag,
+any `--rotate` and any `--flip`, and the crop comes before `--resize`, so the size fits
 what was kept. A box that runs past the edge stops at it, and a video's box
 is kept to even sides, which its encoder needs; a note says when either
 changes the box. `auto` looks at frames from across a video, so a fade from
@@ -1741,11 +1771,12 @@ the notes the human output prints under the path, the same ones a
 always holds each step's raw output, tail-capped at 16 KiB; `notes` is the
 small distilled subset worth a person's attention, usually empty on a clean
 run. A cut adds `range`: where the cut was made, in milliseconds, and the
-times as typed. A turn adds `rotation`: the turn, and `by`, which is `tag`
-when only the orientation tag changed and `pixels` when the picture itself
-was turned. A PDF's pages add `pages`: the page count, the pages saved,
-whether they went into a folder (`output` is then the folder), the file
-names, and the dpi. For the full shapes of every command, run it with `--json`
+times as typed. A turn or flip adds `rotation`: the `turn` and the `flip`
+as typed, each only when asked for, and `by`, which is `tag` when only the
+orientation tag changed and `pixels` when the picture itself was changed. A
+PDF's pages add `pages`: the page count, the pages saved, whether they went
+into a folder (`output` is then the folder), the file names, and the dpi.
+For the full shapes of every command, run it with `--json`
 — the binary is the reference.
 
 ## Troubleshooting

@@ -195,6 +195,12 @@
   PNG, JPG, GIF, WebP and SVG are read with no backend; HEIC, AVIF and
   other pictures go through ImageMagick. `conv qr menu.png` still makes a
   code for the text "menu.png", with a note if that's a picture here.
+- **Mirror photos and videos with `--flip`.** `conv selfie.jpg --flip h`
+  swaps left and right, and `--flip v` top and bottom, for images, video
+  and GIFs, one file or a batch. It goes with `--rotate`: the turn comes
+  first, so `--rotate right --flip h` flips the turned picture. A JPEG, MP4
+  or MOV whose tag mirrored it is fixed by resetting the tag, with nothing
+  re-encoded.
 
 ### Changed
 

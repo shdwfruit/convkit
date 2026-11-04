@@ -659,7 +659,7 @@ const ICO_TO_PNG: Recipe = Recipe {
     warnings: &[ICO_LARGEST_NOTE],
 };
 
-/// A GIF turned into a GIF (`--rotate`), frame by frame. `-coalesce` draws
+/// A GIF turned or flipped into a GIF (`--rotate`, `--flip`), frame by frame. `-coalesce` draws
 /// every frame whole first: a frame that covers only part of the picture
 /// would otherwise turn about its own corner. The frames are optimised
 /// again after. The palette, timing and loop are left as they were.
@@ -2701,9 +2701,9 @@ pub fn needs_probe_tuned(from: Format, to: Format, tuning: &Tuning) -> bool {
             return true;
         }
     }
-    // A video turned into its own format is mapped stream by stream, as one
+    // A video turned or flipped into its own format is mapped stream by stream, as one
     // converted to another container is.
-    if tuning.rotate.is_some() && from == to && from.kind() == Kind::Video {
+    if tuning.change().is_some() && from == to && from.kind() == Kind::Video {
         return true;
     }
     if tuning.fps.is_none() && tuning.resize.is_none() {
@@ -2737,7 +2737,7 @@ fn recipe_read_for(
         .or_else(|| {
             if from != to {
                 None
-            } else if tuning.strip_metadata || tuning.rotate.is_some() || tuning.crop.is_some() {
+            } else if tuning.strip_metadata || tuning.change().is_some() || tuning.crop.is_some() {
                 turn_recipe_for(to)
             } else if tuning.resize.is_some() {
                 image_recipe_for(to)

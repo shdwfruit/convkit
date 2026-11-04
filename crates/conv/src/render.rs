@@ -1014,12 +1014,22 @@ mod tests {
         let mut o = sample_outcome(10, false, vec![]);
         assert!(outcome_json(&o).get("rotation").is_none());
         o.rotation = Some(convkit_core::rotate::RotationReport {
-            turn: convkit_core::rotate::Turn::Left,
+            turn: Some(convkit_core::rotate::Turn::Left),
+            flip: None,
             by: convkit_core::rotate::By::Tag,
         });
         assert_eq!(
             outcome_json(&o)["rotation"],
             serde_json::json!({"turn": "left", "by": "tag"})
+        );
+        o.rotation = Some(convkit_core::rotate::RotationReport {
+            turn: None,
+            flip: Some(convkit_core::rotate::Flip::Horizontal),
+            by: convkit_core::rotate::By::Pixels,
+        });
+        assert_eq!(
+            outcome_json(&o)["rotation"],
+            serde_json::json!({"flip": "horizontal", "by": "pixels"})
         );
     }
 

@@ -106,11 +106,12 @@ pub struct ResolvedVideo {
     /// The speed change resolved against the source, when one was given.
     /// Carried here for the same reason as `cut`.
     pub speed: Option<crate::speed::Retime>,
-    /// A turn of the pixels (`--rotate`): ffmpeg's `transpose` in the
-    /// filter chain, ImageMagick's `-rotate` (`Arg::Rotate`). Set wherever a
-    /// turn was asked for; a copy that resets the source's note instead
-    /// renders no filter, so never reads it.
-    pub turn: Option<crate::rotate::Turn>,
+    /// A turn or flip of the pixels (`--rotate`, `--flip`): ffmpeg's
+    /// `transpose`, `hflip` and `vflip` in the filter chain, ImageMagick's
+    /// `-rotate`, `-flop` and `-flip` (`Arg::Rotate`). Set wherever a change
+    /// was asked for; a copy that resets the source's note instead renders
+    /// no filter, so never reads it.
+    pub turn: Option<crate::rotate::Change>,
     /// The box `--crop` keeps, in the picture as it is shown after the
     /// turn: ffmpeg's `crop` filter in the chain, ImageMagick's `-crop`
     /// (`Arg::Rotate`). `None` when nothing is cut.

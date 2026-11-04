@@ -652,7 +652,15 @@ pub fn in_place(f: Format) -> std::result::Result<(), String> {
              convert it to png first, then crop that",
             f.ext()
         )),
-        _ => match crate::rotate::in_place(f) {
+        // Every format a turn keeps, whichever turn: only the message
+        // depends on it.
+        _ => match crate::rotate::in_place(
+            f,
+            crate::rotate::Change {
+                turn: Some(crate::rotate::Turn::Right),
+                flip: None,
+            },
+        ) {
             Ok(()) => Ok(()),
             Err(_) => match crate::rotate::target_for(f) {
                 Some(to) => Err(format!(

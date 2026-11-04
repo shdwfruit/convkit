@@ -396,6 +396,7 @@ mod tests {
             mix: None,
             copy: false,
             paste: false,
+            flip: None,
             yes: false,
             no_install: false,
             outdir: None,

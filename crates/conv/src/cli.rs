@@ -13,11 +13,11 @@ use convkit_core::{Resolver, Tuning};
 pub struct Cli {
     /// Input paths, then optionally an output path or a bare `.ext`. With
     /// `--max-size`, `--compress`, `--strip-metadata`,
-    /// `--start`/`--end`/`--duration`, `--speed`, `--rotate` or `--crop`, a
-    /// lone input keeps its format and is written as NAME-SUFFIX.EXT
-    /// (`clip.mp4` -> `clip-10mb.mp4`, `scan-compressed.pdf`,
+    /// `--start`/`--end`/`--duration`, `--speed`, `--rotate`, `--flip` or
+    /// `--crop`, a lone input keeps its format and is written as
+    /// NAME-SUFFIX.EXT (`clip.mp4` -> `clip-10mb.mp4`, `scan-compressed.pdf`,
     /// `photo-stripped.jpg`, `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`,
-    /// `photo-rotated.jpg`, `photo-cropped.jpg`).
+    /// `photo-rotated.jpg`, `photo-flipped.jpg`, `photo-cropped.jpg`).
     pub paths: Vec<PathBuf>,
 
     /// Target format for batch conversion, e.g. `--to jpg`.
@@ -248,8 +248,8 @@ pub struct Cli {
     )]
     pub dpi: Option<u32>,
 
-    /// Keep part of the picture as it is shown (after its orientation and
-    /// --rotate, before --resize): WxH+X+Y, a box from the top left; WxH, a
+    /// Keep part of the picture as it is shown (after its orientation,
+    /// --rotate and --flip, before --resize): WxH+X+Y, a box from the top left; WxH, a
     /// box in the middle; W:H, the largest box of that shape, e.g. 16:9,
     /// 1:1 or 9:16; or auto, which cuts away black bars around a video or a
     /// plain border around a picture. Images, video and GIFs. A lone input
@@ -295,6 +295,16 @@ pub struct Cli {
     // Not `global` -- see `dry_run`'s comment.
     #[arg(long, value_name = "FILE")]
     pub subtitles: Option<PathBuf>,
+
+    /// Mirror the picture as it is shown: horizontal (or h) swaps left and
+    /// right, vertical (or v) swaps top and bottom. With --rotate, the turn
+    /// comes first. The picture itself is flipped, as --rotate turns it.
+    /// Images, video and GIFs. A lone input keeps its format: photo.jpg ->
+    /// photo-flipped.jpg, or photo-rotated-flipped.jpg with --rotate; a
+    /// --to batch writes into a flipped folder unless -o is given.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "DIRECTION", value_parser = parse_flip)]
+    pub flip: Option<convkit_core::rotate::Flip>,
 
     /// Copy what was written to the clipboard, ready to paste: a picture
     /// as itself (and its file), an md, csv, html, txt, json, yaml or toml
@@ -1302,6 +1312,10 @@ fn parse_crop(s: &str) -> Result<convkit_core::crop::Spec, String> {
     convkit_core::crop::parse(s)
 }
 
+fn parse_flip(s: &str) -> Result<convkit_core::rotate::Flip, String> {
+    convkit_core::rotate::parse_flip(s)
+}
+
 fn parse_duration(s: &str) -> Result<convkit_core::trim::Time, String> {
     convkit_core::trim::parse_duration(s)
 }
@@ -1326,7 +1340,7 @@ impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
     /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
     /// `--max-size`/`--start`/`--end`/`--duration`/`--speed`/`--rotate`/
-    /// `--crop` was passed.
+    /// `--flip`/`--crop` was passed.
     pub fn tuning(&self) -> Tuning {
         Tuning {
             resize: self.resize.clone(),
@@ -1362,6 +1376,7 @@ impl Cli {
                     mix: self.mix,
                 }),
             subtitles: self.subtitles.clone(),
+            flip: self.flip,
         }
     }
 
@@ -1463,6 +1478,7 @@ mod tests {
             subtitles: None,
             copy: false,
             paste: false,
+            flip: None,
             yes: false,
             no_install: false,
             outdir: None,
@@ -1592,6 +1608,39 @@ mod tests {
         // A negative angle is a turn, not a flag.
         let c = Cli::try_parse_from(["conv", "a.jpg", "--rotate", "-90"]).unwrap();
         assert_eq!(c.tuning().rotate, Some(convkit_core::rotate::Turn::Left));
+    }
+
+    #[test]
+    fn a_flip_parses_into_the_tuning_in_full_or_short() {
+        use convkit_core::rotate::Flip;
+        for (text, want) in [
+            ("horizontal", Flip::Horizontal),
+            ("h", Flip::Horizontal),
+            ("H", Flip::Horizontal),
+            ("vertical", Flip::Vertical),
+            ("v", Flip::Vertical),
+        ] {
+            let c = Cli::try_parse_from(["conv", "a.jpg", "--flip", text]).unwrap();
+            assert_eq!(c.tuning().flip, Some(want), "{text}");
+            assert_eq!(c.tuning().rotate, None, "{text}");
+        }
+        let c = Cli::try_parse_from(["conv", "a.jpg", "--rotate", "right", "--flip", "h"]).unwrap();
+        let change = c.tuning().change().unwrap();
+        assert_eq!(change.turn, Some(convkit_core::rotate::Turn::Right));
+        assert_eq!(change.flip, Some(Flip::Horizontal));
+    }
+
+    #[test]
+    fn a_flip_that_is_not_a_direction_is_a_usage_error() {
+        for text in ["diagonal", "x", "", "hv"] {
+            let e = Cli::try_parse_from(["conv", "a.jpg", "--flip", text]).unwrap_err();
+            assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation, "{text}");
+            assert!(
+                e.to_string()
+                    .contains("expected horizontal or vertical (h or v)"),
+                "{e}"
+            );
+        }
     }
 
     #[test]
