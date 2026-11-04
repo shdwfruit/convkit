@@ -7,21 +7,40 @@
 
 <p align="center"><img src="docs/media/convkit-ascii-loop.gif" alt="The word convkit converting between ASCII-art fonts, conv and kit each behind a glowing scanline, ending on the plain convkit wordmark." width="100%"></p>
 
-<a href="docs/media/convkit-launch.mp4"><img src="docs/media/convkit-launch.jpg" alt="convkit: any file in, the format you need out. A long ffmpeg GIF command next to conv scan listing what each file can become, and conv clip.mkv clip.gif. Click to play the 27-second demo." width="100%"></a>
+<a href="docs/media/convkit-launch.mp4"><img src="docs/media/convkit-launch.jpg" alt="convkit: all the little tools, one command. Twenty everyday jobs people use websites for, from HEIC to JPG and compressing a PDF to decoding a JWT, each with its conv command. Click to play the 22-second demo." width="100%"></a>
 
-<p align="center"><a href="docs/media/convkit-launch.mp4">▶ Watch the 27-second demo</a></p>
+<p align="center"><a href="docs/media/convkit-launch.mp4">▶ Watch the 22-second demo</a></p>
 
-One command for everyday file conversion. `conv` maps a source format and a
-target format onto an expert-tuned invocation of the right backend — ffmpeg,
-ImageMagick, LibreOffice, pandoc, Typst, qpdf, or the system's own speech
-engine — and runs it locally: 312 conversion pairs across 47 formats, zip
-and tar archives included, which conv handles itself (`conv capabilities`
-is the source of truth). Files never leave your machine; only `conv
-install`/`conv update`, and `conv link --follow` when asked, ever touch the
-network. It also does the small text and developer chores (base64,
-checksums, JWTs, timestamps, tracking-free links and more) that people
-otherwise paste into a website; see
-[Text and developer tools](#text-and-developer-tools).
+convkit is a free, offline toolbox for the file and text jobs people
+usually pay an app for or hand to a website. One command, `conv`, converts
+and compresses files, edits video and sound, merges, locks and shrinks
+PDFs, reads QR codes, formats JSON and checks downloads, all on your own
+machine. Nothing is uploaded, and there's no account, watermark or file
+size limit.
+
+```console
+conv photo.heic .jpg                 # instead of a HEIC converter site
+conv clip.mp4 --max-size 25mb        # instead of a video compressor
+conv scan.pdf --compress             # instead of an online PDF compressor
+conv merge a.pdf receipt.jpg out.pdf # instead of a PDF merger
+conv report.pdf --password           # instead of a paid PDF editor
+conv talk.mp4 --denoise              # instead of a noise removal service
+conv clip.mp4 .jpg --every 2s        # instead of a frame extractor
+conv clip.mp4 --subtitles subs.srt   # instead of a subtitle burner
+conv qr --read photo.jpg             # instead of a QR scanner
+conv jwt "$TOKEN"                    # instead of pasting a token into a decoder
+conv data.json .yaml                 # instead of a JSON to YAML site
+conv photos/ .zip                    # instead of an archive app
+```
+
+Under the hood conv picks the right tool for each job (ffmpeg,
+ImageMagick, LibreOffice, pandoc, Typst, qpdf or the system's own speech
+engine) and runs it with settings tuned for that conversion. The data
+formats, archives and text tools are built in. That's 312 conversion pairs
+across 47 formats (`conv capabilities` lists them), plus the commands in
+[Quick start](#quick-start). The only things that go online are `conv
+install` and `conv update`, which fetch backends, and `conv link --follow`
+when you ask it to.
 
 ```console
 $ conv clip.mkv clip.mp4
@@ -29,30 +48,11 @@ OK clip.mp4 - 55 KB - 0.1s - stream copy, no re-encode
   /home/user/Videos/clip.mp4
 ```
 
-When the source codecs already fit the target container, convkit remuxes
-instead of re-encoding — lossless, and measured 3.3× faster on a 2-second
-clip up to 71.7× on a 60-second 1080p one. On a real terminal `OK`/`FAIL`
-render as green/red `✓`/`✗`; piped or redirected output (CI, `| tee`) is
-plain ASCII with no escape codes.
-
-**Video file too large?** Give conv the limit and it compresses the file to
-fit under it, for an upload cap or an attachment limit:
-
-```console
-$ conv clip.mp4 --max-size 5mb
-OK clip-5mb.mp4 - 4.97 MB - 24.0s
-  /home/user/Videos/clip-5mb.mp4
-  note  Sized to 1280x720 at 30 fps, 1.81 Mb/s video, 128 kb/s audio; 2 passes.
-```
-
-conv trades resolution, frame rate and bitrate against each other, so the
-file looks as good as that size allows rather than losing everything from
-one of them, and it asks before a limit too tight to look good. More in
-[Size targets](#size-targets).
-
-**PDF too big to send?** `conv scan.pdf --compress` makes it smaller with
-the same look, offline, instead of handing it to a website. More in
-[Compress PDF](#compress-pdf).
+Where it can, conv avoids re-encoding: a video whose codecs already fit the
+new container is copied, which is lossless and measured 3.3× faster on a
+2-second clip up to 71.7× on a 60-second 1080p one. On a real terminal
+`OK`/`FAIL` render as green/red `✓`/`✗`; piped or redirected output (CI,
+`| tee`) is plain ASCII with no escape codes.
 
 ## Install
 
@@ -115,7 +115,7 @@ conv pages report.pdf 3 1-2 5-z  # pick, reorder, delete or turn a PDF's pages
 conv report.pdf --password       # lock a PDF; --unlock removes the password
 conv report.pdf .png             # each page of a PDF as a picture
 conv scan                        # list the files here and what each can become
-conv info clip.mp4                # what a file is: streams, size, camera, pages
+conv info clip.mp4               # what a file is: streams, size, camera, pages
 conv clip.mp4 --max-size 5mb     # compress a video to fit under 5 MB
 conv photo.jpg --strip-metadata  # remove the location and other metadata
 conv clip.mp4 --start 5 --end 12 # cut out 0:05 to 0:12
