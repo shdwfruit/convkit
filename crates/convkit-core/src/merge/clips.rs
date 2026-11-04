@@ -67,6 +67,8 @@ pub struct Picture {
     /// PQ or HLG.
     pub hdr: bool,
     pub extradata: Option<String>,
+    /// The stream's own length, when ffprobe gives one.
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +81,26 @@ pub struct Sound {
     pub channels: u32,
     pub layout: Option<String>,
     pub extradata: Option<String>,
+    /// The stream's own length, when ffprobe gives one.
+    pub duration_ms: Option<u64>,
+}
+
+impl Clip {
+    /// How long the clip lasts in a join with a picture: its picture's
+    /// length, when its sound ends within 100 ms of it. An AAC decoder
+    /// older than ffmpeg 7 keeps the encoder's padding past the end, about
+    /// 5 ms a clip, which held every later clip's picture a frame late by
+    /// the fifth join; a phone clip's sound runs a few ms past its last
+    /// frame. Anything longer is the clip's own, and kept.
+    fn length_ms(&self, with_picture: bool) -> u64 {
+        let video = self.video.as_ref().and_then(|v| v.duration_ms);
+        let audio = self.audio.as_ref().and_then(|a| a.duration_ms);
+        match (with_picture, video, audio) {
+            (true, Some(v), Some(a)) if a.abs_diff(v) < 100 => v,
+            (true, Some(v), None) => v,
+            _ => self.duration_ms,
+        }
+    }
 }
 
 impl Picture {
@@ -118,8 +140,23 @@ pub fn probe_args(input: &Path) -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    v.push(path_arg(input));
+    v.push(shown_to_ffmpeg(
+        input,
+        winpath::is_long(&input.to_string_lossy()),
+    ));
     v
+}
+
+/// `p` as an ffmpeg argument: `./` before a leading `-` (`path_arg`), and
+/// on Windows, when `verbatim`, in `\\?\` form, since ffmpeg does not
+/// open a path past 260 characters otherwise (`winpath::to_verbatim`).
+fn shown_to_ffmpeg(p: &Path, verbatim: bool) -> String {
+    let arg = path_arg(p);
+    if verbatim {
+        winpath::to_verbatim(&arg).unwrap_or(arg)
+    } else {
+        arg
+    }
 }
 
 /// Reads `input` with the ffprobe at `ffprobe`.
@@ -292,6 +329,7 @@ pub fn parse(path: &Path, json: &str) -> Option<Clip> {
                             Some("smpte2084") | Some("arib-std-b67")
                         ),
                         extradata: text(&s["extradata_hash"]),
+                        duration_ms: seconds_ms(&s["duration"]),
                     });
                 }
                 video_seen += 1;
@@ -310,6 +348,7 @@ pub fn parse(path: &Path, json: &str) -> Option<Clip> {
                         channels: s["channels"].as_u64().unwrap_or(0) as u32,
                         layout: text(&s["channel_layout"]),
                         extradata: text(&s["extradata_hash"]),
+                        duration_ms: seconds_ms(&s["duration"]),
                     });
                 }
                 audio_seen += 1;
@@ -364,6 +403,8 @@ pub struct Options {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Tok {
     Lit(String),
+    /// An input's path.
+    Path(PathBuf),
     /// The concat demuxer's list of files.
     List,
     /// Input `n`'s copy holding only the tracks joined.
@@ -433,13 +474,16 @@ impl ClipsPlan {
 
     fn commands_into(&self, scratch: Option<&Path>) -> Vec<Vec<String>> {
         let places = self.places(scratch);
+        let verbatim = scratch.is_some() && self.wants_verbatim(&places);
+        let shown = |p: &Path| shown_to_ffmpeg(p, verbatim);
         let render = |toks: &[Tok]| -> Vec<String> {
             toks.iter()
                 .map(|t| match t {
                     Tok::Lit(s) => s.clone(),
-                    Tok::List => path_arg(&places.list),
-                    Tok::Part(i) => path_arg(&places.parts[*i]),
-                    Tok::Output => path_arg(&places.output),
+                    Tok::Path(p) => shown(p),
+                    Tok::List => shown(&places.list),
+                    Tok::Part(i) => shown(&places.parts[*i]),
+                    Tok::Output => shown(&places.output),
                 })
                 .collect()
         };
@@ -455,10 +499,20 @@ impl ClipsPlan {
     /// directly.
     pub fn list(&self) -> Option<(PathBuf, String)> {
         let places = self.places(None);
-        self.list_text(&places).map(|t| (places.list, t))
+        self.list_text(&places, false).map(|t| (places.list, t))
     }
 
-    fn list_text(&self, places: &Places) -> Option<String> {
+    /// Whether a run hands ffmpeg every path in `\\?\` form: on Windows,
+    /// when any is long, all of them together, as `exec` does a step's.
+    fn wants_verbatim(&self, places: &Places) -> bool {
+        self.inputs
+            .iter()
+            .chain(&places.parts)
+            .chain([&places.list, &places.output])
+            .any(|p| winpath::is_long(&p.to_string_lossy()))
+    }
+
+    fn list_text(&self, places: &Places, verbatim: bool) -> Option<String> {
         let files: Vec<&Path> = if !self.parts.is_empty() {
             places.parts.iter().map(PathBuf::as_path).collect()
         } else if self.copied {
@@ -466,16 +520,24 @@ impl ClipsPlan {
         } else {
             return None;
         };
-        Some(files.into_iter().map(list_line).collect())
+        Some(files.into_iter().map(|p| list_line(p, verbatim)).collect())
     }
 }
 
 /// One line of a concat list. Absolute, since the demuxer reads a relative
 /// path against the list's own folder, and in single quotes, inside which
-/// only a quote needs escaping (`'\''`), backslashes included, so Windows
-/// paths read as they are.
-fn list_line(p: &Path) -> String {
+/// ffmpeg takes every character as it is (its quoting rules: "all
+/// characters enclosed between '' are included literally"), so a Windows
+/// path's backslashes need nothing; only a quote is closed, escaped and
+/// reopened (`'\''`). `verbatim` writes it in `\\?\` form, as the
+/// command's own paths are when one is long.
+fn list_line(p: &Path, verbatim: bool) -> String {
     let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let abs = if verbatim {
+        winpath::to_verbatim(&abs.to_string_lossy()).map_or(abs, PathBuf::from)
+    } else {
+        abs
+    };
     format!("file '{}'\n", abs.to_string_lossy().replace('\'', r"'\''"))
 }
 
@@ -958,7 +1020,7 @@ pub fn plan(clips: &[Clip], to: Format, output: &Path, opts: &Options) -> Result
                 .iter()
                 .enumerate()
                 .map(|(i, c)| {
-                    let mut v = vec![Tok::Lit("-i".into()), Tok::Lit(path_arg(&c.path))];
+                    let mut v = vec![Tok::Lit("-i".into()), Tok::Path(c.path.clone())];
                     if let Some(p) = c.video.as_ref().filter(|_| video_out) {
                         v.push(Tok::Lit("-map".into()));
                         v.push(Tok::Lit(format!("0:v:{}", p.position)));
@@ -977,7 +1039,7 @@ pub fn plan(clips: &[Clip], to: Format, output: &Path, opts: &Options) -> Result
         main.push(Tok::List);
         if let Some((i, _)) = cover {
             main.push(Tok::Lit("-i".into()));
-            main.push(Tok::Lit(path_arg(&clips[i].path)));
+            main.push(Tok::Path(clips[i].path.clone()));
         }
         let (v_pos, a_pos) = if parts.is_empty() {
             (
@@ -1083,17 +1145,23 @@ pub fn plan(clips: &[Clip], to: Format, output: &Path, opts: &Options) -> Result
             ));
         }
         if let Some((sr, layout)) = sound {
+            let length = c.length_ms(video_out);
             *sounds.last_mut().unwrap() = Some(match &c.audio {
+                // Each clip's sound lasts as long as the clip
+                // (`Clip::length_ms`), so every join lands on a frame.
                 Some(a) => format!(
-                    "[N:a:{p}]aresample={sr},aformat=sample_rates={sr}:channel_layouts={layout}",
+                    "[N:a:{p}]aresample={sr},aformat=sample_rates={sr}:channel_layouts={layout},\
+                     atrim=end={}.{:03}",
+                    length / 1000,
+                    length % 1000,
                     p = a.position,
                 ),
                 None => {
                     silent.push(name(&c.path));
                     format!(
                         "anullsrc=r={sr}:cl={layout}:d={}.{:03}",
-                        c.duration_ms / 1000,
-                        c.duration_ms % 1000
+                        length / 1000,
+                        length % 1000
                     )
                 }
             });
@@ -1105,7 +1173,7 @@ pub fn plan(clips: &[Clip], to: Format, output: &Path, opts: &Options) -> Result
         let mut argv: Vec<Tok> = Vec::new();
         for &i in group {
             argv.push(Tok::Lit("-i".into()));
-            argv.push(Tok::Lit(path_arg(&clips[i].path)));
+            argv.push(Tok::Path(clips[i].path.clone()));
         }
         let mut graph: Vec<String> = Vec::new();
         let mut segments = String::new();
@@ -1377,7 +1445,7 @@ pub fn run(
     let scratch = exec::make_scratch_dir(dest_dir)?;
     let _guard = exec::ScratchGuard::new(scratch.clone());
     let places = plan.places(Some(&scratch));
-    if let Some(list) = plan.list_text(&places) {
+    if let Some(list) = plan.list_text(&places, plan.wants_verbatim(&places)) {
         std::fs::write(&places.list, list).map_err(|e| {
             ConvError::new(
                 ErrorCode::ConversionFailed,
@@ -1525,6 +1593,7 @@ mod tests {
             rate: Some(rate),
             hdr: false,
             extradata: Some("SHA256:v".into()),
+            duration_ms: Some(2000),
         }
     }
 
@@ -1538,6 +1607,7 @@ mod tests {
             channels,
             layout: Some(channels_label(channels)),
             extradata: Some(format!("SHA256:a{rate}{channels}")),
+            duration_ms: Some(2005),
         }
     }
 
@@ -1690,8 +1760,28 @@ mod tests {
 
     #[test]
     fn a_quote_in_a_name_is_escaped_in_the_list() {
-        let line = list_line(Path::new("/v/it's.mp4"));
-        assert_eq!(line, "file '/v/it'\\''s.mp4'\n");
+        let path = Path::new("v").join("it's.mp4");
+        let abs = std::path::absolute(&path).unwrap().display().to_string();
+        assert_eq!(
+            list_line(&path, false),
+            format!("file '{}'\n", abs.replace('\'', "'\\''"))
+        );
+        assert!(list_line(&path, false).contains("it'\\''s.mp4'"));
+    }
+
+    /// Inside single quotes ffmpeg takes a backslash as it is, so a Windows
+    /// path goes in unchanged; a long one goes in `\\?\` form.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_list_line_keeps_its_backslashes_and_can_be_verbatim() {
+        assert_eq!(
+            list_line(Path::new(r"C:\v\it's.mp4"), false),
+            "file 'C:\\v\\it'\\''s.mp4'\n"
+        );
+        assert_eq!(
+            list_line(Path::new(r"C:\v\a.mp4"), true),
+            "file '\\\\?\\C:\\v\\a.mp4'\n"
+        );
     }
 
     #[test]
@@ -1941,8 +2031,10 @@ mod tests {
         let graph = &argv[argv.iter().position(|a| a == "-filter_complex").unwrap() + 1];
         assert_eq!(
             graph,
-            "[0:a:0]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo[a0];\
-             [1:a:0]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo[a1];\
+            "[0:a:0]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo,\
+             atrim=end=2.000[a0];\
+             [1:a:0]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo,\
+             atrim=end=2.000[a1];\
              [a0][a1]concat=n=2:v=0:a=1[a]"
         );
         assert!(has(&argv, ["-c:a", "libmp3lame"]));
@@ -1996,6 +2088,35 @@ mod tests {
         );
         assert!(!graph.contains("[1:v:0]scale=out_color"), "{graph}");
         assert_eq!(p.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_clips_sound_is_cut_to_its_picture_unless_it_runs_on() {
+        // 5 ms of encoder padding past the picture is cut...
+        let p = plan_of(
+            &[
+                hd("a.mp4"),
+                clip("b.mp4", Some(pic(640, 360, (30, 1))), Some(sound(48000, 2))),
+            ],
+            "out.mp4",
+        );
+        let argv = main_argv(&p);
+        let graph = &argv[argv.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(
+            graph.contains("channel_layouts=stereo,atrim=end=2.000[a1]"),
+            "{graph}"
+        );
+        // ...a sound that runs on is the clip's own.
+        let mut long = hd("long.mp4");
+        long.audio.as_mut().unwrap().duration_ms = Some(3000);
+        long.duration_ms = 3000;
+        assert_eq!(long.length_ms(true), 3000);
+        assert_eq!(hd("x.mp4").length_ms(true), 2000);
+        assert_eq!(
+            hd("x.mp4").length_ms(false),
+            2000,
+            "sound alone: the file's length"
+        );
     }
 
     #[test]

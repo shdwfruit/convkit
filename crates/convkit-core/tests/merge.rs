@@ -466,6 +466,64 @@ fn many_clips_are_encoded_in_groups_and_stay_in_step() {
     assert_in_step(&out, &flashes, 9);
 }
 
+/// A clip whose sound runs 256 samples (5 ms) past its picture, as an AAC
+/// decoder older than ffmpeg 7 gives every AAC clip by keeping the
+/// encoder's padding: made here with PCM sound 2.00533 s long, so any
+/// ffmpeg shows it.
+fn padded(dir: &Path, name: &str) -> PathBuf {
+    let out = dir.join(name);
+    ffmpeg(&[
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=black:s=320x180:r=30:d=2,drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:\
+         enable='between(t,1,1+1/30-0.0001)',format=yuv420p",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=f=1000:r=48000:d=2.00533,volume=enable='not(between(t,1,1.1))':volume=0",
+        "-c:v",
+        "libx264",
+        "-g",
+        "30",
+        "-c:a",
+        "pcm_s16le",
+        s(&out),
+    ]);
+    out
+}
+
+/// Without each clip's sound cut to its picture, the padding added up: by
+/// the fifth clip its picture was a frame late, and the sound drifted
+/// against it by the ms of every join before (seen on Ubuntu's ffmpeg 6.1).
+#[test]
+#[ignore = "requires ffmpeg and ffprobe; run with --ignored"]
+fn sound_a_few_ms_longer_than_the_picture_still_joins_on_a_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut inputs: Vec<PathBuf> = (0..9)
+        .map(|i| padded(dir.path(), &format!("p{i}.mov")))
+        .collect();
+    inputs.push(clip(
+        dir.path(),
+        "quiet.mp4",
+        &Spec {
+            sound: None,
+            ..PLAIN
+        },
+    ));
+    let out = dir.path().join("all.mp4");
+
+    let o = join(&inputs, &out, &clips::Options::default());
+
+    assert!(!o.copied);
+    assert!((duration(&probe(&out)) - 20.0).abs() < 0.05);
+    let flashes: Vec<f64> = (0..10).map(|i| 1.0 + 2.0 * f64::from(i)).collect();
+    assert_in_step(&out, &flashes, 9);
+}
+
 #[test]
 #[ignore = "requires ffmpeg and ffprobe; run with --ignored"]
 fn resize_and_crf_encode_every_clip_within_the_size() {
@@ -676,6 +734,11 @@ fn pictures_take_the_size_of_the_pdf_page_beside_them() {
     );
 }
 
+/// A HEIC goes in converted to JPEG, which keeps its EXIF, GPS included,
+/// and the PDF embeds that JPEG as it is. So the note must say so exactly
+/// when the location is in the PDF, whatever this ImageMagick does with a
+/// HEIC's EXIF: ImageMagick 6, as Debian and Ubuntu ship it, keeps it
+/// behind the HEIF item's own offset, where its own reader misses it.
 #[test]
 #[ignore = "requires qpdf, typst and ImageMagick; run with --ignored"]
 fn a_heic_among_pdfs_is_converted_and_its_location_noted() {
@@ -690,14 +753,21 @@ fn a_heic_among_pdfs_is_converted_and_its_location_noted() {
     let sizes = page_sizes(&out);
     let (w, h) = sizes[3];
     assert_eq!((w.max(h), w.min(h)), (297, 230), "the last page's size");
-    if !o
+    // The photo's GPS latitude as its big-endian EXIF stores it: 35/1, 43/1.
+    let latitude = b"\x00\x00\x00\x23\x00\x00\x00\x01\x00\x00\x00\x2b\x00\x00\x00\x01";
+    let kept = std::fs::read(&out)
+        .unwrap()
+        .windows(latitude.len())
+        .any(|w| w == latitude);
+    let noted = o
         .notes
         .iter()
-        .any(|n| n.starts_with("photo.heic records where it was taken"))
-    {
-        // The fixture records a location; a HEIC without one gets no note.
-        panic!("no location note: {:?}", o.notes);
-    }
+        .any(|n| n.starts_with("photo.heic records where it was taken"));
+    assert_eq!(
+        noted, kept,
+        "location in the PDF: {kept}; notes: {:?}",
+        o.notes
+    );
 }
 
 #[test]

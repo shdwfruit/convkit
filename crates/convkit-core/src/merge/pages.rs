@@ -142,19 +142,35 @@ impl PagesPlan {
                     path: layout_file.clone(),
                     contents: text,
                 });
+                let root_arg = if root.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    root.clone()
+                };
+                // On Windows, every path in `\\?\` form when one is long, as
+                // `exec` gives a Typst step's: Typst does not open a path past
+                // 260 characters otherwise.
+                let verbatim = scratch.is_some()
+                    && [&root_arg, &layout_file, &pdf_out]
+                        .iter()
+                        .any(|p| crate::winpath::is_long(&p.to_string_lossy()));
+                let shown = |p: &Path| {
+                    let arg = path_arg(p);
+                    if verbatim {
+                        crate::winpath::to_verbatim(&arg).unwrap_or(arg)
+                    } else {
+                        arg
+                    }
+                };
                 let argv = vec![
                     "compile".to_string(),
                     "--root".to_string(),
-                    if root.as_os_str().is_empty() {
-                        ".".to_string()
-                    } else {
-                        path_arg(&root)
-                    },
+                    shown(&root_arg),
                     "--ignore-system-fonts".to_string(),
                     "--diagnostic-format".to_string(),
                     "short".to_string(),
-                    path_arg(&layout_file),
-                    path_arg(&pdf_out),
+                    shown(&layout_file),
+                    shown(&pdf_out),
                 ];
                 TypstCall {
                     argv: argv.clone(),

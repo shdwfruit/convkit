@@ -230,10 +230,26 @@ impl<'a> Tiff<'a> {
     }
 }
 
+/// The EXIF of the first APP1 that holds one. It usually starts right after
+/// `Exif\0\0`. A JPEG ImageMagick 6 writes from a HEIC has the HEIF Exif
+/// item's own 4-byte offset in front of that, so its TIFF header comes
+/// later; ImageMagick's own EXIF reader then misses it, but the GPS is in
+/// the file all the same. So the header is looked for within the first
+/// bytes, where any of these puts it; an XMP packet has none there.
 fn exif_tiff<'a>(segs: &[Segment<'a>]) -> Option<Tiff<'a>> {
-    segs.iter()
-        .filter(|s| s.marker == APP1)
-        .find_map(|s| Tiff::new(s.payload.strip_prefix(EXIF_HEADER)?))
+    segs.iter().filter(|s| s.marker == APP1).find_map(|s| {
+        if let Some(t) = s.payload.strip_prefix(EXIF_HEADER).and_then(Tiff::new) {
+            return Some(t);
+        }
+        let head = &s.payload[..s.payload.len().min(32)];
+        (0..head.len()).find_map(|at| {
+            let rest = &s.payload[at..];
+            if !(rest.starts_with(b"MM\0\x2a") || rest.starts_with(b"II\x2a\0")) {
+                return None;
+            }
+            Tiff::new(rest).filter(|t| t.ifd0().is_some())
+        })
+    })
 }
 
 /// Whether the JPEG records where it was taken: an EXIF GPS block with a
@@ -403,6 +419,24 @@ mod tests {
     #[test]
     fn the_shared_test_jpeg_records_a_location() {
         assert!(has_location(&located_for_tests()));
+    }
+
+    /// A JPEG ImageMagick 6 writes from a HEIC keeps the HEIF item's 4-byte
+    /// offset ahead of `Exif\0\0`, and its GPS still counts; so does an
+    /// EXIF with no header at all.
+    #[test]
+    fn a_location_behind_a_heif_offset_or_no_header_is_found() {
+        let e = exif(false, &[GPS_POINTER], Some(&[LATITUDE]));
+        let tiff = e.strip_prefix(EXIF_HEADER).unwrap();
+        let mut heif = vec![0, 0, 0, 6];
+        heif.extend_from_slice(&e);
+        for payload in [heif, tiff.to_vec()] {
+            let photo = jpeg(&[segment(APP1, &payload)], &[0x12; 64], &[]);
+            assert!(has_location(&photo), "{:?}", &payload[..12]);
+        }
+        // An XMP packet that mentions TIFF tags is not EXIF.
+        let xmp = segment(APP1, b"http://ns.adobe.com/xap/1.0/\0<x:xmpmeta MM\0*>");
+        assert!(!has_location(&jpeg(&[xmp], &[0x12; 64], &[])));
     }
 
     /// A photo's metadata is all in front of its image data, so that is all
