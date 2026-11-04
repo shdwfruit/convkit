@@ -420,7 +420,7 @@ struct OptionsView: View {
                 get: { job.outputFolder == nil ? 0 : 1 },
                 set: { if $0 == 0 { job.outputFolder = nil } else { chooseFolder() } }
             )) {
-                Text("Next to the original").tag(0)
+                Text(job.destination.map { "In \($0.lastPathComponent), where the chain started" } ?? "Next to the original").tag(0)
                 Text(job.outputFolder?.lastPathComponent ?? "Choose…").tag(1)
             }
             .labelsHidden()

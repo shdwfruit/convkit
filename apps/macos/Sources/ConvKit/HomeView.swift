@@ -148,7 +148,7 @@ struct HomeContent: View {
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 190, maximum: 280), spacing: 6)], alignment: .leading, spacing: 2) {
                 ForEach(model.recentTools) { tool in
-                    ToolRow(tool: tool, showsSection: true) { model.page = .tool(tool) }
+                    ToolRow(tool: tool, showsSection: true) { model.show(tool) }
                 }
             }
         }
@@ -163,7 +163,7 @@ struct HomeContent: View {
             }
             LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
                 ForEach(tools) { tool in
-                    ToolTile(tool: tool) { model.page = .tool(tool) }
+                    ToolTile(tool: tool) { model.show(tool) }
                 }
             }
         }
@@ -224,7 +224,7 @@ struct CategoryBlock: View {
             .padding(.horizontal, 6)
             .padding(.bottom, 6)
             ForEach(tools) { tool in
-                ToolRow(tool: tool) { model.page = .tool(tool) }
+                ToolRow(tool: tool) { model.show(tool) }
             }
         }
         .padding(10)

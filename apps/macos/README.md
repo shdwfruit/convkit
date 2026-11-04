@@ -13,13 +13,11 @@ Finding a tool
   way, unless the tool showing takes them.
 
 The tools
-- Video: Compress, Convert, Trim, Join, Video to GIF, Video to Images (stills),
-  Extract Audio, Add Audio (replace or mix in a song or voice-over), Burn
-  Subtitles, Crop (9:16, 1:1 or black bars), Turn or Flip, Resize, Change
-  Speed, Remove Metadata.
-- Audio: Convert, Trim, Join, Remove Noise, Change Speed, Remove Metadata.
-- Images: Convert, Resize, Crop, Turn or Flip, Beautify Screenshot, Color
-  Palette, Make an Icon, Remove Location.
+- Video: Edit Video, Compress, Convert, Video to GIF, Video to Images (stills),
+  Extract Audio, Join, Remove Metadata.
+- Audio: Edit Audio, Convert, Join, Remove Metadata.
+- Images: Edit Image, Convert, Resize, Remove Location, Beautify Screenshot,
+  Color Palette, Make an Icon.
 - Documents: Compress PDF, Merge PDFs (pictures among them too), Split PDF,
   Arrange Pages, PDF to Images, Photos to PDF, Lock PDF, Unlock PDF, Convert
   Document.
@@ -31,6 +29,28 @@ The tools
 - Files: Convert Anything (every format and option), File Info, Zip Files,
   Open Archive, Scan Folder.
 - conv: Backends (install and update what conv uses), Formats, What's New.
+
+The editors
+- Edit Video, Edit Audio and Edit Image take one file and make every change
+  at once: trim on the bar under the picture, crop with a box on it (or a
+  shape like 9:16, or cut away black bars), turn and flip, speed, mute, take
+  out noise, put on a new sound or subtitles, resize, change the format and
+  take out the metadata. The preview shows the turn, the flip, the crop and
+  the part kept. Saving is one conv run, so nothing is re-encoded twice.
+- Searching for Crop Video, Trim Video, Mute Video, Change Speed, Remove
+  Noise and the like opens the editor at that part.
+- Mute needs a conv with `--mute`; until then the switch says so.
+
+Chains
+- Next to the main button, Then runs this step without saving it and hands
+  what it makes to the next tool: join two clips, then compress them; arrange
+  a PDF's pages, then compress and lock it. The menu lists only the tools
+  that take what this step makes.
+- Each step's result waits in a scratch folder. The last step saves next to
+  the file the chain started from, named for every step
+  (photo-cropped-stripped.jpg), and never over that file. The bar above the
+  tool shows the steps; click one to go back and change it.
+- After a save, Open In does the same with the saved file.
 
 Most tools are Convert with a narrower form: the same `conv FILE .ext --flags`,
 but showing only the options for that job. More Options carries the files

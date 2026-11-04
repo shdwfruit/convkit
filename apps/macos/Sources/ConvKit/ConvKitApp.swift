@@ -14,7 +14,11 @@ struct ConvKitApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Add Files…") {
                     if case .tool(let id) = delegate.model.page, let job = delegate.model.jobs[id] {
-                        pickFiles(job)
+                        if job.isEditor {
+                            if let first = pickURLs().first { delegate.model.open(id, with: [first]) }
+                        } else {
+                            pickFiles(job)
+                        }
                     } else {
                         pickFiles(delegate.model)
                     }
@@ -76,6 +80,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    /// A chain's unsaved steps live in a scratch folder; leave none behind.
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated { model.endChain() }
+    }
+
     private func showWindow() {
         if window == nil {
             let host = NSHostingController(rootView: RootView().environment(model))
@@ -112,7 +121,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let merger: MergeModel? = { if case .tool(let id) = model.page, case .merge = id.kind { return model.mergeModel(id) }; return nil }()
                 let file = kv[1].isEmpty ? nil : URL(fileURLWithPath: kv[1])
                 switch kv[0] {
-                case "page": model.page = kv[1] == "home" ? .home : ToolID(rawValue: kv[1]).map(Page.tool) ?? .home
+                case "page":
+                    if let id = ToolID(rawValue: kv[1]) { model.show(id) } else { model.page = .home }
+                case "then":
+                    // The Then menu, as if picked.
+                    try? await Task.sleep(for: .milliseconds(1200))
+                    guard let next = ToolID(rawValue: kv[1]), case .tool(let id) = model.page else { break }
+                    if let job { await model.chain(job, to: next) }
+                    else if case .merge = id.kind {
+                        let m = model.mergeModel(id)
+                        if let origin = m.items.first?.url {
+                            await model.chain(from: id, origin: origin, fromChain: false, make: { await m.mergeForChain(into: $0) }, to: next)
+                        }
+                    } else if id == .pdfPages, let origin = model.pages.file {
+                        await model.chain(from: id, origin: origin, fromChain: false, make: { await model.pages.writeForChain(into: $0) }, to: next)
+                    }
+                    try? await Task.sleep(for: .milliseconds(800))
+                case "endChain": model.endChain()
                 case "search": model.search = v
                 case "open": model.open(urls); try? await Task.sleep(for: .milliseconds(400))
                 case "add":
@@ -123,13 +148,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let id = ToolID(rawValue: kv[1]) { model.open(id, with: model.dropped) }
                     try? await Task.sleep(for: .milliseconds(600))
                 case "more": if let job { model.moreOptions(from: job) }; try? await Task.sleep(for: .milliseconds(600))
-                case "trimClip":
-                    let parts = kv[1].split(separator: ",")
-                    let t = parts.prefix(2).compactMap { Double($0) }
-                    if t.count == 2 {
-                        model.trimVideo.clips.append(.init(start: t[0], end: t[1], keep: parts.count > 2 ? .sound : .both))
-                    }
-                case "trimWrite": model.trimVideo.writeAll()
                 case "mergeRun":
                     // Bypasses the save panel: merges into the path given.
                     guard let m = merger else { break }
@@ -181,6 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case "rotate": job?.rotate = kv[1]
                 case "flip": job?.flip = kv[1]
                 case "crop": job?.crop = kv[1]
+                case "mute": job?.mute = kv[1] == "1"
                 case "compress": job?.compress = kv[1] == "1"
                 case "every": job?.every = kv[1]
                 case "denoise": job?.denoise = kv[1] == "off" ? "" : kv[1]
@@ -220,7 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let wait = Double(env["CONVKIT_WAIT"] ?? "") ?? 4
             try? await Task.sleep(for: .seconds(wait))
-            if let png = env["CONVKIT_RENDER"] { render(to: png) }
+            if let png = env["CONVKIT_RENDER"] { await render(to: png) }
             try? dump().write(toFile: path, atomically: true, encoding: .utf8)
             NSApp.terminate(nil)
         }
@@ -228,9 +247,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Draws Home off screen; the window itself can't be captured without Screen Recording.
     @MainActor
-    private func render(to path: String) {
+    private func render(to path: String) async {
         let dark = ProcessInfo.processInfo.environment["CONVKIT_DARK"] == "1"
-        let view = HomeContent()
+        var content = AnyView(HomeContent())
+        // An editor draws its preview area; the inspector is AppKit and draws blank.
+        if case .tool(let id) = model.page, let job = model.jobs[id], let media = job.preset.editor {
+            let preview = MediaPreview()
+            await preview.load(job.files.first?.url, media: media)
+            content = AnyView(EditorView(job: job, media: media, focus: nil, preview: preview).stageOnly)
+        }
+        let view = content
             .environment(model)
             .frame(width: CGFloat(Double(ProcessInfo.processInfo.environment["CONVKIT_WIDTH"] ?? "") ?? 900))
             .background(dark ? Color(white: 0.12) : Color(white: 0.98))
@@ -253,13 +279,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         d += "dropped: \(model.dropped.map(\.lastPathComponent)) suggestions: \(model.suggestions.map(\.rawValue))\n"
         d += "recent: \(model.recentTools.map(\.rawValue))\n"
+        d += "focus: \(model.editorFocus?.rawValue ?? "-") chain: \(model.chain.map { "\($0.origin.lastPathComponent) \($0.steps.map(\.rawValue)) -> \($0.destination.path)" } ?? "-")\n"
         if case .tool(let id) = model.page {
             switch id.kind {
             case .convert:
                 if let job = model.jobs[id] { d += dumpJob(job) }
-            case .trim:
-                let t = id == .trimAudio ? model.trimAudio : model.trimVideo
-                d += "trim: dur=\(t.duration) video=\(t.hasVideo) targets=\(t.targets) clips=\(t.clips.map { "\($0.start)-\($0.end) \($0.status)" })\n"
             case .merge:
                 let m = model.mergeModel(id)
                 d += "merge(\(m.mode)): \(m.items.map { "\($0.url.lastPathComponent):\($0.pages ?? -1)" }) as=\(m.outputExt) skipped=\(m.skipped) ready=\(m.ready) warnings=\(m.warnings) problem=\(m.problem ?? "-") result=\(m.result?.lastPathComponent ?? "-")\n"
@@ -322,7 +346,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for c in job.preset.controls {
             for f in c.flags { d += "  \(f): \(job.reason(f) ?? "on")\n" }
         }
-        d += "  command: \(job.commandPreview)\n  env: \(job.passwordEnv.keys.sorted())\n"
+        d += "  command: \(job.commandPreview)\n  env: \(job.passwordEnv.keys.sorted()) out=\(job.outputFolder?.path ?? "-") dest=\(job.destination?.path ?? "-") fromChain=\(job.fromChain) last=\(job.lastOutputs.map(\.lastPathComponent))\n"
+        d += "  next: \(model.nextTools(after: job.tool, making: job.fitting.compactMap(\.plannedOutput)).map(\.rawValue))\n"
         for f in job.files {
             d += "  \(f.url.lastPathComponent) misfit=\(f.misfit ?? "-") -> \(f.plannedOutput?.lastPathComponent ?? "-") problem=\(f.problem ?? "-") warnings=\(f.warnings) status=\(f.status)\n"
         }

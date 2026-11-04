@@ -49,6 +49,11 @@ final class FileItem: Identifiable {
 final class CapsStore {
     var conv: URL?
     private(set) var byExt: [String: CapabilitiesResponse] = [:]
+    /// The flags this conv's --help lists, so a knob for one it doesn't have yet
+    /// (--mute before it ships) can say so.
+    var convFlags: Set<String> = []
+    /// Every flag some pair lists as tuning.
+    private(set) var listedFlags: Set<String> = []
 
     private struct All: Decodable {
         struct Pair: Decodable { var from: String; var to: String }
@@ -73,6 +78,21 @@ final class CapsStore {
             for await (name, resp) in group { if let resp { found[name] = resp } }
         }
         byExt = found
+        listedFlags = Set(found.values.flatMap { ($0.targets ?? []).flatMap(\.tuning) })
+    }
+
+    /// The long flags in a --help text.
+    static func parseFlags(_ help: String) -> Set<String> {
+        var out: Set<String> = []
+        for line in help.split(separator: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard t.hasPrefix("-") else { continue }
+            for word in t.split(separator: " ") where word.hasPrefix("--") {
+                let name = word.split(separator: "[").first.map { String($0) } ?? String(word)
+                out.insert(name.trimmingCharacters(in: CharacterSet(charactersIn: ",=<")))
+            }
+        }
+        return out
     }
 
     /// Looks up extensions conv knows by another name (jpeg, yml, tif).
@@ -112,6 +132,10 @@ final class CapsStore {
     /// What conv does to a PDF kept as a PDF. `capabilities` lists pairs between
     /// formats, so these, which rewrite a PDF in place, aren't among its tuning flags.
     static let pdfOwn: Set<String> = ["--compress", "--max-size", "--password", "--restrict", "--unlock"]
+
+    /// A newer flag `capabilities` may not list, and the one whose files it fits:
+    /// muting goes wherever a new sound could.
+    static let standIn: [String: String] = ["--mute": "--audio"]
 }
 
 /// Flags that make conv write a lone file in its own format (photo-50pct.jpg,
@@ -119,7 +143,7 @@ final class CapsStore {
 let keepFormatTriggers: Set<String> = [
     "--max-size", "--strip-metadata", "--start", "--end", "--duration", "--speed",
     "--resize", "--rotate", "--flip", "--crop", "--compress", "--denoise", "--audio",
-    "--subtitles", "--password", "--unlock",
+    "--subtitles", "--password", "--unlock", "--mute",
 ]
 
 /// One convert-style tool's files and settings. Every tool built on Convert has its
@@ -158,6 +182,7 @@ final class ConvertJob {
     var rotate = ""
     var flip = ""
     var crop = ""
+    var mute = false
     var compress = false
     var every = ""
     /// "", "normal" or "strong".
@@ -188,6 +213,15 @@ final class ConvertJob {
     private(set) var targetNotes: [String] = []
 
     private(set) var isRunning = false
+    /// What the last Save wrote, for an editor's "Saved" line.
+    private(set) var lastOutputs: [URL] = []
+    /// The files came from a chain: they sit in its scratch folder, and the result saves
+    /// in `destination` (the chain's starting folder) under the name conv would give it
+    /// beside its input, never as `protected` (the file the chain started from).
+    var fromChain = false
+    var destination: URL?
+    var protected: URL?
+    var isEditor: Bool { preset.editor != nil }
     /// Shown after a run: what went on the clipboard, or why not.
     private(set) var clipboardNote: String?
     /// Why the last Paste brought nothing in.
@@ -262,7 +296,19 @@ final class ConvertJob {
     func clear() {
         files = []
         clipboardNote = nil
+        lastOutputs = []
         Task { await refreshTargets() }
+    }
+
+    /// An editor holds one file: a new one takes its place.
+    @MainActor
+    func replace(with url: URL) { replace(with: [url]) }
+
+    @MainActor
+    func replace(with urls: [URL]) {
+        files = []
+        lastOutputs = []
+        add(urls)
     }
 
     // MARK: Targets
@@ -301,6 +347,7 @@ final class ConvertJob {
     /// A target the tool offers: Extract Audio offers audio, Convert Image pictures.
     private func targetFits(_ to: String) -> Bool {
         if preset.skipTargets.contains(to) { return false }
+        if preset.extraTargets.contains(to) { return true }
         guard case .pick(let kinds, _, _) = preset.target, !kinds.isEmpty else { return true }
         return caps.kind(to).map(kinds.contains) ?? false
     }
@@ -349,13 +396,25 @@ final class ConvertJob {
     /// tool's own knobs are on (they were chosen for its kind of file); the everything
     /// tool's wait for a file.
     func applies(_ flag: String) -> Bool {
+        if !caps.convFlags.isEmpty && !caps.convFlags.contains(flag) { return false }
         guard let tuning else { return !isGeneral }
+        // A flag conv has but no pair lists yet goes where its neighbour does.
+        if !caps.listedFlags.contains(flag), let like = CapsStore.standIn[flag] { return tuning.contains(like) }
         return tuning.contains(flag)
     }
 
     /// Why a knob is greyed out, or nil when it isn't.
     func reason(_ flag: String) -> String? {
+        if !caps.convFlags.isEmpty && !caps.convFlags.contains(flag) {
+            return "This conv can't do that yet: it has no \(flag)."
+        }
         if applies(flag) {
+            if flag == "--mute" && audioFile != nil { return "Mute or a new sound, not both." }
+            if flag == "--audio" && mute { return "Mute or a new sound, not both." }
+            if flag == "--denoise" && mute { return "There's no sound left to clean." }
+            if flag == "--max-size" && audioFile != nil {
+                return "conv adds new sound first and sizes after: use Then › Compress Video."
+            }
             if flag == "--duration" && !end.isEmpty { return "Set an end or a length, not both." }
             if flag == "--end" && !duration.isEmpty { return "Set an end or a length, not both." }
             if flag == "--password" && unlock && !preset.alwaysUnlock && !lock { return "Lock or unlock, not both." }
@@ -395,6 +454,7 @@ final class ConvertJob {
         check(!rotate.isEmpty, "--rotate", "Turn")
         check(!flip.isEmpty, "--flip", "Flip")
         check(!crop.isEmpty, "--crop", "Crop")
+        check(mute, "--mute", "Mute")
         check(compress && !preset.startsOn.contains(.compress), "--compress", "Compress")
         check(!every.isEmpty, "--every", "Every")
         check(!denoise.isEmpty && !preset.startsOn.contains(.denoise), "--denoise", "Remove noise")
@@ -409,10 +469,15 @@ final class ConvertJob {
 
     // MARK: Arguments
 
-    /// conv's argv for one file, without --json/--dry-run/-y.
-    func args(for item: FileItem) -> [String] {
+    /// conv's argv for one file, without --json/--dry-run/-y. `out` names the file to
+    /// write and `folder` the folder, for chains.
+    func args(for item: FileItem, writing out: URL? = nil, into folder: URL? = nil) -> [String] {
         var a = [item.url.path]
-        if format != "same" && !format.isEmpty { a.append("." + format) }
+        if let out {
+            a.append(out.path)
+        } else if format != "same" && !format.isEmpty {
+            a.append("." + format)
+        }
         func add(_ flag: String, _ value: String) {
             let v = value.trimmingCharacters(in: .whitespaces)
             if !v.isEmpty && applies(flag) { a += [flag, v] }
@@ -434,10 +499,11 @@ final class ConvertJob {
         add("--crop", crop.replacingOccurrences(of: " ", with: ""))
         if compress && applies("--compress") { a.append("--compress") }
         add("--every", every)
-        if !denoise.isEmpty && applies("--denoise") {
+        if mute && applies("--mute") && audioFile == nil { a.append("--mute") }
+        if !denoise.isEmpty && applies("--denoise") && !mute {
             a.append(denoise == "strong" ? "--denoise=strong" : "--denoise")
         }
-        if let f = audioFile, applies("--audio") {
+        if let f = audioFile, applies("--audio"), !mute {
             a += ["--audio", f.path]
             if mix && applies("--mix") { a.append(mixLevel.isEmpty ? "--mix" : "--mix=\(mixLevel)") }
         }
@@ -450,7 +516,11 @@ final class ConvertJob {
             if !off.isEmpty && applies("--restrict") { a += ["--restrict", off.joined(separator: ",")] }
         }
         if unlock && applies("--unlock") && !locking { a.append("--unlock") }
-        if let dir = outputFolder {
+        if out != nil {
+            // The path says where.
+        } else if let folder {
+            a += ["-o", folder.path]
+        } else if let dir = outputFolder {
             a += ["-o", dir.path]
         } else if item.pasted {
             a += ["-o", Clipboard.pastedOutputFolder.path]
@@ -468,10 +538,25 @@ final class ConvertJob {
         return [:]
     }
 
+    /// Where a run writes in a chain. A file is named as conv would name it beside its
+    /// input (`-o` elsewhere keeps the bare name, which could be the original's); a
+    /// folder of stills goes in with `-o`.
+    private func target(for item: FileItem, in folder: URL?) -> (writing: URL?, into: URL?) {
+        guard let folder else { return (nil, nil) }
+        if let planned = item.plannedOutput, !planned.pathExtension.isEmpty {
+            return (folder.appendingPathComponent(planned.lastPathComponent), nil)
+        }
+        return (nil, folder)
+    }
+
+    /// The chain's folder, unless the user picked one.
+    private var chainFolder: URL? { outputFolder == nil ? destination : nil }
+
     /// The command for the first file, for the "Command" disclosure.
     var commandPreview: String {
         guard let first = fitting.first else { return "" }
-        let parts = ["conv"] + args(for: first).map { arg in
+        let t = target(for: first, in: chainFolder)
+        let parts = ["conv"] + args(for: first, writing: t.writing, into: t.into).map { arg in
             arg.contains(where: { " '\"$`\\()[]&;|<>*?!#~".contains($0) })
                 ? "'" + arg.replacingOccurrences(of: "'", with: "'\\''") + "'"
                 : arg
@@ -483,7 +568,7 @@ final class ConvertJob {
     /// Changes whenever any setting does, so the form can re-run the preview.
     var settingsKey: String {
         [format, maxSize, resize, "\(upscale)", colors, fps, crf, duration, "\(useQuality)\(Int(quality))",
-         speed, "\(shiftPitch)", start, end, "\(strip)", rotate, flip, crop, "\(compress)", every, denoise,
+         speed, "\(shiftPitch)", start, end, "\(strip)", rotate, flip, crop, "\(mute)", "\(compress)", every, denoise,
          audioFile?.path ?? "", "\(mix)", mixLevel, subtitlesFile?.path ?? "", pdfPages, dpi,
          "\(lock)", lockPassword, lockAgain, "\(allowPrint)\(allowCopy)\(allowEdit)", "\(unlock)", openPassword,
          outputFolder?.path ?? ""].joined(separator: "|")
@@ -509,6 +594,7 @@ final class ConvertJob {
         other.rotate = rotate
         other.flip = flip
         other.crop = crop
+        other.mute = mute
         other.compress = compress
         other.every = every
         other.denoise = denoise
@@ -537,6 +623,8 @@ final class ConvertJob {
     /// Called on every option change: asks conv (dry run) what each file would become.
     func optionsChanged() {
         updateTuning()
+        // An editor saves again after a change, so what it saved last isn't "done".
+        if isEditor { for item in files where item.isDone { item.status = .idle } }
         previewTask?.cancel()
         let items = fitting
         guard let conv, !items.isEmpty else { return }
@@ -594,6 +682,12 @@ final class ConvertJob {
         item.plannedOutput = (entry?.plan?.output ?? entry?.output).map {
             URL(fileURLWithPath: $0, relativeTo: item.url.deletingLastPathComponent()).standardizedFileURL
         }
+        if let folder = chainFolder, let planned = item.plannedOutput, let protected,
+           folder.appendingPathComponent(planned.lastPathComponent).standardizedFileURL == protected.standardizedFileURL {
+            item.problem = "That would replace \(protected.lastPathComponent), the file this chain started from. Pick another format, or Save In another folder."
+            item.plannedOutput = nil
+            return
+        }
         var warnings = entry?.plan?.warnings ?? entry?.warnings ?? []
         if let w = entry?.plan?.sizing?.warning {
             warnings.append(w + (entry?.plan?.sizing?.suggested.map { " Try \($0)." } ?? ""))
@@ -607,12 +701,34 @@ final class ConvertJob {
         fitting.filter { $0.problem == nil && $0.plannedOutput != nil && !$0.isDone }.count
     }
 
+    /// Runs every ready file into a scratch folder and gives back what it wrote, for
+    /// the next tool in a chain. The rows go back to planned, since nothing was saved.
+    @MainActor
+    func runForChain(into folder: URL) async -> [URL] {
+        guard let conv else { return [] }
+        let items = fitting.filter { $0.problem == nil && $0.plannedOutput != nil }
+        isRunning = true
+        defer { isRunning = false }
+        var outputs: [URL] = []
+        for item in items {
+            await run(item, conv: conv, extra: [], into: folder, chainStep: true)
+            if case .done(let out, _) = item.status {
+                outputs.append(out)
+                item.status = .idle
+            } else {
+                return []
+            }
+        }
+        return outputs
+    }
+
     @MainActor
     func runAll() {
         guard let conv else { return }
         let items = fitting.filter { $0.problem == nil && $0.plannedOutput != nil && !$0.isDone }
         isRunning = true
         clipboardNote = nil
+        lastOutputs = []
         // conv copies one run's output itself. The app runs one conv a file, so with
         // several files it copies all the outputs at the end, as `--copy` would.
         let copyEach = copyResult && items.count == 1
@@ -620,6 +736,7 @@ final class ConvertJob {
             for item in items {
                 if Task.isCancelled { break }
                 await run(item, conv: conv, extra: copyEach ? ["--copy"] : [])
+                if case .done(let out, _) = item.status { lastOutputs.append(out) }
             }
             if copyResult && items.count > 1 {
                 let outputs = items.compactMap { item -> URL? in
@@ -642,6 +759,7 @@ final class ConvertJob {
         isRunning = true
         runTask = Task { @MainActor in
             await run(item, conv: conv, extra: extra + (copyResult ? ["--copy"] : []))
+            if case .done(let out, _) = item.status { lastOutputs = [out] }
             isRunning = false
         }
     }
@@ -652,13 +770,15 @@ final class ConvertJob {
     }
 
     @MainActor
-    private func run(_ item: FileItem, conv: URL, extra: [String]) async {
+    private func run(_ item: FileItem, conv: URL, extra: [String], into folder: URL? = nil, chainStep: Bool = false) async {
+        let t = target(for: item, in: chainStep ? folder : chainFolder)
         item.status = .running
         item.notes = []
         // --yes answers conv's prompts, so it only goes in when the user chose Convert anyway.
         let guardFlags = extra.contains("--yes") ? [] : ["--no-install"]
         do {
-            let out = try await Conv.run(conv, args(for: item) + ["--json"] + guardFlags + extra, env: passwordEnv)
+            let out = try await Conv.run(conv, args(for: item, writing: t.writing, into: t.into) + ["--json"] + guardFlags + extra,
+                                         env: passwordEnv)
             if Task.isCancelled {
                 item.status = .failed("Stopped.")
                 return

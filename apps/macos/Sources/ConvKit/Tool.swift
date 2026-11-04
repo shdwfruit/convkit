@@ -11,7 +11,9 @@ struct RootView: View {
         NavigationSplitView {
             List(selection: Binding<Page?>(
                 get: { model.page },
-                set: { if let p = $0 { model.page = p } }
+                set: { p in
+                    if case .tool(let id) = p { model.show(id) } else if let p { model.page = p }
+                }
             )) {
                 Label {
                     Text("Home")
@@ -45,12 +47,17 @@ struct RootView: View {
             }
             .searchable(text: $model.search, placement: .sidebar, prompt: "Search tools")
             .onSubmit(of: .search) {
-                if let first = model.searchResults.first { model.page = .tool(first) }
+                if let first = model.searchResults.first { model.show(first) }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
         } detail: {
             detail
-                .id(model.page)
+                .id("\(model.page)\(model.editorFocus?.rawValue ?? "")")
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if let chain = model.chain, case .tool(let id) = model.page, chain.steps.contains(id) {
+                        ChainBar(chain: chain, current: id)
+                    }
+                }
         }
         .alert("Nothing to paste", isPresented: Binding(
             get: { model.pasteProblem != nil },
@@ -79,11 +86,14 @@ struct RootView: View {
             HomeView()
         case .tool(let id):
             switch id.kind {
-            case .convert:
-                if let job = model.jobs[id] { ConvertView(job: job) }
-            case .trim:
-                TrimView(trim: id == .trimAudio ? model.trimAudio : model.trimVideo, tool: id,
-                         paste: model.pasteURLs)
+            case .convert(let preset):
+                if let job = model.jobs[id] {
+                    if let media = preset.editor {
+                        EditorView(job: job, media: media, focus: model.editorFocus)
+                    } else {
+                        ConvertView(job: job)
+                    }
+                }
             case .merge:
                 MergeView(merge: model.mergeModel(id), paste: model.pasteURLs)
             case .split:
@@ -128,6 +138,7 @@ struct RootView: View {
 func askWhereToSave(name: String, types: [String]) -> URL? {
     let panel = NSSavePanel()
     panel.nameFieldStringValue = name
+    if let folder = SaveDefaults.folder { panel.directoryURL = folder }
     panel.allowedContentTypes = types.compactMap { UTType(filenameExtension: $0) }
     panel.allowsOtherFileTypes = false
     panel.isExtensionHidden = false

@@ -34,6 +34,10 @@ struct ConvertView: View {
             Button { job.clear() } label: { Label("Clear", systemImage: "trash") }
                 .help("Clear the list")
                 .disabled(job.files.isEmpty || job.isRunning)
+            ThenMenu(tools: model.nextTools(after: job.tool, making: job.fitting.compactMap(\.plannedOutput)),
+                     disabled: job.readyCount == 0 || job.isRunning) { next in
+                Task { await model.chain(job, to: next) }
+            }
             if job.isRunning {
                 Button("Stop") { job.cancel() }
             } else {
@@ -198,8 +202,11 @@ struct FileRow: View {
         case .running:
             ProgressView().controlSize(.small)
         case .done(let output, _):
-            Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([output]) }
-                .controlSize(.small)
+            HStack {
+                OpenInMenu(output: output, from: job.tool)
+                Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([output]) }
+                    .controlSize(.small)
+            }
         case .exists:
             HStack {
                 Button("Replace") { job.retry(item, extra: ["-y"]) }

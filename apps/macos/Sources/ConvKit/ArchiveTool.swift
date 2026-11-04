@@ -52,6 +52,8 @@ final class MakeArchiveModel {
     var lock = false
     var password = ""
     var again = ""
+    /// Where the archive goes; nil is next to the first item.
+    var outputFolder: URL?
 
     private(set) var planned: URL?
     private(set) var notes: [String] = []
@@ -81,7 +83,7 @@ final class MakeArchiveModel {
     private var args: [String]? {
         guard let first = items.first else { return nil }
         // Several files would otherwise land in conv's own folder, so name the folder.
-        return items.map(\.path) + ["." + format, "-o", first.deletingLastPathComponent().path]
+        return items.map(\.path) + ["." + format, "-o", (outputFolder ?? first.deletingLastPathComponent()).path]
             + (locking ? ["--password"] : [])
     }
 

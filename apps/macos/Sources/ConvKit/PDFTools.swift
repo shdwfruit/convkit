@@ -160,12 +160,35 @@ final class MergeModel {
 
     private var command: [String] { mode == .photos ? [] : ["merge"] }
 
+    /// The name a join gets, from the first file.
+    private var outputName: String {
+        let first = items.first?.url.deletingPathExtension().lastPathComponent ?? "merged"
+        return first + (mode == .photos ? "" : "-merged") + "." + outputExt
+    }
+
+    /// Joins into a chain's scratch folder and gives back the file, for the next step.
+    @MainActor
+    func mergeForChain(into folder: URL) async -> URL? {
+        guard let conv, items.count >= minimum else { return nil }
+        let url = folder.appendingPathComponent(outputName)
+        working = true
+        defer { working = false }
+        guard let out = try? await Conv.run(conv, command + ["--json", "--no-install", "-y"] + items.map(\.url.path) + [url.path])
+        else { return nil }
+        if mode == .photos {
+            let r = out.decode(RunResponse.self)
+            if let e = r?.results?.first?.error ?? r?.error { problem = AppModel.friendly(e); return nil }
+        } else if let p = out.decode(PDFResponse.self)?.problem {
+            problem = p
+            return nil
+        }
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     @MainActor
     func merge() {
         guard let conv, items.count >= minimum else { return }
-        let first = items[0].url.deletingPathExtension().lastPathComponent
-        let name = first + (mode == .photos ? "" : "-merged") + "." + outputExt
-        guard let url = askWhereToSave(name: name, types: [outputExt]) else { return }
+        guard let url = askWhereToSave(name: outputName, types: [outputExt]) else { return }
         // The save panel has already asked about replacing, so -y is the user's answer.
         let args = command + ["--json", "--no-install", "-y"] + items.map(\.url.path) + [url.path]
         Task { @MainActor in
@@ -199,6 +222,7 @@ final class MergeModel {
 }
 
 struct MergeView: View {
+    @Environment(AppModel.self) private var model
     @Bindable var merge: MergeModel
     let paste: () async -> [URL]
 
@@ -275,6 +299,14 @@ struct MergeView: View {
                     Label("Paste", systemImage: "doc.on.clipboard")
                 }
                 .help(merge.mode == .photos ? "Add pictures copied in Finder, or a copied picture" : "Add files copied in Finder")
+                ThenMenu(tools: model.nextTools(after: merge.tool, making: [URL(fileURLWithPath: "/tmp/joined." + merge.outputExt)]),
+                         disabled: !merge.ready) { next in
+                    guard let origin = merge.items.first?.url else { return }
+                    Task {
+                        await model.chain(from: merge.tool, origin: origin, fromChain: model.chain?.steps.last == merge.tool,
+                                          make: { await merge.mergeForChain(into: $0) }, to: next)
+                    }
+                }
                 Button(merge.mode == .photos ? "Make PDF…" : merge.mode == .pdfs ? "Merge…" : "Join…") { merge.merge() }
                     .buttonStyle(.borderedProminent)
                     .disabled(!merge.ready)
@@ -571,6 +603,8 @@ final class PagesModel {
     /// Empty turns every page.
     var turnPages = ""
     var password = ""
+    /// Where it's written; nil is next to the PDF.
+    var outputFolder: URL?
 
     private(set) var planned: URL?
     private(set) var plannedPages: Int?
@@ -601,6 +635,7 @@ final class PagesModel {
             let which = turnPages.replacingOccurrences(of: " ", with: "")
             a += ["--rotate", which.isEmpty ? turn : "\(turn):\(which)"]
         }
+        if let outputFolder { a += ["-o", outputFolder.path] }
         return a
     }
 
@@ -636,6 +671,21 @@ final class PagesModel {
 
     var ready: Bool { planned != nil && problem == nil && !working }
 
+    /// Writes into a chain's scratch folder and gives back the file, for the next step.
+    @MainActor
+    func writeForChain(into folder: URL) async -> URL? {
+        guard let conv, let file else { return nil }
+        let saved = outputFolder
+        outputFolder = folder
+        defer { outputFolder = saved }
+        guard let a = args,
+              let out = try? await Conv.run(conv, ["pages", "--json", "--no-install", "-y"] + a, env: env),
+              let resp = out.decode(PDFResponse.self) else { return nil }
+        if let p = resp.problem { problem = p; return nil }
+        _ = file
+        return resp.entry?.output.map(URL.init(fileURLWithPath:))
+    }
+
     @MainActor
     func write(replace: Bool = false) {
         guard let conv, let a = args else { return }
@@ -662,6 +712,7 @@ final class PagesModel {
 }
 
 struct PagesView: View {
+    @Environment(AppModel.self) private var model
     @Bindable var pages: PagesModel
     let paste: () async -> [URL]
 
@@ -698,6 +749,14 @@ struct PagesView: View {
                     Label("Paste", systemImage: "doc.on.clipboard")
                 }
                 .help("Use a PDF copied in Finder")
+                ThenMenu(tools: model.nextTools(after: .pdfPages, making: [URL(fileURLWithPath: "/tmp/pages.pdf")]),
+                         disabled: !pages.ready) { next in
+                    guard let origin = pages.file else { return }
+                    Task {
+                        await model.chain(from: .pdfPages, origin: origin, fromChain: model.chain?.steps.last == .pdfPages,
+                                          make: { await pages.writeForChain(into: $0) }, to: next)
+                    }
+                }
                 Button("Save") { pages.write() }
                     .buttonStyle(.borderedProminent)
                     .disabled(!pages.ready)

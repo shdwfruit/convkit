@@ -58,10 +58,16 @@ enum Category: String, CaseIterable, Identifiable {
     }
 }
 
+/// What an editor works on.
+enum Media { case video, audio, image }
+
+/// The parts of an editor a search shortcut ("Crop Video") opens at.
+enum EditorSection: String { case trim, crop, turn, speed, sound, subtitles, size }
+
 /// The knobs a convert-style tool can show.
 enum Control: String, CaseIterable {
     case maxSize, compress, resize, quality, colors, fps, crf, crop, rotate, flip, time, every, speed,
-         denoise, audio, subtitles, pages, dpi, lock, unlock, strip
+         mute, denoise, audio, subtitles, pages, dpi, lock, unlock, strip
 
     /// conv flags behind the control.
     var flags: [String] {
@@ -79,6 +85,7 @@ enum Control: String, CaseIterable {
         case .time: ["--start", "--end", "--duration"]
         case .every: ["--every"]
         case .speed: ["--speed"]
+        case .mute: ["--mute"]
         case .denoise: ["--denoise"]
         case .audio: ["--audio"]
         case .subtitles: ["--subtitles"]
@@ -113,6 +120,8 @@ struct ConvertPreset {
     var target: Target
     /// Targets not offered though their kind fits (a GIF isn't a still).
     var skipTargets: Set<String> = []
+    /// Targets offered though their kind doesn't fit (GIF from the video editor).
+    var extraTargets: Set<String> = []
     var controls: [Control]
     /// Controls that start switched on, because they are the tool (Remove Noise).
     var startsOn: Set<Control> = []
@@ -127,6 +136,8 @@ struct ConvertPreset {
     var dropDetail = "Videos, pictures, audio, documents. Nothing leaves your Mac."
     /// Plural, for "Compress Video takes videos."
     var noun = "files"
+    /// A one-file editor with a preview, rather than a list of files.
+    var editor: Media? = nil
 
     func takes(_ ext: String, kind: String?) -> Bool {
         if skip.contains(ext) { return false }
@@ -151,17 +162,20 @@ struct ConvertPreset {
 
 enum ToolKind {
     case convert(ConvertPreset)
-    case trim, merge, split, pages, scan, qr, ascii, data, quick, speak, wifi, beautify, colors,
+    case merge, split, pages, scan, qr, ascii, data, quick, speak, wifi, beautify, colors,
          makeArchive, openArchive, backends, formats, changelog
 }
 
 /// Every tool in the box. Several are Convert with a narrower form, so each does one
 /// job and shows only the knobs for it.
 enum ToolID: String, CaseIterable, Identifiable {
-    case compressVideo, convertVideo, trimVideo, joinVideos, videoToGIF, videoStills, extractAudio,
-         addAudio, burnSubtitles, cropVideo, turnVideo, resizeVideo, videoSpeed, stripVideo
-    case convertAudio, trimAudio, joinAudio, denoise, audioSpeed, stripAudio
-    case convertImage, resizeImage, cropImage, turnImage, beautify, colors, makeIcon, stripImage
+    case editVideo, compressVideo, convertVideo, videoToGIF, videoStills, extractAudio, joinVideos, stripVideo
+    case editAudio, convertAudio, joinAudio, stripAudio
+    case editImage, convertImage, resizeImage, stripImage, beautify, colors, makeIcon
+    // Search shortcuts into the editors: "Crop Video" opens Edit Video at Crop.
+    case trimVideo, cropVideo, turnVideo, resizeVideo, videoSpeed, addAudio, burnSubtitles, muteVideo
+    case trimAudio, audioSpeed, denoise
+    case cropImage, turnImage
     case compressPDF, mergePDF, splitPDF, pdfPages, pdfToImages, photosToPDF, lockPDF, unlockPDF,
          convertDocument
     case qr, readQR, speak, ascii, count, changeCase, cleanLinks, findChars, compareText, lorem, wifi
@@ -172,9 +186,28 @@ enum ToolID: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     static let popular: [ToolID] = [
-        .compressVideo, .convertImage, .compressPDF, .mergePDF,
-        .videoToGIF, .trimVideo, .extractAudio, .qr,
+        .editVideo, .compressVideo, .videoToGIF, .editImage,
+        .convertImage, .compressPDF, .mergePDF, .qr,
     ]
+
+    /// For a search shortcut, the editor it opens and where.
+    var shortcut: (editor: ToolID, section: EditorSection)? {
+        switch self {
+        case .trimVideo: (.editVideo, .trim)
+        case .cropVideo: (.editVideo, .crop)
+        case .turnVideo: (.editVideo, .turn)
+        case .resizeVideo: (.editVideo, .size)
+        case .videoSpeed: (.editVideo, .speed)
+        case .addAudio, .muteVideo: (.editVideo, .sound)
+        case .burnSubtitles: (.editVideo, .subtitles)
+        case .trimAudio: (.editAudio, .trim)
+        case .audioSpeed: (.editAudio, .speed)
+        case .denoise: (.editAudio, .sound)
+        case .cropImage: (.editImage, .crop)
+        case .turnImage: (.editImage, .turn)
+        default: nil
+        }
+    }
 
     static let dataExts: Set<String> = ["json", "yaml", "yml", "toml", "csv"]
     /// What `conv speak -f` reads aloud.
@@ -182,11 +215,11 @@ enum ToolID: String, CaseIterable, Identifiable {
 
     var category: Category {
         switch self {
-        case .compressVideo, .convertVideo, .trimVideo, .joinVideos, .videoToGIF, .videoStills,
+        case .editVideo, .compressVideo, .convertVideo, .trimVideo, .joinVideos, .videoToGIF, .videoStills,
              .extractAudio, .addAudio, .burnSubtitles, .cropVideo, .turnVideo, .resizeVideo,
-             .videoSpeed, .stripVideo: .video
-        case .convertAudio, .trimAudio, .joinAudio, .denoise, .audioSpeed, .stripAudio: .audio
-        case .convertImage, .resizeImage, .cropImage, .turnImage, .beautify, .colors, .makeIcon,
+             .videoSpeed, .stripVideo, .muteVideo: .video
+        case .editAudio, .convertAudio, .trimAudio, .joinAudio, .denoise, .audioSpeed, .stripAudio: .audio
+        case .editImage, .convertImage, .resizeImage, .cropImage, .turnImage, .beautify, .colors, .makeIcon,
              .stripImage: .images
         case .compressPDF, .mergePDF, .splitPDF, .pdfPages, .pdfToImages, .photosToPDF, .lockPDF,
              .unlockPDF, .convertDocument: .documents
@@ -200,6 +233,10 @@ enum ToolID: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .editVideo: "Edit Video"
+        case .editAudio: "Edit Audio"
+        case .editImage: "Edit Image"
+        case .muteVideo: "Mute Video"
         case .compressVideo: "Compress Video"
         case .convertVideo: "Convert Video"
         case .trimVideo: "Trim Video"
@@ -266,9 +303,13 @@ enum ToolID: String, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
+        case .editVideo: "Trim, crop, turn, flip, speed, sound and subtitles, in one go"
+        case .editAudio: "Trim, speed up or slow down, and clean up a recording"
+        case .editImage: "Crop, turn, flip, resize and clean up a photo"
+        case .muteVideo: "Take the sound out of a video"
         case .compressVideo: "Make a video small enough to send"
         case .convertVideo: "MOV to MP4, WebM or MKV"
-        case .trimVideo: "Cut clips out of a video"
+        case .trimVideo: "Keep just the part of a video you want"
         case .joinVideos: "Put clips one after another in one video"
         case .videoToGIF: "A looping GIF from part of a video"
         case .videoStills: "Save stills from a video or GIF"
@@ -281,7 +322,7 @@ enum ToolID: String, CaseIterable, Identifiable {
         case .videoSpeed: "Speed up or slow down a video or GIF"
         case .stripVideo: "Take out where and when it was filmed"
         case .convertAudio: "MP3, M4A, WAV, FLAC, AIFF, Opus and Ogg"
-        case .trimAudio: "Cut clips out of a recording"
+        case .trimAudio: "Keep just the part of a recording you want"
         case .joinAudio: "Put recordings one after another in one file"
         case .denoise: "Take background noise and hum out of a recording"
         case .audioSpeed: "Faster or slower, with or without the pitch"
@@ -334,6 +375,8 @@ enum ToolID: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
+        case .editVideo, .editAudio, .editImage: "slider.horizontal.3"
+        case .muteVideo: "speaker.slash"
         case .compressVideo: "arrow.down.right.and.arrow.up.left"
         case .convertVideo, .convertAudio, .convertImage, .convert: "arrow.triangle.2.circlepath"
         case .trimVideo, .trimAudio: "scissors"
@@ -394,6 +437,10 @@ enum ToolID: String, CaseIterable, Identifiable {
     /// Words people search with that aren't in the title.
     var keywords: String {
         switch self {
+        case .editVideo: "editor edit trim cut crop rotate turn flip mirror speed mute sound audio music subtitles captions resize"
+        case .editAudio: "editor edit trim cut speed noise denoise clean"
+        case .editImage: "editor edit crop rotate turn flip mirror resize scale quality metadata location photo picture"
+        case .muteVideo: "mute silent silence remove sound audio no sound"
         case .compressVideo: "shrink smaller reduce size mb email discord whatsapp send mp4 mov"
         case .convertVideo: "mov mp4 webm mkv avi format change export"
         case .trimVideo, .trimAudio: "cut clip shorten segment start end"
@@ -459,7 +506,6 @@ enum ToolID: String, CaseIterable, Identifiable {
     /// The conv subcommand this tool needs, if any.
     var subcommand: String? {
         switch self {
-        case .trimVideo, .trimAudio: "trim"
         case .mergePDF, .joinVideos, .joinAudio: "merge"
         case .splitPDF: "split"
         case .pdfPages: "pages"
@@ -491,6 +537,40 @@ enum ToolID: String, CaseIterable, Identifiable {
     }
 
     var kind: ToolKind {
+        if let s = shortcut { return s.editor.kind }
+        switch self {
+        case .editVideo:
+            return .convert(ConvertPreset(
+                kinds: ["video"], exts: ["gif"], target: .pick(kinds: ["video"], allowSame: true, preferred: []),
+                extraTargets: ["gif"],
+                controls: [.time, .crop, .rotate, .flip, .speed, .mute, .denoise, .audio, .subtitles, .resize,
+                           .maxSize, .fps, .strip],
+                action: "Save", needs: "Make a change: trim it, crop it, turn it, or pick another format.",
+                dropTitle: "Drop a video to edit",
+                dropDetail: "Trim, crop, turn, flip, change the speed and the sound, all at once. conv makes it in one pass.",
+                noun: "videos and GIFs", editor: .video))
+        case .editAudio:
+            return .convert(ConvertPreset(
+                kinds: ["audio"], target: .pick(kinds: ["audio"], allowSame: true, preferred: []),
+                controls: [.time, .speed, .denoise, .strip],
+                action: "Save", needs: "Make a change: trim it, change its speed, or pick another format.",
+                dropTitle: "Drop a recording to edit",
+                dropDetail: "Trim it, speed it up or slow it down, and take the background noise out, all at once.",
+                noun: "audio files", editor: .audio))
+        case .editImage:
+            return .convert(ConvertPreset(
+                kinds: ["image"], target: .pick(kinds: ["image"], allowSame: true, preferred: []),
+                controls: [.crop, .rotate, .flip, .resize, .quality, .colors, .strip],
+                action: "Save", needs: "Make a change: crop it, turn it, or pick another format.",
+                dropTitle: "Drop a picture to edit",
+                dropDetail: "Crop, turn, flip, resize and take out the location, all at once.",
+                noun: "pictures", editor: .image))
+        default:
+            return legacyKind
+        }
+    }
+
+    private var legacyKind: ToolKind {
         switch self {
         case .compressVideo:
             .convert(ConvertPreset(
@@ -523,46 +603,6 @@ enum ToolID: String, CaseIterable, Identifiable {
                 kinds: ["video"], target: .pick(kinds: ["audio"], allowSame: false, preferred: ["mp3", "m4a"]),
                 controls: [.time, .denoise], action: "Extract", dropTitle: "Drop videos to take the sound from",
                 dropDetail: "The picture is left out.", noun: "videos"))
-        case .addAudio:
-            .convert(ConvertPreset(
-                kinds: ["video"], target: .pick(kinds: ["video"], allowSame: true, preferred: []),
-                controls: [.audio], action: "Add Audio", needs: "Choose the sound to put on it.",
-                dropTitle: "Drop a video",
-                dropDetail: "Then choose a song, a voice-over or another video. Its sound replaces the video's own, or plays under it.",
-                noun: "videos"))
-        case .burnSubtitles:
-            .convert(ConvertPreset(
-                kinds: ["video"], exts: ["gif"], target: .pick(kinds: ["video"], allowSame: true, preferred: []),
-                controls: [.subtitles], action: "Burn Subtitles", needs: "Choose a subtitles file.",
-                dropTitle: "Drop a video",
-                dropDetail: "Then choose an .srt, .vtt or .ass file. White with an outline, near the bottom, sized to the picture.",
-                noun: "videos and GIFs"))
-        case .cropVideo:
-            .convert(ConvertPreset(
-                kinds: ["video"], exts: ["gif"], target: .pick(kinds: ["video"], allowSame: true, preferred: []),
-                controls: [.crop], action: "Crop", needs: "Choose a shape or a box.",
-                dropTitle: "Drop videos to crop",
-                dropDetail: "Keep the middle at a shape like 9:16, or let conv cut away black bars.",
-                noun: "videos and GIFs"))
-        case .videoSpeed:
-            .convert(ConvertPreset(
-                kinds: ["video"], exts: ["gif"], target: .pick(kinds: ["video"], allowSame: true, preferred: []),
-                controls: [.speed], action: "Change Speed", needs: "Choose a speed.",
-                dropTitle: "Drop videos or GIFs", dropDetail: "The sound keeps its pitch unless you say otherwise.",
-                noun: "videos and GIFs"))
-        case .resizeVideo:
-            .convert(ConvertPreset(
-                kinds: ["video"], exts: ["gif"], target: .pick(kinds: ["video"], allowSame: true, preferred: []),
-                controls: [.resize], action: "Resize", needs: "Choose a size.",
-                dropTitle: "Drop videos to resize", dropDetail: "A video already smaller is left alone.",
-                noun: "videos and GIFs"))
-        case .turnVideo:
-            .convert(ConvertPreset(
-                kinds: ["video"], exts: ["gif"], target: .pick(kinds: ["video"], allowSame: true, preferred: []),
-                controls: [.rotate, .flip], action: "Turn", needs: "Choose a turn or a flip.",
-                dropTitle: "Drop sideways or mirrored videos",
-                dropDetail: "One that's wrong only because of its orientation tag is fixed without re-encoding.",
-                noun: "videos and GIFs"))
         case .stripVideo:
             .convert(ConvertPreset(
                 kinds: ["video"], target: .pick(kinds: ["video"], allowSame: true, preferred: []),
@@ -575,19 +615,6 @@ enum ToolID: String, CaseIterable, Identifiable {
                 kinds: ["audio"], target: .pick(kinds: ["audio"], allowSame: false, preferred: ["mp3", "m4a"]),
                 controls: [], dropTitle: "Drop audio files to convert",
                 dropDetail: "MP3, M4A, WAV, FLAC, AIFF, Opus and Ogg.", noun: "audio files"))
-        case .denoise:
-            .convert(ConvertPreset(
-                kinds: ["audio", "video"], target: .pick(kinds: ["audio", "video"], allowSame: true, preferred: []),
-                controls: [.denoise], startsOn: [.denoise], action: "Clean Up", needs: "Choose how much to take off.",
-                dropTitle: "Drop recordings or videos",
-                dropDetail: "For voice recordings, podcasts and phone videos. A video keeps its picture as it is; only the sound changes.",
-                noun: "audio files and videos"))
-        case .audioSpeed:
-            .convert(ConvertPreset(
-                kinds: ["audio"], target: .pick(kinds: ["audio"], allowSame: true, preferred: []),
-                controls: [.speed], action: "Change Speed", needs: "Choose a speed.",
-                dropTitle: "Drop audio files", dropDetail: "The sound keeps its pitch unless you say otherwise.",
-                noun: "audio files"))
         case .stripAudio:
             .convert(ConvertPreset(
                 kinds: ["audio"], target: .pick(kinds: ["audio"], allowSame: true, preferred: []),
@@ -604,20 +631,6 @@ enum ToolID: String, CaseIterable, Identifiable {
                 kinds: ["image"], target: .pick(kinds: ["image"], allowSame: true, preferred: []),
                 controls: [.resize, .quality], action: "Resize", needs: "Choose a size.",
                 dropTitle: "Drop pictures to resize", dropDetail: "A picture already smaller is left alone.",
-                noun: "pictures"))
-        case .cropImage:
-            .convert(ConvertPreset(
-                kinds: ["image"], target: .pick(kinds: ["image"], allowSame: true, preferred: []),
-                controls: [.crop], action: "Crop", needs: "Choose a shape or a box.",
-                dropTitle: "Drop pictures to crop",
-                dropDetail: "Keep the middle at a shape like 1:1, a box you give, or let conv trim a plain border.",
-                noun: "pictures"))
-        case .turnImage:
-            .convert(ConvertPreset(
-                kinds: ["image"], target: .pick(kinds: ["image"], allowSame: true, preferred: []),
-                controls: [.rotate, .flip], action: "Turn", needs: "Choose a turn or a flip.",
-                dropTitle: "Drop sideways or mirrored photos",
-                dropDetail: "The picture itself is changed, so every app shows it the same way.",
                 noun: "pictures"))
         case .stripImage:
             .convert(ConvertPreset(
@@ -671,7 +684,6 @@ enum ToolID: String, CaseIterable, Identifiable {
             .convert(ConvertPreset(
                 target: .pick(kinds: [], allowSame: true, preferred: []),
                 controls: Control.allCases))
-        case .trimVideo, .trimAudio: .trim
         case .mergePDF, .photosToPDF, .joinVideos, .joinAudio: .merge
         case .splitPDF: .split
         case .pdfPages: .pages
@@ -690,6 +702,7 @@ enum ToolID: String, CaseIterable, Identifiable {
         case .backends: .backends
         case .formats: .formats
         case .changelog: .changelog
+        default: .changelog // editors and shortcuts are answered above
         }
     }
 
@@ -705,6 +718,17 @@ enum ToolID: String, CaseIterable, Identifiable {
 
     /// Tools whose name is shared with one in another section.
     var sharesName: Bool { [.videoSpeed, .audioSpeed, .stripVideo, .stripAudio].contains(self) }
+
+    /// The editor for a kind of file, for shortcuts opened with a file of another kind
+    /// (Remove Noise with a video opens Edit Video).
+    static func editor(for kind: String?) -> ToolID? {
+        switch kind {
+        case "video": .editVideo
+        case "audio": .editAudio
+        case "image": .editImage
+        default: nil
+        }
+    }
 }
 
 /// A tool's glyph on a tile of its section's colour, like System Settings.

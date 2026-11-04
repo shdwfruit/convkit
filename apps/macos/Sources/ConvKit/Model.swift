@@ -3,6 +3,11 @@ import Foundation
 import Observation
 import PDFKit
 
+/// Where a save panel opens: the chain's starting folder while a chain is on.
+enum SaveDefaults {
+    @MainActor static var folder: URL?
+}
+
 /// What the detail pane shows.
 enum Page: Hashable {
     case home
@@ -17,6 +22,10 @@ final class AppModel {
     }
     /// The sidebar's search, which also filters Home.
     var search = ""
+    /// Where an editor opens when a search shortcut ("Crop Video") led to it.
+    var editorFocus: EditorSection?
+    /// Steps run one into the next; nil when the tool showing isn't part of one.
+    private(set) var chain: Chain?
 
     let caps = CapsStore()
     /// Every convert-style tool's files and settings, made up front so views never
@@ -24,8 +33,6 @@ final class AppModel {
     let jobs: [ToolID: ConvertJob]
     let qr = QRModel()
     let ascii = AsciiModel()
-    let trimVideo = TrimModel()
-    let trimAudio = TrimModel()
     let merge = MergeModel(mode: .pdfs)
     let photos = MergeModel(mode: .photos)
     let joinVideos = MergeModel(mode: .videos)
@@ -74,7 +81,7 @@ final class AppModel {
 
     init() {
         var jobs: [ToolID: ConvertJob] = [:]
-        for id in ToolID.allCases where id.preset != nil {
+        for id in ToolID.allCases where id.preset != nil && id.shortcut == nil {
             jobs[id] = ConvertJob(tool: id, caps: caps)
         }
         self.jobs = jobs
@@ -105,7 +112,6 @@ final class AppModel {
         }
         convURL = url
         caps.conv = url
-        for m in [trimVideo, trimAudio] { m.conv = url }
         for m in [merge, photos, joinVideos, joinAudio] { m.conv = url }
         for m in quick.values { m.conv = url }
         qr.conv = url
@@ -129,7 +135,9 @@ final class AppModel {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if let out = try? await Conv.run(url, ["--help"]) {
-            subcommands = Self.parseSubcommands(String(decoding: out.stdout, as: UTF8.self))
+            let help = String(decoding: out.stdout, as: UTF8.self)
+            subcommands = Self.parseSubcommands(help)
+            caps.convFlags = CapsStore.parseFlags(help)
         }
         await caps.load()
         // Pictures that go into a PDF one a page, alone or among PDFs.
@@ -160,6 +168,10 @@ final class AppModel {
     /// A tool shows when the conv in use can do it: its subcommand is there, or some
     /// format reaches its fixed target.
     func available(_ id: ToolID) -> Bool {
+        if let s = id.shortcut {
+            if id == .muteVideo && !caps.convFlags.contains("--mute") { return false }
+            return available(s.editor)
+        }
         if let sub = id.subcommand, !subcommands.contains(sub) { return false }
         if caps.byExt.isEmpty { return id.preset == nil || id == .convert }
         if let t = id.preset?.fixedTarget { return caps.byExt.values.contains { $0.targets?.contains { $0.to == t } ?? false } }
@@ -170,9 +182,24 @@ final class AppModel {
         return true
     }
 
-    /// The tools in a section that match the search.
+    /// The tools in a section that match the search. Shortcuts into the editors only
+    /// show in a search, so "crop" finds Crop Video and Crop Image.
     func tools(in category: Category) -> [ToolID] {
-        ToolID.allCases.filter { $0.category == category && available($0) && matches($0) }
+        ToolID.allCases.filter {
+            $0.category == category && ($0.shortcut == nil || isSearching) && available($0) && matches($0)
+        }
+    }
+
+    /// Shows a tool, or the editor a shortcut stands for, at its part.
+    @MainActor
+    func show(_ id: ToolID) {
+        if let s = id.shortcut {
+            editorFocus = s.section
+            page = .tool(s.editor)
+        } else {
+            editorFocus = nil
+            page = .tool(id)
+        }
     }
 
     var popular: [ToolID] { ToolID.popular.filter(available) }
@@ -207,12 +234,14 @@ final class AppModel {
 
     /// Whether a tool can do something with all of these files.
     func fits(_ id: ToolID, exts: [String], folder: Bool = false) -> Bool {
-        guard available(id), !exts.isEmpty || folder else { return false }
+        guard available(id), id.shortcut == nil, !exts.isEmpty || folder else { return false }
         if folder { return [.scan, .convert, .mergePDF, .makeArchive, .info].contains(id) }
         let kinds = exts.map { caps.kind($0) }
         let one = exts.count == 1
         switch id.kind {
         case .convert(let p):
+            // An editor works on one file at a time.
+            if p.editor != nil && !one { return false }
             for (ext, kind) in zip(exts, kinds) {
                 guard p.takes(ext, kind: kind) else { return false }
                 if let t = p.fixedTarget {
@@ -226,9 +255,6 @@ final class AppModel {
                 }
             }
             return true
-        case .trim:
-            let want = id == .trimAudio ? "audio" : "video"
-            return exts.count == 1 && kinds[0] == want
         case .merge:
             let m = mergeModel(id)
             guard exts.allSatisfy(m.accepts.contains) else { return false }
@@ -277,14 +303,25 @@ final class AppModel {
         let kinds = Set(exts.compactMap(caps.kind))
         dropped = urls
         defer { page = .home }
+        suggestions = toolsFitting(urls, exts: exts, kinds: kinds, folder: folder)
+    }
+
+    /// The tools that fit these files: their own section first, then the rest, then
+    /// the ones that take any file.
+    func toolsFitting(_ urls: [URL], exts: [String], kinds: Set<String>, folder: Bool) -> [ToolID] {
+        let fm = FileManager.default
         if folder {
             // A folder: see what's in it, convert all of it, or join its PDFs.
             let hasPDFs = urls.contains { url in
                 ((try? fm.contentsOfDirectory(atPath: url.path)) ?? []).contains { $0.lowercased().hasSuffix(".pdf") }
             }
-            suggestions = [.scan, .makeArchive, .convert].filter(available) + (hasPDFs && available(.mergePDF) ? [.mergePDF] : [])
+            let hasPictures = urls.contains { url in
+                ((try? fm.contentsOfDirectory(atPath: url.path)) ?? []).contains { photos.accepts.contains(($0 as NSString).pathExtension.lowercased()) }
+            }
+            return [.scan, .makeArchive, .convert].filter(available)
+                + (hasPDFs && available(.mergePDF) ? [.mergePDF] : [])
+                + (hasPictures && available(.photosToPDF) ? [.photosToPDF] : [])
                 + (urls.count == 1 && available(.info) ? [.info] : [])
-            return
         }
         // Tools that take any file go last, after the ones made for this kind.
         let anyFile: [ToolID] = [.convert, .info, .hash, .base64, .makeArchive]
@@ -292,8 +329,104 @@ final class AppModel {
         let locked = urls.contains { $0.pathExtension.lowercased() == "pdf" && PDFDocument(url: $0)?.isEncrypted == true }
         let fitting = ToolID.allCases.filter { !anyFile.contains($0) && fits($0, exts: exts) && ($0 != .unlockPDF || locked) }
         let own = fitting.filter { $0.category.kind.map(kinds.contains) ?? false }
-        suggestions = own + fitting.filter { !own.contains($0) }
+        return own + fitting.filter { !own.contains($0) }
             + anyFile.filter { $0 == .convert ? available($0) : fits($0, exts: exts) }
+    }
+
+    // MARK: Chains
+
+    /// Steps run one into the next. Each step's result waits in a scratch folder, and
+    /// the last step saves next to the file the chain started from.
+    struct Chain {
+        var origin: URL
+        var steps: [ToolID]
+        let scratch: URL
+        var destination: URL { origin.deletingLastPathComponent() }
+    }
+
+    /// What can come next after a step that will make these files (planned names, so
+    /// a folder of stills is a folder).
+    func nextTools(after tool: ToolID, making outputs: [URL]) -> [ToolID] {
+        guard !outputs.isEmpty else { return [] }
+        let folder = outputs.contains { $0.pathExtension.isEmpty }
+        let exts = outputs.map(fileExt)
+        let kinds = Set(exts.compactMap(caps.kind))
+        return toolsFitting(outputs, exts: exts, kinds: kinds, folder: folder).filter { $0 != tool }
+    }
+
+    /// Runs a convert-style step into the chain's scratch folder and opens the next tool
+    /// with what it made.
+    @MainActor
+    func chain(_ job: ConvertJob, to next: ToolID) async {
+        let origin = (job.fromChain ? chain?.origin : nil) ?? job.fitting.first?.url
+        guard let origin else { return }
+        let place = stepFolder(origin: origin, from: job.tool)
+        let outputs = await job.runForChain(into: place.step)
+        continueChain(from: job.tool, origin: origin, place: place, outputs: outputs, to: next)
+    }
+
+    /// The same for a step that makes one file itself (a join, Arrange Pages).
+    @MainActor
+    func chain(from tool: ToolID, origin: URL, fromChain: Bool, make: (URL) async -> URL?, to next: ToolID) async {
+        let origin = fromChain ? (chain?.origin ?? origin) : origin
+        let place = stepFolder(origin: origin, from: tool)
+        let out = await make(place.step)
+        continueChain(from: tool, origin: origin, place: place, outputs: out.map { [$0] } ?? [], to: next)
+    }
+
+    /// Where a step's result goes. A step already in the chain (the user went back to
+    /// it) keeps the chain's folder, so the steps before it still have their files.
+    private struct StepPlace { let scratch: URL; let step: URL; let keep: Int? }
+
+    @MainActor
+    private func stepFolder(origin: URL, from tool: ToolID) -> StepPlace {
+        let tag = String(UUID().uuidString.prefix(8))
+        let place: StepPlace
+        if let chain, chain.origin == origin, let i = chain.steps.lastIndex(of: tool) {
+            place = StepPlace(scratch: chain.scratch, step: chain.scratch.appendingPathComponent("step-\(tag)"), keep: i)
+        } else {
+            let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-chain-\(tag)", isDirectory: true)
+            place = StepPlace(scratch: scratch, step: scratch.appendingPathComponent("step-1"), keep: nil)
+        }
+        try? FileManager.default.createDirectory(at: place.step, withIntermediateDirectories: true)
+        return place
+    }
+
+    @MainActor
+    private func continueChain(from tool: ToolID, origin: URL, place: StepPlace, outputs: [URL], to next: ToolID) {
+        guard !outputs.isEmpty else {
+            // Nothing made: the rows say why, and there's no chain to keep.
+            if place.keep == nil { try? FileManager.default.removeItem(at: place.scratch) }
+            return
+        }
+        if let keep = place.keep, var c = chain {
+            c.steps = Array(c.steps.prefix(keep + 1))
+            chain = c
+        } else {
+            endChain()
+            chain = Chain(origin: origin, steps: [tool], scratch: place.scratch)
+        }
+        chain?.steps.append(next)
+        SaveDefaults.folder = chain?.destination
+        open(next, with: outputs, chained: true)
+    }
+
+    /// Back to working on files one tool at a time. Scratch results are thrown away.
+    @MainActor
+    func endChain() {
+        guard let old = chain else { return }
+        chain = nil
+        SaveDefaults.folder = nil
+        for job in jobs.values where job.fromChain {
+            job.fromChain = false
+            job.destination = nil
+            job.protected = nil
+            job.optionsChanged()
+        }
+        if split.outputFolder == old.destination { split.outputFolder = nil }
+        if pages.outputFolder == old.destination { pages.outputFolder = nil }
+        if makeArchive.outputFolder == old.destination { makeArchive.outputFolder = nil }
+        try? FileManager.default.removeItem(at: old.scratch)
     }
 
     @MainActor
@@ -307,6 +440,7 @@ final class AppModel {
     @MainActor
     func open(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
+        endChain()
         if case .tool(let id) = page {
             let exts = urls.map(fileExt)
             if id == .convert || fits(id, exts: exts) {
@@ -317,17 +451,43 @@ final class AppModel {
         Task { await suggest(for: urls) }
     }
 
-    /// Shows a tool with these files in it.
+    /// Shows a tool with these files in it. In a chain, the files are the last step's
+    /// results, and the tool saves where the chain started.
     @MainActor
-    func open(_ id: ToolID, with urls: [URL]) {
+    func open(_ id: ToolID, with urls: [URL], chained: Bool = false) {
+        var id = id
+        var focus: EditorSection?
+        if let s = id.shortcut {
+            id = s.editor
+            focus = s.section
+        } else if id.preset?.editor != nil, page == .tool(id) {
+            focus = editorFocus
+        }
+        // A file goes to the editor for its kind: Remove Noise or Edit Audio with a
+        // video opens Edit Video.
+        if id.preset?.editor != nil, let first = urls.first,
+           let editor = ToolID.editor(for: caps.kind(fileExt(first))), available(editor) {
+            id = editor
+        }
+        editorFocus = focus
         page = .tool(id)
         guard let first = urls.first else { return }
+        let destination = chained ? chain?.destination : nil
         switch id.kind {
-        case .convert: jobs[id]?.add(urls)
-        case .trim: (id == .trimAudio ? trimAudio : trimVideo).load(first)
+        case .convert:
+            guard let job = jobs[id] else { break }
+            // An editor holds one file; a chained step holds just what the step before made.
+            if job.isEditor { job.replace(with: first) } else if chained { job.replace(with: urls) } else { job.add(urls) }
+            job.fromChain = chained
+            job.destination = chained ? destination : nil
+            job.protected = chained ? chain?.origin : nil
         case .merge: mergeModel(id).add(urls)
-        case .split: split.load(first)
-        case .pages: pages.load(first)
+        case .split:
+            split.load(first)
+            if chained { split.outputFolder = destination }
+        case .pages:
+            pages.load(first)
+            if chained { pages.outputFolder = destination }
         case .ascii: ascii.input = first
         case .data: data.load(first)
         case .scan: Task { await scan.scan(first) }
@@ -335,8 +495,12 @@ final class AppModel {
         case .speak: speak.load(first)
         case .beautify: beautify.load(first)
         case .colors: colors.load(first)
-        case .makeArchive: makeArchive.add(urls)
-        case .openArchive: openArchive.load(first)
+        case .makeArchive:
+            makeArchive.add(urls)
+            if chained { makeArchive.outputFolder = destination }
+        case .openArchive:
+            openArchive.load(first)
+            if chained { openArchive.outputFolder = destination }
         case .qr, .wifi, .backends, .formats, .changelog: break
         }
         if urls == dropped { clearDropped() }
@@ -347,7 +511,8 @@ final class AppModel {
     func moreOptions(from job: ConvertJob) {
         guard let all = jobs[.convert], job !== all else { return }
         job.copySettings(to: all)
-        page = .tool(.convert)
+        all.fromChain = job.fromChain
+        show(.convert)
     }
 
     /// Paste for the tools that aren't Convert: the clipboard's files or picture, or none and a problem.
