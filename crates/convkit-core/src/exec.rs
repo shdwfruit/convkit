@@ -830,7 +830,10 @@ fn run_pdf_pages(
             format!("output path has no file name: {}", req.output.display()),
         )
     })?;
-    let temp_output = scratch.join(name);
+    // Absolute, so an ffmpeg pattern's doubled `%` signs cover the whole
+    // path: the long-path rewriter would otherwise put the working folder in
+    // front of it, with any `%` in that left single.
+    let temp_output = std::path::absolute(scratch.join(name)).map_err(io_err)?;
     let flatten = raster::plan(req.to, &req.inputs, &temp_output, Some(&pdf), &req.tuning)?;
     let work = flatten.work.clone();
     std::fs::create_dir_all(&work).map_err(io_err)?;

@@ -26,7 +26,7 @@ use super::{display_name, path_arg};
 use crate::error::{ConvError, ErrorCode, Remediation, Result};
 use crate::plan::{ConversionPlan, PlannedStep, Prepare};
 use crate::procutil::backend_command;
-use crate::{Backend, Format, OutputMode, Tuning};
+use crate::{winpath, Backend, Format, OutputMode, Tuning};
 
 /// The resolution pages are drawn at without `--dpi`: what pdftoppm and
 /// most "PDF to JPG" sites use. A Letter page is 1275 x 1650.
@@ -369,13 +369,26 @@ fn text(p: &Path) -> String {
     path_arg(p)
 }
 
-/// `name`, an ffmpeg image2 pattern such as `1-%d.png`, inside `dir`,
+/// `name` inside the work folder `dir`, joined with `/` on every platform,
+/// so a plan reads the same everywhere and the snapshot is stable, as
+/// stills' image2 patterns are. Windows takes `/`, and the long-path
+/// rewriter makes it `\` where it must: `winpath::to_verbatim` makes a
+/// path absolute first, which turns every `/` into `\`.
+pub(crate) fn inside(dir: &Path, name: &str) -> PathBuf {
+    let dir = dir.to_string_lossy();
+    match dir.trim_end_matches(['/', '\\']) {
+        "" => PathBuf::from(name),
+        dir => PathBuf::from(format!("{dir}/{name}")),
+    }
+}
+
+/// `name`, an ffmpeg image2 pattern such as `png/1-%d.png`, inside `dir`,
 /// whose own `%` signs are doubled so ffmpeg reads them as themselves.
+/// `exec` hands this a `dir` that is already absolute, so the long-path
+/// rewriter has no working directory to add whose `%` would not be.
 fn pattern_text(dir: &Path, name: &str) -> String {
-    Path::new(&path_arg(dir).replace('%', "%%"))
-        .join(name)
-        .to_string_lossy()
-        .into_owned()
+    let dir = PathBuf::from(path_arg(dir).replace('%', "%%"));
+    inside(&dir, name).to_string_lossy().into_owned()
 }
 
 fn step(backend: Backend, argv: Vec<String>, paths: &[usize], output: PathBuf) -> PlannedStep {
@@ -393,7 +406,7 @@ fn step(backend: Backend, argv: Vec<String>, paths: &[usize], output: PathBuf) -
 }
 
 fn flatten_step(input: &Path, work: &Path) -> PlannedStep {
-    let flat = work.join(FLAT);
+    let flat = inside(work, FLAT);
     let argv = vec![
         // Typst cannot open an encrypted file; an owner password's
         // restrictions do not stop drawing it.
@@ -417,8 +430,8 @@ fn flatten_step(input: &Path, work: &Path) -> PlannedStep {
 /// One Typst run: draws the pages of `layout` into `png`, as `K-1.png` and
 /// on.
 fn typst_step(work: &Path, chunk: usize, layout: String) -> PlannedStep {
-    let layout_path = work.join(format!("layout-{chunk}.typ"));
-    let png = work.join("png");
+    let layout_path = inside(work, &format!("layout-{chunk}.typ"));
+    let png = inside(work, "png");
     let argv = vec![
         "compile".to_string(),
         "--root".to_string(),
@@ -432,7 +445,7 @@ fn typst_step(work: &Path, chunk: usize, layout: String) -> PlannedStep {
         "--ppi".to_string(),
         "72".to_string(),
         text(&layout_path),
-        text(&png.join(format!("{chunk}-{{p}}.png"))),
+        text(&inside(work, &format!("png/{chunk}-{{p}}.png"))),
     ];
     let mut s = step(Backend::Typst, argv, &[2, 8, 9], png);
     s.output_mode = OutputMode::Folder;
@@ -488,12 +501,12 @@ fn jpeg_step(
     n: Option<usize>,
     quality: u8,
 ) -> PlannedStep {
-    let jpg = work.join("jpg");
+    let jpg = inside(work, "jpg");
     let mut argv = vec![
         "-start_number".to_string(),
         first.to_string(),
         "-i".to_string(),
-        pattern_text(&work.join("png"), &format!("{chunk}-%d.png")),
+        pattern_text(work, &format!("png/{chunk}-%d.png")),
     ];
     if let Some(n) = n {
         argv.extend(["-frames:v".to_string(), n.to_string()]);
@@ -520,7 +533,7 @@ fn jpeg_step(
         "-start_number".to_string(),
         first.to_string(),
         "-y".to_string(),
-        pattern_text(&jpg, &format!("{chunk}-%d.jpg")),
+        pattern_text(work, &format!("jpg/{chunk}-%d.jpg")),
     ]);
     let last = argv.len() - 1;
     let mut s = step(Backend::Ffmpeg, argv, &[3, last], jpg);
@@ -530,12 +543,12 @@ fn jpeg_step(
 
 /// One ImageMagick run: one page, PNG to WebP or HEIC.
 fn magick_step(work: &Path, chunk: usize, index: usize, to: Format, quality: u8) -> PlannedStep {
-    let enc = work.join("enc");
+    let enc = inside(work, "enc");
     let argv = vec![
-        text(&work.join("png").join(format!("{chunk}-{index}.png"))),
+        text(&inside(work, &format!("png/{chunk}-{index}.png"))),
         "-quality".to_string(),
         quality.to_string(),
-        text(&enc.join(format!("{chunk}-{index}.{}", to.ext()))),
+        text(&inside(work, &format!("enc/{chunk}-{index}.{}", to.ext()))),
     ];
     let mut s = step(Backend::Magick, argv, &[0, 3], enc);
     s.output_mode = OutputMode::Folder;
@@ -678,7 +691,7 @@ pub(crate) fn plan(
         match to {
             Format::Png => {
                 for i in 1..=chunk.len() {
-                    produced.push(work.join("png").join(format!("{k}-{i}.png")));
+                    produced.push(inside(&work, &format!("png/{k}-{i}.png")));
                 }
             }
             Format::Jpg => {
@@ -694,13 +707,13 @@ pub(crate) fn plan(
                     i = j + 1;
                 }
                 for i in 1..=chunk.len() {
-                    produced.push(work.join("jpg").join(format!("{k}-{i}.jpg")));
+                    produced.push(inside(&work, &format!("jpg/{k}-{i}.jpg")));
                 }
             }
             _ => {
                 for i in 1..=chunk.len() {
                     encode.push(magick_step(&work, k, i, to, quality));
-                    produced.push(work.join("enc").join(format!("{k}-{i}.{}", to.ext())));
+                    produced.push(inside(&work, &format!("enc/{k}-{i}.{}", to.ext())));
                 }
             }
         }
@@ -793,7 +806,7 @@ pub fn why_needed(mut e: ConvError, to: Format) -> ConvError {
 /// left out.
 pub(crate) fn name_the_pdf(mut e: ConvError, work: &Path, input: &Path) -> ConvError {
     let shown = display_name(input);
-    let flat = work.join(FLAT).display().to_string();
+    let flat = inside(work, FLAT).display().to_string();
     e.message = e
         .message
         .split("; ")
@@ -860,12 +873,25 @@ fn conversion_plan(
 /// Reads the page count of `input` with qpdf, refusing a password-protected
 /// file as `conv split` does.
 pub fn read(qpdf: &Path, input: &Path) -> Result<PdfPages> {
-    let info = super::read::read(qpdf, input, None).map_err(|e| locked(e, input))?;
+    let info =
+        super::read::read(qpdf, &for_backend(input, input), None).map_err(|e| locked(e, input))?;
     Ok(PdfPages {
         count: info.pages,
         sizes: Vec::new(),
         damaged: info.damaged,
     })
+}
+
+/// `p` as a backend should be handed it: in extended (`\\?\`) form on
+/// Windows when `opens`, the file the backend will open through it, is past
+/// the length most programs there handle, as `exec` hands every recorded
+/// path of a step. `p` itself otherwise, and everywhere else.
+fn for_backend(p: &Path, opens: &Path) -> PathBuf {
+    let long = winpath::is_long(&opens.to_string_lossy());
+    match long.then(|| winpath::to_verbatim(&p.to_string_lossy())) {
+        Some(Some(v)) => PathBuf::from(v),
+        _ => p.to_path_buf(),
+    }
 }
 
 /// A password-protected PDF, with the way round it: nothing here can ask
@@ -939,7 +965,7 @@ pub fn read_sizes(typst: &Path, root: &Path, name: &str, count: u32) -> Result<V
         .arg("--in")
         .arg("-")
         .arg("--root")
-        .arg(root)
+        .arg(for_backend(root, &root.join(name)))
         .arg("--ignore-system-fonts")
         .arg("--diagnostic-format")
         .arg("short")
@@ -1470,6 +1496,43 @@ mod tests {
         let ffmpeg = &p.plan.steps[2];
         assert_eq!(ffmpeg.argv[3], "100%% done.convkit-pages/png/1-%d.png");
         assert_eq!(p.plan.output, PathBuf::from("100% done"));
+    }
+
+    #[test]
+    fn work_folder_paths_are_joined_with_a_slash_on_every_platform() {
+        let p = |s: &str| PathBuf::from(s);
+        assert_eq!(
+            inside(Path::new("out.convkit-pages"), "png/1-2.png"),
+            p("out.convkit-pages/png/1-2.png")
+        );
+        // A Windows scratch folder keeps its own separators; only the part
+        // conv adds is `/`, which Windows takes.
+        assert_eq!(
+            inside(
+                Path::new("C:\\Docs\\.convkit-1-0\\r.convkit-pages\\"),
+                "flat.pdf"
+            ),
+            p("C:\\Docs\\.convkit-1-0\\r.convkit-pages/flat.pdf")
+        );
+        assert_eq!(inside(Path::new(""), "flat.pdf"), p("flat.pdf"));
+        assert_eq!(
+            pattern_text(Path::new("/tmp/100% done/r.convkit-pages"), "png/1-%d.png"),
+            "/tmp/100%% done/r.convkit-pages/png/1-%d.png"
+        );
+        assert_eq!(
+            pattern_text(Path::new("-r.convkit-pages"), "jpg/1-%d.jpg"),
+            "./-r.convkit-pages/jpg/1-%d.jpg"
+        );
+    }
+
+    #[test]
+    fn a_path_only_goes_to_a_backend_verbatim_when_it_is_long_on_windows() {
+        let short = Path::new("report.pdf");
+        assert_eq!(for_backend(short, short), short.to_path_buf());
+        if !cfg!(windows) {
+            let long = PathBuf::from("a".repeat(300));
+            assert_eq!(for_backend(&long, &long), long, "no limit to work around");
+        }
     }
 
     #[test]

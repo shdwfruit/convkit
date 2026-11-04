@@ -1217,3 +1217,47 @@ fn more_than_a_thousand_pages_needs_consent_and_writes_nothing_without_it() {
     );
     assert!(!dir.path().join("doc").exists());
 }
+
+/// A destination close to Windows' path limit, with a `%` in it. There,
+/// every path conv hands qpdf, Typst, ffmpeg and ImageMagick goes in
+/// extended (`\\?\`) form, as `exec` hands every other step's (`winpath`),
+/// and ffmpeg's pattern keeps that `%` a `%` once the rewriter has made it
+/// absolute. Elsewhere nothing is long, and this checks the same run works.
+#[test]
+#[ignore = "requires qpdf, typst, ffmpeg and ImageMagick; run with --ignored"]
+fn pages_are_saved_in_a_destination_that_approaches_max_path() {
+    let base = tempfile::tempdir().unwrap();
+    let mut deep = base.path().join("half_%_done");
+    while deep.as_os_str().len() < 240 {
+        deep = deep.join("convkit_deep_destination_directory_segment");
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    let input = copy_sample(&deep, "report.pdf");
+    assert!(
+        input.as_os_str().len() >= 248,
+        "the input must pass the verbatim threshold: {} ({} bytes)",
+        input.display(),
+        input.as_os_str().len()
+    );
+
+    for ext in ["jpg", "webp"] {
+        let o = pages(
+            &input,
+            &deep.join(format!("report.{ext}")),
+            Tuning::default(),
+            false,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "pdf -> {ext} in a {}-character folder failed: {e}",
+                deep.as_os_str().len()
+            )
+        });
+        let r = report(&o);
+        assert_eq!(r.files.len(), 3, "{ext}");
+        for name in &r.files {
+            let len = std::fs::metadata(o.output.join(name)).map_or(0, |m| m.len());
+            assert!(len > 0, "{name} was not written");
+        }
+    }
+}
