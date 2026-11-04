@@ -137,7 +137,9 @@ fn rtf_plans_libreoffice_and_falls_back_to_pandoc_without_it() {
 #[test]
 fn documents_become_txt_and_rtf_through_pandoc() {
     for (input, output, wants) in [
-        ("a.docx", "a.txt", "-t plain '--wrap=none'"),
+        // `--wrap=none` is quoted for the shell, in its own way on each.
+        ("a.docx", "a.txt", "--wrap=none"),
+        ("a.docx", "a.txt", "-t plain"),
         ("a.odt", "a.txt", "-t plain"),
         ("a.md", "a.txt", "-t plain"),
         ("a.html", "a.txt", "-f html+raw_html -t plain"),
@@ -216,7 +218,21 @@ fn text_read_aloud_plans_the_systems_engine_then_ffmpeg() {
     assert_eq!(plan["steps"][0]["program"], engine);
     assert_eq!(plan["steps"][1]["program"], "ffmpeg");
     assert_eq!(plan["output"], "notes.m4a");
-    assert_eq!(plan["steps"][0]["prepare"][0]["form"], "speech");
+    // conv writes the text the engine reads, and on Windows the script
+    // that reads it, before the step runs.
+    let prepare = plan["steps"][0]["prepare"].as_array().unwrap();
+    let speech = prepare
+        .iter()
+        .find(|p| p["kind"] == "text")
+        .unwrap_or_else(|| panic!("no text to read: {prepare:?}"));
+    assert_eq!(speech["form"], "speech");
+    assert_eq!(speech["to"], "notes.convkit-speech.txt");
+    let script = prepare
+        .iter()
+        .find(|p| p["kind"] == "write" && p["path"] == "notes.convkit-speak.ps1");
+    assert_eq!(script.is_some(), cfg!(windows), "{prepare:?}");
+    let argv = plan["steps"][0]["argv"].to_string();
+    assert!(argv.contains("notes.convkit-speech.txt"), "{argv}");
 }
 
 #[test]

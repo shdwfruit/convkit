@@ -47,7 +47,11 @@ fn a_txt_source_is_read_by_conv_and_handed_to_pandoc_as_a_page() {
     .unwrap();
     let step = &plan.steps[0];
     assert_eq!(step.program, "pandoc");
-    assert_eq!(step.argv[0], "out/todo.convkit-text.html");
+    // Compared as paths: Windows writes it with a backslash.
+    assert_eq!(
+        Path::new(&step.argv[0]),
+        Path::new("out/todo.convkit-text.html")
+    );
     assert_eq!(
         step.prepare,
         vec![Prepare::Text {

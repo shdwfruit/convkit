@@ -1,5 +1,6 @@
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::time::Duration;
 
 /// Builds a `Command` for spawning `path` as a backend subprocess, with
 /// Windows' console-window suppression applied unconditionally.
@@ -44,6 +45,36 @@ pub(crate) fn backend_command(path: impl AsRef<Path>) -> Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// How often, and how long apart, `spawn` tries again on a busy program:
+/// about half a second in all.
+const BUSY_TRIES: u32 = 10;
+const BUSY_PAUSE: Duration = Duration::from_millis(10);
+
+/// `cmd.spawn()`, tried again for a moment while the program is busy.
+///
+/// Linux refuses to run a program file that some process still has open
+/// for writing (`ETXTBSY`). Closing it is not always enough: a process
+/// another thread forks while the file is open keeps it open until that
+/// process runs its own program, which takes a moment. So a program written
+/// and then run while other threads start processes can fail to start for
+/// no reason of its own. conv's tests do exactly that, writing stub
+/// backends and probing them in parallel threads, and on CI the version
+/// probe of a freshly written stub failed this way, read as an unknown
+/// version, and `conv update`'s test saw an outdated backend. `conv install`
+/// does it too, running the program it has just unpacked.
+pub(crate) fn spawn(cmd: &mut Command) -> std::io::Result<Child> {
+    let mut tries = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < BUSY_TRIES => {
+                tries += 1;
+                std::thread::sleep(BUSY_PAUSE * tries);
+            }
+            spawned => return spawned,
+        }
+    }
 }
 
 #[cfg(test)]

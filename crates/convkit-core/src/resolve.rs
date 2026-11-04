@@ -814,7 +814,7 @@ impl Resolver {
     /// collect the exit status.
     fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().ok()?;
+        let mut child = crate::procutil::spawn(&mut cmd).ok()?;
 
         let deadline = Instant::now() + timeout;
         loop {
@@ -1499,6 +1499,39 @@ mod tests {
     /// The complement: an ordinary, fast-exiting child still gets its
     /// output back — the timeout machinery must not interfere with the
     /// normal, non-hung case.
+    /// A program still open for writing cannot be run on Linux (ETXTBSY),
+    /// which is how a freshly written stub's version came back unknown on
+    /// CI while other tests started processes. Held open here on purpose
+    /// and closed a moment later, it is run once it can be.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_program_busy_for_a_moment_is_still_probed() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("busy.sh");
+        let mut held = std::fs::File::create(&path).unwrap();
+        held.write_all(b"#!/bin/sh\necho \"busy 1.2.3\"\n").unwrap();
+        held.flush().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Busy now, as it was on CI.
+        let busy = Command::new(&path).spawn().map(|mut c| c.wait());
+        assert_eq!(
+            busy.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::ExecutableFileBusy)
+        );
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(held);
+        });
+        let mut cmd = Command::new(&path);
+        cmd.arg("--version");
+        let out = Resolver::run_with_timeout(cmd, Duration::from_secs(5))
+            .expect("run once the file is closed");
+        closer.join().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "busy 1.2.3");
+    }
+
     #[test]
     fn run_with_timeout_returns_output_for_a_child_that_exits_promptly() {
         let dir = tempfile::tempdir().unwrap();
