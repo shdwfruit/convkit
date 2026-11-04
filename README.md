@@ -103,6 +103,8 @@ conv *.heic --to jpg             # batch; globs expanded by conv itself, so this
 conv ./photos --to jpg -o ./out  # folder input, non-recursive, outputs redirected
 conv a.png b.png out.pdf         # merge two or more images into one PDF
 conv merge a.pdf b.pdf out.pdf   # join PDFs into one
+conv merge scan.pdf receipt.jpg out.pdf  # PDFs and photos in one PDF
+conv merge a.mp4 b.mov out.mp4   # join videos, losslessly when they match
 conv split report.pdf 1-3 4-z    # one PDF per page range
 conv pages report.pdf 3 1-2 5-z  # pick, reorder, delete or turn a PDF's pages
 conv report.pdf --password       # lock a PDF; --unlock removes the password
@@ -685,12 +687,11 @@ conv photo.jpg --rotate right --resize 50%
 conv screen.mov clip.gif --rotate left --resize 480x
 ```
 
-## Merge and split PDFs
+## Merge and split
 
-`conv merge` joins PDFs into one, in the order given; the last argument is
-the output. `conv split` writes one file per page, or one per range. Both
-run on qpdf, which rewrites the PDF's structure rather than re-rendering
-pages, so text stays selectable and links keep working.
+`conv merge` joins files into one, in the order given; the last argument is
+the output, and its extension says what is made. `conv split` writes one
+PDF per page, or one per range.
 
 ```console
 $ conv merge cover.pdf report.pdf out.pdf
@@ -703,10 +704,12 @@ OK report-1-3.pdf, report-4-10.pdf - 2 files - 900 KB - 0.1s
 warning  Pages 11-12 are not in any range, so they were left out.
 ```
 
-A range is a page (`5`), a span (`1-3`), or uses `z` for the last page
-(`11-z`); `5-1` reverses. Without ranges, `report.pdf` becomes
-`report-01.pdf` to `report-12.pdf`. `-o DIR` writes the files elsewhere, and
-a folder given to `conv merge` adds every PDF in it, in natural order.
+PDFs are joined by qpdf, which rewrites the PDF's structure rather than
+re-rendering pages, so text stays selectable and links keep working. A range
+is a page (`5`), a span (`1-3`), or uses `z` for the last page (`11-z`);
+`5-1` reverses. Without ranges, `report.pdf` becomes `report-01.pdf` to
+`report-12.pdf`. `-o DIR` writes the files elsewhere, and a folder given to
+`conv merge` adds every file in it the output takes, in natural order.
 
 The merged file keeps the first file's bookmarks only, and neither command
 keeps permission restrictions; conv says so when either applies. A PDF
@@ -783,6 +786,54 @@ Naming works as it does for `--strip-metadata`: one file gets `-locked` or
 `-unlocked` in its name, a named output is written as named, and `conv
 ./statements --to pdf --unlock` writes into an `unlocked` folder, leaving
 out files with nothing to unlock.
+
+Pictures can go in among the PDFs, as a scan or a photo of a receipt
+usually does. Each gets a page the size of the PDF page next to it (the
+last page before it, or the first after it when the pictures come first),
+turned to suit the picture, so a landscape photo among A4 pages gets a
+landscape A4 page. The picture is centred at its own size, or shrunk to fit,
+never enlarged. JPG, PNG, WebP and GIF go in through Typst, a JPEG as it is;
+HEIC, AVIF, TIFF, BMP, SVG and ICO are converted first, which needs
+ImageMagick. Pictures with no PDF among them get a page each of their own
+size, as `conv a.jpg b.jpg out.pdf` makes.
+
+Videos join into a video, and audio files, or the sound of videos, into an
+audio file:
+
+```console
+$ conv merge IMG_0041.mov IMG_0042.mov trip.mov
+OK trip.mov - 2 files, 1:02.5 - 96.1 MB - 0.3s - stream copy, no re-encode
+  /home/user/Videos/trip.mov
+
+$ conv merge intro.mp4 clip.mov outro.webm talk.mp4
+OK talk.mp4 - 3 files, 4:10 - 61.2 MB - 52.4s
+  /home/user/Videos/talk.mp4
+  note  Re-encoded to 1920x1080 at 30 fps, as intro.mp4 is, since mp4 can't hold VP9 video or Opus sound, and the clips differ: clip.mov is 1080x1920 and HEVC; outro.webm is 1280x720, VP9 and Opus.
+  note  clip.mov is another shape, so black bars fill out the frame.
+  note  outro.webm is smaller, so it is enlarged to fit, which adds no detail.
+
+conv merge *.mp3 album.mp3
+conv merge ./voice-notes all.m4a
+```
+
+Files that match (the same codecs and encoder settings, picture size, frame
+rate, rotation and sound) are joined without re-encoding, in about the time
+a copy takes. Phone clips filmed one after another usually match. Otherwise
+every clip is encoded once to the first clip's picture size, frame rate and
+sound: a clip of another shape is scaled to fit with black bars, never
+stretched or cropped, a sideways clip is turned upright, a clip filmed at a
+varying frame rate is evened out, a clip without sound is silent for its
+length, and the sound stays in step with the picture after each join. The
+note says which files differed and how. An HDR clip among standard ones is
+turned to standard range, with a warning.
+
+`--resize` fits the joined video within a size, never larger than the first
+clip, and `--crf` sets the encode's quality; both encode every clip.
+`--max-size 25mb` joins the clips and then fits the result under the size,
+as `conv clip.mp4 --max-size` does. The joined file keeps the tags every
+input shares (an album's artist, say) and drops the rest, such as each
+song's title; chapters, subtitles and sound tracks after the first are left
+out, with a note.
 
 ## Copy and paste
 
@@ -1264,9 +1315,9 @@ convkit dispatches to these programs, each invoked as a subprocess:
 | `ffmpeg` / `ffprobe` | video, audio, GIF, remux | Yes | 9.0.1 |
 | `magick` (ImageMagick) | images, HEIC (HEIF read-only), HEIC/HEIF/AVIF/TIFF/BMP → PDF, and image → PDF with `--quality`, `--resize`, `--rotate`, or an SVG or ICO in the merge | No — use your package manager | — |
 | `pandoc` | Markdown, text, HTML and RTF documents; parses docx/odt/rtf for the PDF fallback | Yes | 3.11 |
-| `typst` | JPG/PNG/WebP/GIF → PDF; PDF engine for the docx/odt/rtf → pdf fallback | Yes | 0.15.1 |
+| `typst` | JPG/PNG/WebP/GIF → PDF, and pictures merged among PDFs; PDF engine for the docx/odt/rtf → pdf fallback | Yes | 0.15.1 |
 | `soffice` (LibreOffice) | Office documents ⇄ PDF, reading RTF | No — manual install, always | — |
-| `qpdf` | PDF merge, split, pages and passwords | Yes | 12.4.2 |
+| `qpdf` | PDF merge, split, pages and passwords, and the pages of a merge with pictures | Yes | 12.4.2 |
 | `say`, Windows PowerShell, `espeak-ng`, `piper` | reading text aloud | No — the first two come with the system | — |
 
 Managed versions are pinned per convkit build

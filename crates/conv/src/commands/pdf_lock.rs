@@ -242,7 +242,7 @@ fn plan_paths(
     for p in expand_globs(paths, paths.len()) {
         if p.is_dir() {
             let ending = format!("-{}", way.done);
-            let found: Vec<PathBuf> = input::pdfs_in(&p, &p)?
+            let found: Vec<PathBuf> = input::files_in(&p, &p, |f| f == Format::Pdf)?
                 .into_iter()
                 .filter(|f| {
                     !f.file_stem()

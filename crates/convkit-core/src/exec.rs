@@ -282,7 +282,7 @@ fn is_remux(argv: &[String]) -> bool {
 /// last-three-lines tail, so a missed pattern degrades, never hides).
 /// Per-backend patterns, deliberately conservative. Lines are deduplicated
 /// in order and capped, with the overflow counted honestly.
-fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
+pub(crate) fn classify_backend_noise(backend: Backend, raw: &str) -> Vec<String> {
     const MAX_NOTES: usize = 5;
     let interesting = |line: &str| -> bool {
         match backend {
@@ -1383,7 +1383,7 @@ fn io_err(e: std::io::Error) -> ConvError {
     ConvError::new(ErrorCode::ConversionFailed, e.to_string())
 }
 
-fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::hard_link(from, to)
 }
 
@@ -1392,7 +1392,7 @@ fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
 /// copy. With `strip`, a JPEG is written without its metadata instead.
 /// `link` is a parameter so the copy fallback is testable. Every failure
 /// names `from`, the user's file, never `to`, which is convkit's.
-fn stage_file(
+pub(crate) fn stage_file(
     from: &Path,
     to: &Path,
     strip: bool,

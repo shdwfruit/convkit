@@ -15,6 +15,7 @@ mod jpeg;
 mod layout;
 pub mod manifest;
 mod media;
+pub mod merge;
 pub mod metadata;
 mod mov;
 pub mod office;
