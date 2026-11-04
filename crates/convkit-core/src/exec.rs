@@ -859,6 +859,24 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     })
 }
 
+/// The program `step` runs with ImageMagick found at `resolved`, and whether
+/// its first argument is that program's name rather than an argument.
+/// ImageMagick 6 has no `magick` front end: its `mogrify` is a program of
+/// its own beside `convert`, which conv finds ImageMagick 6 by.
+fn program_for(step: &PlannedStep, resolved: &Path) -> (PathBuf, bool) {
+    let im6_mogrify = step.backend == Backend::Magick
+        && step.argv.first().map(String::as_str) == Some("mogrify")
+        && resolved
+            .file_stem()
+            .is_some_and(|s| s.eq_ignore_ascii_case("convert"));
+    if im6_mogrify {
+        let mogrify = format!("mogrify{}", std::env::consts::EXE_SUFFIX);
+        (resolved.with_file_name(mogrify), true)
+    } else {
+        (resolved.to_path_buf(), false)
+    }
+}
+
 /// Moves a series out of the scratch folder into `dest`, made if missing,
 /// and returns how many files it holds and their bytes together. With
 /// `overwrite`, an earlier series of the same name and format is removed
@@ -1145,9 +1163,11 @@ impl StepRunner<'_> {
             self.notes.extend(prepare(p)?);
         }
 
+        let (program, im6_mogrify) = program_for(step, &resolved.path);
+
         // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
         // inside `backend_command`, not repeated here -- see its docs.
-        let mut cmd = backend_command(&resolved.path);
+        let mut cmd = backend_command(&program);
 
         // Decided before the argv is built so both branches below agree, and
         // per step rather than per run: a two-step recipe can have a short
@@ -1222,6 +1242,17 @@ impl StepRunner<'_> {
             };
             let rest = substitute_backend_paths(&argv, &shifted, verbatim_paths, self.resolver)?;
             cmd.args(&rest);
+        } else if im6_mogrify {
+            // The word itself is the program now, so the recorded positions
+            // shift down by one, as for soffice's placeholder above.
+            let shifted: Vec<usize> = step
+                .path_args
+                .iter()
+                .filter_map(|i| i.checked_sub(1))
+                .collect();
+            let rest =
+                substitute_backend_paths(&step.argv[1..], &shifted, verbatim_paths, self.resolver)?;
+            cmd.args(&rest);
         } else {
             let argv = substitute_backend_paths(
                 &step.argv,
@@ -1234,7 +1265,7 @@ impl StepRunner<'_> {
 
         (self.on_event)(Event::StepSpawned {
             index,
-            program: resolved.path.clone(),
+            program: program.clone(),
             argv: cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -2314,6 +2345,35 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             "only the last three lines should be kept: {}",
             e.message
         );
+    }
+
+    /// ImageMagick 6's `mogrify` is its own program, so a series of stills
+    /// runs it, not `convert mogrify`; ImageMagick 7's `magick` takes the
+    /// word, and nothing else changes.
+    #[test]
+    fn a_mogrify_step_runs_imagemagick_6s_own_mogrify() {
+        let step = |argv: &[&str], backend: Backend| PlannedStep {
+            backend,
+            program: "magick".into(),
+            argv: argv.iter().map(|a| a.to_string()).collect(),
+            output_mode: OutputMode::Folder,
+            output: PathBuf::from("out"),
+            intermediate_ext: None,
+            path_args: vec![],
+            prepare: vec![],
+            stdin: None,
+        };
+        let exe = std::env::consts::EXE_SUFFIX;
+        let convert = PathBuf::from(format!("/usr/bin/convert{exe}"));
+        let magick = PathBuf::from("/opt/homebrew/bin/magick");
+        let series = step(&["mogrify", "-path", "out"], Backend::Magick);
+        assert_eq!(
+            program_for(&series, &convert),
+            (PathBuf::from(format!("/usr/bin/mogrify{exe}")), true)
+        );
+        assert_eq!(program_for(&series, &magick), (magick.clone(), false));
+        let one = step(&["in.png", "out.jpg"], Backend::Magick);
+        assert_eq!(program_for(&one, &convert), (convert.clone(), false));
     }
 
     /// `--verbose`'s data source: a run must emit `StepSpawned` with the
