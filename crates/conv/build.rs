@@ -1,5 +1,6 @@
 //! Puts the changelog into the binary for `conv changelog`, and the
-//! version `conv --version` prints.
+//! version `conv --version` prints, and gives the binary the stack it
+//! needs on Windows.
 //!
 //! In the workspace it is CHANGELOG.md at the root. `crates/conv/CHANGELOG.md`
 //! links to it, and `cargo package` turns the link into a copy, so a crate
@@ -34,4 +35,18 @@ fn main() {
         _ => version.to_string(),
     };
     println!("cargo:rustc-env=CONV_VERSION={version}");
+
+    // Windows gives a program's main thread 1 MB of stack, where Linux and
+    // macOS give 8 MB. A debug build parsing conv's flags and commands
+    // outgrew 1 MB and overflowed before doing anything, so conv asks for
+    // the same 8 MB on Windows.
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if os == "windows" {
+        match target_env.as_str() {
+            "msvc" => println!("cargo:rustc-link-arg-bins=/STACK:8388608"),
+            "gnu" => println!("cargo:rustc-link-arg-bins=-Wl,--stack,8388608"),
+            _ => {}
+        }
+    }
 }
