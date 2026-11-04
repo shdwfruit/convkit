@@ -126,6 +126,7 @@ mod tests {
             fps: None,
             crf: None,
             max_size: None,
+            compress: false,
             strip_metadata: false,
             start: None,
             end: None,

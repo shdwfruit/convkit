@@ -12,9 +12,10 @@ use convkit_core::{Resolver, Tuning};
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     /// Input paths, then optionally an output path or a bare `.ext`. With
-    /// `--max-size`, `--strip-metadata`, `--start`/`--end`/`--duration`,
-    /// `--speed` or `--rotate`, a lone input keeps its format and is written
-    /// as NAME-SUFFIX.EXT (`clip.mp4` -> `clip-10mb.mp4`, `photo-stripped.jpg`,
+    /// `--max-size`, `--compress`, `--strip-metadata`,
+    /// `--start`/`--end`/`--duration`, `--speed` or `--rotate`, a lone input
+    /// keeps its format and is written as NAME-SUFFIX.EXT (`clip.mp4` ->
+    /// `clip-10mb.mp4`, `scan-compressed.pdf`, `photo-stripped.jpg`,
     /// `clip-1m02s-1m10s.mp4`, `clip-2x.mp4`, `photo-rotated.jpg`).
     pub paths: Vec<PathBuf>,
 
@@ -91,14 +92,26 @@ pub struct Cli {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=63))]
     pub crf: Option<u8>,
 
-    /// Keep each output at or under this size, choosing resolution, frame
-    /// rate and bitrates to fit. Video targets only. SIZE is a number and a
-    /// unit: 500kb, 10mb, 1.5gb, 10mib. A lone input keeps its format and is
-    /// written as NAME-SIZE.EXT, e.g. clip-10mb.mp4; a --to batch writes into a
-    /// folder named after the size, e.g. 10mb/clip.mp4, unless -o is given.
+    /// Keep each output at or under this size: a video's resolution, frame
+    /// rate and bitrates are chosen to fit, and a PDF's images go down a
+    /// step at a time until it fits. Video and PDF targets. SIZE is a number
+    /// and a unit: 500kb, 10mb, 1.5gb, 10mib. A lone input keeps its format
+    /// and is written as NAME-SIZE.EXT, e.g. clip-10mb.mp4; a --to batch
+    /// writes into a folder named after the size, e.g. 10mb/clip.mp4, unless
+    /// -o is given.
     // Not `global` -- see `dry_run`'s comment.
     #[arg(long, value_name = "SIZE", value_parser = parse_max_size, conflicts_with = "crf")]
     pub max_size: Option<convkit_core::size::MaxSize>,
+
+    /// Make a PDF smaller without changing how it looks: images drawn
+    /// above 225 dpi go to 150 dpi, and high-quality JPEGs and lossless
+    /// photos are re-encoded. Text, links, bookmarks, form fields and tags
+    /// stay as they are, and a result that isn't smaller is a copy of the
+    /// original. A lone input is written as NAME-compressed.pdf; a --to pdf
+    /// batch writes into a compressed folder, unless -o is given.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long)]
+    pub compress: bool,
 
     /// Remove location and the rest of the metadata: everything but the
     /// colour profile from images (orientation is applied first), and every
@@ -228,9 +241,10 @@ pub struct Cli {
     #[arg(long)]
     pub paste: bool,
 
-    /// Assume yes to every prompt: installing a missing backend, or
-    /// converting an extreme --max-size target or a large --upscale. For a script that wants
-    /// either without a terminal to answer. Contradicts `--no-install`,
+    /// Assume yes to every prompt: installing a missing backend, converting
+    /// an extreme --max-size target or a large --upscale, or rewriting a
+    /// signed PDF. For a script that wants any of these without a terminal
+    /// to answer. Contradicts `--no-install`,
     /// which asks the opposite question ("never install"): passing both is
     /// a usage error.
     #[arg(long, global = true, conflicts_with = "no_install")]
@@ -1199,6 +1213,7 @@ impl Cli {
             fps: self.fps.clone(),
             crf: self.crf,
             max_size: self.max_size.clone(),
+            compress: self.compress,
             upscale: self.upscale,
             strip_metadata: self.strip_metadata,
             // `check` has already refused a range that does not hold
@@ -1279,6 +1294,7 @@ mod tests {
             fps: None,
             crf: None,
             max_size: None,
+            compress: false,
             strip_metadata: false,
             start: None,
             end: None,

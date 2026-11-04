@@ -1,5 +1,7 @@
 //! PDF merge, split, page edits and passwords (`conv merge`, `conv
-//! split`, `conv pages`, `--password`, `--unlock`), run on qpdf.
+//! split`, `conv pages`, `--password`, `--unlock`), run on qpdf, and
+//! `--compress` (`compress`), which runs on qpdf and an image pass of its
+//! own.
 //!
 //! qpdf rewrites a PDF's structure and never re-renders a page, so text,
 //! links and images come through untouched. This module reads the inputs,
@@ -8,6 +10,7 @@
 //! nothing behind. Like the rest of convkit-core, it never prints, and it
 //! never asks for a password itself: the caller passes `AskPassword`.
 
+pub mod compress;
 pub mod lock;
 pub mod pages;
 pub mod plan;

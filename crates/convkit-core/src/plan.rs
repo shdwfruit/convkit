@@ -187,6 +187,12 @@ pub fn build_tuned(
         return built_in(from, to, inputs, output, tuning);
     }
 
+    // `--compress`, and `--max-size` on a PDF, run on qpdf and conv's own
+    // image pass, not a recipe.
+    if crate::pdf::compress::applies(tuning, from, to) {
+        return crate::pdf::compress::plan(from, to, inputs, output, tuning);
+    }
+
     // A password-protected .docx/.xlsx/.pptx is refused before LibreOffice
     // sees it: one LibreOffice does not recognise as encrypted is imported
     // as plain text, and the result is pages of the encrypted bytes with
@@ -3170,6 +3176,7 @@ mod tests {
             rotate: None,
             voice: None,
             rate: None,
+            compress: false,
         }
     }
 

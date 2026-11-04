@@ -51,10 +51,21 @@ pub struct SizingPlan {
     pub source_bytes: Option<u64>,
 }
 
+/// What a sized file is, in `--json`'s `sizing.kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SizedKind {
+    Video,
+    Pdf,
+}
+
 /// What a sized conversion actually did, on `Outcome` and in `--json`.
+/// `--compress` reports here too, with no target.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SizingReport {
-    pub target_bytes: u64,
+    pub kind: SizedKind,
+    /// The `--max-size` target; `None` under `--compress` alone.
+    pub target_bytes: Option<u64>,
     pub family: UnitFamily,
     pub strategy: Strategy,
     pub width: Option<u32>,
@@ -71,6 +82,9 @@ pub struct SizingReport {
     pub cost: Option<f64>,
     pub over_target: bool,
     pub suggested: Option<String>,
+    /// What a PDF's images went through, flattened into the object.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<crate::pdf::compress::PdfSizing>,
 }
 
 // Spelled `std::result::Result` so a later import of the crate's
@@ -85,9 +99,14 @@ fn optional_rational<S: Serializer>(
     }
 }
 
-/// The containers `--max-size` can size: the four video targets.
+/// The containers `--max-size` can size as video: the four video targets.
 pub fn is_video_target(to: Format) -> bool {
     matches!(to, Format::Mp4 | Format::Mov | Format::Mkv | Format::Webm)
+}
+
+/// Every target `--max-size` can size: the video targets, and PDF.
+pub fn is_sized_target(to: Format) -> bool {
+    is_video_target(to) || to == Format::Pdf
 }
 
 /// A sized encode runs at most this many times, both passes each time.
@@ -761,7 +780,8 @@ pub(crate) fn report(
 ) -> SizingReport {
     let c = sizing.choice.as_ref();
     SizingReport {
-        target_bytes: sizing.target_bytes,
+        kind: SizedKind::Video,
+        target_bytes: Some(sizing.target_bytes),
         family: sizing.family,
         strategy: sizing.strategy,
         width: c.map(|c| c.width),
@@ -776,6 +796,7 @@ pub(crate) fn report(
         cost: c.map(SizedChoice::cost),
         over_target: bytes > sizing.target_bytes,
         suggested: sizing.suggested.clone(),
+        pdf: None,
     }
 }
 
@@ -1009,7 +1030,8 @@ mod tests {
 
     fn sample_report(fps: Option<(u32, u32)>) -> SizingReport {
         SizingReport {
-            target_bytes: 10_000_000,
+            kind: SizedKind::Video,
+            target_bytes: Some(10_000_000),
             family: UnitFamily::Decimal,
             strategy: Strategy::Encode,
             width: Some(1280),
@@ -1021,6 +1043,7 @@ mod tests {
             cost: Some(1.5),
             over_target: false,
             suggested: None,
+            pdf: None,
         }
     }
 
@@ -1035,6 +1058,13 @@ mod tests {
 
         let v = serde_json::to_value(sample_report(None)).unwrap();
         assert!(v.get("fps").is_some_and(|f| f.is_null()), "{v}");
+        // A video report says it is one and carries no PDF fields.
+        assert_eq!(v["kind"], "video", "{v}");
+        assert_eq!(v["target_bytes"], 10_000_000, "{v}");
+        assert!(
+            v.get("level").is_none() && v.get("images_skipped").is_none(),
+            "{v}"
+        );
     }
 
     /// A rate is chosen as a division of the source's, `60/2` or `144/144`,
@@ -1582,7 +1612,8 @@ mod tests {
     #[test]
     fn the_notes_read_as_sentences() {
         let r = SizingReport {
-            target_bytes: 10_000_000,
+            kind: SizedKind::Video,
+            target_bytes: Some(10_000_000),
             family: crate::size::UnitFamily::Decimal,
             strategy: Strategy::Encode,
             width: Some(1280),
@@ -1594,6 +1625,7 @@ mod tests {
             cost: Some(18.4),
             over_target: false,
             suggested: None,
+            pdf: None,
         };
         assert_eq!(
             summary_note(&r),

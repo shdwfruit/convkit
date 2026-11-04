@@ -49,6 +49,10 @@ file looks as good as that size allows rather than losing everything from
 one of them, and it asks before a limit too tight to look good. More in
 [Size targets](#size-targets).
 
+**PDF too big to send?** `conv scan.pdf --compress` makes it smaller with
+the same look, offline, instead of handing it to a website. More in
+[Compress PDF](#compress-pdf).
+
 ## Install
 
 Prebuilt binaries cover Windows x64, macOS x64/arm64, and Linux x64/arm64:
@@ -442,7 +446,9 @@ them.
 
 ## Size targets
 
-`--max-size` makes a video fit a size, for upload limits and attachments:
+`--max-size` makes a video or a PDF fit a size, for upload limits and
+attachments. A PDF climbs a ladder of image settings instead; see
+[Compress PDF](#compress-pdf). For video:
 
 ```console
 $ conv clip.mp4 --max-size 10mb
@@ -457,7 +463,7 @@ tight target trims a little from everything rather than all of one thing:
 a 144 fps clip loses frame rate long before it drops to 360p. The size is a
 ceiling: `10mb` means 10,000,000 bytes, which also fits a limit enforced as
 10 MiB. `kb`, `mb` and `gb` are decimal; write `kib`, `mib` or `gib` for
-binary units. The targets are mp4, mov, mkv and webm; any other target
+binary units. The targets are mp4, mov, mkv, webm and pdf; any other target
 refuses the flag by name.
 
 It encodes in two passes and checks the result. If the file comes out over,
@@ -834,6 +840,74 @@ as `conv clip.mp4 --max-size` does. The joined file keeps the tags every
 input shares (an album's artist, say) and drops the rest, such as each
 song's title; chapters, subtitles and sound tracks after the first are left
 out, with a note.
+
+## Compress PDF
+
+`--compress` makes a PDF smaller without changing how it looks, for a scan
+or a deck that's too big to email or upload:
+
+```console
+$ conv scan.pdf --compress
+OK scan-compressed.pdf - 1.66 MB (was 14.70 MB) - 0.5s
+  /home/user/Docs/scan-compressed.pdf
+  note  Downsampled 6 images to 150 dpi.
+```
+
+Almost all of a large PDF is its images. conv works out how large each one
+is drawn on the page. One drawn above 225 dpi goes to 150 dpi, a JPEG saved
+at high quality is saved again at quality 80, and a photo stored without
+loss becomes a JPEG if it looks the same. Screenshots and diagrams stay
+lossless, and black-and-white and JPEG 2000 images, already compact, are
+left alone. Nothing else changes: text stays selectable, and links,
+bookmarks, form fields and their values, tags and attachments come through
+as they were. qpdf (`conv install qpdf`) does the rest of the rewrite,
+losslessly.
+
+The result is never bigger than the original. If conv can't make it
+smaller, the copy is the same file, and the note says why. A typical office
+scan is 200 dpi, which `--compress` keeps, so for a file like that conv also
+measures 150 dpi and says what it would give:
+
+```console
+$ conv office-scan.pdf --compress
+OK office-scan-compressed.pdf - 47.23 MB (was 47.26 MB) - 1.7s
+  /home/user/Docs/office-scan-compressed.pdf
+  note  Less than 1% smaller at the same look: its images are about 200 dpi, which --compress keeps. At 150 dpi it would be 25.74 MB; try --max-size 26mb.
+```
+
+`--max-size` sets a ceiling instead. conv tries qpdf's lossless rewrite,
+then images at 150 dpi, at 150 dpi with lower quality, and at 120 dpi,
+and keeps the first one under the size. Each try is measured. Going lower,
+to 96 or 72 dpi, makes small print hard to read, so conv asks first, and
+names the smallest size the readable steps reached:
+
+```console
+$ conv deck.pdf --max-size 2mb
+warning  Getting deck.pdf under 2 MB takes its images down to 96 dpi or less, where small print may be hard to read.
+         For a readable result, try: conv deck.pdf --max-size 3.3mb
+Make it anyway? [y/N] n
+FAIL deck.pdf -> pdf
+  not confirmed for deck.pdf, so nothing was written
+  try  pass --yes to make it anyway, or try --max-size 3.3mb
+```
+
+`--yes` answers for a script; without a terminal the answer is no, with
+exit code 2. A file already under the size is copied, and one still over
+after the last step is kept and flagged, as for video. `--compress
+--max-size 5mb` starts at 150 dpi.
+
+One file is written beside itself as `scan-compressed.pdf` or
+`deck-2mb.pdf`; a batch needs `--to pdf` and writes into `compressed/` or
+`2mb/`. A PDF with an open password is refused, and one with only an owner
+password keeps its restrictions. A digitally signed PDF asks first, since
+the copy's signature can't stay valid; a form carrying Adobe Reader usage
+rights loses them, with a warning. The copy isn't set up for "fast web
+view" even when the original was, since that would make it bigger.
+`--dry-run` reads the file and says how many images it would change, and
+`--json` reports in `sizing` with `kind: "pdf"`: the `level` used,
+`images_downsampled`, `images_reencoded`, `images_skipped` by reason, and
+`suggested`. How the thresholds were chosen is in "Compress PDF" in
+[`docs/defaults-calibration.md`](docs/defaults-calibration.md#compress-pdf).
 
 ## Copy and paste
 

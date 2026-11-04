@@ -230,6 +230,11 @@ pub fn run_each(
                             measured,
                             target,
                         } => retry = Some(retry_label(attempt, measured, target)),
+                        exec::Event::Working { what } => {
+                            if let Some(pb) = &spinner {
+                                pb.set_message(format!("{what}…"));
+                            }
+                        }
                         _ => {}
                     };
                     exec::run(&req, &resolver, &mut on_event)
@@ -349,6 +354,7 @@ mod tests {
             fps: None,
             crf: None,
             max_size: None,
+            compress: false,
             strip_metadata: false,
             start: None,
             end: None,

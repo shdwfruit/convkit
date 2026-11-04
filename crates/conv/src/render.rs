@@ -186,13 +186,18 @@ pub fn sizing_hint_human(label: &str, o: &Outcome, args: &[String], styled: bool
     let Some(size) = sizing.suggested.as_deref() else {
         return String::new();
     };
+    // A PDF is read, not watched.
+    let good = match sizing.kind {
+        convkit_core::sized::SizedKind::Pdf => "readable",
+        convkit_core::sized::SizedKind::Video => "watchable",
+    };
     let line = if label.is_empty() {
         format!(
-            "         For a watchable result, try: {}\n",
+            "         For a {good} result, try: {}\n",
             suggestion_command(args, size)
         )
     } else {
-        format!("         {label}: for a watchable result, try --max-size {size}.\n")
+        format!("         {label}: for a {good} result, try --max-size {size}.\n")
     };
     paint(&line, yellow_bold(), styled)
 }
@@ -488,9 +493,22 @@ pub fn conversion_success_human(o: &Outcome, styled: bool) -> String {
         .unwrap_or_else(|| o.output.display().to_string());
     let sep = if styled { " \u{b7} " } else { " - " };
 
+    // A PDF made smaller says what it was.
+    let size = match o
+        .sizing
+        .as_ref()
+        .and_then(|s| s.pdf.as_ref().map(|p| (s, p)))
+    {
+        Some((s, p)) if p.source_bytes > o.bytes => format!(
+            "{} (was {})",
+            size_for(o),
+            convkit_core::size::display(p.source_bytes, s.family)
+        ),
+        _ => size_for(o),
+    };
     let mut fields = vec![
         name,
-        size_for(o),
+        size,
         human_elapsed(Duration::from_millis(o.elapsed_ms)),
     ];
     if o.remuxed {
@@ -912,7 +930,8 @@ mod tests {
     fn sized_outcome(bytes: u64) -> Outcome {
         let mut o = sample_outcome(bytes, false, vec![]);
         o.sizing = Some(convkit_core::sized::SizingReport {
-            target_bytes: 10_000_000,
+            kind: convkit_core::sized::SizedKind::Video,
+            target_bytes: Some(10_000_000),
             family: convkit_core::size::UnitFamily::Decimal,
             strategy: convkit_core::sized::Strategy::Encode,
             width: Some(1280),
@@ -924,6 +943,7 @@ mod tests {
             cost: Some(18.4),
             over_target: false,
             suggested: None,
+            pdf: None,
         });
         o
     }
@@ -1435,6 +1455,49 @@ mod tests {
         let mut fitted = sized_outcome(4_900_000);
         fitted.sizing.as_mut().unwrap().suggested = Some("40mb".into());
         assert_eq!(sizing_hint_human("", &fitted, &args, false), "");
+    }
+
+    #[test]
+    fn a_pdf_says_what_it_was_and_suggests_a_readable_size() {
+        let mut o = sized_outcome(1_600_000);
+        let s = o.sizing.as_mut().unwrap();
+        s.kind = convkit_core::sized::SizedKind::Pdf;
+        s.target_bytes = None;
+        s.pdf = Some(convkit_core::pdf::compress::PdfSizing {
+            level: Some(1),
+            source_bytes: 14_700_000,
+            images_downsampled: 6,
+            images_reencoded: 0,
+            images_skipped: Default::default(),
+        });
+        let line = conversion_success_human(&o, false);
+        assert!(line.contains(" - 1.60 MB (was 14.70 MB) - "), "{line}");
+        let v = outcome_json(&o);
+        assert_eq!(v["sizing"]["kind"], "pdf");
+        assert_eq!(v["sizing"]["target_bytes"], serde_json::Value::Null);
+        assert_eq!(v["sizing"]["level"], 1);
+        assert_eq!(v["sizing"]["images_downsampled"], 6);
+        assert!(v["sizing"]["images_skipped"].is_object(), "{v}");
+
+        let s = o.sizing.as_mut().unwrap();
+        s.target_bytes = Some(1_000_000);
+        s.over_target = true;
+        s.suggested = Some("3mb".into());
+        let args = vec!["scan.pdf".to_string(), "--max-size".into(), "1mb".into()];
+        let hint = sizing_hint_human("", &o, &args, false);
+        assert!(
+            hint.contains("For a readable result, try: conv scan.pdf --max-size 3mb"),
+            "{hint}"
+        );
+        // A copy says nothing about what it was.
+        o.sizing
+            .as_mut()
+            .unwrap()
+            .pdf
+            .as_mut()
+            .unwrap()
+            .source_bytes = o.bytes;
+        assert!(!conversion_success_human(&o, false).contains("(was"));
     }
 
     #[test]
