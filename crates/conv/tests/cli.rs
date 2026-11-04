@@ -4714,7 +4714,7 @@ fn merge_end_to_end_prints_the_ok_line_and_json() {
 
 /// A two-second clip made with ffmpeg, as `conv merge` gets them.
 fn make_clip(dir: &Path, name: &str, size: &str) {
-    let out = std::process::Command::new("ffmpeg")
+    let out = std::process::Command::new(ffmpeg_path())
         .current_dir(dir)
         .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
         .arg(format!("testsrc2=s={size}:r=30:d=2"))
@@ -4780,7 +4780,7 @@ fn merge_of_videos_end_to_end_copies_or_says_why_not() {
 fn merge_of_pdfs_and_pictures_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(sample_pdf(), dir.path().join("a.pdf")).unwrap();
-    let made = std::process::Command::new("ffmpeg")
+    let made = std::process::Command::new(ffmpeg_path())
         .current_dir(dir.path())
         .args(["-v", "error", "-f", "lavfi", "-i", "color=red:s=800x600"])
         .args(["-frames:v", "1", "scan.png"])
@@ -4985,6 +4985,15 @@ fn qpdf_path() -> PathBuf {
     convkit_core::Resolver::new()
         .resolve(convkit_core::Backend::Qpdf)
         .expect("qpdf")
+        .path
+}
+
+/// The ffmpeg conv itself would run, which the Windows real-backend job
+/// installs through conv rather than on PATH.
+fn ffmpeg_path() -> PathBuf {
+    convkit_core::Resolver::new()
+        .resolve(convkit_core::Backend::Ffmpeg)
+        .expect("this test needs ffmpeg")
         .path
 }
 
