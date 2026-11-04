@@ -147,6 +147,9 @@ pub struct ResolvedVideo {
     /// The voice `Arg::Voice` names, chosen by `speech::choose`. `None`
     /// reads with the system's own.
     pub voice: Option<String>,
+    /// What a still or a series saves (`stills::plan`). `None` renders the
+    /// stills slots' templates.
+    pub stills: Option<crate::stills::Pick>,
 }
 
 impl ResolvedVideo {

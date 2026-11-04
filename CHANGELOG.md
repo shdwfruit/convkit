@@ -207,6 +207,15 @@
   picture as it is, and only the sound is re-encoded. `--denoise=strong`
   takes more off a very noisy recording, at some cost to the voice. One
   file is written as `talk-denoised.mp4`, and a batch into `denoised/`.
+- **Stills from a video.** Name a picture format to save frames from a
+  video or a GIF as PNG, JPEG, WebP or HEIC. `conv clip.mp4 .png --start
+  0:12` saves the frame at 0:12 as `clip-12s.png`, and `conv clip.mp4 .jpg
+  --every 2s` saves one every 2 seconds into `clip/`, numbered in order;
+  `--every frame` saves every frame. `--start`, `--end` and `--duration`
+  pick the part they come from. With no time, a video gives 10 stills
+  spread across it and a GIF gives every frame. Phone videos come out
+  upright and HDR video in ordinary colors, and conv asks before saving
+  more than 1,000 files.
 
 ### Changed
 

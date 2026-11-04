@@ -1249,9 +1249,20 @@ fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
             format!("{does}, so it needs their format: conv {name} .png {flag}{split}"),
         ));
     }
+    if cli.every.is_some() && cli.to.is_none() && expanded.len() == 1 {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "--every saves stills, so it needs their format: conv {} .jpg --every {}",
+                expanded[0].display(),
+                cli.every.as_ref().map_or("", |e| e.text())
+            ),
+        ));
+    }
     let Some(own) = own else {
         let mut jobs = jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?;
         name_pdf_pages(&mut jobs, cli, explicit_output);
+        name_stills(&mut jobs, cli, explicit_output);
         // With `--to`, `--resize` tunes the conversion and names nothing,
         // except where a file already in the `--to` format would be written
         // over itself (`conv *.jpg --to jpg --resize 50%`, the fix several
@@ -1273,6 +1284,7 @@ fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
         _ => jobs_from(&expanded, cli.to.as_deref(), cli.outdir.as_deref())?,
     };
     name_pdf_pages(&mut jobs, cli, explicit_output);
+    name_stills(&mut jobs, cli, explicit_output);
     // A batch writes into a subfolder beside its inputs (`photos/stripped/`,
     // `clips/10mb/`, `talks/1m02s-1m10s/`) unless `-o` says where. These runs
     // take files already in the target format as inputs, so outputs written
@@ -1282,7 +1294,12 @@ fn plan(cli: &Cli) -> Result<Vec<Job>, ConvError> {
     // is an existing file, never overwritten without -y.
     let into_subfolder = cli.to.is_some() && cli.outdir.is_none();
     if into_subfolder {
-        for job in &mut jobs {
+        // Stills are pictures, which a re-run of the same video batch never
+        // takes for its inputs, and are already named for their time.
+        for job in jobs
+            .iter_mut()
+            .filter(|j| !convkit_core::stills::is_pair(j.from, j.to))
+        {
             job.output = in_subfolder(&job.output, &own.suffix);
         }
     }
@@ -1325,6 +1342,40 @@ fn name_pdf_pages(jobs: &mut [Job], cli: &Cli, explicit_output: bool) {
         .filter(|j| convkit_core::pdf::raster::is_pair(j.from, j.to))
     {
         job.output = suffixed_name(&job.output, &a.to_string());
+    }
+}
+
+/// Names the stills a video or GIF gives, as a cut is named: one still
+/// after its time (`clip-12s.png`, `clip-end-5s.png`), and a series after
+/// the folder it goes in, named after the clip and any range
+/// (`clip/clip-0001.png`, `clip-1m00s-2m00s/...`). A typed-out OUT keeps
+/// its name: `shots.png` is one still, or the folder `shots/` of a series.
+fn name_stills(jobs: &mut [Job], cli: &Cli, explicit_output: bool) {
+    use convkit_core::{stills, trim};
+    let tuning = cli.tuning();
+    let range = tuning.range.as_ref();
+    for job in jobs.iter_mut().filter(|j| stills::is_pair(j.from, j.to)) {
+        if stills::is_single(&tuning) {
+            let Some(start) = range.and_then(|r| r.start.as_ref()) else {
+                continue;
+            };
+            if !explicit_output {
+                let label = match start.from_end {
+                    true => format!("end-{}", trim::name_time(start.ms)),
+                    false => trim::name_time(start.ms),
+                };
+                job.output = suffixed_name(&job.output, &label);
+            }
+            continue;
+        }
+        let folder = job.output.with_extension("");
+        job.output = match range.filter(|_| !explicit_output) {
+            Some(r) => {
+                let name = folder.file_name().unwrap_or_default().to_string_lossy();
+                folder.with_file_name(format!("{name}-{}", trim::name_suffix(r)))
+            }
+            None => folder,
+        };
     }
 }
 
@@ -2018,6 +2069,7 @@ mod tests {
             denoise: None,
             copy: false,
             paste: false,
+            every: None,
             yes: false,
             no_install: false,
             outdir,

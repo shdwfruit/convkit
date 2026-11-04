@@ -149,6 +149,7 @@ mod tests {
             copy: false,
             paste: false,
             flip: None,
+            every: None,
             yes,
             no_install,
             outdir: None,

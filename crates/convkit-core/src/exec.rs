@@ -166,6 +166,11 @@ pub struct Outcome {
     /// `ConversionPlan::subtitles`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subtitles: Option<crate::subtitles::SubtitlesReport>,
+    /// The stills a video or GIF gave: one, or a series, whose `output` is
+    /// the folder they are in and whose `bytes` are theirs together. Omitted
+    /// from `--json` for every other conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stills: Option<crate::stills::StillsReport>,
 }
 
 /// Uniquifies each conversion's scratch directory alongside the process id,
@@ -481,7 +486,26 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     // otherwise inherit a silent overwrite. Checked early, before any work
     // (probing, a scratch directory, an actual conversion) is done, so a
     // refusal is cheap rather than discarding a completed transcode.
-    if req.output.exists() && !req.overwrite {
+    // A series writes into a folder, which may be there already: what it
+    // would replace is a series of the same name in the same format.
+    let series = crate::stills::is_series(req.from, req.to, &req.tuning);
+    if series {
+        if let Some(first) = crate::stills::occupied(&req.output, req.to.ext()) {
+            if !req.overwrite {
+                return Err(crate::stills::exists_error(&req.output, &first));
+            }
+        }
+        if req.output.exists() && !req.output.is_dir() {
+            return Err(ConvError::new(
+                ErrorCode::OutputExists,
+                format!(
+                    "{} is a file, and stills are saved into a folder of that name; \
+                     move it or pick another name",
+                    req.output.display()
+                ),
+            ));
+        }
+    } else if req.output.exists() && !req.overwrite {
         return Err(ConvError::new(
             ErrorCode::OutputExists,
             format!("{} exists; pass -y to overwrite", req.output.display()),
@@ -650,6 +674,11 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
     {
         return Err(crate::video::confirmation_error(&req.inputs));
     }
+    if let Some(s) = built.stills.as_ref().filter(|s| s.needs_confirmation) {
+        if !req.allow_extreme {
+            return Err(crate::stills::confirmation_error(&req.inputs[0], s));
+        }
+    }
     let (ran, sizing) = match built.sizing.clone() {
         // JSON, YAML, TOML or CSV: converted here, in process. What the
         // conversion found to say joins the plan's notes.
@@ -733,8 +762,21 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         ..
     } = runner;
 
-    let bytes = file_len(&temp_final)?;
-    std::fs::rename(&temp_final, &req.output).map_err(io_err)?;
+    let mut stills = ran.stills.clone();
+    let bytes = if series {
+        let (count, bytes) = move_series(&temp_final, &req.output, req.to, req.overwrite)?;
+        if let Some(s) = &mut stills {
+            s.written = Some(count);
+        }
+        bytes
+    } else {
+        let bytes = file_len(&temp_final)?;
+        std::fs::rename(&temp_final, &req.output).map_err(io_err)?;
+        if let Some(s) = &mut stills {
+            s.written = Some(1);
+        }
+        bytes
+    };
 
     // A note says what convkit chose; this says what `--upscale` costs, so
     // it goes with the notes the frontend prints as warnings.
@@ -813,7 +855,60 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
         crop,
         audio,
         subtitles,
+        stills,
     })
+}
+
+/// The program `step` runs with ImageMagick found at `resolved`, and whether
+/// its first argument is that program's name rather than an argument.
+/// ImageMagick 6 has no `magick` front end: its `mogrify` is a program of
+/// its own beside `convert`, which conv finds ImageMagick 6 by.
+fn program_for(step: &PlannedStep, resolved: &Path) -> (PathBuf, bool) {
+    let im6_mogrify = step.backend == Backend::Magick
+        && step.argv.first().map(String::as_str) == Some("mogrify")
+        && resolved
+            .file_stem()
+            .is_some_and(|s| s.eq_ignore_ascii_case("convert"));
+    if im6_mogrify {
+        let mogrify = format!("mogrify{}", std::env::consts::EXE_SUFFIX);
+        (resolved.with_file_name(mogrify), true)
+    } else {
+        (resolved.to_path_buf(), false)
+    }
+}
+
+/// Moves a series out of the scratch folder into `dest`, made if missing,
+/// and returns how many files it holds and their bytes together. With
+/// `overwrite`, an earlier series of the same name and format is removed
+/// first, so the folder never mixes two runs' stills; nothing else there is
+/// touched. Each file is renamed on its own, within one filesystem.
+fn move_series(scratch: &Path, dest: &Path, to: Format, overwrite: bool) -> Result<(u64, u64)> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(scratch)
+        .map_err(io_err)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            "no stills were written",
+        ));
+    }
+    std::fs::create_dir_all(dest).map_err(io_err)?;
+    if overwrite {
+        for old in crate::stills::series_files(dest, to.ext()) {
+            std::fs::remove_file(&old).map_err(io_err)?;
+        }
+    }
+    let mut bytes = 0;
+    for f in &files {
+        bytes += file_len(f)?;
+        let name = f.file_name().expect("a listed file has a name");
+        std::fs::rename(f, dest.join(name)).map_err(io_err)?;
+    }
+    Ok((files.len() as u64, bytes))
 }
 
 /// Saves a PDF's pages as images (`pdf::raster`). Reads the page count with
@@ -953,6 +1048,7 @@ fn run_pdf_pages(
         audio: None,
         subtitles: None,
         denoise: None,
+        stills: None,
     })
 }
 
@@ -1067,9 +1163,11 @@ impl StepRunner<'_> {
             self.notes.extend(prepare(p)?);
         }
 
+        let (program, im6_mogrify) = program_for(step, &resolved.path);
+
         // Windows console-window suppression (`CREATE_NO_WINDOW`) is applied
         // inside `backend_command`, not repeated here -- see its docs.
-        let mut cmd = backend_command(&resolved.path);
+        let mut cmd = backend_command(&program);
 
         // Decided before the argv is built so both branches below agree, and
         // per step rather than per run: a two-step recipe can have a short
@@ -1144,6 +1242,17 @@ impl StepRunner<'_> {
             };
             let rest = substitute_backend_paths(&argv, &shifted, verbatim_paths, self.resolver)?;
             cmd.args(&rest);
+        } else if im6_mogrify {
+            // The word itself is the program now, so the recorded positions
+            // shift down by one, as for soffice's placeholder above.
+            let shifted: Vec<usize> = step
+                .path_args
+                .iter()
+                .filter_map(|i| i.checked_sub(1))
+                .collect();
+            let rest =
+                substitute_backend_paths(&step.argv[1..], &shifted, verbatim_paths, self.resolver)?;
+            cmd.args(&rest);
         } else {
             let argv = substitute_backend_paths(
                 &step.argv,
@@ -1156,7 +1265,7 @@ impl StepRunner<'_> {
 
         (self.on_event)(Event::StepSpawned {
             index,
-            program: resolved.path.clone(),
+            program: program.clone(),
             argv: cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -2236,6 +2345,35 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
             "only the last three lines should be kept: {}",
             e.message
         );
+    }
+
+    /// ImageMagick 6's `mogrify` is its own program, so a series of stills
+    /// runs it, not `convert mogrify`; ImageMagick 7's `magick` takes the
+    /// word, and nothing else changes.
+    #[test]
+    fn a_mogrify_step_runs_imagemagick_6s_own_mogrify() {
+        let step = |argv: &[&str], backend: Backend| PlannedStep {
+            backend,
+            program: "magick".into(),
+            argv: argv.iter().map(|a| a.to_string()).collect(),
+            output_mode: OutputMode::Folder,
+            output: PathBuf::from("out"),
+            intermediate_ext: None,
+            path_args: vec![],
+            prepare: vec![],
+            stdin: None,
+        };
+        let exe = std::env::consts::EXE_SUFFIX;
+        let convert = PathBuf::from(format!("/usr/bin/convert{exe}"));
+        let magick = PathBuf::from("/opt/homebrew/bin/magick");
+        let series = step(&["mogrify", "-path", "out"], Backend::Magick);
+        assert_eq!(
+            program_for(&series, &convert),
+            (PathBuf::from(format!("/usr/bin/mogrify{exe}")), true)
+        );
+        assert_eq!(program_for(&series, &magick), (magick.clone(), false));
+        let one = step(&["in.png", "out.jpg"], Backend::Magick);
+        assert_eq!(program_for(&one, &convert), (convert.clone(), false));
     }
 
     /// `--verbose`'s data source: a run must emit `StepSpawned` with the

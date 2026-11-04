@@ -17,7 +17,12 @@ fn every_registered_pair_renders_stable_argv() {
             continue;
         }
         let input = PathBuf::from(format!("in.{}", from.ext()));
-        let output = PathBuf::from(format!("out.{}", to.ext()));
+        // A series of stills is written into a folder.
+        let output = if convkit_core::stills::is_series(from, to, &Default::default()) {
+            PathBuf::from("out")
+        } else {
+            PathBuf::from(format!("out.{}", to.ext()))
+        };
         let p = plan::build(from, to, &[input], &output, None, None)
             .unwrap_or_else(|e| panic!("{from:?}->{to:?} failed to plan: {e}"));
         // A pair conv converts itself has no command to show.

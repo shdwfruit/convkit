@@ -40,6 +40,7 @@ pub mod sized;
 pub mod soundtrack;
 pub mod speech;
 pub mod speed;
+pub mod stills;
 pub mod subtitles;
 pub mod table;
 pub mod text;

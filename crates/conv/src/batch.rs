@@ -102,6 +102,23 @@ pub fn exit_code(results: &[JobResult]) -> i32 {
     }
 }
 
+/// Why `job` would replace something already there: its output file, or
+/// for a series of stills, an earlier series of the same name in its
+/// folder. `None` when nothing is in the way.
+pub fn taken(job: &Job, tuning: &Tuning) -> Option<ConvError> {
+    use convkit_core::stills;
+    if stills::is_series(job.from, job.to, tuning) {
+        return stills::occupied(&job.output, job.to.ext())
+            .map(|first| stills::exists_error(&job.output, &first));
+    }
+    job.output.exists().then(|| {
+        ConvError::new(
+            ErrorCode::OutputExists,
+            format!("{} exists; pass -y to overwrite", job.output.display()),
+        )
+    })
+}
+
 /// Runs every job, in parallel, on a shared `Resolver` (built once so its
 /// per-backend resolution cache is shared across the whole batch rather than
 /// re-probed per job). Returns each job's result, the process exit code (see
@@ -178,11 +195,8 @@ pub fn run_each(
                 let pages = convkit_core::pdf::raster::is_pair(job.from, job.to);
                 let result = if refused {
                     Err(ConvError::unsupported_pair(job.from, job.to))
-                } else if job.output.exists() && !cli.overwrite && !pages {
-                    Err(ConvError::new(
-                        ErrorCode::OutputExists,
-                        format!("{} exists; pass -y to overwrite", job.output.display()),
-                    ))
+                } else if let Some(e) = taken(&job, &tuning).filter(|_| !cli.overwrite && !pages) {
+                    Err(e)
                 } else {
                     let req = exec::Request {
                         from: job.from,
@@ -322,6 +336,7 @@ mod tests {
             crop: None,
             audio: None,
             subtitles: None,
+            stills: None,
         })
     }
 
@@ -399,6 +414,7 @@ mod tests {
             copy: false,
             paste: false,
             flip: None,
+            every: None,
             yes: false,
             no_install: false,
             outdir: None,

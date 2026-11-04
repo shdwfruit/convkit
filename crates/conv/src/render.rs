@@ -92,6 +92,9 @@ pub fn plan_human(plan: &ConversionPlan) -> String {
     if let Some(w) = plan.pages.as_ref().and_then(|p| p.warning.as_ref()) {
         s.push_str(&format!("warning: {w}\n"));
     }
+    if let Some(w) = plan.stills.as_ref().and_then(|st| st.warning.as_ref()) {
+        s.push_str(&format!("warning: {w}\n"));
+    }
     for w in &plan.warnings {
         s.push_str(&format!("note: {w}\n"));
     }
@@ -317,6 +320,9 @@ pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     if let Some(s) = &o.subtitles {
         v["subtitles"] = json!(s);
     }
+    if let Some(st) = &o.stills {
+        v["stills"] = json!(st);
+    }
     v
 }
 
@@ -529,16 +535,32 @@ pub fn conversion_success_human(o: &Outcome, styled: bool) -> String {
         ),
         _ => size_for(o),
     };
-    // A PDF's pages in a folder name the folder, and how many are in it.
-    let mut fields = match o.pages.as_ref().filter(|p| p.folder) {
-        Some(p) => vec![
+    // A PDF's pages in a folder, or a series of stills, name the folder
+    // and how many files are in it.
+    let pages = o
+        .pages
+        .as_ref()
+        .filter(|p| p.folder)
+        .map(|p| p.files.len() as u64);
+    let stills = o
+        .stills
+        .as_ref()
+        .filter(|st| st.series)
+        .and_then(|st| st.written);
+    let mut fields = match (pages, stills) {
+        (Some(n), _) => vec![
+            format!("{name}{}", std::path::MAIN_SEPARATOR),
+            format!("{} pages", convkit_core::pdf::raster::grouped(n as usize)),
+        ],
+        (None, Some(n)) => vec![
             format!("{name}{}", std::path::MAIN_SEPARATOR),
             format!(
-                "{} pages",
-                convkit_core::pdf::raster::grouped(p.files.len())
+                "{} {}",
+                convkit_core::stills::grouped(n),
+                if n == 1 { "still" } else { "stills" }
             ),
         ],
-        None => vec![name],
+        (None, None) => vec![name],
     };
     fields.extend([size, human_elapsed(Duration::from_millis(o.elapsed_ms))]);
     if o.remuxed {
@@ -959,6 +981,7 @@ mod tests {
             crop: None,
             audio: None,
             subtitles: None,
+            stills: None,
         }
     }
 

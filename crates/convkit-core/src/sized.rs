@@ -261,6 +261,7 @@ pub(crate) fn plan(
                 crop: p.crop_report.clone(),
                 audio: None,
                 subtitles: p.subtitles_report.clone(),
+                stills: None,
             });
         }
         if let Some(m) = media::stream_mapped_invocation(
@@ -297,6 +298,7 @@ pub(crate) fn plan(
                 crop: p.crop_report.clone(),
                 audio: None,
                 subtitles: p.subtitles_report.clone(),
+                stills: None,
             });
         }
     }
@@ -693,6 +695,7 @@ fn encode(p: &Prepared<'_>, mut sizing: SizingPlan, aim: Aim) -> Result<Conversi
         crop: p.crop_report.clone(),
         audio: None,
         subtitles: p.subtitles_report.clone(),
+        stills: None,
     })
 }
 

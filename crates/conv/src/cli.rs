@@ -326,6 +326,16 @@ pub struct Cli {
     #[arg(long, value_name = "DIRECTION", value_parser = parse_flip)]
     pub flip: Option<convkit_core::rotate::Flip>,
 
+    /// Save a still every TIME from a video or GIF (2s, 0.5, 1:00), or
+    /// every frame with `frame`: `conv clip.mp4 .jpg --every 2s` writes
+    /// clip/clip-0001.jpg and on. With --start/--end/--duration, the stills
+    /// come from that part. Without it, a video gives 10 stills spread
+    /// across it, a GIF every frame, and --start TIME alone the one still
+    /// at TIME, as clip-12s.png.
+    // Not `global` -- see `dry_run`'s comment.
+    #[arg(long, value_name = "TIME", value_parser = parse_every)]
+    pub every: Option<convkit_core::stills::Every>,
+
     /// Copy what was written to the clipboard, ready to paste: a picture
     /// as itself (and its file), an md, csv, html, txt, json, yaml or toml
     /// file as its text, and anything else, or several outputs, as the
@@ -1360,6 +1370,10 @@ fn parse_rate(s: &str) -> Result<u16, String> {
     Ok(wpm)
 }
 
+fn parse_every(s: &str) -> Result<convkit_core::stills::Every, String> {
+    convkit_core::stills::parse_every(s)
+}
+
 impl Cli {
     /// The tuning this invocation asked for — empty (registry defaults)
     /// unless one of `--resize`/`--quality`/`--colors`/`--fps`/`--crf`/
@@ -1402,6 +1416,7 @@ impl Cli {
                 }),
             subtitles: self.subtitles.clone(),
             flip: self.flip,
+            every: self.every.clone(),
         }
     }
 
@@ -1514,6 +1529,7 @@ mod tests {
             copy: false,
             paste: false,
             flip: None,
+            every: None,
             yes: false,
             no_install: false,
             outdir: None,

@@ -11,6 +11,10 @@ aiff -> wav: ffmpeg -i in.aiff -vn -c:a pcm_s16le -y out.wav
 avi -> aiff: ffmpeg -i in.avi -vn -c:a pcm_s16be -y out.aiff
 avi -> flac: ffmpeg -i in.avi -vn -c:a flac -y out.flac
 avi -> gif: ffmpeg -i in.avi -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+avi -> heic: ffmpeg -i in.avi -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+avi -> heic: magick mogrify -path out -format heic -quality 60 out.convkit-step0/*.png
+avi -> jpg: ffmpeg -i in.avi -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+avi -> jpg: magick mogrify -path out -format jpg -background white -alpha remove -alpha off -quality 92 out.convkit-step0/*.png
 avi -> m4a: ffmpeg -i in.avi -vn -c:a aac -b:a 192k -y out.m4a
 avi -> mkv: ffmpeg -i in.avi -map 0 -map -0:d -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -c:s copy -y out.mkv
 avi -> mov: ffmpeg -i in.avi -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mov
@@ -18,8 +22,11 @@ avi -> mp3: ffmpeg -i in.avi -vn -c:a libmp3lame -q:a 2 -y out.mp3
 avi -> mp4: ffmpeg -i in.avi -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mp4
 avi -> ogg: ffmpeg -i in.avi -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 avi -> opus: ffmpeg -i in.avi -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
+avi -> png: ffmpeg -i in.avi -map 0:v:0 -fps_mode passthrough -y out/out-%04d.png
 avi -> wav: ffmpeg -i in.avi -vn -c:a pcm_s16le -y out.wav
 avi -> webm: ffmpeg -i in.avi -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+avi -> webp: ffmpeg -i in.avi -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+avi -> webp: magick mogrify -path out -format webp -quality 92 out.convkit-step0/*.png
 avif -> bmp: magick in.avif[0] -auto-orient out.bmp
 avif -> heic: magick in.avif[0] -auto-orient -quality 60 out.heic
 avif -> jpg: magick in.avif[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
@@ -49,8 +56,13 @@ flac -> mp3: ffmpeg -i in.flac -map 0:a -map 0:v? -c:v copy -c:a libmp3lame -q:a
 flac -> ogg: ffmpeg -i in.flac -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 flac -> opus: ffmpeg -i in.flac -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
 flac -> wav: ffmpeg -i in.flac -vn -c:a pcm_s16le -y out.wav
+gif -> heic: ffmpeg -i in.gif -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+gif -> heic: magick mogrify -path out -format heic -quality 60 out.convkit-step0/*.png
+gif -> jpg: ffmpeg -i in.gif -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+gif -> jpg: magick mogrify -path out -format jpg -background white -alpha remove -alpha off -quality 92 out.convkit-step0/*.png
 gif -> mp4: ffmpeg -i in.gif -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -pix_fmt yuv420p -movflags +faststart -y out.mp4
 gif -> pdf: typst compile --root . --ignore-system-fonts --diagnostic-format short out.convkit-layout.typ out.pdf
+gif -> png: ffmpeg -i in.gif -map 0:v:0 -fps_mode passthrough -y out/out-%04d.png
 heic -> avif: magick in.heic -auto-orient -quality 92 out.avif
 heic -> bmp: magick in.heic[0] -auto-orient out.bmp
 heic -> jpg: magick in.heic[0] -auto-orient -background white -alpha remove -alpha off -quality 92 out.jpg
@@ -99,25 +111,39 @@ md -> txt: pandoc in.md -t plain --wrap=none -o out.txt
 mkv -> aiff: ffmpeg -i in.mkv -vn -c:a pcm_s16be -y out.aiff
 mkv -> flac: ffmpeg -i in.mkv -vn -c:a flac -y out.flac
 mkv -> gif: ffmpeg -i in.mkv -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+mkv -> heic: ffmpeg -i in.mkv -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+mkv -> heic: magick mogrify -path out -format heic -quality 60 out.convkit-step0/*.png
+mkv -> jpg: ffmpeg -i in.mkv -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+mkv -> jpg: magick mogrify -path out -format jpg -background white -alpha remove -alpha off -quality 92 out.convkit-step0/*.png
 mkv -> m4a: ffmpeg -i in.mkv -vn -c:a aac -b:a 192k -y out.m4a
 mkv -> mov: ffmpeg -i in.mkv -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mov
 mkv -> mp3: ffmpeg -i in.mkv -vn -c:a libmp3lame -q:a 2 -y out.mp3
 mkv -> mp4: ffmpeg -i in.mkv -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mp4
 mkv -> ogg: ffmpeg -i in.mkv -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 mkv -> opus: ffmpeg -i in.mkv -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
+mkv -> png: ffmpeg -i in.mkv -map 0:v:0 -fps_mode passthrough -y out/out-%04d.png
 mkv -> wav: ffmpeg -i in.mkv -vn -c:a pcm_s16le -y out.wav
 mkv -> webm: ffmpeg -i in.mkv -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+mkv -> webp: ffmpeg -i in.mkv -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+mkv -> webp: magick mogrify -path out -format webp -quality 92 out.convkit-step0/*.png
 mov -> aiff: ffmpeg -i in.mov -vn -c:a pcm_s16be -y out.aiff
 mov -> flac: ffmpeg -i in.mov -vn -c:a flac -y out.flac
 mov -> gif: ffmpeg -i in.mov -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+mov -> heic: ffmpeg -i in.mov -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+mov -> heic: magick mogrify -path out -format heic -quality 60 out.convkit-step0/*.png
+mov -> jpg: ffmpeg -i in.mov -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+mov -> jpg: magick mogrify -path out -format jpg -background white -alpha remove -alpha off -quality 92 out.convkit-step0/*.png
 mov -> m4a: ffmpeg -i in.mov -vn -c:a aac -b:a 192k -y out.m4a
 mov -> mkv: ffmpeg -i in.mov -map 0 -map -0:d -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -c:s srt -y out.mkv
 mov -> mp3: ffmpeg -i in.mov -vn -c:a libmp3lame -q:a 2 -y out.mp3
 mov -> mp4: ffmpeg -i in.mov -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mp4
 mov -> ogg: ffmpeg -i in.mov -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 mov -> opus: ffmpeg -i in.mov -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
+mov -> png: ffmpeg -i in.mov -map 0:v:0 -fps_mode passthrough -y out/out-%04d.png
 mov -> wav: ffmpeg -i in.mov -vn -c:a pcm_s16le -y out.wav
 mov -> webm: ffmpeg -i in.mov -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+mov -> webp: ffmpeg -i in.mov -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+mov -> webp: magick mogrify -path out -format webp -quality 92 out.convkit-step0/*.png
 mp3 -> aiff: ffmpeg -i in.mp3 -vn -c:a pcm_s16be -y out.aiff
 mp3 -> flac: ffmpeg -i in.mp3 -map 0:a -map 0:v? -c:v copy -c:a flac -y out.flac
 mp3 -> m4a: ffmpeg -i in.mp3 -map 0:a -map 0:v? -c:v copy -c:a aac -b:a 192k -y out.m4a
@@ -127,14 +153,21 @@ mp3 -> wav: ffmpeg -i in.mp3 -vn -c:a pcm_s16le -y out.wav
 mp4 -> aiff: ffmpeg -i in.mp4 -vn -c:a pcm_s16be -y out.aiff
 mp4 -> flac: ffmpeg -i in.mp4 -vn -c:a flac -y out.flac
 mp4 -> gif: ffmpeg -i in.mp4 -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+mp4 -> heic: ffmpeg -i in.mp4 -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+mp4 -> heic: magick mogrify -path out -format heic -quality 60 out.convkit-step0/*.png
+mp4 -> jpg: ffmpeg -i in.mp4 -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+mp4 -> jpg: magick mogrify -path out -format jpg -background white -alpha remove -alpha off -quality 92 out.convkit-step0/*.png
 mp4 -> m4a: ffmpeg -i in.mp4 -vn -c:a aac -b:a 192k -y out.m4a
 mp4 -> mkv: ffmpeg -i in.mp4 -map 0 -map -0:d -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -c:s srt -y out.mkv
 mp4 -> mov: ffmpeg -i in.mp4 -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mov
 mp4 -> mp3: ffmpeg -i in.mp4 -vn -c:a libmp3lame -q:a 2 -y out.mp3
 mp4 -> ogg: ffmpeg -i in.mp4 -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 mp4 -> opus: ffmpeg -i in.mp4 -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
+mp4 -> png: ffmpeg -i in.mp4 -map 0:v:0 -fps_mode passthrough -y out/out-%04d.png
 mp4 -> wav: ffmpeg -i in.mp4 -vn -c:a pcm_s16le -y out.wav
 mp4 -> webm: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -threads 0 -deadline good -cpu-used 4 -c:a libopus -b:a 128k -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.webm
+mp4 -> webp: ffmpeg -i in.mp4 -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+mp4 -> webp: magick mogrify -path out -format webp -quality 92 out.convkit-step0/*.png
 ods -> csv: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to csv:Text - txt - csv (StarCalc):44,34,76,1,,1033,false,true,false,false,false,0 --outdir . in.ods
 ods -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore macro:///Convkit.Sheets.ToPdf("in.ods","out.pdf")
 odt -> pdf: soffice -env:UserInstallation=<per-run temp profile> --headless --norestore --convert-to pdf --outdir . in.odt
@@ -205,6 +238,10 @@ wav -> opus: ffmpeg -i in.wav -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=c
 webm -> aiff: ffmpeg -i in.webm -vn -c:a pcm_s16be -y out.aiff
 webm -> flac: ffmpeg -i in.webm -vn -c:a flac -y out.flac
 webm -> gif: ffmpeg -i in.webm -vf fps=15,scale=w=min(640\,iw):h=-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3 -loop 0 -y out.gif
+webm -> heic: ffmpeg -i in.webm -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+webm -> heic: magick mogrify -path out -format heic -quality 60 out.convkit-step0/*.png
+webm -> jpg: ffmpeg -i in.webm -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+webm -> jpg: magick mogrify -path out -format jpg -background white -alpha remove -alpha off -quality 92 out.convkit-step0/*.png
 webm -> m4a: ffmpeg -i in.webm -vn -c:a aac -b:a 192k -y out.m4a
 webm -> mkv: ffmpeg -i in.webm -map 0 -map -0:d -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -c:s copy -y out.mkv
 webm -> mov: ffmpeg -i in.webm -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mov
@@ -212,7 +249,10 @@ webm -> mp3: ffmpeg -i in.webm -vn -c:a libmp3lame -q:a 2 -y out.mp3
 webm -> mp4: ffmpeg -i in.webm -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -c:a aac -b:a 160k -sn -movflags +faststart -y out.mp4
 webm -> ogg: ffmpeg -i in.webm -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.ogg
 webm -> opus: ffmpeg -i in.webm -vn -c:a libopus -b:a 128k -ar 48000 -af aformat=channel_layouts=7.1|5.1|stereo|mono -y out.opus
+webm -> png: ffmpeg -i in.webm -map 0:v:0 -fps_mode passthrough -y out/out-%04d.png
 webm -> wav: ffmpeg -i in.webm -vn -c:a pcm_s16le -y out.wav
+webm -> webp: ffmpeg -i in.webm -map 0:v:0 -fps_mode passthrough -y out.convkit-step0/out-%04d.png
+webm -> webp: magick mogrify -path out -format webp -quality 92 out.convkit-step0/*.png
 webp -> avif: magick in.webp -auto-orient -quality 92 out.avif
 webp -> bmp: magick in.webp[0] -auto-orient out.bmp
 webp -> heic: magick in.webp[0] -auto-orient -quality 60 out.heic

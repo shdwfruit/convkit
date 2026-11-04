@@ -12,8 +12,13 @@
 
 use convkit_core::{registry, Format, Kind};
 
-/// Whether `(from, to)` is a pair this harness measures.
+/// Whether `(from, to)` is a pair this harness measures. Stills from a
+/// GIF (`gif -> png`) are left out: they write a folder of frames, not the
+/// one file this harness compares.
 pub fn in_scope(from: Format, to: Format) -> bool {
+    if registry::is_stills_pair(from, to) {
+        return false;
+    }
     let both_image = from.kind() == Kind::Image && to.kind() == Kind::Image;
     let gif_pathway = to == Format::Gif || (from == Format::Gif && to.kind() == Kind::Video);
     both_image || gif_pathway

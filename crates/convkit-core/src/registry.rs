@@ -1645,6 +1645,208 @@ fn insert_media_family(t: &mut Table) {
     t.insert((Format::Gif, Format::Mp4), GIF_TO_MP4);
 }
 
+// --- Stills family -----------------------------------------------------------
+
+/// The picture formats a video or a GIF gives stills in. GIF -> WebP is left
+/// out: converting a GIF to WebP means an animated WebP, not a folder of
+/// stills.
+const STILL_TARGETS: &[Format] = &[Format::Png, Format::Jpg, Format::Webp, Format::Heic];
+
+/// What `conv capabilities` says about every stills pair. `stills::plan`
+/// writes its own notes for the run instead.
+const STILLS_NOTE: &str = "Saves stills into a folder named after the source: 10 spread \
+     evenly across it (every frame of a GIF), one every TIME with --every TIME, or every \
+     frame with --every frame. --start TIME alone saves the one still at TIME.";
+
+/// ffmpeg draws the stills, upright: it applies a phone video's display
+/// matrix on decode, before the filter chain. Only the first video stream
+/// is read, so cover art in a second one is never taken for the picture. A
+/// series goes to a numbered pattern in a folder the executor makes.
+const GRAB_SERIES: &[Arg] = &[
+    Arg::StillsSeek,
+    Arg::Lit("-i"),
+    Arg::Input,
+    Arg::Lit("-map"),
+    Arg::Lit("0:v:0"),
+    Arg::StillsPick,
+    Arg::Lit("-y"),
+    Arg::FramePattern("png"),
+];
+
+/// One still: `-update 1` tells the image2 muxer the name is one file, not
+/// a pattern it should warn about.
+const GRAB_ONE: &[Arg] = &[
+    Arg::StillsSeek,
+    Arg::Lit("-i"),
+    Arg::Input,
+    Arg::Lit("-map"),
+    Arg::Lit("0:v:0"),
+    Arg::StillsPick,
+    Arg::Lit("-update"),
+    Arg::Lit("1"),
+    Arg::Lit("-y"),
+    Arg::Output,
+];
+
+macro_rules! grab_step {
+    ($args:expr, $output:expr, $intermediate:expr) => {
+        Step {
+            backend: Backend::Ffmpeg,
+            args: $args,
+            output: $output,
+            intermediate_ext: $intermediate,
+        }
+    };
+}
+
+/// A lossy still is drawn by ffmpeg as a lossless PNG and encoded by
+/// ImageMagick, as every other picture conv writes in that format is: the
+/// same encoder, the same quality anchor, and `--quality` means the same.
+/// JPEG flattens a GIF's transparency onto white, as `IMG_TO_JPG` does.
+macro_rules! encode_still {
+    (one, $($arg:expr),*) => {
+        Step {
+            backend: Backend::Magick,
+            args: &[Arg::Input, $($arg,)* Arg::Output],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        }
+    };
+    (series, $ext:expr, $($arg:expr),*) => {
+        Step {
+            backend: Backend::Magick,
+            args: &[
+                Arg::Lit("mogrify"),
+                Arg::Lit("-path"),
+                Arg::FramesDir,
+                Arg::Lit("-format"),
+                Arg::Lit($ext),
+                $($arg,)*
+                Arg::InputFrames("png"),
+            ],
+            output: OutputMode::Folder,
+            intermediate_ext: None,
+        }
+    };
+}
+
+const ONE_TO_PNG: Recipe = Recipe {
+    steps: &[grab_step!(GRAB_ONE, OutputMode::Path, None)],
+    warnings: &[STILLS_NOTE],
+};
+const ONE_TO_JPG: Recipe = Recipe {
+    steps: &[
+        grab_step!(GRAB_ONE, OutputMode::Path, Some("png")),
+        encode_still!(
+            one,
+            Arg::Lit("-background"),
+            Arg::Lit("white"),
+            Arg::Lit("-alpha"),
+            Arg::Lit("remove"),
+            Arg::Lit("-alpha"),
+            Arg::Lit("off"),
+            Arg::Lit("-quality"),
+            Arg::Quality(IMAGE_QUALITY)
+        ),
+    ],
+    warnings: &[STILLS_NOTE],
+};
+const ONE_TO_WEBP: Recipe = Recipe {
+    steps: &[
+        grab_step!(GRAB_ONE, OutputMode::Path, Some("png")),
+        encode_still!(one, Arg::Lit("-quality"), Arg::Quality(IMAGE_QUALITY)),
+    ],
+    warnings: &[STILLS_NOTE],
+};
+const ONE_TO_HEIC: Recipe = Recipe {
+    steps: &[
+        grab_step!(GRAB_ONE, OutputMode::Path, Some("png")),
+        encode_still!(one, Arg::Lit("-quality"), Arg::Quality(HEIC_QUALITY)),
+    ],
+    warnings: &[STILLS_NOTE],
+};
+
+const SERIES_TO_PNG: Recipe = Recipe {
+    steps: &[grab_step!(GRAB_SERIES, OutputMode::Folder, None)],
+    warnings: &[STILLS_NOTE],
+};
+const SERIES_TO_JPG: Recipe = Recipe {
+    steps: &[
+        grab_step!(GRAB_SERIES, OutputMode::Folder, Some("png")),
+        encode_still!(
+            series,
+            "jpg",
+            Arg::Lit("-background"),
+            Arg::Lit("white"),
+            Arg::Lit("-alpha"),
+            Arg::Lit("remove"),
+            Arg::Lit("-alpha"),
+            Arg::Lit("off"),
+            Arg::Lit("-quality"),
+            Arg::Quality(IMAGE_QUALITY)
+        ),
+    ],
+    warnings: &[STILLS_NOTE],
+};
+const SERIES_TO_WEBP: Recipe = Recipe {
+    steps: &[
+        grab_step!(GRAB_SERIES, OutputMode::Folder, Some("png")),
+        encode_still!(
+            series,
+            "webp",
+            Arg::Lit("-quality"),
+            Arg::Quality(IMAGE_QUALITY)
+        ),
+    ],
+    warnings: &[STILLS_NOTE],
+};
+const SERIES_TO_HEIC: Recipe = Recipe {
+    steps: &[
+        grab_step!(GRAB_SERIES, OutputMode::Folder, Some("png")),
+        encode_still!(
+            series,
+            "heic",
+            Arg::Lit("-quality"),
+            Arg::Quality(HEIC_QUALITY)
+        ),
+    ],
+    warnings: &[STILLS_NOTE],
+};
+
+/// The recipe for stills in `to`: a folder of them, or one.
+pub(crate) fn stills_recipe(to: Format, series: bool) -> Option<Recipe> {
+    Some(match (to, series) {
+        (Format::Png, true) => SERIES_TO_PNG,
+        (Format::Jpg, true) => SERIES_TO_JPG,
+        (Format::Webp, true) => SERIES_TO_WEBP,
+        (Format::Heic, true) => SERIES_TO_HEIC,
+        (Format::Png, false) => ONE_TO_PNG,
+        (Format::Jpg, false) => ONE_TO_JPG,
+        (Format::Webp, false) => ONE_TO_WEBP,
+        (Format::Heic, false) => ONE_TO_HEIC,
+        _ => return None,
+    })
+}
+
+/// Whether `from -> to` saves stills: a video, or a GIF, into a picture.
+pub fn is_stills_pair(from: Format, to: Format) -> bool {
+    STILL_TARGETS.contains(&to)
+        && (VIDEO.contains(&from) || (from == Format::Gif && to != Format::Webp))
+}
+
+/// The table holds the series recipes, which is what a run with no time
+/// writes.
+fn insert_stills_family(t: &mut Table) {
+    for &from in VIDEO.iter().chain([Format::Gif].iter()) {
+        for &to in STILL_TARGETS {
+            if is_stills_pair(from, to) {
+                let recipe = stills_recipe(to, true).expect("every still target has a recipe");
+                t.insert((from, to), recipe);
+            }
+        }
+    }
+}
+
 // --- Document family ---------------------------------------------------------
 
 /// LibreOffice writes into a directory and names the file itself. The second
@@ -2541,6 +2743,7 @@ static TABLE: LazyLock<Table> = LazyLock::new(|| {
     let mut t = Table::new();
     insert_image_family(&mut t);
     insert_media_family(&mut t);
+    insert_stills_family(&mut t);
     insert_document_family(&mut t);
     insert_data_family(&mut t);
     insert_speech_family(&mut t);
@@ -3059,6 +3262,9 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
     // Denoised sound needs to know there is sound, and is filtered while the
     // probe-aware mapping copies the picture.
     let denoised = tuning.denoise.is_some() && crate::denoise::takes_denoise(from, to);
+    // Stills are placed against the file's length and frame rate, and a
+    // run with no time spreads them across it.
+    let stills = is_stills_pair(from, to);
     sized
         || webm_knob
         || cut
@@ -3068,6 +3274,7 @@ pub fn requires_probe(from: Format, to: Format, tuning: &Tuning) -> bool {
         || new_sound
         || subtitled
         || denoised
+        || stills
 }
 
 /// What a format cut into itself runs (`conv talk.mp4 --start 1:02`): the
@@ -3513,6 +3720,11 @@ mod tests {
             // carry none either, and their recipes only name their backends
             // (`pdf::raster` plans the commands and refuses the flag).
             if speaks(from, to) || crate::pdf::raster::is_pair(from, to) {
+                continue;
+            }
+            // A still saved from a video carries none of its metadata, so
+            // stills refuse the flag (`stills::plan`).
+            if is_stills_pair(from, to) {
                 continue;
             }
             let r = lookup(from, to).unwrap();
@@ -5178,6 +5390,12 @@ mod tests {
     #[test]
     fn every_ffmpeg_recipe_and_only_those_can_be_cut() {
         for (from, to) in all_pairs() {
+            // Stills place a range themselves (`stills::plan`): it picks
+            // the frames rather than cutting the source.
+            if is_stills_pair(from, to) {
+                assert!(!takes_range(from, to), "{from:?} -> {to:?}");
+                continue;
+            }
             let ffmpeg = backends_for(from, to) == [Backend::Ffmpeg];
             assert_eq!(takes_range(from, to), ffmpeg, "{from:?} -> {to:?}");
         }
