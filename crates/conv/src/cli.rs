@@ -796,20 +796,33 @@ changes nothing, and exits non-zero if anything is.")]
         #[arg(long)]
         check: bool,
     },
-    /// Join PDFs into one, in the order given: `conv merge a.pdf b.pdf out.pdf`.
+    /// Join files into one, in the order given: PDFs and pictures into a PDF,
+    /// videos into a video, sound into an audio file.
     #[command(long_about = "\
-Joins PDFs into one, in the order given. The last argument is the output; it \
-must end in .pdf, and conv refuses to replace an existing file unless -y is \
-given. A folder adds every PDF directly inside it, in natural order (p2 \
-before p10).
+Joins files into one, in the order given. The last argument is the output, \
+and its extension says what is made: .pdf from PDFs and pictures, a video \
+(.mp4, .mov, .mkv, .webm) from videos, or an audio file (.mp3, .m4a, .wav, \
+.flac, .opus, .ogg) from audio files and the sound of videos. conv refuses \
+to replace an existing file unless -y is given. A folder adds every file \
+directly inside it that the output takes, in natural order (p2 before p10).
 
-qpdf does the work, rewriting the files' structure rather than re-rendering \
-pages, so text stays selectable and links keep working. The first file's \
-bookmarks are kept; later files' bookmarks and every file's permission \
-restrictions are not, and conv prints a note when that happens.
+PDFs are joined by qpdf, which rewrites the files' structure rather than \
+re-rendering pages, so text stays selectable and links keep working. The \
+first file's bookmarks are kept; later files' bookmarks and every file's \
+permission restrictions are not, and conv prints a note when that happens. \
+A picture among PDFs gets a page the size of the PDF page beside it, turned \
+to suit the picture, with the picture centred at its own size or shrunk to \
+fit. Pictures alone get a page each of their own size, as `conv a.jpg b.jpg \
+out.pdf` makes.
 
 A PDF that needs a password to open is asked for it, or opened with \
-CONVKIT_PASSWORD. --password locks the merged file.")]
+CONVKIT_PASSWORD. --password locks the merged PDF.
+
+Videos and audio files that match (codecs, picture size, frame rate, sound) \
+are joined without re-encoding. Otherwise every clip is encoded once to the \
+first one's size, frame rate and sound: a clip of another shape is scaled \
+to fit, with black bars, never stretched, a clip without sound is silent \
+for its length, and a note says which files differed and how.")]
     Merge(MergeArgs),
 
     /// Split a PDF into one file per page, or one per page range.
@@ -898,22 +911,39 @@ pub struct SpeakArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct MergeArgs {
-    /// PDFs to join, then the output file: `a.pdf b.pdf out.pdf`. A folder
-    /// adds every PDF in it.
-    #[arg(required = true, value_name = "PDF")]
+    /// Files to join, then the output file: `a.pdf b.pdf out.pdf`,
+    /// `a.mp4 b.mov out.mp4`. A folder adds every file in it the output
+    /// takes.
+    #[arg(required = true, value_name = "FILE")]
     pub paths: Vec<PathBuf>,
 
     /// Overwrite the output if it exists.
     #[arg(short = 'y', long)]
     pub overwrite: bool,
 
-    /// Print the qpdf command instead of running it.
+    /// Print the backend commands instead of running them.
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Show the qpdf command as it runs, and qpdf's own output.
+    /// Show each backend command as it runs, and the backend's own output.
     #[arg(short = 'v', long)]
     pub verbose: bool,
+
+    /// Videos only: fit the joined video within this size (1280x720, 1280x,
+    /// x720, 50%), never larger than the first clip. Encodes every clip.
+    #[arg(long, value_name = "GEOMETRY", value_parser = parse_resize_geometry)]
+    pub resize: Option<String>,
+
+    /// Videos only: the encode's quality, 0-51 for mp4, mov and mkv, 0-63 for
+    /// webm; lower is better. Encodes every clip.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=63))]
+    pub crf: Option<u8>,
+
+    /// Videos only: keep the joined video at or under this size (25mb,
+    /// 1.5gb), choosing resolution, frame rate and bitrates to fit, as
+    /// `conv clip.mp4 --max-size` does.
+    #[arg(long, value_name = "SIZE", value_parser = parse_max_size, conflicts_with = "crf")]
+    pub max_size: Option<convkit_core::size::MaxSize>,
 
     #[command(flatten)]
     pub lock: LockArgs,

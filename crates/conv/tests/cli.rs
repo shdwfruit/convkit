@@ -4412,16 +4412,60 @@ fn merge_needs_an_output() {
         .args(["merge", "a.pdf"])
         .assert()
         .code(2)
-        .stderr(contains("expected PDFs and then an output"));
+        .stderr(contains("expected files and then an output"));
 }
 
 #[test]
-fn merge_points_images_at_the_image_merge() {
+fn merge_points_a_document_at_its_conversion() {
     conv()
-        .args(["merge", "a.png", "b.pdf", "out.pdf"])
+        .args(["merge", "notes.docx", "b.pdf", "out.pdf"])
         .assert()
         .code(2)
-        .stderr(contains("a.png is not one").and(contains("conv a.png b.png out.pdf")));
+        .stderr(contains("notes.docx is neither").and(contains("conv notes.docx .pdf")));
+}
+
+#[test]
+fn merge_refuses_video_knobs_on_a_pdf() {
+    conv()
+        .args(["merge", "a.pdf", "b.png", "out.pdf", "--crf", "20"])
+        .assert()
+        .code(2)
+        .stderr(contains("--crf works on a merge of videos, not on out.pdf"));
+}
+
+#[test]
+fn merge_into_a_gif_says_how_to_make_one() {
+    conv()
+        .args(["merge", "a.mp4", "b.mp4", "out.gif"])
+        .assert()
+        .code(2)
+        .stderr(contains("conv merged.mp4 .gif"));
+}
+
+#[test]
+fn merge_refuses_picture_knobs_on_sound() {
+    conv()
+        .args(["merge", "a.mp3", "b.mp3", "out.mp3", "--max-size", "5mb"])
+        .assert()
+        .code(2)
+        .stderr(contains(
+            "--max-size works on a merge of videos; out.mp3 holds only sound",
+        ));
+}
+
+#[test]
+fn merge_without_ffprobe_reports_it_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.mp4"), b"x").unwrap();
+    std::fs::write(dir.path().join("b.mp4"), b"x").unwrap();
+    let (mut cmd, _empty_path, _empty_managed_dir) = command_with_no_backends();
+    cmd.current_dir(dir.path())
+        .args(["merge", "a.mp4", "b.mp4", "out.mp4", "--no-install"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(3)
+        .stderr(contains("FAIL out.mp4").and(contains("ffprobe not found")));
+    assert!(!dir.path().join("out.mp4").exists());
 }
 
 #[test]
@@ -4580,6 +4624,95 @@ fn merge_end_to_end_prints_the_ok_line_and_json() {
     let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
     assert_eq!(v["results"][0]["pages"], 6);
     assert_eq!(v["results"][0]["inputs"][1], "b.pdf");
+}
+
+/// A two-second clip made with ffmpeg, as `conv merge` gets them.
+fn make_clip(dir: &Path, name: &str, size: &str) {
+    let out = std::process::Command::new("ffmpeg")
+        .current_dir(dir)
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!("testsrc2=s={size}:r=30:d=2"))
+        .args([
+            "-f", "lavfi", "-i", "sine=d=2", "-c:v", "libx264", "-c:a", "aac", name,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+#[ignore = "requires ffmpeg; run with --ignored"]
+fn merge_of_videos_end_to_end_copies_or_says_why_not() {
+    let dir = tempfile::tempdir().unwrap();
+    make_clip(dir.path(), "a.mp4", "320x180");
+    make_clip(dir.path(), "b.mp4", "320x180");
+    make_clip(dir.path(), "c.mp4", "160x120");
+    conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.mp4", "b.mp4", "ab.mp4"])
+        .assert()
+        .success()
+        .stdout(
+            contains("OK ab.mp4 - 2 files, 0:04 - ").and(contains("stream copy, no re-encode")),
+        );
+    conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.mp4", "c.mp4", "ac.mp4", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("concat=n=2:v=1:a=1[v][a]").and(contains(
+            "note: Re-encoded to 320x180 at 30 fps, as a.mp4 is, since the clips differ: \
+             c.mp4 is 160x120.",
+        )));
+    let out = conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.mp4", "c.mp4", "ac.mp4", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["results"][0]["remuxed"], false);
+    assert_eq!(v["results"][0]["width"], 320);
+    assert_eq!(v["results"][0]["inputs"][1], "c.mp4");
+    conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.mp4", "b.mp4", "ab.mp4"])
+        .assert()
+        .code(2)
+        .stderr(
+            contains("ab.mp4 exists; pass -y to overwrite").and(contains(
+                "try  conv merge a.mp4 b.mp4 ab.mp4 merged.mp4 (if ab.mp4 was meant as an input)",
+            )),
+        );
+}
+
+#[test]
+#[ignore = "requires qpdf, typst and ffmpeg; run with --ignored"]
+fn merge_of_pdfs_and_pictures_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("a.pdf")).unwrap();
+    let made = std::process::Command::new("ffmpeg")
+        .current_dir(dir.path())
+        .args(["-v", "error", "-f", "lavfi", "-i", "color=red:s=800x600"])
+        .args(["-frames:v", "1", "scan.png"])
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.pdf", "scan.png", "out.pdf", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("typst compile").and(contains("qpdf --decrypt a.pdf --pages .")));
+    conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.pdf", "scan.png", "out.pdf"])
+        .assert()
+        .success()
+        .stdout(contains("OK out.pdf - 4 pages - "));
 }
 
 #[test]

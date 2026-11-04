@@ -800,11 +800,15 @@ pub(crate) fn expand_globs(paths: &[PathBuf], globbable: usize) -> Vec<PathBuf> 
     out
 }
 
-/// Every PDF directly inside `dir`, in natural order (`p2` before `p10`),
-/// leaving out `exclude`: the merge's own output, so a rerun of `conv merge
-/// scans/ scans/all.pdf -y` does not fold the previous result into the new
-/// one.
-pub(crate) fn pdfs_in(dir: &Path, exclude: &Path) -> Result<Vec<PathBuf>, ConvError> {
+/// Every file directly inside `dir` whose format `keep` takes, in natural
+/// order (`p2` before `p10`), leaving out `exclude`: the merge's own
+/// output, so a rerun of `conv merge scans/ scans/all.pdf -y` does not fold
+/// the previous result into the new one.
+pub(crate) fn files_in(
+    dir: &Path,
+    exclude: &Path,
+    keep: impl Fn(Format) -> bool,
+) -> Result<Vec<PathBuf>, ConvError> {
     let entries = std::fs::read_dir(dir).map_err(|e| {
         ConvError::new(
             ErrorCode::InvalidInvocation,
@@ -815,7 +819,7 @@ pub(crate) fn pdfs_in(dir: &Path, exclude: &Path) -> Result<Vec<PathBuf>, ConvEr
     let mut found: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_file() && Format::from_path(p) == Some(Format::Pdf))
+        .filter(|p| p.is_file() && Format::from_path(p).is_some_and(&keep))
         .filter(|p| collision_key(p) != skip)
         .collect();
     found.sort_by(|a, b| {
@@ -1214,14 +1218,17 @@ mod tests {
     }
 
     #[test]
-    fn pdfs_in_lists_pdfs_in_natural_order_and_leaves_out_the_merge_output() {
+    fn files_in_lists_pdfs_in_natural_order_and_leaves_out_the_merge_output() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["p10.pdf", "p2.pdf", "p1.PDF", "all.pdf", "notes.txt"] {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
         std::fs::create_dir(dir.path().join("sub.pdf")).unwrap();
 
-        let found = pdfs_in(dir.path(), &dir.path().join("all.pdf")).unwrap();
+        let found = files_in(dir.path(), &dir.path().join("all.pdf"), |f| {
+            f == Format::Pdf
+        })
+        .unwrap();
 
         assert_eq!(names(&found), vec!["p1.PDF", "p2.pdf", "p10.pdf"]);
     }

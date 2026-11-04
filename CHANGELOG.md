@@ -53,6 +53,16 @@
   `pages` open locked PDFs too, asking for the password or reading
   `CONVKIT_PASSWORD`, and `--password` locks what they write. A password
   never goes on qpdf's command line.
+- **`conv merge` takes pictures among PDFs, and joins video and audio.**
+  `conv merge scan.pdf receipt.jpg out.pdf` puts each picture on a page the
+  size of the PDF page next to it, turned to suit it, with the picture at
+  its own size or shrunk to fit. `conv merge a.mp4 b.mov out.mp4` and
+  `conv merge *.mp3 album.mp3` join video and audio files, without
+  re-encoding when they match. When they don't, every clip is encoded once
+  to the first one's size, frame rate and sound, scaled and padded rather
+  than stretched, with silence for a clip without sound, and a note says
+  which files differed and how. `--resize`, `--crf` and `--max-size` work
+  on a merge of videos.
 - **qpdf is a managed backend.** `conv install qpdf` downloads qpdf 12.4.2 for
   all five platforms, checks its SHA-256, and installs it as a folder. The
   Linux build needs glibc 2.34 or newer. `--qpdf-path` and `CONVKIT_QPDF`

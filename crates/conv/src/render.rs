@@ -568,6 +568,55 @@ pub fn conversion_failure_human(input: &Path, to_ext: &str, e: &ConvError, style
     failure_human(&format!("{name} {arrow} {to_ext}"), e, styled)
 }
 
+/// A finished `conv merge` of video or audio files, for stdout:
+///
+/// ```text
+/// OK out.mp4 - 3 files, 1:02.5 - 12.3 MB - 0.4s - stream copy, no re-encode
+///   /home/user/Videos/out.mp4
+///   note  c.mp4 has no sound, so it is silent in out.mp4.
+/// ```
+///
+/// Like a conversion's line, with how many files went in and how long the
+/// result plays, as a PDF merge gives its pages.
+pub fn clips_success_human(
+    o: &convkit_core::merge::clips::ClipsOutcome,
+    elapsed: Duration,
+    styled: bool,
+) -> String {
+    let sep = if styled { " \u{b7} " } else { " - " };
+    let files = match o.inputs.len() {
+        1 => "1 file".to_string(),
+        n => format!("{n} files"),
+    };
+    // To the tenth of a second: what a person reads off a player.
+    let length = convkit_core::trim::format_time(o.duration_ms / 100 * 100);
+    let mut fields = vec![
+        file_name_of(&o.output),
+        format!("{files}, {length}"),
+        convkit_core::size::human(o.bytes),
+        human_elapsed(elapsed),
+    ];
+    if o.copied {
+        fields.push("stream copy, no re-encode".to_string());
+    }
+    let glyph = if styled {
+        paint("\u{2713}", green_bold(), true)
+    } else {
+        "OK".to_string()
+    };
+    let mut s = format!(
+        "{glyph} {}\n  {}\n",
+        fields.join(sep),
+        absolute_display(&o.output)
+    );
+    for n in &o.notes {
+        s.push_str("  ");
+        s.push_str(&paint(&format!("note  {n}"), dim(), styled));
+        s.push('\n');
+    }
+    s
+}
+
 fn file_name_of(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())

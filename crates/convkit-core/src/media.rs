@@ -793,7 +793,7 @@ pub(crate) fn is_ogg(f: Format) -> bool {
 /// lossless `-c:a copy` extraction instead of a generation-loss re-encode
 /// of a codec the target already speaks (mp4 → m4a used to re-encode AAC
 /// to AAC).
-fn copyable_audio_for(to: Format) -> Option<&'static [&'static str]> {
+pub(crate) fn copyable_audio_for(to: Format) -> Option<&'static [&'static str]> {
     match to {
         Format::M4a => Some(&["aac", "alac"]),
         Format::Mp3 => Some(&["mp3"]),
