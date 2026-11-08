@@ -2644,6 +2644,35 @@ mod tests {
         }
     }
 
+    /// Issue #33: `--resize 150%` on an image used to reach ImageMagick as
+    /// `150%>`, which it ignores the `>` of and enlarges anyway.
+    #[test]
+    fn an_image_percentage_over_100_leaves_it_unchanged_without_upscale() {
+        for pct in ["150%", "500%"] {
+            let plan = build_tuned(
+                Format::Png,
+                Format::Jpg,
+                &[p("small.png")],
+                Path::new("out.jpg"),
+                None,
+                None,
+                &resized(pct),
+            )
+            .unwrap();
+            let argv = &plan.steps[0].argv;
+            assert!(!argv.iter().any(|a| a == "-resize"), "{argv:?}");
+            assert_eq!(plan.enlarged, None);
+            assert!(
+                plan.warnings.iter().any(|w| w
+                    == &format!(
+                        "--resize {pct} left the source unchanged (add --upscale to enlarge)."
+                    )),
+                "{:?}",
+                plan.warnings
+            );
+        }
+    }
+
     /// A picture resized into its own format runs the recipe any raster
     /// takes to that format, and keeps its metadata as that does: no strip
     /// arguments, no png TIFF detour, no note about re-encoding to strip.

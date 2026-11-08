@@ -564,7 +564,10 @@ impl Step {
                 }),
                 Arg::VideoChain(spec) => argv.push(spec.compose(video)),
                 Arg::TuneResize => {
-                    if let Some(g) = &tuning.resize {
+                    // A resize the plan found cannot bind is left out, not
+                    // trusted to `>`: ImageMagick ignores that on a
+                    // percentage and enlarges anyway.
+                    if let Some(g) = tuning.resize.as_ref().filter(|_| !video.keep_source_size) {
                         argv.push("-resize".to_string());
                         // ImageMagick's `>`: only shrink a larger image.
                         // `--upscale` drops it, and the plan warns.
@@ -1124,6 +1127,29 @@ mod tests {
         };
         assert!(render(false).windows(2).any(|w| w == ["-resize", "50%>"]));
         assert!(render(true).windows(2).any(|w| w == ["-resize", "50%"]));
+    }
+
+    /// ImageMagick ignores `>` on a percentage, so `150%>` still enlarges.
+    /// A resize the plan decided keeps the source's size leaves `-resize`
+    /// out altogether.
+    #[test]
+    fn an_image_that_keeps_its_size_gets_no_resize() {
+        let argv = TUNABLE
+            .render_full(
+                &[Path::new("in.png")],
+                Path::new("out.jpg"),
+                &Tuning {
+                    resize: Some("150%".into()),
+                    ..Tuning::default()
+                },
+                &ResolvedVideo {
+                    keep_source_size: true,
+                    ..ResolvedVideo::default()
+                },
+                &[],
+            )
+            .argv;
+        assert!(!argv.iter().any(|a| a == "-resize"), "{argv:?}");
     }
 
     /// Path positions must stay correct when tune slots expand: the output

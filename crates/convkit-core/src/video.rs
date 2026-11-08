@@ -441,6 +441,22 @@ pub fn resolve(tuning: &Tuning, probe: Option<&MediaProbe>, target: Target) -> R
                 ));
             }
             (Some(_), None) => r.scale = Some(scale_filter(geometry, tuning.upscale)),
+            // An image is not sized before converting, and ImageMagick
+            // ignores the `>` that keeps `-resize` from enlarging when the
+            // geometry is a percentage. One of 100 or more cannot bind on
+            // any source, so it needs no size to keep it (issue #33). GIF
+            // and video clamp inside their filter instead.
+            (None, None)
+                if !tuning.upscale
+                    && matches!(target, Target::Image { .. })
+                    && geometry.ends_with('%')
+                    && !geometry_binds(geometry, (0, 0)) =>
+            {
+                r.keep_source_size = true;
+                r.notes.push(format!(
+                    "--resize {geometry} left the source unchanged (add --upscale to enlarge)."
+                ));
+            }
             (None, None) => {
                 r.scale = Some(scale_filter(geometry, tuning.upscale));
                 if tuning.upscale {
@@ -775,6 +791,32 @@ mod tests {
             r.notes,
             vec!["Source is 640x480; --resize 1920x1080 left it unchanged (add --upscale to enlarge).".to_string()]
         );
+    }
+
+    /// An image is not sized before converting, and ImageMagick ignores
+    /// the `>` that keeps a pixel geometry from enlarging when it is given
+    /// a percentage. A percentage of 100 or more cannot shrink anything, so
+    /// without `--upscale` it keeps the source's size, as GIF and video do.
+    #[test]
+    fn an_image_percentage_of_100_or_more_keeps_the_source_size() {
+        for pct in ["100%", "150%", "500%", "99999999999%"] {
+            let r = resolve(&tuning_resize(pct), None, image(None));
+            assert!(r.keep_source_size, "{pct}");
+            assert_eq!(r.scale, None, "{pct}");
+            assert_eq!(r.enlarged, None, "{pct}");
+            assert_eq!(
+                r.notes,
+                vec![format!(
+                    "--resize {pct} left the source unchanged (add --upscale to enlarge)."
+                )],
+                "{pct}"
+            );
+        }
+        // Below 100% it shrinks, and with --upscale it enlarges, as before.
+        assert!(!resolve(&tuning_resize("50%"), None, image(None)).keep_source_size);
+        let up = resolve(&tuning_upscale("150%"), None, image(None));
+        assert!(!up.keep_source_size);
+        assert!(up.notes.is_empty(), "{:?}", up.notes);
     }
 
     fn tuning_upscale(v: &str) -> Tuning {
