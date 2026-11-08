@@ -3116,6 +3116,52 @@ fn an_image_resize_only_enlarges_with_upscale() {
 
 #[test]
 #[ignore = "requires backends; run with --ignored"]
+fn an_image_percentage_resize_only_enlarges_with_upscale() {
+    // ImageMagick ignores `>` on a percentage: before, this 100x80 came out
+    // 150x120 with nothing said (issue #33).
+    let dir = tmp();
+    let src = synth_png(&dir, 100, 80);
+
+    let kept = dir.path().join("kept.jpg");
+    let outcome = convert_tuned(
+        &src,
+        &kept,
+        &Tuning {
+            resize: Some("150%".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(imagemagick_dimensions(&kept), (100, 80));
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|n| n == "--resize 150% left the source unchanged (add --upscale to enlarge)."),
+        "{:?}",
+        outcome.warnings
+    );
+
+    let big = dir.path().join("big.jpg");
+    let outcome = convert_tuned(&src, &big, &upscaled("150%")).unwrap();
+    assert_eq!(imagemagick_dimensions(&big), (150, 120));
+    assert!(outcome.enlarged.is_some());
+
+    let small = dir.path().join("small.jpg");
+    convert_tuned(
+        &src,
+        &small,
+        &Tuning {
+            resize: Some("50%".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(imagemagick_dimensions(&small), (50, 40));
+}
+
+#[test]
+#[ignore = "requires backends; run with --ignored"]
 fn upscale_enlarges_a_video_and_warns() {
     let dir = tmp();
     let src = synth_video(&dir, 640, 360, 30);
