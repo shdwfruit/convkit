@@ -98,6 +98,11 @@ $ cargo install --path crates/conv
 convkit performs no encoding itself — see [Backends](#backends). Running a
 conversion also prompts to install whichever backend it needs.
 
+On a Mac there is also ConvKit, a SwiftUI app with a tool for each job
+(compress a video, merge PDFs, format JSON and so on) that runs conv
+underneath. It isn't in a release yet; build it from
+[`apps/macos`](apps/macos/README.md).
+
 ## Quick start
 
 ```console

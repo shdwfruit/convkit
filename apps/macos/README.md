@@ -1,4 +1,4 @@
-# ConvKit for Mac (prototype)
+# ConvKit for Mac
 
 A SwiftUI toolbox for conv. Each tool does one job, and every tool runs on your Mac.
 
@@ -102,6 +102,7 @@ then `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and `~/.cargo/bin`.
 
 ## Not yet
 
+- Not in a release yet, so build it as above.
 - No progress bar for a single file, because conv's `--json` mode reports at the end.
 - One file at a time.
 - Unsigned. Gatekeeper will ask the first time it's opened from a download.

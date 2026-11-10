@@ -493,7 +493,7 @@ final class AppModel {
         case .pages:
             pages.load(first)
             if chained { pages.outputFolder = destination }
-        case .ascii: ascii.input = first
+        case .ascii: ascii.input = first; ascii.changed()
         case .data: data.load(first)
         case .scan: Task { await scan.scan(first) }
         case .quick: quick[id]?.load(first)

@@ -582,7 +582,7 @@ enum ToolID: String, CaseIterable, Identifiable {
         case .convertVideo:
             .convert(ConvertPreset(
                 kinds: ["video"], target: .pick(kinds: ["video"], allowSame: false, preferred: ["mp4", "mov", "webm"]),
-                controls: [.resize, .crf, .fps], dropTitle: "Drop videos to convert",
+                controls: [.resize, .crf, .fps, .strip], dropTitle: "Drop videos to convert",
                 dropDetail: "MOV, MP4, MKV, WebM and AVI.", noun: "videos"))
         case .videoToGIF:
             .convert(ConvertPreset(
@@ -613,7 +613,7 @@ enum ToolID: String, CaseIterable, Identifiable {
         case .convertAudio:
             .convert(ConvertPreset(
                 kinds: ["audio"], target: .pick(kinds: ["audio"], allowSame: false, preferred: ["mp3", "m4a"]),
-                controls: [], dropTitle: "Drop audio files to convert",
+                controls: [.strip], dropTitle: "Drop audio files to convert",
                 dropDetail: "MP3, M4A, WAV, FLAC, AIFF, Opus and Ogg.", noun: "audio files"))
         case .stripAudio:
             .convert(ConvertPreset(
@@ -624,7 +624,7 @@ enum ToolID: String, CaseIterable, Identifiable {
         case .convertImage:
             .convert(ConvertPreset(
                 kinds: ["image"], target: .pick(kinds: ["image"], allowSame: false, preferred: ["jpg", "png", "webp"]),
-                controls: [.quality, .resize, .colors], dropTitle: "Drop pictures to convert",
+                controls: [.quality, .resize, .colors, .strip], dropTitle: "Drop pictures to convert",
                 dropDetail: "HEIC, JPG, PNG, WebP, AVIF, TIFF, BMP and SVG.", noun: "pictures"))
         case .resizeImage:
             .convert(ConvertPreset(

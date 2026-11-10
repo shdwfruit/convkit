@@ -311,9 +311,10 @@ struct DataView: View {
                 Text(data.output)
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(11)
             }
+            // A two-way scroll view centers short content; keep it at the top left.
+            .defaultScrollAnchor(.topLeading)
             .background(.background.secondary)
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(data.notes, id: \.self) { Text($0).font(.caption).foregroundStyle(.orange) }

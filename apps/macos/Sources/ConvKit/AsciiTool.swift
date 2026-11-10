@@ -190,7 +190,7 @@ struct AsciiView: View {
     /// Fit the art's width to the pane; monospaced glyphs are about 0.6 em wide.
     private func fontSize(for size: CGSize) -> CGFloat {
         let cols = max(ascii.art.split(separator: "\n").map(\.count).max() ?? Int(ascii.width), 10)
-        return min(max((size.width - 24) / (CGFloat(cols) * 0.6), 4), 16)
+        return min(max((size.width - 24) / (CGFloat(cols) * 0.62), 4), 16)
     }
 
     private var controls: some View {

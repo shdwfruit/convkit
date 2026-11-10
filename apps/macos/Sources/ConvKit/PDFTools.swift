@@ -518,7 +518,6 @@ struct SplitView: View {
             }
             Section {
                 TextField("Pages for each file", text: $split.ranges, prompt: Text("Every page on its own"))
-                    .font(.system(.body, design: .monospaced))
             } header: {
                 Text("Ranges")
             } footer: {
@@ -776,9 +775,7 @@ struct PagesView: View {
             }
             Section {
                 TextField("Keep", text: $pages.keep, prompt: Text("Every page, in order"))
-                    .font(.system(.body, design: .monospaced))
                 TextField("Leave out", text: $pages.delete, prompt: Text("None"))
-                    .font(.system(.body, design: .monospaced))
             } header: {
                 Text("Pages")
             } footer: {

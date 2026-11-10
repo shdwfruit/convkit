@@ -9,20 +9,19 @@ struct RootView: View {
 
     var body: some View {
         @Bindable var model = model
-        detail
-            .id("\(model.page)\(model.editorFocus?.rawValue ?? "")")
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .topTrailing) {
-                if model.isSearching { SearchResults() }
+        // A VStack, not safeAreaInset: AppKit lists, forms and text views would start under the bar.
+        VStack(spacing: 0) {
+            TopBar()
+            if let chain = model.chain, case .tool(let id) = model.page, chain.steps.contains(id) {
+                ChainBar(chain: chain, current: id)
             }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                VStack(spacing: 0) {
-                    TopBar()
-                    if let chain = model.chain, case .tool(let id) = model.page, chain.steps.contains(id) {
-                        ChainBar(chain: chain, current: id)
-                    }
+            detail
+                .id("\(model.page)\(model.editorFocus?.rawValue ?? "")")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .topTrailing) {
+                    if model.isSearching { SearchResults() }
                 }
-            }
+        }
             .searchable(text: $model.search, placement: .toolbar, prompt: "Search tools")
             .onSubmit(of: .search) {
                 if let first = model.searchResults.first { model.show(first) }

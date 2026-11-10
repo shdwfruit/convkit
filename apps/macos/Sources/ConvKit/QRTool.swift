@@ -193,6 +193,7 @@ struct QRView: View {
 
                 Text(qr.info).font(.caption).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: 340)
 
                 HStack {

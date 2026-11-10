@@ -63,9 +63,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pending = []
         }
 
+        #if DEBUG
         if let path = ProcessInfo.processInfo.environment["CONVKIT_STATE"] {
             snapshot(to: path)
         }
+        #endif
     }
 
     /// Finder's Open With, or files dropped on the Dock icon.
@@ -103,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window?.makeKeyAndOrderFront(nil)
     }
 
+    #if DEBUG
     /// Dev aid for testing without clicking: CONVKIT_STATE=/tmp/state.txt writes the
     /// model's state there and quits. CONVKIT_SET="page=compressVideo add=/a.mp4 maxSize=10mb"
     /// sets things up in order (each `add=` waits for the one before), CONVKIT_CONVERT=1
@@ -367,6 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return d
     }
+    #endif
 }
 
 @MainActor

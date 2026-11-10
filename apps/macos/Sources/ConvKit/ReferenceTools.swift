@@ -18,7 +18,8 @@ final class FormatsModel {
         guard let conv, formats.isEmpty,
               let out = try? await Conv.run(conv, ["capabilities", "--json"]),
               let all = out.decode(All.self) else { return }
-        let names = Set((all.pairs ?? []).flatMap { [$0.from, $0.to] })
+        // "folder" is where an archive opens to, not a format capabilities describes.
+        let names = Set((all.pairs ?? []).flatMap { [$0.from, $0.to] }).subtracting(["folder"])
         formats = names.sorted()
         if selected == nil { selected = formats.first }
         await show()
@@ -46,6 +47,10 @@ struct CapabilitiesDetail: Decodable {
     var sources: [String]?
     var targets: [Target]?
     var defaults: [String: String]?
+    // Archives answer in their own shape.
+    var accepts_from: [String]?
+    var converts_to: [String]?
+    var notes: [String]?
 }
 
 struct FormatsView: View {
@@ -65,14 +70,20 @@ struct FormatsView: View {
                             Text((d.format ?? "").uppercased()).font(.largeTitle.weight(.semibold))
                             Text(d.kind ?? "").foregroundStyle(.secondary)
                         }
-                        if let src = d.sources, !src.isEmpty {
+                        if let src = d.sources ?? d.accepts_from, !src.isEmpty {
                             labeled("Made from", src.map { $0.uppercased() }.joined(separator: "  "))
+                        }
+                        if let to = d.converts_to, !to.isEmpty {
+                            labeled("Turns into", to.map { $0.uppercased() }.joined(separator: "  "))
+                        }
+                        ForEach(d.notes ?? [], id: \.self) {
+                            Text($0).font(.caption).foregroundStyle(.orange)
                         }
                         if let defs = d.defaults, !defs.isEmpty {
                             labeled("Defaults when it's the target", defs.sorted { $0.key < $1.key }
                                 .map { "\($0.key) \($0.value)" }.joined(separator: ", "))
                         }
-                        Text("Turns into").font(.headline)
+                        if d.targets?.isEmpty == false { Text("Turns into").font(.headline) }
                         ForEach(d.targets ?? []) { t in
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
