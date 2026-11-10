@@ -187,7 +187,7 @@ fn draw(cli: &Cli, args: &Args) -> Result<(), ConvError> {
         cell_aspect,
     };
     let made = ascii::make(&img, cols, rows, &opts);
-    let has_clear = img.rgba.chunks_exact(4).any(|p| p[3] < 128);
+    let has_clear = img.rgba.as_chunks::<4>().0.iter().any(|p| p[3] < 128);
     notes.extend(bg_note(&opts.style, opts.colour, opts.bg, shown, has_clear).map(str::to_string));
     let plain_text = shown == Shown::Txt || (cli.json && path.is_none());
     notes.extend(made.notes.into_iter().map(|n| plain_note(n, plain_text)));

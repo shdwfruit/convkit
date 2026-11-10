@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.1 - 2026-11-04
+
+### Fixed
+
+- **Up-to-date zip and TLS libraries.** The zip library conv packs and
+  unpacks archives with moves from 2.4 to 9.3, past three advisories. The
+  worst is a zip whose two copies of an entry's header disagree, so one
+  tool sees a different file than another (GHSA-m665-v7pm-7grj). rustls,
+  which `conv install` and `conv update` download with, moves to 0.23.46,
+  past four. Building from source now needs Rust 1.88.
+
 ## 0.7.0 - 2026-11-04
 
 ### New

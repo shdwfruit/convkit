@@ -69,7 +69,7 @@ const D50_Y: i32 = 0x0001_0000;
 const D50_Z: i32 = 0x0000_D32D;
 
 fn pad4(mut b: Vec<u8>) -> Vec<u8> {
-    while b.len() % 4 != 0 {
+    while !b.len().is_multiple_of(4) {
         b.push(0);
     }
     b

@@ -273,7 +273,11 @@ pub fn render(pic: &Picture, plan: &Plan) -> Result<Vec<u8>> {
 fn shaped(pic: &Picture, radius: u32) -> Option<Pixmap> {
     let img = &pic.image;
     let mut pixmap = Pixmap::new(img.width, img.height)?;
-    for (dst, p) in pixmap.pixels_mut().iter_mut().zip(img.rgba.chunks_exact(4)) {
+    for (dst, p) in pixmap
+        .pixels_mut()
+        .iter_mut()
+        .zip(img.rgba.as_chunks::<4>().0)
+    {
         let a = u16::from(p[3]);
         let pre = |v: u8| ((u16::from(v) * a + 127) / 255) as u8;
         *dst = PremultipliedColorU8::from_rgba(pre(p[0]), pre(p[1]), pre(p[2]), p[3])?;

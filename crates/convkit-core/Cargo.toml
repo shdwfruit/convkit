@@ -18,7 +18,7 @@ ureq = "2"
 sha2 = "0.10"
 # Also archives (`archive`): deflate64 is what Windows uses for a zip over
 # 2 GB, and aes-crypto reads and writes AES-256 password zips.
-zip = { version = "2", default-features = false, features = ["deflate", "deflate64", "aes-crypto"] }
+zip = { version = "9.3", default-features = false, features = ["deflate", "deflate64", "aes-crypto"] }
 tar = "0.4"
 flate2 = "1"
 # Archives. lzma-rust2 writes and reads .tar.xz in pure Rust (lzma-rs below

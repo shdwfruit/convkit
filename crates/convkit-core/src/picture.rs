@@ -220,7 +220,9 @@ fn decode_webp(bytes: &[u8]) -> Result<Picture> {
     let rgba = if decoder.has_alpha() {
         buf
     } else {
-        buf.chunks_exact(3)
+        buf.as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect()
     };
@@ -318,7 +320,7 @@ mod tests {
     }
 
     fn reds(img: &Image) -> Vec<u8> {
-        img.rgba.chunks_exact(4).map(|p| p[0]).collect()
+        img.rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect()
     }
 
     #[test]

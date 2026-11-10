@@ -83,7 +83,7 @@ first run.
 $ cargo install convkit --locked
 ```
 
-Building from source — which `cargo install` does — requires Rust 1.85+ and
+Building from source — which `cargo install` does — requires Rust 1.88+ and
 a C toolchain on every platform (the HTTPS downloader's `ring` dependency
 compiles C at build time). On Windows that toolchain is the MSVC C++ build
 tools rustup already requires, so nothing extra is needed beyond a working
@@ -97,6 +97,11 @@ $ cargo install --path crates/conv
 
 convkit performs no encoding itself — see [Backends](#backends). Running a
 conversion also prompts to install whichever backend it needs.
+
+On a Mac there is also ConvKit, a SwiftUI app with a tool for each job
+(compress a video, merge PDFs, format JSON and so on) that runs conv
+underneath. It isn't in a release yet; build it from
+[`apps/macos`](apps/macos/README.md).
 
 ## Quick start
 

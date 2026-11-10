@@ -229,7 +229,9 @@ fn decode(bytes: &[u8]) -> Option<(String, Encoding)> {
     }
     let utf16 = |rest: &[u8], big: bool| {
         let units: Vec<u16> = rest
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| {
                 if big {
                     u16::from_be_bytes([c[0], c[1]])

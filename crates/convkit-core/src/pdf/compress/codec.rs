@@ -105,7 +105,9 @@ pub(crate) fn estimated_quality(data: &[u8]) -> Option<f64> {
                     table.iter().map(|&v| u64::from(v)).sum()
                 } else {
                     table
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|c| u64::from(u16::from_be_bytes([c[0], c[1]])))
                         .sum()
                 };
@@ -260,7 +262,9 @@ pub(crate) fn luma(p: &Pixels) -> Vec<u8> {
         Space::Gray => p.data.clone(),
         Space::Rgb => p
             .data
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| {
                 let y = 299 * u32::from(c[0]) + 587 * u32::from(c[1]) + 114 * u32::from(c[2]);
                 ((y + 500) / 1000) as u8

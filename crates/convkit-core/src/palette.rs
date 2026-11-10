@@ -200,7 +200,7 @@ fn representatives(
     }
     let mut counts: Vec<std::collections::HashMap<[u8; 3], u64>> =
         vec![Default::default(); clusters];
-    for p in img.rgba.chunks_exact(4) {
+    for p in img.rgba.as_chunks::<4>().0 {
         if p[3] < OPAQUE {
             continue;
         }
@@ -239,7 +239,7 @@ struct Point {
 /// of its pixels.
 fn grid(img: &Image) -> Vec<Point> {
     let mut cells = vec![(0u64, [0u64; 3]); 1 << 15];
-    for p in img.rgba.chunks_exact(4) {
+    for p in img.rgba.as_chunks::<4>().0 {
         if p[3] < OPAQUE {
             continue;
         }

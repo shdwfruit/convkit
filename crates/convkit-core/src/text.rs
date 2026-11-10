@@ -127,7 +127,9 @@ fn no_nul(text: String, encoding: Encoding) -> std::result::Result<(String, Enco
 
 fn utf16(bytes: &[u8], big: bool) -> String {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| {
             if big {
                 u16::from_be_bytes([c[0], c[1]])
@@ -149,7 +151,9 @@ fn utf16_without_mark(bytes: &[u8]) -> Option<bool> {
         return None;
     }
     let zero_at = |odd: bool| {
-        head.chunks_exact(2)
+        head.as_chunks::<2>()
+            .0
+            .iter()
             .filter(|c| c[usize::from(odd)] == 0)
             .count()
     };
