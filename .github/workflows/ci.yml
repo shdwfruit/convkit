@@ -83,6 +83,15 @@ jobs:
             exit 1
           fi
 
+  # The Mac app only runs conv, so building it is the whole check.
+  app:
+    name: app (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift build
+        run: swift build --package-path apps/macos
+
   # Ubuntu only: installs every real backend (from apt, and Typst through
   # `conv install`), then runs the `#[ignore]`-gated output-property suite
   # that exercises them for real (§10.2). This is the job that actually
