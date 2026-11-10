@@ -2,6 +2,11 @@
 
 A SwiftUI toolbox for conv. Each tool does one job, and every tool runs on your Mac.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../docs/media/app-home-dark.webp">
+  <img src="../../docs/media/app-home-light.webp" alt="ConvKit's Home page: a bar of sections, a place to drop a file, the popular tools, and every tool by section." width="100%">
+</picture>
+
 Finding a tool
 - The bar at the top has Home and one dropdown per section: Video, Audio,
   Images, Documents, Text, Developer, Files and conv. Each lists its tools

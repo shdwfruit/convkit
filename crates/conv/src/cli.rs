@@ -7,7 +7,7 @@ use convkit_core::{Resolver, Tuning};
 #[command(
     name = "conv",
     version = env!("CONV_VERSION"),
-    about = "One command for everyday file conversion, offline"
+    about = "A free, offline toolbox for file and text jobs: convert, compress, cut, merge and more"
 )]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {

@@ -7,10 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "One command for everyday file conversion, offline"
+description = "A free, offline toolbox for the file and text jobs you would pay an app for or hand to a website"
 readme = "../../README.md"
-keywords = ["convert", "ffmpeg", "pandoc", "imagemagick", "cli"]
-categories = ["command-line-utilities", "multimedia"]
+keywords = ["convert", "pdf", "video", "offline", "cli"]
+categories = ["command-line-utilities", "multimedia", "text-processing"]
 
 [package.metadata.wix]
 upgrade-guid = "E9BFE898-D5AA-4900-BB79-0448F6DCD057"
