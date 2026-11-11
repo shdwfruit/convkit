@@ -41,6 +41,7 @@ pub struct PlannedStep {
     /// engine relies on this rather than reading the last argv
     /// element, which is wrong for `soffice` recipes — their argv ends with
     /// the *input* path, not the output.
+    #[serde(serialize_with = "crate::lossy_path")]
     pub output: PathBuf,
     pub intermediate_ext: Option<String>,
     /// Indices into `argv` holding filesystem paths, for the executor's
@@ -56,7 +57,11 @@ pub struct PlannedStep {
     /// A file the step reads on its standard input, as Piper reads the
     /// text it speaks. `None` for every other step, which reads nothing
     /// there.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::lossy_opt_path"
+    )]
     pub stdin: Option<PathBuf>,
 }
 
@@ -66,12 +71,18 @@ pub struct PlannedStep {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Prepare {
     /// A file convkit writes.
-    Write { path: PathBuf, contents: String },
+    Write {
+        #[serde(serialize_with = "crate::lossy_path")]
+        path: PathBuf,
+        contents: String,
+    },
     /// An input placed where the step reads it: a hard link to the input's
     /// resolved path, else a copy; with `strip`, a copy without its
     /// metadata (`jpeg::strip`).
     Stage {
+        #[serde(serialize_with = "crate::lossy_path")]
         from: PathBuf,
+        #[serde(serialize_with = "crate::lossy_path")]
         to: PathBuf,
         strip: bool,
     },
@@ -80,14 +91,18 @@ pub enum Prepare {
     /// what pandoc made of a document; `source` is the user's file, which a
     /// failure names.
     Text {
+        #[serde(serialize_with = "crate::lossy_path")]
         from: PathBuf,
+        #[serde(serialize_with = "crate::lossy_path")]
         to: PathBuf,
         form: TextForm,
+        #[serde(serialize_with = "crate::lossy_path")]
         source: PathBuf,
     },
     /// Subtitles drawn into the animated PNG the step lays over the
     /// picture (`subtitles::draw`). Summarised in `--json`.
     Subtitles {
+        #[serde(serialize_with = "crate::lossy_path")]
         path: PathBuf,
         #[serde(serialize_with = "crate::subtitles::serialize_shared")]
         render: std::sync::Arc<crate::subtitles::Render>,
@@ -108,7 +123,9 @@ pub enum TextForm {
 pub struct ConversionPlan {
     pub from: Format,
     pub to: Format,
+    #[serde(serialize_with = "crate::lossy_paths")]
     pub inputs: Vec<PathBuf>,
+    #[serde(serialize_with = "crate::lossy_path")]
     pub output: PathBuf,
     pub steps: Vec<PlannedStep>,
     pub warnings: Vec<String>,
@@ -1669,6 +1686,25 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_for_a_name_that_is_not_utf8_still_serializes() {
+        use std::os::unix::ffi::OsStringExt;
+        let input = PathBuf::from(std::ffi::OsString::from_vec(b"a\xff.png".to_vec()));
+        let plan = build(
+            Format::Png,
+            Format::Jpg,
+            &[input],
+            Path::new("b.jpg"),
+            None,
+            None,
+        )
+        .unwrap();
+        let v = serde_json::to_value(&plan).unwrap();
+        assert_eq!(v["inputs"][0], "a\u{fffd}.png");
+        assert_eq!(v["output"], "b.jpg");
     }
 
     #[test]

@@ -133,23 +133,31 @@ fn subtype(doc: &Document, id: ObjectId) -> Option<(&[u8], &lopdf::Stream)> {
     Some((sub, stream))
 }
 
-/// The decoded content of a stream, or `None` when it cannot be read.
-fn content_of(stream: &lopdf::Stream) -> Option<Vec<u8>> {
+/// Content far larger than this, a page's or a form's, is not one conv can
+/// walk in a reasonable time anyway.
+const MAX_CONTENT: usize = 512 << 20;
+
+/// Form XObjects drawn in the whole document, at most: forms that each draw
+/// the next several times multiply, ten levels deep.
+const MAX_FORM_DRAWS: usize = 100_000;
+
+/// The decoded content of a stream, at most `limit` bytes, or `None` when
+/// it cannot be read.
+fn content_of(stream: &lopdf::Stream, limit: usize) -> Option<Vec<u8>> {
     if stream.dict.get(b"Filter").is_err() {
-        return Some(stream.content.clone());
+        return (stream.content.len() <= limit).then(|| stream.content.clone());
     }
-    // A content stream far larger than this is not one conv can walk in a
-    // reasonable time anyway.
-    stream.decompressed_content_with_limit(512 << 20).ok()
+    stream.decompressed_content_with_limit(limit).ok()
 }
 
-/// The concatenated content of a page, or `None` when any part of it is
-/// unreadable.
-fn page_content(doc: &Document, page: ObjectId) -> Option<Vec<u8>> {
+/// The concatenated content of a page, at most `limit` bytes, or `None`
+/// when any part of it is unreadable. The parts share the limit, since a
+/// page may list the same stream many times.
+fn page_content(doc: &Document, page: ObjectId, limit: usize) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     for id in doc.get_page_contents(page) {
         let stream = doc.get_object(id).ok()?.as_stream().ok()?;
-        out.extend(content_of(stream)?);
+        out.extend(content_of(stream, limit.checked_sub(out.len())?)?);
         out.push(b'\n');
     }
     Some(out)
@@ -204,6 +212,8 @@ struct Walker<'a> {
     found: &'a mut Placements,
     /// Forms being walked, so one that draws itself is not walked forever.
     active: Vec<ObjectId>,
+    /// Form draws left in the document's `MAX_FORM_DRAWS`.
+    draws_left: &'a mut usize,
 }
 
 impl Walker<'_> {
@@ -216,7 +226,9 @@ impl Walker<'_> {
         base: Matrix,
         depth: usize,
     ) -> bool {
-        let Ok(content) = Content::decode(data) else {
+        // Strict: the lenient decode stops at the first bad token and keeps
+        // what came before, so later, larger drawings would go unseen.
+        let Ok(content) = Content::decode_strict(data) else {
             return false;
         };
         let names: HashMap<Vec<u8>, ObjectId> = resources
@@ -274,7 +286,12 @@ impl Walker<'_> {
                     .ok()
                     .and_then(|o| dict_of(doc, o));
                 let resources = own.or(parent);
-                let Some(data) = content_of(form) else {
+                if *self.draws_left == 0 {
+                    self.unreadable(resources, depth + 1);
+                    return;
+                }
+                *self.draws_left -= 1;
+                let Some(data) = content_of(form, MAX_CONTENT) else {
                     self.unreadable(resources, depth + 1);
                     return;
                 };
@@ -301,6 +318,7 @@ impl Walker<'_> {
 /// Walks every page.
 pub(crate) fn placements(doc: &Document) -> Placements {
     let mut found = Placements::default();
+    let mut draws_left = MAX_FORM_DRAWS;
     for page in doc.page_iter() {
         let resources = page_resources(doc, page);
         let user_unit = doc
@@ -315,9 +333,10 @@ pub(crate) fn placements(doc: &Document) -> Placements {
             user_unit,
             found: &mut found,
             active: Vec::new(),
+            draws_left: &mut draws_left,
         };
-        let walked =
-            page_content(doc, page).is_some_and(|data| walker.walk(&data, resources, IDENTITY, 0));
+        let walked = page_content(doc, page, MAX_CONTENT)
+            .is_some_and(|data| walker.walk(&data, resources, IDENTITY, 0));
         if !walked {
             walker.unreadable(resources, 0);
         }
@@ -528,6 +547,51 @@ mod tests {
             .set("Contents", broken);
         let p = placements(&doc);
         assert!(p.unknown.contains(&ids[0]));
+    }
+
+    #[test]
+    fn content_with_a_bad_token_marks_its_images_unknown() {
+        let (doc, ids) = doc_with(
+            "q 10 0 0 10 0 0 cm /Im0 Do Q ) q 600 0 0 600 0 0 cm /Im0 Do Q",
+            vec![("Im0", image(600, 600))],
+        );
+        let p = placements(&doc);
+        assert!(p.unknown.contains(&ids[0]), "{:?}", p.dpi);
+    }
+
+    #[test]
+    fn form_draws_past_the_budget_mark_their_images_unknown() {
+        let (mut doc, ids) = doc_with("", vec![("Im0", image(300, 300))]);
+        let fm = doc.add_object(form("72 0 0 72 0 0 cm /Im0 Do", None, None));
+        let resources = dictionary! { "XObject" => dictionary! { "Fm0" => fm, "Im0" => ids[0] } };
+        let mut found = Placements::default();
+        let mut left = 3;
+        let mut walker = Walker {
+            doc: &doc,
+            user_unit: 1.0,
+            found: &mut found,
+            active: Vec::new(),
+            draws_left: &mut left,
+        };
+        assert!(walker.walk(b"/Fm0 Do /Fm0 Do /Fm0 Do", Some(&resources), IDENTITY, 0));
+        assert!(walker.found.unknown.is_empty());
+        walker.walk(b"/Fm0 Do", Some(&resources), IDENTITY, 0);
+        assert!(found.unknown.contains(&ids[0]));
+    }
+
+    #[test]
+    fn a_page_listing_one_stream_many_times_shares_one_limit() {
+        let (mut doc, _) = doc_with("", vec![]);
+        let page = doc.page_iter().next().unwrap();
+        let part = doc.add_object(Stream::new(dictionary! {}, b"0 0 m".to_vec()));
+        let parts: Vec<Object> = vec![part.into(); 10];
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Contents", parts);
+        assert_eq!(page_content(&doc, page, 60).map(|c| c.len()), Some(60));
+        assert_eq!(page_content(&doc, page, 50), None);
     }
 
     #[test]

@@ -206,14 +206,15 @@ fn print_plan(cli: &Cli, path: &Path, plan: &Plan, notes: &[String]) {
         let v = json!({
             "ok": true,
             "dry_run": true,
-            "output": path,
+            "output": path.to_string_lossy(),
             "beautify": plan_json(plan),
             "notes": notes,
         });
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
         return;
     }
-    println!("would write {}: {}", path.display(), summary(plan));
+    let path = render::safe_for_terminal(&path.display().to_string());
+    println!("would write {path}: {}", summary(plan));
     eprint!("{}", render::notes_human(notes, render::stderr_styled()));
 }
 

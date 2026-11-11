@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use convkit_core::pdf::{self, PageRange};
-use convkit_core::{ConvError, ErrorCode, Format, Remediation};
+use convkit_core::{Backend, ConvError, ErrorCode, Format, Remediation};
 use serde_json::json;
 
 use crate::cli::{Cli, SplitArgs};
 use crate::commands::pdf_support;
-use crate::input;
 use crate::password::{self, Opener};
 use crate::render;
+use crate::{input, install_prompt};
 
 pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
     let (input, ranges) = match check_args(args) {
@@ -21,8 +21,8 @@ pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
             return e.code.exit_code();
         }
     };
-    let subject = json!({ "input": input });
-    let header = name_of(&input);
+    let subject = json!({ "input": input.to_string_lossy() });
+    let header = render::file_name_of(&input);
     // Check the input before offering to install qpdf.
     if !input.is_file() {
         let e = ConvError::new(
@@ -33,7 +33,7 @@ pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
     }
     // A missing qpdf (or a failed install) is a failure of this run, so it
     // goes in the result envelope like any other, as in `conv merge`.
-    let qpdf = match pdf_support::resolve_qpdf(cli, !args.dry_run) {
+    let qpdf = match install_prompt::resolve_offering(cli, Backend::Qpdf, !args.dry_run) {
         Ok(q) => q,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
@@ -87,12 +87,6 @@ pub fn run(cli: &Cli, args: &SplitArgs) -> i32 {
     }
 }
 
-fn name_of(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| p.display().to_string())
-}
-
 /// A RANGE argument that is really another file, as when `conv split
 /// *.pdf` matched several.
 fn looks_like_a_file(arg: &str) -> bool {
@@ -119,7 +113,10 @@ fn check_args(args: &SplitArgs) -> Result<(PathBuf, Vec<PageRange>), ConvError> 
     if Format::from_path(&input) != Some(Format::Pdf) {
         return Err(ConvError::new(
             ErrorCode::InvalidInvocation,
-            format!("split takes a PDF file; {} is not one", name_of(&input)),
+            format!(
+                "split takes a PDF file; {} is not one",
+                render::file_name_of(&input)
+            ),
         ));
     }
     if args.lock.password {

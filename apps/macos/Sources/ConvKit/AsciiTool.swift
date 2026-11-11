@@ -18,21 +18,20 @@ final class AsciiModel {
     private(set) var warnings: [String] = []
     private(set) var problem: String?
     private(set) var saved: URL?
-    private(set) var working = false
 
     private var task: Task<Void, Never>?
 
     /// Everything but the input and output.
     private var lookArgs: [String] {
         let chars = style == "custom" ? customChars : style
-        return ["--width", String(Int(width)), "--chars", chars, "--bg", background,
+        // Joined with =, so a ramp that starts with - isn't read as a flag.
+        return ["--width", String(Int(width)), "--chars=" + chars, "--bg", background,
                 "--contrast", String(Int(contrast)), "--brightness", String(Int(brightness))]
     }
 
     var command: String {
         guard let input else { return "" }
-        let quoted = lookArgs.map { $0.contains(" ") || $0.isEmpty ? "'\($0)'" : $0 }
-        return (["conv", "ascii"] + quoted + ["'\(input.lastPathComponent)'"]).joined(separator: " ")
+        return (["conv", "ascii"] + (lookArgs + [input.lastPathComponent]).map(shellQuoted)).joined(separator: " ")
     }
 
     func changed() {
@@ -47,8 +46,6 @@ final class AsciiModel {
         task = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled else { return }
-            working = true
-            defer { working = false }
             guard let out = try? await Conv.run(conv, args), !Task.isCancelled else { return }
             guard let resp = out.decode(Response.self) else {
                 problem = Conv.stderrMessage(out.stderr)
@@ -80,9 +77,8 @@ final class AsciiModel {
         else { return }
         // The save panel has already asked about replacing, so -y is the user's answer.
         let args = ["ascii", "--json", "--no-install", "-y"] + lookArgs + ["--", input.path, url.path]
-        task = Task { @MainActor in
-            working = true
-            defer { working = false }
+        // Not `task`: a change to the look cancels that, and this one is writing a file.
+        Task { @MainActor in
             guard let out = try? await Conv.run(conv, args) else { return }
             let resp = out.decode(Response.self)
             if let r = resp?.results?.first, r.ok {
@@ -181,7 +177,7 @@ struct AsciiView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let first = urls.first else { return false }
+            guard let first = urls.first(where: \.isFileURL) else { return false }
             ascii.input = first
             return true
         } isTargeted: { dropHover = $0 }

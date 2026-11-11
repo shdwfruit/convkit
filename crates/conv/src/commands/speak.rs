@@ -50,7 +50,7 @@ pub fn run(cli: &Cli, args: &SpeakArgs) -> i32 {
         }
     };
     if let (Some(note), false) = (note, cli.json || cli.quiet) {
-        eprintln!("  note  {note}");
+        eprintln!("  note  {}", render::safe_for_terminal(&note));
     }
     // The words are a file only for as long as the run.
     let written = match &source {

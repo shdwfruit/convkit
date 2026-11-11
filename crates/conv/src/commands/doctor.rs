@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::cli::Cli;
 
-const BACKENDS: [Backend; 7] = [
+pub(crate) const BACKENDS: [Backend; 7] = [
     Backend::Ffmpeg,
     Backend::Ffprobe,
     Backend::Magick,

@@ -106,9 +106,9 @@ pub fn decode(bytes: &[u8]) -> std::result::Result<(String, Encoding), String> {
         };
         return no_nul(utf16(bytes, big), encoding);
     }
-    match std::str::from_utf8(bytes) {
-        Ok(text) => no_nul(text.to_string(), Encoding::Utf8),
-        Err(_) => no_nul(
+    match crate::table::utf8_text(bytes) {
+        Some(text) => no_nul(text, Encoding::Utf8),
+        None => no_nul(
             bytes
                 .iter()
                 .map(|&b| crate::table::windows_1252(b))

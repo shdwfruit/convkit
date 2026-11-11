@@ -184,7 +184,14 @@ fn human(
         Status::ValidUntil(_) | Status::NoExpiry => paint.green("valid now"),
     };
     rows.push(("status".to_string(), status_text));
-    let alg = token.alg.as_deref().unwrap_or("none named");
+    // The header is the token's author's text: no raw escape codes to the terminal.
+    let alg: String = token
+        .alg
+        .as_deref()
+        .unwrap_or("none named")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
     // The marks only where they are symbols; piped, the words say it.
     let mark = |m: String| {
         if paint.on {
@@ -248,4 +255,17 @@ fn json_of(token: &Token, status: Status, signature: Option<Signature>, now: Tim
         },
         "warnings": token.warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_header_alg_cannot_write_escape_codes() {
+        let t = j::decode("eyJhbGciOiJcdTAwMWJdNTI7YztYXHUwMDA3In0.eyJhIjoxfQ.AA").unwrap();
+        let now = Timestamp::now();
+        let text = human(&t, t.status(now), None, now, Paint { on: false });
+        assert!(!text.contains('\x1b') && !text.contains('\x07'));
+    }
 }

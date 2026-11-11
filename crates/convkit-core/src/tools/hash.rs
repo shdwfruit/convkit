@@ -275,7 +275,21 @@ fn parse_gnu(line: &str) -> Option<(Expected, String)> {
         return None;
     }
     let name = if escaped {
-        name.replace("\\n", "\n").replace("\\\\", "\\")
+        // One left-to-right pass: `\\n` is a backslash and an n, `\n` a newline.
+        let mut out = String::new();
+        let mut chars = name.chars();
+        while let Some(c) = chars.next() {
+            match (c, chars.clone().next()) {
+                ('\\', Some('n')) => out.push('\n'),
+                ('\\', Some('\\')) => out.push('\\'),
+                _ => {
+                    out.push(c);
+                    continue;
+                }
+            }
+            chars.next();
+        }
+        out
     } else {
         name.to_string()
     };
@@ -403,6 +417,12 @@ mod tests {
         assert_eq!(sums.lines[0].expected.algorithm, Algorithm::Md5);
         assert_eq!(sums.lines[1].expected.algorithm, Algorithm::Sha1);
         assert_eq!(sums.lines[1].file, "new\nline.iso");
+    }
+
+    #[test]
+    fn an_escaped_backslash_before_n_is_not_a_newline() {
+        let text = format!("\\{}  a\\\\nb\n", "e".repeat(40));
+        assert_eq!(parse_sums(&text).lines[0].file, "a\\nb");
     }
 
     #[test]

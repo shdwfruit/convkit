@@ -384,7 +384,7 @@ fn split(url: &str) -> Option<Parts<'_>> {
     }
     let after = scheme_end + 3;
     let auth_len = url[after..]
-        .find(['/', '?', '#'])
+        .find(['/', '\\', '?', '#'])
         .unwrap_or(url.len() - after);
     let authority = &url[after..after + auth_len];
     let host = authority.rsplit('@').next().unwrap_or("");
@@ -428,7 +428,12 @@ fn host_is(host: &str, pattern: &str) -> bool {
         return labels.iter().enumerate().any(|(i, l)| {
             *l == name && {
                 let tail = &labels[i + 1..];
-                matches!(tail.len(), 1 | 2) && tail.iter().all(|t| t.len() <= 3 && !t.is_empty())
+                // google.de, google.co.uk, google.com.au: no other second label.
+                match tail {
+                    [tld] => (2..=3).contains(&tld.len()),
+                    [sld, cc] => matches!(*sld, "co" | "com") && cc.len() == 2,
+                    _ => false,
+                }
             }
         });
     }
@@ -600,12 +605,12 @@ fn unwrap_once(url: &str) -> Option<(&'static str, String)> {
                     .ok()?;
                 String::from_utf8(bytes).ok()
             }),
-            Carry::Amp => p
-                .path
-                .strip_prefix("/amp/s/")
-                .map(|rest| format!("https://{rest}")),
+            Carry::Amp => p.path.strip_prefix("/amp/s/").map(|rest| match p.query {
+                Some(q) => format!("https://{rest}?{q}"),
+                None => format!("https://{rest}"),
+            }),
         };
-        if let Some(inner) = inner.filter(|i| is_link(i)) {
+        if let Some(inner) = inner.filter(|i| is_link(i) && !i.chars().any(char::is_control)) {
             return Some((w.name, inner));
         }
     }
@@ -625,8 +630,11 @@ fn strip_tracking(url: &str) -> (String, Vec<String>) {
         for pair in part.split('&') {
             let key = pair.split_once('=').map_or(pair, |(k, _)| k);
             let key = decode(key);
-            if !key.is_empty() && is_tracking(&p.host, &key) {
-                removed.push(key.into_owned());
+            // Bing Maps uses `sp` for the saved places on the map.
+            let bing_maps =
+                key == "sp" && host_is(&p.host, "bing.com") && p.path.starts_with("/maps");
+            if !key.is_empty() && !bing_maps && is_tracking(&p.host, &key) {
+                removed.push(key.chars().filter(|c| !c.is_control()).collect());
                 dropped_any = true;
             } else {
                 kept.push(pair);
@@ -677,7 +685,9 @@ pub fn clean_text(text: &str) -> (String, Vec<Cleaned>) {
     let mut out = String::with_capacity(text.len());
     let mut found = Vec::new();
     let mut rest = text;
-    while let Some(start) = find_link(rest) {
+    // Lowercased once; the same byte offsets as `text`.
+    let lower = text.to_ascii_lowercase();
+    while let Some(start) = find_link(&lower[text.len() - rest.len()..]) {
         out.push_str(&rest[..start]);
         let tail = &rest[start..];
         let len = link_len(tail);
@@ -696,13 +706,10 @@ pub fn clean_text(text: &str) -> (String, Vec<Cleaned>) {
 }
 
 fn find_link(s: &str) -> Option<usize> {
-    let lower = s.to_ascii_lowercase();
-    let a = lower.find("https://");
-    let b = lower.find("http://");
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
+    s.match_indices("http").map(|(i, _)| i).find(|&i| {
+        let after = &s[i + 4..];
+        after.starts_with("://") || after.starts_with("s://")
+    })
 }
 
 /// How much of `s` is the link: up to whitespace or a character links
@@ -746,6 +753,9 @@ pub fn resolve(base: &str, location: &str) -> String {
     }
     if location.starts_with('/') {
         return format!("{}{location}", p.origin);
+    }
+    if location.starts_with('?') {
+        return format!("{}{}{location}", p.origin, p.path);
     }
     let dir = match p.path.rfind('/') {
         Some(i) => &p.path[..=i],
@@ -972,6 +982,47 @@ mod tests {
             out("https://www.google.com/url?q=hello"),
             "https://www.google.com/url?q=hello"
         );
+    }
+
+    #[test]
+    fn unwrapping_refuses_control_characters_and_backslash_hosts() {
+        let c =
+            clean("https://www.google.com/url?q=https%3A%2F%2Fexample.com%2F%1B%5D0%3Btitle%07")
+                .unwrap();
+        assert!(!c.output.contains('\x1b') && c.unwrapped.is_empty());
+        let c = clean("https://example.com/?utm_%1B%5D=1").unwrap();
+        assert!(c.removed.iter().all(|k| !k.contains('\x1b')));
+        let c = clean("https://evil.example\\@www.google.com/url?q=https://bank.example/login")
+            .unwrap();
+        assert!(c.unwrapped.is_empty());
+        assert!(!host_is("google.abc.io", "google.*"));
+        assert!(host_is("google.com.au", "google.*"));
+    }
+
+    #[test]
+    fn amp_keeps_its_query_and_bing_maps_keeps_sp() {
+        assert_eq!(
+            clean("https://www.google.com/amp/s/www.example.com/story.php?id=123")
+                .unwrap()
+                .output,
+            "https://www.example.com/story.php?id=123"
+        );
+        assert_eq!(
+            clean("https://www.bing.com/maps?cp=1&sp=aN.x")
+                .unwrap()
+                .output,
+            "https://www.bing.com/maps?cp=1&sp=aN.x"
+        );
+        assert_eq!(
+            resolve("https://a.com/x/file.php?a=1", "?page=2"),
+            "https://a.com/x/file.php?page=2"
+        );
+    }
+
+    #[test]
+    fn a_text_of_many_links_is_cleaned_in_linear_time() {
+        let text = "http://a.com/x?utm_source=z ".repeat(30_000);
+        assert_eq!(clean_text(&text).1.len(), 30_000);
     }
 
     #[test]

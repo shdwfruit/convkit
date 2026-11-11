@@ -65,7 +65,8 @@ and settings into Convert Anything.
 
 The small text and developer tools run their conv command as you type and
 show what it prints. Text goes to conv on a pipe, so a long paste or one
-starting with a dash is fine.
+starting with a dash is fine. Compare Text and QR Code are the exceptions:
+conv takes their text as arguments, after `--`.
 
 Options that don't fit the files are greyed out, and hovering says why: a
 PNG has no quality setting, a picture has no frame rate, End and a length

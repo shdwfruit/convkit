@@ -358,15 +358,6 @@ fn refuse_a_typed_password(cli: &Cli, ops: &[Op]) -> Result<(), ConvError> {
     }
 }
 
-/// Reads a password without showing it.
-fn ask_password(question: &str) -> Option<String> {
-    eprint!("{question}");
-    console::Term::stderr()
-        .read_secure_line()
-        .ok()
-        .filter(|p| !p.is_empty())
-}
-
 fn env_password() -> Option<String> {
     std::env::var(archive::PASSWORD_ENV)
         .ok()
@@ -399,9 +390,9 @@ fn new_password(
         )));
     }
     let name = output.file_name().unwrap_or_default().to_string_lossy();
-    let first = ask_password(&format!("Password for {name}: "))
+    let first = crate::password::ask_hidden(&format!("Password for {name}: "))
         .ok_or_else(|| invalid("no password given; nothing was written"))?;
-    let again = ask_password("Again, to check: ").unwrap_or_default();
+    let again = crate::password::ask_hidden("Again, to check: ").unwrap_or_default();
     if first != again {
         return Err(invalid("the two passwords differ; nothing was written"));
     }
@@ -418,7 +409,7 @@ fn open_password(archive: &Path, ask_now: bool) -> Option<String> {
         return None;
     }
     let name = archive.file_name().unwrap_or_default().to_string_lossy();
-    ask_password(&format!("Password for {name}: "))
+    crate::password::ask_hidden(&format!("Password for {name}: "))
 }
 
 /// Runs `attempt` with the password known so far, and once more with one
@@ -436,7 +427,7 @@ fn with_open_password(
                 && prompt::is_interactive_session() =>
         {
             let name = archive.file_name().unwrap_or_default().to_string_lossy();
-            match ask_password(&format!("{name} is locked. Password: ")) {
+            match crate::password::ask_hidden(&format!("{name} is locked. Password: ")) {
                 Some(p) => attempt(Some(p)),
                 None => Err(e),
             }
@@ -456,7 +447,7 @@ fn confirm_large(cli: &Cli) -> impl FnMut(&Expansion) -> bool + '_ {
         Gate::Proceed => true,
         Gate::Refuse => false,
         Gate::Ask => {
-            eprintln!("{}", e.warning());
+            eprintln!("{}", render::safe_for_terminal(&e.warning()));
             prompt::ask("Unpack anyway? [y/N] ")
         }
     }
@@ -625,7 +616,7 @@ fn print(cli: &Cli, results: &[(Op, Result<Report, ConvError>, u64)]) {
             .map(|(op, r, ms)| match r {
                 Ok(rep) => {
                     let mut v = render::outcome_json(&outcome(rep, *ms));
-                    v["input"] = json!(op.input());
+                    v["input"] = json!(op.input().to_string_lossy());
                     v["archive"] = json!({
                         "action": action(op),
                         "format": rep.format,
@@ -637,7 +628,7 @@ fn print(cli: &Cli, results: &[(Op, Result<Report, ConvError>, u64)]) {
                     });
                     v
                 }
-                Err(e) => json!({ "ok": false, "input": op.input(), "error": e }),
+                Err(e) => json!({ "ok": false, "input": op.input().to_string_lossy(), "error": e }),
             })
             .collect();
         let ok = results.iter().all(|(_, r, _)| r.is_ok());
@@ -694,7 +685,7 @@ fn dry_run(cli: &Cli, ops: &[Op]) -> i32 {
             } => {
                 let from: Vec<String> = inputs.iter().map(|p| p.display().to_string()).collect();
                 Ok((
-                    json!({ "action": "pack", "inputs": inputs, "output": output, "format": format }),
+                    json!({ "action": "pack", "inputs": from, "output": output.to_string_lossy(), "format": format }),
                     render::archive_plan_human(
                         "pack",
                         &from.join(" "),
@@ -708,7 +699,7 @@ fn dry_run(cli: &Cli, ops: &[Op]) -> i32 {
                 output,
                 format,
             } => Ok((
-                json!({ "action": "convert", "input": input, "output": output, "format": format }),
+                json!({ "action": "convert", "input": input.to_string_lossy(), "output": output.to_string_lossy(), "format": format }),
                 render::archive_plan_human(
                     "convert",
                     &input.display().to_string(),
@@ -726,7 +717,7 @@ fn dry_run(cli: &Cli, ops: &[Op]) -> i32 {
                         convkit_core::size::human(listing.total())
                     );
                     (
-                        json!({ "action": "unpack", "input": a, "output": to, "listing": listing }),
+                        json!({ "action": "unpack", "input": a.to_string_lossy(), "output": to.to_string_lossy(), "listing": listing }),
                         render::archive_plan_human(
                             "unpack",
                             &a.display().to_string(),

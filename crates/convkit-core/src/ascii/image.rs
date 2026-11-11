@@ -20,11 +20,22 @@ fn unreadable(what: impl std::fmt::Display) -> ConvError {
     )
 }
 
+/// The most pixels a PNG may have: a small file can claim a picture that
+/// takes gigabytes to hold.
+const MAX_PIXELS: u64 = 100_000_000;
+
 /// Decodes a PNG of any colour type and bit depth into 8-bit RGBA.
 pub fn decode_png(bytes: &[u8]) -> Result<Image> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().map_err(unreadable)?;
+    let (w, h) = reader.info().size();
+    if u64::from(w) * u64::from(h) > MAX_PIXELS {
+        return Err(unreadable(format!(
+            "it is {w}x{h}, more than the {} megapixels conv reads",
+            MAX_PIXELS / 1_000_000
+        )));
+    }
     let size = reader
         .output_buffer_size()
         .ok_or_else(|| unreadable("it is too large"))?;
@@ -57,11 +68,24 @@ pub fn decode_png(bytes: &[u8]) -> Result<Image> {
     })
 }
 
+/// How an SVG from the user is parsed: pictures embedded as data: URLs
+/// are drawn, but an `<image href>` naming a file is not, since it could
+/// be any path on this machine (a private picture, or /dev/zero).
+pub(crate) fn svg_options() -> usvg::Options<'static> {
+    usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..usvg::Options::default()
+    }
+}
+
 /// Draws an SVG so its longer side is `max_side` pixels, keeping its
 /// shape. Text is not drawn (resvg is built without fonts); see
 /// `svg_has_text`.
 pub fn from_svg(bytes: &[u8], max_side: u32) -> Result<Image> {
-    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).map_err(unreadable)?;
+    let tree = usvg::Tree::from_data(bytes, &svg_options()).map_err(unreadable)?;
     let size = tree.size();
     let scale = max_side as f32 / size.width().max(size.height());
     let width = ((size.width() * scale).round() as u32).max(1);
@@ -183,6 +207,18 @@ mod tests {
     }
 
     #[test]
+    fn a_png_claiming_too_many_pixels_is_refused_before_decoding() {
+        let mut bytes = encode(png::ColorType::Rgba, png::BitDepth::Eight, 1, 1, &[0; 4]);
+        // The IHDR's width and height, at 16..24, claimed as 16000x16000.
+        bytes[16..24].copy_from_slice(&[0, 0, 0x3E, 0x80, 0, 0, 0x3E, 0x80]);
+        let mut crc = flate2::Crc::new();
+        crc.update(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.sum().to_be_bytes());
+        let e = decode_png(&bytes).unwrap_err();
+        assert!(e.message.contains("megapixels"), "{}", e.message);
+    }
+
+    #[test]
     fn an_svg_keeps_its_shape() {
         let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect width="100" height="100" fill="#fff"/></svg>"##;
         let img = from_svg(svg, 400).unwrap();
@@ -190,6 +226,23 @@ mod tests {
         assert_eq!(img.rgba[..4], [255, 255, 255, 255], "the rect is drawn");
         let right = ((100 * 400 + 399) * 4) as usize;
         assert_eq!(img.rgba[right + 3], 0, "outside the rect is transparent");
+    }
+
+    #[test]
+    fn an_svg_image_naming_a_local_file_draws_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("private.png");
+        std::fs::write(
+            &png,
+            encode(png::ColorType::Rgba, png::BitDepth::Eight, 1, 1, &[255; 4]),
+        )
+        .unwrap();
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><image href="{}" width="10" height="10"/></svg>"#,
+            png.display()
+        );
+        let img = from_svg(svg.as_bytes(), 10).unwrap();
+        assert!(img.rgba.iter().all(|&v| v == 0), "the file was drawn");
     }
 
     #[test]

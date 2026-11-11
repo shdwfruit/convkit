@@ -6,12 +6,10 @@
 use std::time::Duration;
 
 use convkit_core::pdf::{PdfOutcome, PdfPlan};
-use convkit_core::{Backend, ConvError, ErrorCode, Event, ResolvedBackend};
+use convkit_core::{ConvError, Event};
 use serde_json::json;
 
 use crate::cli::{Cli, LockArgs};
-use crate::commands::install;
-use crate::install_prompt;
 use crate::password;
 use crate::render;
 
@@ -27,24 +25,6 @@ pub(crate) fn locked(
         plan.set_lock(lock);
     }
     Ok(plan)
-}
-
-/// qpdf, resolved the usual way. When it is missing and `offer_install` is
-/// set, the same install prompt a conversion gives (`--yes` installs,
-/// `--no-install`, `--json` and `-q` never prompt).
-pub(crate) fn resolve_qpdf(cli: &Cli, offer_install: bool) -> Result<ResolvedBackend, ConvError> {
-    match cli.resolver().resolve(Backend::Qpdf) {
-        Ok(q) => Ok(q),
-        Err(e)
-            if e.code == ErrorCode::BackendMissing
-                && offer_install
-                && install_prompt::should_install(cli, Backend::Qpdf) =>
-        {
-            install::install_backend(cli, Backend::Qpdf)?;
-            cli.resolver().resolve(Backend::Qpdf)
-        }
-        Err(e) => Err(e),
-    }
 }
 
 /// `-v`: each qpdf command line as it is spawned, then qpdf's output, on

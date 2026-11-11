@@ -912,3 +912,231 @@ fn the_listing_names_the_top_level() {
     assert_eq!(l.top_level(), ["photos"]);
     assert!(l.total() > 100_000);
 }
+
+fn refuses() -> impl FnMut(&Expansion) -> bool {
+    |_| false
+}
+
+#[test]
+fn a_hard_link_copied_on_a_disk_without_links_counts_toward_the_question() {
+    safe::TEST_LIMITS.with(|l| l.set(Some((10_000, 2))));
+    safe::TEST_NO_HARDLINKS.with(|l| l.set(true));
+    let dir = tempfile::tempdir().unwrap();
+    let t = dir.path().join("links.tar");
+    let names: Vec<String> = (0..20).map(|i| format!("l{i}")).collect();
+    let mut entries: Vec<RawEntry> = vec![(b"f", tar::EntryType::Regular, &[7u8; 20_000], b"")];
+    for n in &names {
+        entries.push((n.as_bytes(), tar::EntryType::Link, b"", b"f"));
+    }
+    raw_tar(&t, &entries);
+    let e = unpack(
+        &t,
+        &Destination::Beside(dir.path().to_path_buf()),
+        &UnpackOptions::default(),
+        &mut refuses(),
+    )
+    .unwrap_err();
+    safe::TEST_LIMITS.with(|l| l.set(None));
+    safe::TEST_NO_HARDLINKS.with(|l| l.set(false));
+    assert_eq!(e.code, ErrorCode::ConfirmationRequired);
+}
+
+#[test]
+fn many_empty_files_are_asked_about() {
+    safe::TEST_LIMITS.with(|l| l.set(Some((100_000, 10))));
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("empties");
+    fs::create_dir(&src).unwrap();
+    for i in 0..3000 {
+        fs::write(src.join(format!("f{i}")), "").unwrap();
+    }
+    let t = dir.path().join("empties.tar.gz");
+    pack(&[src], &t, ArchiveFormat::TarGz, &PackOptions::default()).unwrap();
+    let e = unpack(
+        &t,
+        &Destination::Into(dir.path().join("out")),
+        &UnpackOptions::default(),
+        &mut refuses(),
+    )
+    .unwrap_err();
+    safe::TEST_LIMITS.with(|l| l.set(None));
+    assert_eq!(e.code, ErrorCode::ConfirmationRequired);
+}
+
+#[test]
+fn names_that_differ_only_in_case_are_refused_on_a_disk_that_ignores_case() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("probe"), "").unwrap();
+    if !dir.path().join("PROBE").exists() {
+        return;
+    }
+    let z = dir.path().join("c.zip");
+    raw_zip(&z, &[("top/Makefile", b"one"), ("top/makefile", b"two")]);
+    let e = unpack(
+        &z,
+        &Destination::Into(dir.path().join("out")),
+        &UnpackOptions::default(),
+        &mut no_question(),
+    )
+    .unwrap_err();
+    assert!(
+        e.message.contains("Makefile") && e.message.contains("makefile"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_repeated_name_still_keeps_the_later_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let z = dir.path().join("d.tar");
+    raw_tar(
+        &z,
+        &[
+            (b"top/a", tar::EntryType::Regular, b"one", b""),
+            (b"top/a", tar::EntryType::Regular, b"two", b""),
+        ],
+    );
+    let r = unpack(
+        &z,
+        &Destination::Into(dir.path().join("out")),
+        &UnpackOptions::default(),
+        &mut no_question(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(r.output.join("top/a")).unwrap(), b"two");
+}
+
+#[test]
+fn a_macos_sidecar_does_not_hide_the_one_top_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let z = dir.path().join("photos.zip");
+    raw_zip(&z, &[("photos/a.txt", b"hi"), ("._photos", b"x")]);
+    let r = unpack(
+        &z,
+        &Destination::Beside(dir.path().to_path_buf()),
+        &UnpackOptions::default(),
+        &mut no_question(),
+    )
+    .unwrap();
+    assert!(r.output.join("a.txt").exists(), "{:?}", r.output);
+}
+
+#[cfg(unix)]
+#[test]
+fn unpacking_into_a_link_to_a_folder_goes_into_the_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let z = dir.path().join("a.zip");
+    raw_zip(&z, &[("a.txt", b"hi")]);
+    unpack(
+        &z,
+        &Destination::Into(link),
+        &UnpackOptions::default(),
+        &mut no_question(),
+    )
+    .unwrap();
+    assert!(real.join("a.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_merge_moves_back_what_it_moved() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("dest");
+    fs::create_dir_all(dest.join("zz")).unwrap();
+    fs::set_permissions(dest.join("zz"), fs::Permissions::from_mode(0o500)).unwrap();
+    let writable = fs::write(dest.join("zz/probe"), "").is_ok();
+    let z = dir.path().join("a.zip");
+    raw_zip(&z, &[("a.txt", b"1"), ("b.txt", b"2"), ("zz/c.txt", b"3")]);
+    let r = unpack(
+        &z,
+        &Destination::Into(dest.clone()),
+        &UnpackOptions::default(),
+        &mut no_question(),
+    );
+    fs::set_permissions(dest.join("zz"), fs::Permissions::from_mode(0o700)).unwrap();
+    if writable {
+        return; // running as root: the folder was never read-only
+    }
+    assert!(r.is_err());
+    assert!(!dest.join("a.txt").exists() && !dest.join("b.txt").exists());
+}
+
+#[test]
+fn a_refused_unpack_leaves_no_new_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let z = dir.path().join("slip.zip");
+    raw_zip(&z, &[("../evil.txt", b"x")]);
+    unpack(
+        &z,
+        &Destination::Into(dir.path().join("new/deep/dest")),
+        &UnpackOptions::default(),
+        &mut no_question(),
+    )
+    .unwrap_err();
+    assert!(!dir.path().join("new").exists());
+}
+
+#[test]
+fn listing_a_sparse_tar_does_not_read_its_claimed_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = tar::Header::new_gnu();
+    h.set_path("big").unwrap();
+    h.set_entry_type(tar::EntryType::GNUSparse);
+    h.set_size(512);
+    let gnu = h.as_gnu_mut().unwrap();
+    gnu.set_real_size(1 << 40);
+    // One 512-byte chunk at the very end; everything before it is a hole.
+    gnu.sparse[0].offset[0] = 0x80;
+    gnu.sparse[0].offset[4..].copy_from_slice(&((1u64 << 40) - 512).to_be_bytes());
+    gnu.sparse[0].numbytes.copy_from_slice(b"00000001000\0");
+    h.set_cksum();
+    let mut bytes = h.as_bytes().to_vec();
+    bytes.resize(bytes.len() + 512 + 1024, 0);
+    let t = dir.path().join("sparse.tar");
+    fs::write(&t, bytes).unwrap();
+    let start = std::time::Instant::now();
+    let l = list(&t, None).unwrap();
+    assert_eq!(l.entries.len(), 1);
+    assert!(start.elapsed().as_secs() < 5);
+}
+
+#[test]
+fn a_listing_total_saturates() {
+    let e = |n: &str| Listed {
+        name: n.into(),
+        kind: "file",
+        size: u64::MAX,
+    };
+    let l = Listing {
+        format: ArchiveFormat::Zip,
+        entries: vec![e("a"), e("b")],
+        encrypted: false,
+    };
+    assert_eq!(l.total(), u64::MAX);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_to_a_top_level_name_that_is_not_packed_is_said() {
+    let dir = tempfile::tempdir().unwrap();
+    let top = make_tree(dir.path());
+    std::os::unix::fs::symlink("../notes.txt", top.join("notes")).unwrap();
+    let r = pack(
+        &[top],
+        &dir.path().join("p.tar"),
+        ArchiveFormat::Tar,
+        &PackOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        r.notes.iter().any(|n| n.contains("photos/notes")),
+        "{:?}",
+        r.notes
+    );
+}

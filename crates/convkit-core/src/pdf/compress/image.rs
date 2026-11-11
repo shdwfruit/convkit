@@ -151,8 +151,12 @@ fn coding_of(doc: &Document, d: &Dictionary) -> Result<Coding, Skip> {
                 .any(|p| !matches!(resolve(doc, p), Some(Object::Null) | None)),
             _ => true,
         });
+    // lopdf applies /DecodeParms (a PNG predictor) only when it is a
+    // dictionary written in place; else it would inflate to noise.
+    let lopdf_reads_params =
+        !has_params || matches!(d.get(b"DecodeParms"), Ok(Object::Dictionary(_)));
     match names.as_slice() {
-        [] | [b"FlateDecode"] => Ok(Coding::Samples),
+        [] | [b"FlateDecode"] if lopdf_reads_params => Ok(Coding::Samples),
         [b"DCTDecode"] if !has_params => Ok(Coding::Jpeg { inflate: false }),
         [b"FlateDecode", b"DCTDecode"] if !has_params => Ok(Coding::Jpeg { inflate: true }),
         _ => Err(Skip::Filter),
@@ -161,6 +165,15 @@ fn coding_of(doc: &Document, d: &Dictionary) -> Result<Coding, Skip> {
 
 fn image_stream(doc: &Document, id: ObjectId) -> Option<&Stream> {
     doc.get_object(id).ok()?.as_stream().ok()
+}
+
+/// The most a Flate-wrapped JPEG of this size may inflate to: twice its
+/// raw pixels, which no JPEG comes near, so a bomb costs no more than the
+/// size the memory budget counts.
+fn jpeg_limit(width: u32, height: u32, space: Space) -> usize {
+    (u64::from(width) * u64::from(height))
+        .saturating_mul(space.channels() as u64 * 2)
+        .clamp(16 << 20, 512 << 20) as usize
 }
 
 /// A JPEG image's JPEG bytes: its data, inflated first under a Flate layer.
@@ -411,7 +424,7 @@ fn decode(
     let p = match coding {
         Coding::Samples => decode_samples(stream, width, height, space)?,
         Coding::Jpeg { inflate } => {
-            let jpeg = jpeg_bytes(stream, inflate, 512 << 20)?;
+            let jpeg = jpeg_bytes(stream, inflate, jpeg_limit(width, height, space))?;
             codec::decode_jpeg(&jpeg, MAX_PIXELS)?
         }
     };
@@ -475,9 +488,11 @@ pub(crate) fn shrink(doc: &Document, c: &Candidate, level: &Level) -> Option<Rep
     // Decided before decoding, so an image no rule can touch costs nothing:
     // most of an office scan's, at --compress.
     let requant = match c.coding {
-        Coding::Jpeg { inflate } => jpeg_bytes(stream, inflate, 512 << 20)
-            .and_then(|j| codec::estimated_quality(&j))
-            .is_some_and(|q| q > level.requant_above),
+        Coding::Jpeg { inflate } => {
+            jpeg_bytes(stream, inflate, jpeg_limit(c.width, c.height, c.space))
+                .and_then(|j| codec::estimated_quality(&j))
+                .is_some_and(|q| q > level.requant_above)
+        }
         Coding::Samples => false,
     };
     let photo = c.coding == Coding::Samples
@@ -927,6 +942,34 @@ mod tests {
     }
 
     #[test]
+    fn decode_parms_lopdf_would_ignore_skip_the_image() {
+        let mut doc = Document::with_version("1.7");
+        let parms = doc.add_object(dictionary! { "Predictor" => 12, "Columns" => 10 });
+        let indirect = flate_image(&mut doc, &photo(10, 10, Space::Gray));
+        let in_array = flate_image(&mut doc, &photo(10, 10, Space::Gray));
+        let direct = flate_image(&mut doc, &photo(10, 10, Space::Gray));
+        let set = |doc: &mut Document, id, o: Object| {
+            let d = &mut doc
+                .get_object_mut(id)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict;
+            d.set("DecodeParms", o);
+        };
+        set(&mut doc, indirect, parms.into());
+        set(&mut doc, in_array, vec![Object::Reference(parms)].into());
+        set(
+            &mut doc,
+            direct,
+            dictionary! { "Predictor" => 12, "Columns" => 10 }.into(),
+        );
+        assert_eq!(verdict(&doc, indirect).map(|c| c.coding), Err(Skip::Filter));
+        assert_eq!(verdict(&doc, in_array).map(|c| c.coding), Err(Skip::Filter));
+        assert_eq!(verdict(&doc, direct).map(|c| c.coding), Ok(Coding::Samples));
+    }
+
+    #[test]
     fn icc_profiles_give_the_component_count() {
         let mut doc = Document::with_version("1.7");
         let profile = doc.add_object(Stream::new(dictionary! { "N" => 3 }, vec![]));
@@ -1005,6 +1048,22 @@ mod tests {
         assert_eq!(c.coding, Coding::Jpeg { inflate: true });
         let r = shrink(&doc, &c, l1()).unwrap();
         assert!(r.jpeg && r.data.starts_with(&[0xFF, 0xD8]));
+    }
+
+    #[test]
+    fn a_flate_wrapped_jpeg_inflating_far_past_its_pixels_is_not_read() {
+        let mut doc = Document::with_version("1.7");
+        let mut jpeg = encode_jpeg(&photo(600, 400, Space::Gray), 98).unwrap();
+        jpeg.resize(jpeg.len() + (17 << 20), 0);
+        let id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => 600, "Height" => 400,
+                "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8,
+                "Filter" => vec![Object::Name(b"FlateDecode".to_vec()), Object::Name(b"DCTDecode".to_vec())],
+            },
+            codec::flate(&jpeg),
+        ));
+        assert_eq!(shrink(&doc, &candidate(&doc, id, 150.0), l1()), None);
     }
 
     #[test]

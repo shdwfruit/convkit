@@ -472,17 +472,14 @@ pub fn rows(rows: &[(String, String)]) -> String {
 
 /// `OK NAME - SIZE` and the full path below it, for a file a tool wrote.
 pub fn written_human(path: &Path, bytes: u64, paint: Paint) -> String {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
+    let name = render::safe_for_terminal(&render::file_name_of(path));
     let sep = if paint.on { " \u{b7} " } else { " - " };
     let full = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     format!(
         "{} {name}{sep}{}\n  {}\n",
         paint.ok(),
         convkit_core::size::human(bytes),
-        full.display()
+        render::safe_for_terminal(&full.display().to_string())
     )
 }
 

@@ -50,6 +50,14 @@ pub(crate) fn install_backend(
 ) -> Result<Vec<(Backend, std::path::PathBuf)>, ConvError> {
     let asset = manifest::lookup(backend).ok_or_else(|| ConvError::no_managed_build(backend))?;
 
+    // No absolute managed dir (e.g. HOME unset): fail rather than write somewhere shared.
+    if Resolver::managed_dir().is_none() {
+        return Err(ConvError::new(
+            ErrorCode::ConversionFailed,
+            "can't pick a folder for managed tools: set HOME (or XDG_DATA_HOME to an absolute path)",
+        ));
+    }
+
     if !cli.quiet && !cli.json {
         // Progress goes to stderr, matching the batch progress bar
         // (`indicatif::ProgressBar` also draws there) — stdout is reserved
@@ -58,7 +66,7 @@ pub(crate) fn install_backend(
         eprintln!("downloading {} ...", asset.url);
     }
 
-    install::fetch_and_install(asset, Resolver::managed_path)
+    install::fetch_and_install(asset, |b| Resolver::managed_path(b).unwrap_or_default())
 }
 
 /// Where `installed` says `backend` itself landed. Falls back to the first

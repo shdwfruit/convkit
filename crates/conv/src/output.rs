@@ -82,9 +82,8 @@ pub fn convert(
     let mut result = exec::run(&req, &cli.resolver(), &mut |_| {});
     if let Err(e) = &result {
         if let (ErrorCode::BackendMissing, Some(backend)) = (e.code, e.backend) {
-            if install_prompt::should_install(cli, backend)
-                && install::install_backend(cli, backend).is_ok()
-            {
+            if install_prompt::should_install(cli, backend) {
+                install::install_backend(cli, backend)?;
                 result = exec::run(&req, &cli.resolver(), &mut |_| {});
             }
         }

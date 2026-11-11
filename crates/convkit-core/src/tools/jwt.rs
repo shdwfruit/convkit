@@ -103,7 +103,11 @@ pub fn decode(s: &str) -> Result<Token, String> {
                 "{name} is {v}, which looks like milliseconds; a JWT counts seconds, so to a library this is tens of thousands of years away"
             ));
         }
-        match Timestamp::from_nanosecond((secs * 1e9) as i128) {
+        // Whole seconds stay integers: through f64 they come out a second early.
+        let nanos = v
+            .as_i64()
+            .map_or((secs * 1e9) as i128, |i| i as i128 * 1_000_000_000);
+        match Timestamp::from_nanosecond(nanos) {
             Ok(ts) => times.push((name, ts)),
             Err(_) => warnings.push(format!("{name} is {v}, which is past any date")),
         }
@@ -299,6 +303,17 @@ mod tests {
     fn bearer_prefixes_and_quotes_are_ignored() {
         assert!(decode(&format!("Bearer {JWT_IO}")).is_ok());
         assert!(decode(&format!("  \"{JWT_IO}\"\n")).is_ok());
+    }
+
+    #[test]
+    fn whole_second_times_are_exact() {
+        let t = decode(&sign_hs256(
+            r#"{"alg":"HS256"}"#,
+            r#"{"exp":4999999997}"#,
+            b"k",
+        ))
+        .unwrap();
+        assert_eq!(t.time("exp").unwrap().as_second(), 4999999997);
     }
 
     #[test]

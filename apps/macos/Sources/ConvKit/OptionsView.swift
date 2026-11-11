@@ -16,17 +16,21 @@ struct OptionsView: View {
     var body: some View {
         VStack(spacing: 0) {
             Form {
-                formatSection
-                if shows(.compress) || shows(.maxSize) || shows(.resize) || shows(.quality) || shows(.colors) { sizeSection }
-                if shows(.pages) || shows(.dpi) { pagesSection }
-                if shows(.fps) || shows(.crf) { videoSection }
-                if shows(.rotate) || shows(.flip) || shows(.crop) { pictureSection }
-                if shows(.time) || shows(.every) || shows(.speed) { timeSection }
-                if shows(.denoise) || shows(.audio) { soundSection }
-                if shows(.subtitles) { subtitlesSection }
-                if shows(.lock) || shows(.unlock) || job.preset.alwaysUnlock { passwordSection }
-                if shows(.strip) || job.preset.alwaysStrip { privacySection }
-                saveSection
+                Group {
+                    formatSection
+                    if shows(.compress) || shows(.maxSize) || shows(.resize) || shows(.quality) || shows(.colors) { sizeSection }
+                    if shows(.pages) || shows(.dpi) { pagesSection }
+                    if shows(.fps) || shows(.crf) { videoSection }
+                    if shows(.rotate) || shows(.flip) || shows(.crop) { pictureSection }
+                    if shows(.time) || shows(.every) || shows(.speed) { timeSection }
+                    if shows(.denoise) || shows(.audio) { soundSection }
+                    if shows(.subtitles) { subtitlesSection }
+                    if shows(.lock) || shows(.unlock) || job.preset.alwaysUnlock { passwordSection }
+                    if shows(.strip) || job.preset.alwaysStrip { privacySection }
+                    saveSection
+                }
+                // A run reads these for each file as it gets to it.
+                .disabled(job.isRunning)
                 if let moreOptions {
                     Section {
                         Button("More Options…", action: moreOptions)

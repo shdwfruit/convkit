@@ -308,6 +308,28 @@ fn hash_sums_checks_what_is_there() {
 }
 
 #[test]
+fn hash_sums_prefers_the_exact_path_over_the_same_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for (sub, body) in [("dir1", "hello"), ("dir2", "")] {
+        std::fs::create_dir(d.join(sub)).unwrap();
+        std::fs::write(d.join(sub).join("app.zip"), body).unwrap();
+    }
+    std::fs::write(
+        d.join("SHA256SUMS"),
+        format!(
+            "{HELLO_SHA256}  dir1/app.zip\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  dir2/app.zip\n"
+        ),
+    )
+    .unwrap();
+    conv()
+        .current_dir(d)
+        .args(["hash", "--sums", "SHA256SUMS", "dir2/app.zip"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn hash_missing_files_and_folders() {
     conv()
         .args(["hash", "no-such-file.bin"])
@@ -616,6 +638,16 @@ fn link_names_short_links_and_never_asks_them_unasked() {
         .stderr(contains("write it as https://example.com/x"));
 }
 
+#[test]
+fn link_follow_in_a_text_asks_only_short_links() {
+    // A request to this closed port would fail the command.
+    conv()
+        .args(["link", "--follow"])
+        .write_stdin("http://127.0.0.1:1/magic-login?token=abc\n")
+        .assert()
+        .success();
+}
+
 // --- count, case, chars, lorem -------------------------------------------
 
 #[test]
@@ -801,6 +833,22 @@ fn diff_treats_crlf_as_lf_and_says_so() {
         .assert()
         .code(1)
         .stdout(contains("-y\n+z\n"));
+}
+
+#[test]
+fn diff_unified_keeps_crs_so_the_patch_applies() {
+    let dir = two_files("x\r\ny\r\n", "x\r\nz\r\n");
+    conv()
+        .current_dir(dir.path())
+        .args(["diff", "--unified", "a.txt", "b.txt"])
+        .assert()
+        .code(1)
+        .stdout(contains("-y\r\n+z\r\n"));
+    conv()
+        .current_dir(dir.path())
+        .args(["diff", "-U", "18446744073709551615", "a.txt", "b.txt"])
+        .assert()
+        .code(2);
 }
 
 #[test]

@@ -122,8 +122,12 @@ pub fn frame(art: &Art, tune: &Tune, name: &str, window: (u16, u16), truecolor: 
         .iter()
         .find(|k| k.width() <= usize::from(cols))
         .unwrap_or(&KEYS[2]);
-    let below = tune.message.as_deref().unwrap_or(keys);
-    for (k, text) in [settings.as_str(), below].iter().enumerate() {
+    // A message can quote a file's name or an error about it.
+    let below = tune
+        .message
+        .as_deref()
+        .map_or_else(|| keys.to_string(), crate::render::safe_for_terminal);
+    for (k, text) in [settings.as_str(), below.as_str()].iter().enumerate() {
         let row = rows - STATUS_ROWS + 1 + k as u16;
         out.push_str(&format!(
             "\x1b[{row};1H\x1b[2K{}",

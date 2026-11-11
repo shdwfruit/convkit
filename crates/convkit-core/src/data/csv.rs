@@ -43,8 +43,10 @@ pub(crate) fn shape(src: &Source) -> Result<Shape, DataError> {
         .read_to_end(&mut head)
         .map_err(|e| DataError::io(&e, "read the CSV"))?;
     // Whole records only, so a cut one doesn't count against a delimiter.
+    // A CR-only file is cut at a CR, so never inside a UTF-8 character.
     if head.len() == SNIFF {
-        if let Some(end) = head.iter().rposition(|&b| b == b'\n') {
+        let last = |c: u8| head.iter().rposition(|&b| b == c);
+        if let Some(end) = last(b'\n').or_else(|| last(b'\r')) {
             head.truncate(end + 1);
         }
     }

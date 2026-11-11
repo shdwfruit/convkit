@@ -27,17 +27,8 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::cli::Cli;
+use crate::commands::doctor::BACKENDS;
 use crate::commands::install;
-
-const BACKENDS: [Backend; 7] = [
-    Backend::Ffmpeg,
-    Backend::Ffprobe,
-    Backend::Magick,
-    Backend::Pandoc,
-    Backend::Soffice,
-    Backend::Typst,
-    Backend::Qpdf,
-];
 
 /// One backend's row in the report. `--check` and a real update share this
 /// exact shape -- the only difference is which `action` values can appear:
@@ -232,13 +223,20 @@ fn has_receipt_in(dir: &Path) -> bool {
 fn receipt_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("convkit"))
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .map(|base| base.join("convkit"))
     }
     #[cfg(not(windows))]
     {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        let abs = |name| {
+            std::env::var_os(name)
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+        };
+        abs("XDG_CONFIG_HOME")
+            .or_else(|| abs("HOME").map(|h| h.join(".config")))
             .map(|base| base.join("convkit"))
     }
 }

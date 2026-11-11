@@ -11,9 +11,14 @@
 use std::path::Path;
 
 fn main() {
-    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Read at run time: a build script compiled for another checkout and shared
+    // through one target dir would otherwise keep that checkout's path.
+    let here =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets it"));
     let root = here.join("../..");
-    let workspace = root.join("Cargo.toml").is_file() && root.join("CHANGELOG.md").is_file();
+    let workspace = root.join("Cargo.toml").is_file()
+        && root.join("crates/conv/Cargo.toml").is_file()
+        && root.join("CHANGELOG.md").is_file();
     let source = if workspace {
         root.join("CHANGELOG.md")
     } else {

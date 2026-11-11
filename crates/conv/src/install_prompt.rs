@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use convkit_core::{manifest, Backend, ConvError, ErrorCode};
+use convkit_core::{manifest, Backend, ConvError, ErrorCode, ResolvedBackend};
 
 use crate::cli::Cli;
 
@@ -71,21 +71,29 @@ pub fn should_install(cli: &Cli, backend: Backend) -> bool {
     crate::prompt::is_interactive_session() && crate::prompt::ask(&prompt_message(backend))
 }
 
-/// Finds `backend` the way conversions do, and when it is missing, offers
-/// to install it (see `should_install`) and looks again.
-pub fn resolve_or_install(cli: &Cli, backend: Backend) -> Result<PathBuf, ConvError> {
+/// `backend`, resolved the usual way. When it is missing and `offer` is
+/// set, the same install prompt a conversion gives (`--yes` installs,
+/// `--no-install`, `--json` and `-q` never prompt). A failed install is
+/// the error, not the original "isn't installed".
+pub fn resolve_offering(
+    cli: &Cli,
+    backend: Backend,
+    offer: bool,
+) -> Result<ResolvedBackend, ConvError> {
     match cli.resolver().resolve(backend) {
-        Ok(found) => Ok(found.path),
-        Err(e) if e.code == ErrorCode::BackendMissing => {
-            if should_install(cli, backend)
-                && crate::commands::install::install_backend(cli, backend).is_ok()
-            {
-                return Ok(cli.resolver().resolve(backend)?.path);
-            }
-            Err(e)
+        Ok(b) => Ok(b),
+        Err(e) if e.code == ErrorCode::BackendMissing && offer && should_install(cli, backend) => {
+            crate::commands::install::install_backend(cli, backend)?;
+            cli.resolver().resolve(backend)
         }
         Err(e) => Err(e),
     }
+}
+
+/// Finds `backend` the way conversions do, and when it is missing, offers
+/// to install it (see `should_install`) and looks again.
+pub fn resolve_or_install(cli: &Cli, backend: Backend) -> Result<PathBuf, ConvError> {
+    resolve_offering(cli, backend, true).map(|b| b.path)
 }
 
 #[cfg(test)]

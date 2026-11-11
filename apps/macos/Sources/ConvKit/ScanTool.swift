@@ -29,7 +29,10 @@ final class ScanModel {
     func scan(_ url: URL) async {
         folder = url
         selection = []
-        guard let conv, let out = try? await Conv.run(conv, ["scan", "--json", url.path]) else { return }
+        entries = []
+        problem = nil
+        // Another folder was picked meanwhile: this answer is for the old one.
+        guard let conv, let out = try? await Conv.run(conv, ["scan", "--json", url.path]), folder == url else { return }
         guard let resp = out.decode(Response.self) else {
             problem = Conv.stderrMessage(out.stderr)
             return
@@ -98,7 +101,7 @@ struct ScanView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let first = urls.first else { return false }
+            guard let first = urls.first(where: \.isFileURL) else { return false }
             Task { await scan.scan(first) }
             return true
         }

@@ -29,6 +29,9 @@ pub(crate) struct Found {
     /// Plain `yes`, `no`, `on` or `off` values, which YAML 1.1 reads as
     /// true or false.
     pub yaml11_bools: bool,
+    /// Plain numbers with a leading 0 (`0644`), which YAML 1.1 reads as
+    /// octal.
+    pub yaml11_octal: bool,
 }
 
 enum Node {
@@ -52,8 +55,8 @@ struct Builder<'t> {
     text: &'t str,
     lenient: bool,
     stack: Vec<Node>,
-    /// Each anchor's value, and how many values it holds.
-    anchors: HashMap<usize, (Value, usize)>,
+    /// Each anchor's value, and what it holds.
+    anchors: HashMap<usize, (Value, Held)>,
     expanded: usize,
     docs: Vec<Value>,
     root: Option<Value>,
@@ -121,7 +124,7 @@ pub(crate) fn read(
                 if !budget.value(&Value::Null) {
                     return Err(budget.exceeded());
                 }
-                b.done(Value::Array(items), anchor, span)?;
+                b.done(Value::Array(items), anchor, span, budget)?;
             }
             Event::MappingEnd => {
                 let Some(Node::Map {
@@ -137,10 +140,10 @@ pub(crate) fn read(
                 if !budget.value(&Value::Null) {
                     return Err(budget.exceeded());
                 }
-                b.done(Value::Object(merged), anchor, span)?;
+                b.done(Value::Object(merged), anchor, span, budget)?;
             }
             Event::Alias(id) => {
-                let Some((value, nodes)) = b.anchors.get(&id).cloned() else {
+                let Some(&(_, held)) = b.anchors.get(&id) else {
                     return Err(b
                         .error(
                             span.start,
@@ -148,8 +151,11 @@ pub(crate) fn read(
                         )
                         .hint("an alias *name needs an &name earlier in the file"));
                 };
-                b.expanded += nodes;
-                if b.expanded > ALIAS_LIMIT || !budget.charge(nodes * VALUE_COST) {
+                if b.stack.len() + held.depth > MAX_DEPTH {
+                    return Err(b.too_deep(span));
+                }
+                b.expanded += held.nodes;
+                if b.expanded > ALIAS_LIMIT {
                     return Err(DataError {
                         kind: DataErrorKind::TooBig,
                         ..b.error(
@@ -164,7 +170,11 @@ pub(crate) fn read(
                         "a file whose aliases multiply like this (a \"billion laughs\") exhausts memory, so conv stops reading it",
                     ));
                 }
+                if !budget.charge(held.cost()) {
+                    return Err(budget.exceeded());
+                }
                 b.found.aliases = true;
+                let value = b.anchors[&id].0.clone();
                 b.place(value, span)?;
             }
         }
@@ -202,12 +212,16 @@ impl Builder<'_> {
                 .hint("JSON, TOML and CSV keys are text, so conv can't carry it over"));
         }
         if self.stack.len() >= MAX_DEPTH {
-            return Err(DataError {
-                kind: DataErrorKind::TooBig,
-                ..self.error(span.start, format!("nested more than {MAX_DEPTH} deep"))
-            });
+            return Err(self.too_deep(span));
         }
         Ok(())
+    }
+
+    fn too_deep(&self, span: Span) -> DataError {
+        DataError {
+            kind: DataErrorKind::TooBig,
+            ..self.error(span.start, format!("nested more than {MAX_DEPTH} deep"))
+        }
     }
 
     /// A tag on a list or mapping: its own kind, or one conv drops or
@@ -266,6 +280,14 @@ impl Builder<'_> {
                 {
                     self.found.yaml11_bools = true;
                 }
+                let t = text.as_bytes();
+                if t.len() > 1
+                    && t[0] == b'0'
+                    && t.iter().all(u8::is_ascii_digit)
+                    && self.wants_value()
+                {
+                    self.found.yaml11_octal = true;
+                }
                 resolve_plain(&text)
             }
             None => Value::String(text.to_string()),
@@ -323,8 +345,8 @@ impl Builder<'_> {
                 return Err(budget.exceeded());
             }
             if anchor != 0 {
-                self.anchors
-                    .insert(anchor, (Value::String(text.to_string()), 1));
+                let key = Value::String(text.to_string());
+                self.keep(anchor, key, budget)?;
             }
             if let Some(Node::Map { key, keys, .. }) = self.stack.last_mut() {
                 if !merge {
@@ -337,7 +359,7 @@ impl Builder<'_> {
         if !budget.value(&value) {
             return Err(budget.exceeded());
         }
-        self.done(value, anchor, span)
+        self.done(value, anchor, span, budget)
     }
 
     /// Whether the next node is a value rather than a mapping's key.
@@ -358,11 +380,27 @@ impl Builder<'_> {
     }
 
     /// A finished node: kept for its anchor, and placed in what holds it.
-    fn done(&mut self, value: Value, anchor: usize, span: Span) -> Result<(), DataError> {
+    fn done(
+        &mut self,
+        value: Value,
+        anchor: usize,
+        span: Span,
+        budget: &mut Budget,
+    ) -> Result<(), DataError> {
         if anchor != 0 {
-            self.anchors.insert(anchor, (value.clone(), count(&value)));
+            self.keep(anchor, value.clone(), budget)?;
         }
         self.place(value, span)
+    }
+
+    /// Keeps a copy of an anchor's value, which costs memory like any other.
+    fn keep(&mut self, anchor: usize, value: Value, budget: &mut Budget) -> Result<(), DataError> {
+        let held = count(&value);
+        if !budget.charge(held.cost()) {
+            return Err(budget.exceeded());
+        }
+        self.anchors.insert(anchor, (value, held));
+        Ok(())
     }
 
     fn place(&mut self, value: Value, span: Span) -> Result<(), DataError> {
@@ -517,12 +555,54 @@ pub(crate) fn datetime(s: &str) -> bool {
     looks && s.parse::<toml_datetime::Datetime>().is_ok()
 }
 
-/// How many values `v` holds, itself included.
-fn count(v: &Value) -> usize {
+/// What a value holds, so each copy of it can be charged.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    /// Values, itself included.
+    nodes: usize,
+    /// How deep its lists and mappings nest: 0 for a scalar.
+    depth: usize,
+    /// Bytes of text, keys included.
+    text: usize,
+}
+
+impl Held {
+    fn cost(self) -> usize {
+        self.nodes * VALUE_COST + self.text
+    }
+}
+
+fn count(v: &Value) -> Held {
+    let add = |a: Held, b: Held| Held {
+        nodes: a.nodes + b.nodes,
+        depth: a.depth.max(b.depth + 1),
+        text: a.text + b.text,
+    };
+    let scalar = |text| Held {
+        nodes: 1,
+        depth: 0,
+        text,
+    };
+    let open = Held {
+        nodes: 1,
+        depth: 1,
+        text: 0,
+    };
     match v {
-        Value::Array(items) => 1 + items.iter().map(count).sum::<usize>(),
-        Value::Object(entries) => 1 + entries.iter().map(|(_, v)| count(v)).sum::<usize>(),
-        _ => 1,
+        Value::Array(items) => items.iter().map(count).fold(open, add),
+        Value::Object(entries) => entries
+            .iter()
+            .map(|(k, v)| {
+                let held = count(v);
+                Held {
+                    text: held.text + k.len() + std::mem::size_of::<String>(),
+                    ..held
+                }
+            })
+            .fold(open, add),
+        Value::String(s) | Value::DateTime(s) => scalar(s.len()),
+        Value::Number(n) => scalar(n.text().len()),
+        Value::Bool(_) | Value::Null => scalar(0),
     }
 }
 
@@ -760,14 +840,14 @@ impl Emit for Writer<'_> {
         self.entry()?;
         let indent = self.stack.last().map_or(0, |f| f.indent);
         // An implicit key is at most 1024 characters; a longer one is
-        // written as an explicit `? key`.
-        if key.chars().count() > 1000 {
+        // written as an explicit `? key`. Quoting can double its length.
+        let k = key_text(key);
+        if k.chars().count() > 1000 {
             self.put(Role::Punct, "? ")?;
             self.put(Role::Key, &double_quoted(key))?;
             self.put(Role::Space, &format!("\n{}", " ".repeat(indent)))?;
             self.put(Role::Punct, ":")?;
         } else {
-            let k = key_text(key);
             self.put(Role::Key, &k)?;
             self.put(Role::Punct, ":")?;
         }

@@ -226,6 +226,7 @@ pub enum Destination {
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     /// The archive written, or the file or folder unpacked.
+    #[serde(serialize_with = "crate::lossy_path")]
     pub output: PathBuf,
     /// The archive's format: the one written, or the one opened.
     pub format: ArchiveFormat,
@@ -273,7 +274,7 @@ impl Listing {
 
     /// The size `unpack` would write.
     pub fn total(&self) -> u64 {
-        self.kept().map(|e| e.size).sum()
+        self.kept().map(|e| e.size).fold(0, u64::saturating_add)
     }
 
     pub fn files(&self) -> usize {
@@ -495,21 +496,6 @@ fn parent_dir(path: &Path) -> PathBuf {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
-    }
-}
-
-/// A size for a note: 1024-based, as file managers show it.
-fn human_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    let b = bytes as f64;
-    if b < KB {
-        format!("{bytes} B")
-    } else if b < KB * KB {
-        format!("{:.0} KB", b / KB)
-    } else if b < KB * KB * KB {
-        format!("{:.1} MB", b / KB / KB)
-    } else {
-        format!("{:.1} GB", b / KB / KB / KB)
     }
 }
 

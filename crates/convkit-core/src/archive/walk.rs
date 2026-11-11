@@ -4,8 +4,8 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use super::read::plural;
 use super::{failed, input_not_found};
+use crate::tools::plural;
 use crate::{ConvError, ErrorCode, Result};
 
 pub(crate) enum Source {
@@ -131,9 +131,22 @@ impl Skip {
 pub(crate) fn collect(sources: &[Source], skip: &Skip) -> Result<Collected> {
     let mut out = Collected::default();
     let mut tops: Vec<String> = Vec::new();
+    // What a link may name at the archive's top without leaving it.
+    let all_tops: Vec<String> = sources
+        .iter()
+        .flat_map(|s| match s {
+            Source::ContentsOf(d) => std::fs::read_dir(d)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect(),
+            Source::Named(p) => top_name(p).ok().into_iter().collect::<Vec<_>>(),
+        })
+        .collect();
     for source in sources {
         match source {
-            Source::ContentsOf(dir) => walk_dir(dir, "", 0, skip, &mut out)?,
+            Source::ContentsOf(dir) => walk_dir(dir, "", 0, skip, &all_tops, &mut out)?,
             Source::Named(path) => {
                 let meta = std::fs::metadata(path).map_err(|_| input_not_found(path))?;
                 let name = top_name(path)?;
@@ -156,7 +169,7 @@ pub(crate) fn collect(sources: &[Source], skip: &Skip) -> Result<Collected> {
                         mode: mode_of(&meta),
                         mtime,
                     });
-                    walk_dir(path, &name, 1, skip, &mut out)?;
+                    walk_dir(path, &name, 1, skip, &all_tops, &mut out)?;
                 } else if meta.is_file() {
                     out.items.push(Item {
                         name,
@@ -215,6 +228,7 @@ fn walk_dir(
     prefix: &str,
     depth: usize,
     skip: &Skip,
+    tops: &[String],
     out: &mut Collected,
 ) -> Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
@@ -252,7 +266,7 @@ fn walk_dir(
         if meta.file_type().is_symlink() {
             let target = std::fs::read_link(&path)
                 .map_err(|e| failed(format!("cannot read the link {}: {e}", path.display())))?;
-            if points_outside(&target, depth) {
+            if points_outside(&target, depth, tops) {
                 out.outside_links.push(name.clone());
             }
             out.items.push(Item {
@@ -270,7 +284,7 @@ fn walk_dir(
                 mode,
                 mtime,
             });
-            walk_dir(&path, &name, depth + 1, skip, out)?;
+            walk_dir(&path, &name, depth + 1, skip, tops, out)?;
         } else if meta.is_file() {
             out.items.push(Item {
                 name,
@@ -287,8 +301,8 @@ fn walk_dir(
 }
 
 /// Whether a link `depth` folders below the archive's top points above
-/// it, or anywhere absolute.
-fn points_outside(target: &Path, depth: usize) -> bool {
+/// it, or anywhere absolute, or to a top-level name that is not packed.
+fn points_outside(target: &Path, depth: usize, tops: &[String]) -> bool {
     let mut level = depth as i64;
     for c in target.components() {
         match c {
@@ -299,7 +313,12 @@ fn points_outside(target: &Path, depth: usize) -> bool {
                     return true;
                 }
             }
-            Component::Normal(_) => level += 1,
+            Component::Normal(n) => {
+                if level == 0 && !tops.iter().any(|t| n == t.as_str()) {
+                    return true;
+                }
+                level += 1;
+            }
             Component::CurDir => {}
         }
     }

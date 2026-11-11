@@ -153,6 +153,11 @@ impl Number {
                 n
             }));
         }
+        // As in JSON: 02134 is an ID or a zip code, not 2134.
+        let b = unsigned.as_bytes();
+        if b.len() > 1 && b[0] == b'0' && b[1].is_ascii_digit() {
+            return None;
+        }
         decimal(raw)
     }
 
@@ -269,10 +274,14 @@ fn decimal(s: &str) -> Option<Number> {
     })
 }
 
-/// Digits in `base` (no sign, no prefix), as a decimal integer of any
-/// length.
+/// The most digits `radix` reads: its work grows with their square, and no
+/// real number in another base is anywhere near this long.
+const MAX_RADIX_DIGITS: usize = 1000;
+
+/// Digits in `base` (no sign, no prefix), as a decimal integer of up to
+/// `MAX_RADIX_DIGITS` digits.
 fn radix(digits: &str, base: u32) -> Option<String> {
-    if digits.is_empty() {
+    if digits.is_empty() || digits.len() > MAX_RADIX_DIGITS {
         return None;
     }
     // Little-endian limbs of 10^9.
@@ -356,6 +365,21 @@ mod tests {
             text(Number::from_yaml("0xFFFFFFFFFFFFFFFFFFFFFFFF")),
             "79228162514264337593543950335"
         );
+    }
+
+    #[test]
+    fn hex_too_long_to_convert_quickly_is_not_a_number() {
+        let long = format!("0x{}", "f".repeat(200_000));
+        assert_eq!(Number::from_yaml(&long), None);
+        assert_eq!(Number::from_json5(&long), None);
+    }
+
+    #[test]
+    fn json5_refuses_a_leading_zero() {
+        assert_eq!(Number::from_json5("02134"), None);
+        assert_eq!(Number::from_json5("-00.5"), None);
+        assert_eq!(text(Number::from_json5("0.5")), "0.5");
+        assert_eq!(text(Number::from_json5("+0")), "0");
     }
 
     #[test]

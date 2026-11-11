@@ -49,7 +49,7 @@ pub fn grab_args(input: &Path, at_ms: u64, want: Want) -> Vec<OsString> {
     args.push("-ss".into());
     args.push(format!("{}.{:03}", at_ms / 1000, at_ms % 1000).into());
     args.push("-i".into());
-    args.push(input.as_os_str().to_owned());
+    args.push(crate::procutil::path_arg_os(input));
     for a in ["-map", "0:v:0", "-frames:v", "1", "-vf"] {
         args.push(a.into());
     }
@@ -116,7 +116,7 @@ pub fn grab(ffmpeg: &Path, input: &Path, at_ms: u64, want: Want) -> Result<Pixel
 pub fn still_args(input: &Path, max_side: u32) -> Vec<OsString> {
     let mut args: Vec<OsString> = QUIET.iter().map(OsString::from).collect();
     args.push("-i".into());
-    args.push(input.as_os_str().to_owned());
+    args.push(crate::procutil::path_arg_os(input));
     for a in ["-map", "0:v:0", "-frames:v", "1", "-vf"] {
         args.push(a.into());
     }
@@ -168,7 +168,7 @@ pub fn loudness(
 ) -> Result<()> {
     let mut args: Vec<OsString> = QUIET.iter().map(OsString::from).collect();
     args.push("-i".into());
-    args.push(input.as_os_str().to_owned());
+    args.push(crate::procutil::path_arg_os(input));
     for a in [
         "-map", "0:a:0", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1",
     ] {

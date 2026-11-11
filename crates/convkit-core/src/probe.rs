@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::error::{ConvError, ErrorCode, Result};
-use crate::procutil::backend_command;
+use crate::procutil::{backend_command, magick_frame, path_arg_os};
 
 /// The full stream inventory of a media file, not just the first stream of
 /// each type: the remux decision has to hold for *every* stream a container
@@ -162,7 +162,7 @@ pub fn frame_sizes(magick: &Path, input: &Path) -> Result<Vec<(u32, u32, u32)>> 
     }
     let out = backend_command(magick)
         .arg("-ping")
-        .arg(input)
+        .arg(path_arg_os(input))
         .args(["-format", "%w %h %z\n", "info:"])
         .output()
         .map_err(|e| {
@@ -492,7 +492,7 @@ pub(crate) fn json(ffprobe: &Path, input: &Path) -> Result<String> {
             "-show_format",
             "-show_chapters",
         ])
-        .arg(input)
+        .arg(path_arg_os(input))
         .output()
         .map_err(|e| {
             ConvError::new(
@@ -582,14 +582,15 @@ fn image_pages(magick: &Path, input: &Path, read: ImageRead) -> Result<Vec<(u32,
             ),
         ));
     }
-    let mut target = input.as_os_str().to_owned();
     // A merge takes a GIF's or WebP's first frame alone (`Arg::Inputs`, the
     // slot `every_input` is read from), so that is the frame sized.
     let first_frame =
         !read.every_page || (read.every_input && crate::recipe::first_frame_only(input));
-    if first_frame && !read.largest_frame {
-        target.push("[0]");
-    }
+    let target = if first_frame && !read.largest_frame {
+        magick_frame(input, 0)
+    } else {
+        path_arg_os(input)
+    };
     let out = backend_command(magick)
         .arg("-ping")
         .arg(target)
@@ -696,9 +697,7 @@ pub fn image_traits(magick: &Path, inputs: &[std::path::PathBuf]) -> Result<Imag
                 ),
             ));
         }
-        let mut target = input.as_os_str().to_owned();
-        target.push("[0-1]");
-        cmd.arg(target);
+        cmd.arg(magick_frame(input, "0-1"));
     }
     let first = inputs
         .first()

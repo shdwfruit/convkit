@@ -128,9 +128,14 @@ final class MergeModel {
     var totalPages: Int { items.compactMap(\.pages).reduce(0, +) }
     var ready: Bool { items.count >= minimum && problem == nil && !working }
 
+    /// Checks can finish out of order; only the latest one's answer counts.
+    private var checks = 0
+
     /// Dry run with a stand-in output, for conv's warnings (bookmarks, protection, size).
     @MainActor
     func check() async {
+        checks += 1
+        let mine = checks
         guard let conv, items.count >= minimum else {
             warnings = []
             problem = items.count == 1 && mode != .photos ? "Add at least one more." : nil
@@ -138,7 +143,7 @@ final class MergeModel {
         }
         let stand = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-merge-check.\(outputExt)")
         guard let out = try? await Conv.run(conv, command + ["--dry-run", "--json", "--no-install"]
-            + items.map(\.url.path) + [stand.path]) else { return }
+            + items.map(\.url.path) + [stand.path]), mine == checks else { return }
         let name = { (s: String) in s.replacingOccurrences(of: stand.lastPathComponent, with: "the new file") }
         switch mode {
         case .pdfs, .videos, .audio:
@@ -288,7 +293,7 @@ struct MergeView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            merge.add(urls)
+            merge.add(urls.filter(\.isFileURL))
             return true
         }
         .navigationTitle(merge.title)
@@ -436,9 +441,10 @@ final class SplitModel {
     @MainActor
     func split(replace: Bool = false) {
         guard let conv, let a = args() else { return }
-        // A preview still on its way would clear what this run reports.
+        // A preview still on its way would clear what this run reports. This run isn't
+        // `task`, which an edit cancels, since it's writing files.
         task?.cancel()
-        task = Task { @MainActor in
+        Task { @MainActor in
             working = true
             defer { working = false }
             guard let out = try? await Conv.run(conv, ["split", "--json", "--no-install"] + (replace ? ["-y"] : []) + a),
@@ -485,7 +491,7 @@ struct SplitView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let first = urls.first, first.pathExtension.lowercased() == "pdf" else { return false }
+            guard let first = urls.first, first.isFileURL, first.pathExtension.lowercased() == "pdf" else { return false }
             split.load(first)
             return true
         }
@@ -620,6 +626,8 @@ final class PagesModel {
         let doc = PDFDocument(url: url)
         pages = doc?.pageCount
         locked = doc?.isLocked ?? false
+        // The last PDF's password isn't this one's.
+        password = ""
         written = nil
         changed()
     }
@@ -673,7 +681,7 @@ final class PagesModel {
     /// Writes into a chain's scratch folder and gives back the file, for the next step.
     @MainActor
     func writeForChain(into folder: URL) async -> URL? {
-        guard let conv, let file else { return nil }
+        guard let conv else { return nil }
         let saved = outputFolder
         outputFolder = folder
         defer { outputFolder = saved }
@@ -681,7 +689,6 @@ final class PagesModel {
               let out = try? await Conv.run(conv, ["pages", "--json", "--no-install", "-y"] + a, env: env),
               let resp = out.decode(PDFResponse.self) else { return nil }
         if let p = resp.problem { problem = p; return nil }
-        _ = file
         return resp.entry?.output.map(URL.init(fileURLWithPath:))
     }
 
@@ -689,7 +696,8 @@ final class PagesModel {
     func write(replace: Bool = false) {
         guard let conv, let a = args else { return }
         task?.cancel()
-        task = Task { @MainActor in
+        // Not `task`: an edit cancels that, and this one is writing the PDF.
+        Task { @MainActor in
             working = true
             defer { working = false }
             guard let out = try? await Conv.run(conv, ["pages", "--json", "--no-install"] + (replace ? ["-y"] : []) + a, env: env),
@@ -736,7 +744,7 @@ struct PagesView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let first = urls.first, first.pathExtension.lowercased() == "pdf" else { return false }
+            guard let first = urls.first, first.isFileURL, first.pathExtension.lowercased() == "pdf" else { return false }
             pages.load(first)
             return true
         }

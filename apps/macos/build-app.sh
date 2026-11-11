@@ -4,6 +4,15 @@
 set -eu
 cd "$(dirname "$0")"
 
+conv=
+if [ "${1:-}" = "--bundle-conv" ]; then
+  conv="${CONV_BIN:-${CARGO_TARGET_DIR:-../../target}/release/conv}"
+  if [ ! -f "$conv" ] || [ ! -x "$conv" ]; then
+    echo "No conv at $conv. Build it first (cargo build --release), or set CONV_BIN." >&2
+    exit 1
+  fi
+fi
+
 swift build -c release
 bin="$(swift build -c release --show-bin-path)/ConvKit"
 
@@ -38,10 +47,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-if [ "${1:-}" = "--bundle-conv" ]; then
-  conv="${CONV_BIN:-../../target/release/conv}"
+if [ -n "$conv" ]; then
   cp "$conv" "$app/Contents/Resources/conv"
 fi
 
-codesign --force --sign - "$app" >/dev/null 2>&1 || true
+codesign --force --sign - "$app"
 echo "$PWD/$app"

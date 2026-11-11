@@ -100,6 +100,7 @@ pub struct BackendOutput {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
+    #[serde(serialize_with = "crate::lossy_path")]
     pub output: PathBuf,
     pub bytes: u64,
     pub warnings: Vec<String>,
@@ -201,7 +202,9 @@ pub(crate) fn make_scratch_dir(dest_dir: &Path) -> Result<PathBuf> {
     }
     let pid = std::process::id();
     let n = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dest_dir.join(format!(".convkit-{pid}-{n}"));
+    // It begins every path a step writes, so a `take:2` folder must not read as a protocol.
+    let path =
+        Path::new(&crate::procutil::path_arg_os(dest_dir)).join(format!(".convkit-{pid}-{n}"));
     std::fs::create_dir(&path).map_err(|e| {
         ConvError::new(
             ErrorCode::ConversionFailed,
@@ -464,6 +467,22 @@ pub fn run(req: &Request, resolver: &Resolver, on_event: &mut dyn FnMut(Event)) 
                 format!("input not found: {}", input.display()),
             ));
         }
+    }
+    // A step's argv is text, so such a name would reach the backend changed.
+    if let Some(p) = req
+        .inputs
+        .iter()
+        .chain([&req.output])
+        .find(|p| p.to_str().is_none())
+    {
+        return Err(ConvError::new(
+            ErrorCode::InvalidInvocation,
+            format!(
+                "conv cannot pass a file name that is not valid UTF-8 to its tools; \
+                 rename it and try again: {}",
+                p.display()
+            ),
+        ));
     }
 
     // Before anything else touching the destination: on Windows, a name
@@ -1190,7 +1209,7 @@ impl StepRunner<'_> {
         // writes down what it did.
         let mut sheet_profile = None;
         if step.backend == Backend::Soffice {
-            let profile = make_lo_profile_dir();
+            let profile = make_lo_profile_dir("", &LO_PROFILE_COUNTER).map_err(io_err)?;
             self.guard.track_profile(profile.clone());
             if sheet_pdf::is_call(&step.argv) {
                 // The macro is handed its paths inside one argument, where
@@ -1846,10 +1865,24 @@ static LO_PROFILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// system temp — always short, always writable — is a strictly better home
 /// for it than a path built from the user's own, arbitrarily long and deep,
 /// destination directory.
-fn make_lo_profile_dir() -> PathBuf {
+///
+/// `what` and `counter` name it (`convkit-lo-<what><pid>-<n>`). It is made
+/// here, new and private: on a shared temp directory another user could
+/// have made a folder of the next name first, so that name is passed over.
+pub(crate) fn make_lo_profile_dir(what: &str, counter: &AtomicUsize) -> std::io::Result<PathBuf> {
     let pid = std::process::id();
-    let n = LO_PROFILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("convkit-lo-{pid}-{n}"))
+    loop {
+        let n = counter.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("convkit-lo-{what}{pid}-{n}"));
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut dir = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+        match dir.create(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            made => return made.map(|()| path),
+        }
+    }
 }
 
 /// Percent-encodes every byte outside the RFC 3986 "unreserved" set
@@ -2543,6 +2576,28 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_refuses_a_file_name_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Resolver::new();
+        r.with_override(Backend::Magick, stub_that_creates_its_output(dir.path()));
+        let input = dir.path().join("a.png");
+        std::fs::write(&input, b"fresh input").unwrap();
+        let req = Request {
+            from: Format::Png,
+            to: Format::Jpg,
+            inputs: vec![input],
+            output: dir.path().join(std::ffi::OsStr::from_bytes(b"\xff.jpg")),
+            overwrite: false,
+            tuning: Default::default(),
+            allow_extreme: false,
+        };
+        let e = run(&req, &r, &mut |_| {}).unwrap_err();
+        assert_eq!(e.code, crate::ErrorCode::InvalidInvocation, "{}", e.message);
+    }
+
     /// The counterpart: `Request::overwrite: true` must still let a real
     /// run replace an existing output — this isn't a blanket refusal, only
     /// a default one.
@@ -2971,10 +3026,11 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
     /// same profile.
     #[test]
     fn make_lo_profile_dir_lives_directly_under_system_temp_and_is_unique_per_call() {
-        let a = make_lo_profile_dir();
-        let b = make_lo_profile_dir();
+        let a = make_lo_profile_dir("", &LO_PROFILE_COUNTER).unwrap();
+        let b = make_lo_profile_dir("", &LO_PROFILE_COUNTER).unwrap();
         assert_ne!(a, b, "two calls must never produce the same profile path");
         for p in [&a, &b] {
+            std::fs::remove_dir(p).unwrap();
             assert_eq!(
                 p.parent(),
                 Some(std::env::temp_dir().as_path()),
@@ -2987,6 +3043,38 @@ Error while decoding stream #0:0: Invalid data found when processing input\n";
                 "unexpected profile directory name: {name}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scratch_folder_in_a_relative_folder_named_like_a_protocol_starts_with_dot_slash() {
+        let dir = tempfile::Builder::new()
+            .prefix("take:")
+            .tempdir_in(".")
+            .unwrap();
+        let rel = Path::new(dir.path().file_name().unwrap());
+        let scratch = make_scratch_dir(rel).unwrap();
+        assert!(
+            scratch.starts_with(Path::new(".").join(rel)),
+            "{}",
+            scratch.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_folder_someone_made_first_is_passed_over_and_ours_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let pid = std::process::id();
+        let squat = std::env::temp_dir().join(format!("convkit-lo-squat-{pid}-0"));
+        std::fs::create_dir_all(&squat).unwrap();
+        let ours = make_lo_profile_dir("squat-", &COUNTER).unwrap();
+        let mode = std::fs::metadata(&ours).unwrap().permissions().mode() & 0o777;
+        std::fs::remove_dir(&squat).unwrap();
+        std::fs::remove_dir(&ours).unwrap();
+        assert_ne!(ours, squat);
+        assert_eq!(mode, 0o700);
     }
 
     // --- Arg::BackendPath substitution for the pandoc+typst docx/odt -> pdf

@@ -83,7 +83,8 @@ enum Source {
 impl Source {
     fn name(&self) -> String {
         match self {
-            Source::File(p) => p.display().to_string(),
+            // For what is printed; a file's name is anyone's.
+            Source::File(p) => crate::render::safe_for_terminal(&p.display().to_string()),
             Source::Stdin => "-".to_string(),
             Source::Text(t) => format!("{t:?}"),
             Source::Bytes(name, _) => name.to_string(),
@@ -402,7 +403,7 @@ fn check_sums(cli: &Cli, args: &Args, sums_path: &Path) -> i32 {
     let base = sums_path.parent().unwrap_or(Path::new("."));
     let sums_name = sums_path
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
+        .map(|n| crate::render::safe_for_terminal(&n.to_string_lossy()))
         .unwrap_or_default();
     // Which lines to check: the FILEs given, or every listed file here.
     let mut plan: Vec<(String, PathBuf, Option<&h::SumsLine>)> = Vec::new();
@@ -420,12 +421,14 @@ fn check_sums(cli: &Cli, args: &Args, sums_path: &Path) -> i32 {
         for f in &args.files {
             let name = f.file_name().map(|n| n.to_string_lossy().into_owned());
             let given = f.to_string_lossy();
-            let line = sums.lines.iter().find(|l| {
-                l.file == given
-                    || Path::new(&l.file)
+            // The exact path first: two folders can each hold an app.zip.
+            let line = sums.lines.iter().find(|l| l.file == given).or_else(|| {
+                sums.lines.iter().find(|l| {
+                    Path::new(&l.file)
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         == name
+                })
             });
             plan.push((f.display().to_string(), f.clone(), line));
         }
@@ -450,11 +453,13 @@ fn check_sums(cli: &Cli, args: &Args, sums_path: &Path) -> i32 {
     let (mut good, mut bad) = (0usize, 0usize);
     let mut code = 0;
     for (name, path, line) in plan {
+        // A SUMS file names whatever it likes.
+        let shown = crate::render::safe_for_terminal(&name);
         let Some(line) = line else {
             bad += 1;
             code = code.max(1);
             if !cli.json {
-                eprintln!("{} {name} isn't listed in {sums_name}", err.fail());
+                eprintln!("{} {shown} isn't listed in {sums_name}", err.fail());
             }
             files.push(json!({ "name": name, "listed": false, "match": false }));
             continue;
@@ -472,13 +477,13 @@ fn check_sums(cli: &Cli, args: &Args, sums_path: &Path) -> i32 {
         let matched = *actual == line.expected.hex;
         if matched {
             good += 1;
-            human.push_str(&format!("{} {name}\n", out.ok()));
+            human.push_str(&format!("{} {shown}\n", out.ok()));
         } else {
             bad += 1;
             code = code.max(1);
             if !cli.json {
                 eprint!(
-                    "{} {name} does NOT match\n  expected  {}\n  actual    {actual}\n",
+                    "{} {shown} does NOT match\n  expected  {}\n  actual    {actual}\n",
                     err.fail(),
                     line.expected.hex
                 );

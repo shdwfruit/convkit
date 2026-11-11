@@ -50,7 +50,7 @@ name="conv-${branch##*/}"
 
 CONV_DEV_STAMP="$branch $sha$dirty" cargo build --release -p convkit --manifest-path "$root/Cargo.toml"
 mkdir -p "$bin"
-install -m 755 "$root/target/release/conv" "$bin/$name"
+install -m 755 "${CARGO_TARGET_DIR:-$root/target}/release/conv" "$bin/$name"
 echo "installed $bin/$name: $("$bin/$name" --version)"
 case ":$PATH:" in
   *":$bin:"*) ;;

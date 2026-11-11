@@ -248,6 +248,10 @@ const TERMINAL_MAX: u64 = 48 * 1024 * 1024;
 /// doesn't speak kitty's clipboard protocol.
 #[cfg(unix)]
 fn put_through_terminal(put: &Put) -> Option<Result<Copied, String>> {
+    // Not behind the back of a script or an agent with no terminal of its own.
+    if !crate::prompt::is_interactive_session() {
+        return None;
+    }
     let mut tty = terminal::Tty::open()?;
     if !terminal_supported(&mut tty) {
         return None;
@@ -307,6 +311,9 @@ fn terminal_supported(tty: &mut terminal::Tty) -> bool {
 
 #[cfg(unix)]
 fn get_through_terminal() -> Option<Result<Got, String>> {
+    if !crate::prompt::is_interactive_session() {
+        return None;
+    }
     let mut tty = terminal::Tty::open()?;
     if !terminal_supported(&mut tty) {
         return None;

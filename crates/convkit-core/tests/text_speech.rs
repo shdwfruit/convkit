@@ -710,6 +710,54 @@ fn a_web_page_is_converted_without_touching_the_network() {
 }
 
 #[test]
+#[ignore = "requires pandoc; run with --ignored"]
+fn a_document_takes_in_no_file_outside_its_folder() {
+    let (url, hits) = counting_server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("secret.txt"), "TOP-SECRET").unwrap();
+    let docs = dir.path().join("docs");
+    std::fs::create_dir_all(docs.join("sub")).unwrap();
+    std::fs::write(docs.join("pic.png"), "PIC").unwrap();
+    std::fs::write(docs.join("sub").join("s.png"), "SUB").unwrap();
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(
+        docs.join("notes.md"),
+        format!(
+            "![](../secret.txt)\n\n![](%2e%2e/secret.txt)\n\n![]({})\n\n![]({url}/x.png)\n\n\
+             ![](pic.png)\n\n![](sub/s.png)\n",
+            secret.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        docs.join("page.html"),
+        "<html><body><img src=\"../secret.txt\"><img src=\"pic.png\"></body></html>",
+    )
+    .unwrap();
+    for (input, kept) in [("notes.md", 2), ("page.html", 1)] {
+        let output = dir.path().join(format!("{input}.docx"));
+        let outcome = run(&docs.join(input), &output, &Tuning::default());
+        let zip = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+        let media = zip
+            .file_names()
+            .filter_map(Result::ok)
+            .filter(|n| n.starts_with("word/media/"))
+            .count();
+        assert_eq!(media, kept, "{input}");
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|n| n.contains("outside the document's folder")),
+            "{input}: {:?}",
+            outcome.notes
+        );
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "conv went online");
+}
+
+#[test]
 #[ignore = "requires LibreOffice; run with --ignored"]
 fn rtf_comes_out_in_its_own_order() {
     let dir = tempfile::tempdir().unwrap();

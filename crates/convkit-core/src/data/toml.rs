@@ -258,8 +258,8 @@ impl Writer<'_> {
                         };
                         self.path.push(Seg::Index(i));
                         self.header(true)?;
-                        self.path.pop();
                         self.table(sub)?;
+                        self.path.pop();
                     }
                 }
                 _ => unreachable!("only tables and lists of tables are headed"),
@@ -335,6 +335,17 @@ impl Writer<'_> {
                     )
                     .hint("JSON and YAML keep it exactly; a TOML reader would have to round it"));
                 }
+                if overflows(n) {
+                    return Err(DataError::new(
+                        DataErrorKind::Unrepresentable,
+                        format!(
+                            "TOML's floats are 64-bit, and {} is {}, too large for one",
+                            self.where_(),
+                            n.text()
+                        ),
+                    )
+                    .hint("JSON and YAML keep it exactly; a TOML reader would refuse it"));
+                }
                 self.put(Role::Num, n.text())
             }
             Value::String(s) if top && s.contains('\n') => self.put(Role::Str, &multi_line(s)),
@@ -382,7 +393,7 @@ fn inline_len(v: &Value, max: usize) -> Option<usize> {
     let len = match v {
         Value::Null => return None,
         Value::Bool(b) => b.to_string().len(),
-        Value::Number(n) if !n.fits_i64() => return None,
+        Value::Number(n) if !n.fits_i64() || overflows(n) => return None,
         Value::Number(n) => n.text().len(),
         Value::String(s) => basic(s).len(),
         Value::DateTime(d) => d.len(),
@@ -406,6 +417,11 @@ fn inline_len(v: &Value, max: usize) -> Option<usize> {
         }
     };
     (len <= max).then_some(len)
+}
+
+/// A float past what TOML's 64-bit floats hold, like `1e400`.
+fn overflows(n: &Number) -> bool {
+    matches!(n, Number::Float(t) if t.parse::<f64>().is_ok_and(f64::is_infinite))
 }
 
 /// A key bare when it can be (`A-Za-z0-9_-`), quoted otherwise.

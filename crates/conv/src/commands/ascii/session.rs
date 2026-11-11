@@ -184,7 +184,7 @@ fn session(
                             Ok(outcome) => {
                                 tune.message = Some(format!(
                                     "wrote {} ({})",
-                                    file_name(&path),
+                                    crate::render::file_name_of(&path),
                                     convkit_core::size::human(outcome.bytes)
                                 ));
                                 // The last write of a file is what it holds.
@@ -356,13 +356,6 @@ fn copy(img: &Image, made: Option<&(Made, Art, Vec<String>)>) -> String {
         ),
         Err(e) => format!("couldn't copy it: {e}"),
     }
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
 }
 
 #[cfg(test)]

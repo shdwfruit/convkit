@@ -248,12 +248,29 @@ fn decode(bytes: &[u8]) -> Option<(String, Encoding)> {
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         return utf16(rest, true);
     }
-    match std::str::from_utf8(bytes) {
-        Ok(text) => Some((text.to_string(), Encoding::Utf8)),
-        Err(_) => Some((
+    match utf8_text(bytes) {
+        Some(text) => Some((text, Encoding::Utf8)),
+        None => Some((
             bytes.iter().map(|&b| windows_1252(b)).collect(),
             Encoding::Windows1252,
         )),
+    }
+}
+
+/// `bytes` as UTF-8, or `None` when they are in an 8-bit encoding. A bad
+/// spot after other multi-byte characters, or a character cut off at the
+/// end after its second byte, is read as U+FFFD; a lone lead byte at the
+/// end is not enough, since `Caf\xE9` is Windows-1252.
+pub(crate) fn utf8_text(bytes: &[u8]) -> Option<String> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Some(text.to_string()),
+        Err(e)
+            if !bytes[..e.valid_up_to()].is_ascii()
+                || (e.error_len().is_none() && bytes.len() - e.valid_up_to() >= 2) =>
+        {
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        }
+        Err(_) => None,
     }
 }
 
@@ -347,11 +364,7 @@ fn xlsx(path: &Path) -> Option<WorkbookShape> {
 /// will read it next.
 fn ods(path: &Path) -> Option<WorkbookShape> {
     let mut zip = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
-    let mut content = String::new();
-    zip.by_name("content.xml")
-        .ok()?
-        .read_to_string(&mut content)
-        .ok()?;
+    let content = entry_text(&mut zip, "content.xml")?;
     let starts: Vec<usize> = content
         .match_indices("<table:table ")
         .map(|(i, _)| i)
@@ -368,13 +381,21 @@ fn ods(path: &Path) -> Option<WorkbookShape> {
     })
 }
 
+/// A part read whole stops here, so a zip bomb costs no more, as PDF
+/// streams do in `pdf::inspect`. A workbook past it gets the general notes.
+const MAX_PART: u64 = 64 << 20;
+
 fn entry_text<R: std::io::Read + std::io::Seek>(
     zip: &mut zip::ZipArchive<R>,
     name: &str,
 ) -> Option<String> {
     let mut text = String::new();
-    zip.by_name(name).ok()?.read_to_string(&mut text).ok()?;
-    Some(text)
+    zip.by_name(name)
+        .ok()?
+        .take(MAX_PART + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= MAX_PART).then_some(text)
 }
 
 /// Every start tag in `xml` that begins with `open`, up to its `>`.
@@ -609,6 +630,37 @@ mod tests {
         text.extend_from_slice(b"<f>1</f>");
         assert_eq!(contains(&text[..], &[b"<f>"]), Some(true));
         assert_eq!(contains(&b"<v>1</v>"[..], &[b"<f>", b"<f "]), Some(false));
+    }
+
+    #[test]
+    fn one_bad_spot_does_not_make_utf8_windows_1252() {
+        // Cut off inside 日, with nothing but ASCII before it.
+        let cut = [b"Tokyo ".as_slice(), &"日".as_bytes()[..2]].concat();
+        assert_eq!(utf8_text(&cut).as_deref(), Some("Tokyo \u{FFFD}"));
+        // A stray byte after UTF-8's own ü.
+        assert_eq!(
+            utf8_text(b"Z\xc3\xbcrich \xff").as_deref(),
+            Some("Zürich \u{FFFD}")
+        );
+        // Windows-1252 still is, its last letter too.
+        assert_eq!(utf8_text(b"Caf\xe9 au lait"), None);
+        assert_eq!(utf8_text(b"Caf\xe9"), None);
+    }
+
+    #[test]
+    fn a_part_too_large_to_hold_is_not_read() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("content.xml", stored).unwrap();
+        zip.write_all(br#"<table:table table:name="A">"#).unwrap();
+        let pad = vec![b' '; 1 << 20];
+        for _ in 0..=(MAX_PART >> 20) {
+            zip.write_all(&pad).unwrap();
+        }
+        zip.finish().unwrap();
+        assert_eq!(ods(file.path()), None);
     }
 
     #[test]

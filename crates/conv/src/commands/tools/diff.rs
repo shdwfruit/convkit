@@ -35,8 +35,8 @@ pub struct Args {
     #[arg(long)]
     pub text: bool,
     /// Lines of unchanged text around each change.
-    #[arg(short = 'U', long, value_name = "N", default_value_t = 3)]
-    pub context: usize,
+    #[arg(short = 'U', long, value_name = "N", default_value_t = 3, value_parser = clap::value_parser!(u32).range(..=100_000))]
+    pub context: u32,
     /// Count CRLF against LF line endings as a change.
     #[arg(long)]
     pub eol: bool,
@@ -133,12 +133,14 @@ fn diff(cli: &Cli, args: &Args) -> Result<i32, ConvError> {
     }
     let old_text = String::from_utf8(old.bytes).expect("checked");
     let new_text = String::from_utf8(new.bytes).expect("checked");
+    // A patch must keep the CRs, or it won't apply to the CRLF file.
+    let eol = args.eol || args.unified;
     let result = d::diff(
         &old_text,
         &new_text,
         Options {
-            context: args.context,
-            eol: args.eol,
+            context: args.context as usize,
+            eol,
         },
     );
     if let Some((a, b)) = result.eol {
@@ -147,7 +149,7 @@ fn diff(cli: &Cli, args: &Args) -> Result<i32, ConvError> {
         } else {
             ""
         };
-        let how = if args.eol {
+        let how = if eol {
             "they are counted as changes"
         } else {
             "--eol counts that as a change"

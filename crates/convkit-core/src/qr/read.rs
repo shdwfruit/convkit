@@ -473,6 +473,11 @@ fn scan(pic: &Picture, pass: Pass) -> (Vec<Code>, Vec<[[i32; 2]; 4]>) {
         }
     };
     let Grey { w, h, px, scale } = grey;
+    // A picture far longer than it is wide shrinks to nothing, which rqrr
+    // can't take.
+    if w == 0 || h == 0 {
+        return (vec![], vec![]);
+    }
     let mut prepared = match threshold {
         None => rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| px[y * w + x]),
         Some(t) => rqrr::PreparedImage::prepare_from_bitmap(w, h, |x, y| px[y * w + x] <= t),
@@ -966,6 +971,12 @@ mod tests {
     fn a_phone_photo_reads() {
         assert_eq!(texts(&phone_photo("qr-phone.jpg")), [PHONE_LINK]);
         assert_eq!(texts(&phone_photo("qr-phone-soft.jpg")), [PHONE_LINK]);
+    }
+
+    #[test]
+    fn a_picture_one_pixel_wide_reads_as_nothing() {
+        let pic = Picture::from_luma(1, 5000, vec![255; 5000]);
+        assert!(read(&pic).is_empty());
     }
 
     #[test]

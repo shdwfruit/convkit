@@ -148,14 +148,14 @@ fn movie(moov: &[u8], base: u64) -> Option<Movie> {
             // volume and reserved bytes.
             b"mvhd" => {
                 let times = if moov.get(from)? == &1 { 28 } else { 16 };
-                matrix = Some(matrix_at(moov, from + 4 + times + 16)?);
+                matrix = Some(matrix_at(moov, from + 4 + times + 16, to)?);
             }
             b"trak" => {
                 let mut tkhd = None;
                 let mut handler = None;
                 for t in children(moov, from, to) {
                     match &t.kind {
-                        b"tkhd" => tkhd = Some(t.body as usize),
+                        b"tkhd" => tkhd = Some((t.body as usize, t.end as usize)),
                         b"mdia" => {
                             handler = children(moov, t.body as usize, t.end as usize)
                                 .into_iter()
@@ -165,7 +165,7 @@ fn movie(moov: &[u8], base: u64) -> Option<Movie> {
                         _ => {}
                     }
                 }
-                if let (Some(tkhd), Some(b"vide")) = (tkhd, handler) {
+                if let (Some((tkhd, end)), Some(b"vide")) = (tkhd, handler) {
                     // version, flags, then the times, the track ID and the
                     // duration (32 bytes in version 1), then layer, volume
                     // and reserved bytes.
@@ -173,7 +173,7 @@ fn movie(moov: &[u8], base: u64) -> Option<Movie> {
                     let at = tkhd + 4 + times + 16;
                     video.push(Track {
                         at: base + at as u64,
-                        matrix: matrix_at(moov, at)?,
+                        matrix: matrix_at(moov, at, end)?,
                     });
                 }
             }
@@ -186,8 +186,10 @@ fn movie(moov: &[u8], base: u64) -> Option<Movie> {
     })
 }
 
-fn matrix_at(bytes: &[u8], at: usize) -> Option<[i32; 9]> {
-    let raw = bytes.get(at..at + 36)?;
+/// The matrix at `at`, inside a box that ends at `end`: past it are the
+/// next box's bytes, which `set_upright` would overwrite.
+fn matrix_at(bytes: &[u8], at: usize, end: usize) -> Option<[i32; 9]> {
+    let raw = bytes.get(..end)?.get(at..at + 36)?;
     let mut m = [0; 9];
     for (i, v) in m.iter_mut().enumerate() {
         *v = i32::from_be_bytes(raw[i * 4..i * 4 + 4].try_into().ok()?);
@@ -317,6 +319,19 @@ pub(crate) mod tests {
     fn resetting_a_file_without_a_video_track_is_an_error() {
         let f = written(&movie(IDENTITY, &[trak(0, RIGHT, b"soun")]));
         assert!(set_upright(f.path()).is_err());
+    }
+
+    #[test]
+    fn a_track_header_too_short_for_its_matrix_is_left_alone() {
+        let mut hdlr = vec![0; 8];
+        hdlr.extend(b"vide");
+        hdlr.extend([0; 60]);
+        let mut trak = boxed(b"tkhd", &[0; 4]);
+        trak.extend(boxed(b"mdia", &boxed(b"hdlr", &hdlr)));
+        let file = movie(IDENTITY, &[boxed(b"trak", &trak)]);
+        let f = written(&file);
+        assert!(set_upright(f.path()).is_err());
+        assert_eq!(std::fs::read(f.path()).unwrap(), file);
     }
 
     /// Box sizes that cannot be true read as no movie, and are never read
