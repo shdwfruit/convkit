@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.7.2 - 2026-11-11
+
+### Fixed
+
+- **Managed tools are never looked for in the current folder.** With
+  `XDG_DATA_HOME` set but empty or relative, conv looked for its managed
+  tools under the folder it was run in, so a program planted there could
+  run. Only an absolute folder counts now.
+- **A file's name is never read as an option.** A name that starts with
+  `-` or `@`, or holds a `:`, reached the backend as it was: `conv --
+  -d.md out.html` made pandoc load a defaults file and run its Lua filter.
+  Such names now go in as `./name`. A `%` in a name no longer makes
+  ImageMagick write or read a different file.
+- **A document takes in no file from outside its folder.** Markdown to
+  docx, pdf or html embedded any image the text named, `../` and absolute
+  paths included, and fetched remote ones. Those become plain links, with
+  a note saying so.
+- **Text from a file can't drive your terminal.** A tag, a file name or a
+  scanned QR code could carry escape sequences, enough to set the
+  clipboard. What conv prints for a person is cleaned of them; `--json`
+  is unchanged.
+- **An SVG can't read local files** through `<image href>` in `conv
+  ascii`, `colors`, `beautify` and `qr --read`.
+- **Files built to break conv.** Small YAML and PDF files that overflowed
+  the stack or ran for minutes are refused, an archive's hard links count
+  toward the unpack size question, and two entries whose names differ only
+  in case no longer overwrite each other.
+- **Names that aren't UTF-8** no longer crash `--json`.
+- **`--compress` on a PDF** no longer turns some images to noise.
+- **Installs.** A failed install says why, two installs at once no longer
+  share a temp file, and a slow download is no longer cut off at five
+  minutes; only a stalled one is.
+- **Passwords.** Ctrl-C at a password prompt gives the terminal its echo
+  back, and `conv wifi --json` shows a password only when asked.
+- Smaller fixes: `conv link` is no longer fooled by `\@` in a URL and
+  `--follow` only follows short links; `conv time` refuses a month or day
+  of 0; `conv diff --unified` keeps line endings; subtitle cues no longer
+  merge; a JSON5 number with a leading zero is refused instead of losing
+  it; `conv info` reads a location from XMP.
+
 ## 0.7.1 - 2026-11-04
 
 ### Fixed
