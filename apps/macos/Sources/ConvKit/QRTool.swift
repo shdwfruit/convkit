@@ -17,7 +17,7 @@ final class QRModel {
     private(set) var working = false
 
     private var task: Task<Void, Never>?
-    private let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-qr", isDirectory: true)
+    private let tmp = appTemp.appendingPathComponent("convkit-qr", isDirectory: true)
 
     func changed() {
         task?.cancel()
@@ -63,7 +63,8 @@ final class QRModel {
         var args = ["qr", "--json", "--no-install", "-y"]
         if let logo { args += ["--logo", logo.path] }
         args += ["--", text, url.path]
-        task = Task { @MainActor in
+        // Not `task`: an edit cancels that, and this one is writing the file.
+        Task { @MainActor in
             working = true
             defer { working = false }
             guard let result = try? await Conv.run(conv, args) else { return }

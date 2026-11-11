@@ -25,6 +25,7 @@ struct ConvertView: View {
         ToolbarItemGroup(placement: .primaryAction) {
             Button { pickFiles(job) } label: { Label("Add Files", systemImage: "plus") }
                 .help("Add files (⌘O)")
+                .disabled(job.isRunning)
             Button { Task { await job.paste() } } label: {
                 Label("Paste", systemImage: "doc.on.clipboard")
             }
@@ -84,7 +85,8 @@ struct ConvertView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            job.add(urls)
+            guard !job.isRunning else { return false }
+            job.add(urls.filter(\.isFileURL))
             return true
         } isTargeted: { dropHover = $0 }
         .onPasteCommand(of: [.fileURL, .image]) { _ in Task { await job.paste() } }

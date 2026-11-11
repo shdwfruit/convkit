@@ -13,8 +13,9 @@ struct HomeView: View {
         }
         .navigationTitle("ConvKit")
         .dropDestination(for: URL.self) { urls, _ in
-            Task { await model.suggest(for: urls) }
-            return true
+            let files = urls.filter(\.isFileURL)
+            Task { await model.suggest(for: files) }
+            return !files.isEmpty
         } isTargeted: { dropHover = $0 }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {

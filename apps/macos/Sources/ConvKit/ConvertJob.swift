@@ -77,6 +77,8 @@ final class CapsStore {
             }
             for await (name, resp) in group { if let resp { found[name] = resp } }
         }
+        // Settings picked another conv while this one was asked.
+        guard conv == self.conv else { return }
         byExt = found
         listedFlags = Set(found.values.flatMap { ($0.targets ?? []).flatMap(\.tuning) })
     }
@@ -229,6 +231,7 @@ final class ConvertJob {
 
     private var previewTask: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
+    private var chainTask: Task<[URL], Never>?
 
     init(tool: ToolID, caps: CapsStore) {
         self.tool = tool
@@ -249,6 +252,8 @@ final class ConvertJob {
 
     @MainActor
     func add(_ urls: [URL]) {
+        // The run reads the list and the settings as it goes.
+        guard !isRunning else { return }
         let fm = FileManager.default
         var expanded: [URL] = []
         for url in urls {
@@ -306,6 +311,7 @@ final class ConvertJob {
 
     @MainActor
     func replace(with urls: [URL]) {
+        guard !isRunning else { return }
         files = []
         lastOutputs = []
         add(urls)
@@ -430,9 +436,6 @@ final class ConvertJob {
 
     func enabled(_ flag: String) -> Bool { reason(flag) == nil }
 
-    /// Whether any of a control's flags applies, for greying a whole section.
-    func applies(_ control: Control) -> Bool { control.flags.contains(where: applies) }
-
     /// Options the user set that conv would ignore for these files, so the form can say so.
     var ignoredOptions: [String] {
         guard tuning != nil else { return [] }
@@ -556,11 +559,7 @@ final class ConvertJob {
     var commandPreview: String {
         guard let first = fitting.first else { return "" }
         let t = target(for: first, in: chainFolder)
-        let parts = ["conv"] + args(for: first, writing: t.writing, into: t.into).map { arg in
-            arg.contains(where: { " '\"$`\\()[]&;|<>*?!#~".contains($0) })
-                ? "'" + arg.replacingOccurrences(of: "'", with: "'\\''") + "'"
-                : arg
-        }
+        let parts = ["conv"] + args(for: first, writing: t.writing, into: t.into).map(shellQuoted)
         let env = passwordEnv.isEmpty ? "" : "CONVKIT_PASSWORD=… "
         return env + parts.joined(separator: " ")
     }
@@ -636,7 +635,7 @@ final class ConvertJob {
             for (item, args) in zip(items, argv) {
                 guard !Task.isCancelled else { return }
                 if let why = nothingToDo(args) {
-                    if !item.isDone { item.status = .idle }
+                    if !item.isDone && item.status != .running { item.status = .idle }
                     item.plannedOutput = nil
                     item.warnings = []
                     item.problem = why
@@ -664,7 +663,7 @@ final class ConvertJob {
 
     @MainActor
     private func apply(dryRun out: Conv.Output, to item: FileItem) {
-        if case .done = item.status {} else { item.status = .idle }
+        if !item.isDone && item.status != .running { item.status = .idle }
         guard let resp = out.decode(DryRunResponse.self) else {
             item.plannedOutput = nil
             item.warnings = []
@@ -709,17 +708,22 @@ final class ConvertJob {
         let items = fitting.filter { $0.problem == nil && $0.plannedOutput != nil }
         isRunning = true
         defer { isRunning = false }
-        var outputs: [URL] = []
-        for item in items {
-            await run(item, conv: conv, extra: [], into: folder, chainStep: true)
-            if case .done(let out, _) = item.status {
-                outputs.append(out)
-                item.status = .idle
-            } else {
-                return []
+        // A task of its own, so Stop can cancel it.
+        let step = Task { @MainActor () -> [URL] in
+            var outputs: [URL] = []
+            for item in items {
+                await run(item, conv: conv, extra: [], into: folder, chainStep: true)
+                if case .done(let out, _) = item.status {
+                    outputs.append(out)
+                    item.status = .idle
+                } else {
+                    return []
+                }
             }
+            return outputs
         }
-        return outputs
+        chainTask = step
+        return await step.value
     }
 
     @MainActor
@@ -767,6 +771,7 @@ final class ConvertJob {
     @MainActor
     func cancel() {
         runTask?.cancel()
+        chainTask?.cancel()
     }
 
     @MainActor

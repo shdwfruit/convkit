@@ -45,6 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Text goes to conv on a pipe; a conv that exits without reading it must not
         // take the app down with SIGPIPE.
         signal(SIGPIPE, SIG_IGN)
+        // Pasted pictures, chain steps and previews left by the last run, even one that crashed.
+        try? FileManager.default.removeItem(at: appTemp)
         // Needed when started from a terminal rather than as an .app.
         NSApp.setActivationPolicy(.regular)
         showWindow()
@@ -82,8 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    /// A chain's unsaved steps live in a scratch folder; leave none behind.
+    /// A chain's unsaved steps live in a scratch folder; leave none behind, and no conv running.
     func applicationWillTerminate(_ notification: Notification) {
+        Conv.stopAll()
         MainActor.assumeIsolated { model.endChain() }
     }
 

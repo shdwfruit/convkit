@@ -37,8 +37,6 @@ struct QuickSpec {
     /// A button that runs it again, for tools that make something new each time.
     var again: ((QuickModel) -> String?)? = nil
     var empty = "The result shows here."
-    /// What an empty answer means (two texts that are the same).
-    var blankResult: String? = nil
     var diff = false
     var monoInput = false
 }
@@ -82,7 +80,7 @@ final class QuickModel {
     private var task: Task<Void, Never>?
 
     /// The app's own scratch folder, for what a tool writes before it's saved.
-    let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-quick", isDirectory: true)
+    let scratch = appTemp.appendingPathComponent("convkit-quick", isDirectory: true)
 
     init(tool: ToolID, spec: QuickSpec) {
         self.tool = tool
@@ -101,12 +99,6 @@ final class QuickModel {
     func load(_ url: URL) {
         file = url
         if spec.input == .textOrFile { useFile = true }
-        changed()
-    }
-
-    @MainActor
-    func clearFile() {
-        file = nil
         changed()
     }
 
@@ -145,11 +137,7 @@ final class QuickModel {
     /// The command, with the text shown as piped in.
     var command: String {
         guard let run = spec.build(self) else { return "" }
-        let shown = run.args.map { a in
-            a.contains(where: { " '\"$`\\()[]&;|<>*?!#~\n".contains($0) })
-                ? "'" + a.replacingOccurrences(of: "'", with: "'\\''") + "'" : a
-        }
-        return (run.stdin != nil ? "… | " : "") + "conv " + shown.joined(separator: " ")
+        return (run.stdin != nil ? "… | " : "") + "conv " + run.args.map(shellQuoted).joined(separator: " ")
     }
 
     func changed(now: Bool = false) {
@@ -168,8 +156,14 @@ final class QuickModel {
             running = true
             defer { running = false }
             try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-            guard let out = try? await Conv.run(conv, run.args, in: run.folder, stdin: run.stdin.map { Data($0.utf8) }, env: run.env),
-                  !Task.isCancelled else { return }
+            let result = try? await Conv.run(conv, run.args, in: run.folder, stdin: run.stdin.map { Data($0.utf8) }, env: run.env)
+            guard !Task.isCancelled else { return }
+            guard let out = result else {
+                output = ""
+                notes = []
+                problem = "conv didn't answer."
+                return
+            }
             ran = true
             if let parse = spec.parse, let parsed = parse(self, out) {
                 output = parsed.text
@@ -373,7 +367,7 @@ extension ToolID {
                     if !tz.isEmpty { a += ["--tz", tz] }
                     let t = m.text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !m.v("unit").isEmpty && Int(t) != nil { a += ["--unit", m.v("unit")] }
-                    return QuickRun(args: t.isEmpty ? a : a + ["--", t])
+                    return t.isEmpty ? QuickRun(args: a) : QuickRun(args: a + ["-"], stdin: t)
                 },
                 again: { $0.text.isEmpty ? "Now" : nil }, monoInput: true)
         case .uuid:
@@ -387,7 +381,7 @@ extension ToolID {
                 ],
                 build: { m in
                     let t = m.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !t.isEmpty { return QuickRun(args: ["uuid", "--", t]) }
+                    if !t.isEmpty { return QuickRun(args: ["uuid", "-"], stdin: t) }
                     return QuickRun(args: ["uuid", "-n", m.v("n")] + (m.on("v7") ? ["--v7"] : []))
                 },
                 again: { $0.text.isEmpty ? "Make More" : nil }, monoInput: true)
@@ -532,7 +526,7 @@ struct QuickView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .dropDestination(for: URL.self) { urls, _ in
-            guard let first = urls.first else { return false }
+            guard let first = urls.first(where: \.isFileURL) else { return false }
             quick.load(first)
             return true
         }
@@ -606,8 +600,6 @@ struct QuickView: View {
                         .font(.system(.body, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    } else if quick.ran && quick.problem == nil, let blank = quick.spec.blankResult {
-                        Label(blank, systemImage: "checkmark.circle").foregroundStyle(.green)
                     } else if !quick.ran && quick.problem == nil {
                         Text(quick.spec.input == .file ? "" : quick.spec.empty).foregroundStyle(.tertiary)
                     }

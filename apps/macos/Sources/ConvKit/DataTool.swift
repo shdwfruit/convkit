@@ -107,7 +107,7 @@ final class DataModel {
     }
 
     var command: String {
-        let input = source.map { "'\($0.lastPathComponent)'" } ?? "--paste"
+        let input = source.map { shellQuoted($0.lastPathComponent) } ?? "--paste"
         return (["conv", "fmt"] + args + [input]).joined(separator: " ")
     }
 
@@ -129,11 +129,9 @@ final class DataModel {
             guard !Task.isCancelled else { return }
             working = true
             defer { working = false }
-            // A file with no extension, so conv tells the language from the text
-            // unless --from says it.
-            let file = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-fmt-input")
-            do { try text.write(to: file, atomically: true, encoding: .utf8) } catch { return }
-            guard let out = try? await Conv.run(conv, ["fmt", "--json"] + args + ["--", file.path]),
+            // On a pipe, never in a temp file, since it may hold secrets. conv tells the
+            // language from the text unless --from says it.
+            guard let out = try? await Conv.run(conv, ["fmt", "--json"] + args + ["-"], stdin: Data(text.utf8)),
                   !Task.isCancelled else { return }
             guard let resp = out.decode(Response.self) else {
                 problem = Problem(message: Conv.stderrMessage(out.stderr))
@@ -298,7 +296,7 @@ struct DataView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let first = urls.first else { return false }
+            guard let first = urls.first(where: \.isFileURL) else { return false }
             data.load(first)
             return true
         } isTargeted: { dropHover = $0 }

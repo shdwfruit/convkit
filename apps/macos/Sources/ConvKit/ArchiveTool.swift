@@ -125,7 +125,8 @@ final class MakeArchiveModel {
     func make(replace: Bool = false) {
         guard let conv, let args else { return }
         task?.cancel()
-        task = Task { @MainActor in
+        // Not `task`: a change cancels that, and this one is writing the archive.
+        Task { @MainActor in
             working = true
             defer { working = false }
             guard let out = try? await Conv.run(conv, args + ["--json", "--no-install"] + (replace ? ["-y"] : []), env: env),
@@ -136,6 +137,10 @@ final class MakeArchiveModel {
             if let err = resp.entry?.error ?? resp.error {
                 exists = err.code == "output_exists"
                 problem = AppModel.friendly(err)
+                return
+            }
+            guard resp.ok, resp.entry?.ok == true else {
+                problem = "conv didn't say what went wrong."
                 return
             }
             exists = false
@@ -185,7 +190,7 @@ struct MakeArchiveView: View {
                 }
             }
             .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
-            .dropDestination(for: URL.self) { urls, _ in archive.add(urls); return true }
+            .dropDestination(for: URL.self) { urls, _ in archive.add(urls.filter(\.isFileURL)); return true }
 
             Form {
                 Section {
@@ -316,7 +321,8 @@ final class OpenArchiveModel {
     func open(replace: Bool = false) {
         guard let conv, let args else { return }
         task?.cancel()
-        task = Task { @MainActor in
+        // Not `task`: a change cancels that, and this one is unpacking.
+        Task { @MainActor in
             working = true
             defer { working = false }
             guard let out = try? await Conv.run(conv, args + ["--json", "--no-install"] + (replace ? ["-y"] : []), env: env),
@@ -327,6 +333,10 @@ final class OpenArchiveModel {
             if let err = resp.entry?.error ?? resp.error {
                 exists = err.code == "output_exists"
                 problem = AppModel.friendly(err)
+                return
+            }
+            guard resp.ok, resp.entry?.ok == true else {
+                problem = "conv didn't say what went wrong."
                 return
             }
             exists = false
@@ -373,7 +383,7 @@ struct OpenArchiveView: View {
             }
             .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
             .dropDestination(for: URL.self) { urls, _ in
-                guard let first = urls.first, OpenArchiveModel.exts.contains(fileExt(first)) else { return false }
+                guard let first = urls.first, first.isFileURL, OpenArchiveModel.exts.contains(fileExt(first)) else { return false }
                 archive.load(first)
                 return true
             }

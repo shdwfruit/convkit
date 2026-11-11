@@ -20,7 +20,19 @@ enum Conv {
             "/usr/local/bin/conv",
             "\(home)/.cargo/bin/conv",
         ]
-        return candidates.first { fm.isExecutableFile(atPath: $0) }.map(URL.init(fileURLWithPath:))
+        return candidates.first { path in
+            // A folder is "executable" too.
+            var isDir: ObjCBool = false
+            return fm.isExecutableFile(atPath: path) && fm.fileExists(atPath: path, isDirectory: &isDir) && !isDir.boolValue
+        }.map(URL.init(fileURLWithPath:))
+    }
+
+    /// conv runs still going, so quitting can stop them.
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var live: Set<Process> = []
+
+    static func stopAll() {
+        for p in lock.withLock({ live }) where p.isRunning { p.terminate() }
     }
 
     struct Output {
@@ -74,6 +86,7 @@ enum Conv {
                     group.leave()
                 }
                 process.terminationHandler = { p in
+                    lock.withLock { _ = live.remove(p) }
                     group.notify(queue: .global()) {
                         cont.resume(returning: Output(
                             stdout: collected.out,
@@ -82,6 +95,7 @@ enum Conv {
                         ))
                     }
                 }
+                lock.withLock { _ = live.insert(process) }
                 do {
                     try process.run()
                     if let input, let stdin {
@@ -92,6 +106,10 @@ enum Conv {
                     }
                 } catch {
                     process.terminationHandler = nil
+                    lock.withLock { _ = live.remove(process) }
+                    // No child holds the write ends, so the readers only stop when these close.
+                    try? out.fileHandleForWriting.close()
+                    try? err.fileHandleForWriting.close()
                     cont.resume(throwing: error)
                 }
             }
@@ -154,6 +172,13 @@ func fileExt(_ url: URL) -> String {
         return double
     }
     return url.pathExtension.lowercased()
+}
+
+/// An argument as it has to be typed in a shell, for the copyable "Command" lines.
+func shellQuoted(_ arg: String) -> String {
+    arg.isEmpty || arg.contains(where: { " \t\n'\"$`\\()[]{}&;|<>*?!#~".contains($0) })
+        ? "'" + arg.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        : arg
 }
 
 struct DryRunResponse: Decodable {

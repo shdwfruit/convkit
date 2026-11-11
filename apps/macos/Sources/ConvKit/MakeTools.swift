@@ -23,7 +23,7 @@ private struct OneFileResponse: Decodable {
 }
 
 private func scratchFolder(_ name: String) -> URL {
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-\(name)", isDirectory: true)
+    let dir = appTemp.appendingPathComponent("convkit-\(name)", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
 }
@@ -188,7 +188,7 @@ struct SpeakView: View {
             }
             .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
             .dropDestination(for: URL.self) { urls, _ in
-                guard let f = urls.first, ToolID.speakExts.contains(fileExt(f)) else { return false }
+                guard let f = urls.first, f.isFileURL, ToolID.speakExts.contains(fileExt(f)) else { return false }
                 speak.load(f)
                 return true
             }
@@ -334,7 +334,7 @@ final class BeautifyModel {
             defer { working = false }
             guard let o = try? await Conv.run(conv, ["beautify", "--json", "-y"] + options() + [input.path, url.path]),
                   let r = o.decode(OneFileResponse.self) else { problem = "conv didn't answer."; return }
-            if let p = r.problem { problem = p } else { saved = url }
+            if r.ok, r.result?.ok == true { saved = url } else { problem = r.problem ?? "conv couldn't do that." }
         }
     }
 
@@ -374,7 +374,7 @@ struct BeautifyView: View {
             }
             .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
             .dropDestination(for: URL.self) { urls, _ in
-                guard let f = urls.first else { return false }
+                guard let f = urls.first(where: \.isFileURL) else { return false }
                 beautify.load(f)
                 return true
             }
@@ -443,6 +443,8 @@ final class ColorsModel {
 
     var conv: URL?
     private(set) var input: URL?
+    /// The picture, read once rather than on every redraw.
+    private(set) var image: NSImage?
     var count = 6
     var code = ""
     private(set) var swatches: [Swatch] = []
@@ -454,6 +456,7 @@ final class ColorsModel {
     @MainActor
     func load(_ url: URL) {
         input = url
+        image = NSImage(contentsOf: url)
         changed()
     }
 
@@ -468,7 +471,8 @@ final class ColorsModel {
             struct R: Decodable { var ok: Bool; var colors: [Swatch]?; var error: ConvError? }
             guard let r = o.decode(R.self) else { problem = Conv.stderrMessage(o.stderr); return }
             problem = r.error.map(AppModel.friendly)
-            swatches = r.colors ?? []
+            // The rows read three numbers from each.
+            swatches = (r.colors ?? []).filter { $0.rgb.count == 3 && $0.hsl.count == 3 }
             if code.isEmpty {
                 codeText = ""
             } else if let c = try? await Conv.run(conv, ["colors", "-n", n, "--code", code, input.path]) {
@@ -490,9 +494,9 @@ struct ColorsView: View {
 
     var body: some View {
         Group {
-            if let input = colors.input {
+            if colors.input != nil {
                 HSplitView {
-                    Image(nsImage: NSImage(contentsOf: input) ?? NSImage())
+                    Image(nsImage: colors.image ?? NSImage())
                         .resizable().aspectRatio(contentMode: .fit).padding(16)
                         .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
                         .background(.background.secondary)
@@ -535,7 +539,7 @@ struct ColorsView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let f = urls.first else { return false }
+            guard let f = urls.first(where: \.isFileURL) else { return false }
             colors.load(f)
             return true
         }
@@ -616,15 +620,19 @@ final class WifiModel {
         notes = []
     }
 
-    private var nameArg: [String] { name.isEmpty ? [] : [name] }
+    /// Last, after `--`, so a name that starts with - isn't read as a flag.
+    private var nameArg: [String] { name.isEmpty ? [] : ["--", name] }
 
     @MainActor
     func show() {
         guard let conv else { return }
+        let asked = name
         Task { @MainActor in
             working = true
             defer { working = false }
-            guard let out = try? await Conv.run(conv, ["wifi"] + nameArg + ["--json", "--show-password"]) else { return }
+            guard let out = try? await Conv.run(conv, ["wifi", "--json", "--show-password"] + nameArg) else { return }
+            // Another network was picked while macOS asked; this answer is for the old one.
+            guard name == asked else { return }
             struct R: Decodable {
                 struct N: Decodable { var name: String?; var security: String?; var password: String? }
                 var ok: Bool
@@ -651,12 +659,14 @@ final class WifiModel {
         guard let conv,
               let url = askWhereToSave(name: "\(name.isEmpty ? "wifi" : name)-wifi.png", types: ["png", "svg", "pdf"])
         else { return }
+        let asked = name
         Task { @MainActor in
             working = true
             defer { working = false }
-            guard let out = try? await Conv.run(conv, ["wifi"] + nameArg + ["--qr", url.path, "--json", "-y"]),
-                  let r = out.decode(OneFileResponse.self) else { problem = "conv didn't answer."; return }
-            if let p = r.problem { problem = p; return }
+            let out = try? await Conv.run(conv, ["wifi", "--qr", url.path, "--json", "-y"] + nameArg)
+            guard name == asked else { return }
+            guard let r = out?.decode(OneFileResponse.self) else { problem = "conv didn't answer."; return }
+            guard r.ok, r.result?.ok == true else { problem = r.problem ?? "conv couldn't make the code."; return }
             saved = url
             notes = r.messages
             qr = NSImage(contentsOf: url)
@@ -717,5 +727,7 @@ struct WifiView: View {
         .navigationTitle("Wi-Fi Password")
         .task { await wifi.loadNetworks() }
         .onChange(of: wifi.name) { wifi.reset(); reveal = false }
+        // Don't keep a password around once its page is gone.
+        .onDisappear { wifi.reset() }
     }
 }

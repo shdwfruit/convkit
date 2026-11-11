@@ -8,6 +8,10 @@ enum SaveDefaults {
     @MainActor static var folder: URL?
 }
 
+/// Everything the app writes to temp goes in here, and launch empties it. conv's own
+/// temp files (convkit-lo-…) sit beside it, so a conv in a terminal keeps them.
+let appTemp = FileManager.default.temporaryDirectory.appendingPathComponent("ConvKit", isDirectory: true)
+
 /// What the detail pane shows.
 enum Page: Hashable {
     case home
@@ -100,8 +104,13 @@ final class AppModel {
 
     // MARK: Setup
 
+    /// Each keystroke in Settings connects again; only the newest one sets things up.
+    private var connects = 0
+
     @MainActor
     func connect() async {
+        connects += 1
+        let mine = connects
         guard let url = Conv.locate(override: convOverride) else {
             convURL = nil
             setupProblem = "Can't find conv. Install it, or set its path in Settings."
@@ -127,16 +136,20 @@ final class AppModel {
         formats.conv = url
         changelog.conv = url
         setupProblem = nil
-        if let out = try? await Conv.run(url, ["--version"]) {
+        let version = try? await Conv.run(url, ["--version"])
+        let helpOut = try? await Conv.run(url, ["--help"])
+        guard mine == connects else { return }
+        if let out = version {
             convVersion = String(decoding: out.stdout, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        if let out = try? await Conv.run(url, ["--help"]) {
+        if let out = helpOut {
             let help = String(decoding: out.stdout, as: UTF8.self)
             subcommands = Self.parseSubcommands(help)
             caps.convFlags = CapsStore.parseFlags(help)
         }
         await caps.load()
+        guard mine == connects else { return }
         // Pictures that go into a PDF one a page, alone or among PDFs.
         photos.accepts = Set((caps.byExt["pdf"]?.sources ?? []).filter { caps.kind($0) == "image" })
         merge.accepts = photos.accepts.union(["pdf"])
@@ -390,7 +403,7 @@ final class AppModel {
         if let chain, chain.origin == origin, let i = chain.steps.lastIndex(of: tool) {
             place = StepPlace(scratch: chain.scratch, step: chain.scratch.appendingPathComponent("step-\(tag)"), keep: i)
         } else {
-            let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("convkit-chain-\(tag)", isDirectory: true)
+            let scratch = appTemp.appendingPathComponent("convkit-chain-\(tag)", isDirectory: true)
             place = StepPlace(scratch: scratch, step: scratch.appendingPathComponent("step-1"), keep: nil)
         }
         try? FileManager.default.createDirectory(at: place.step, withIntermediateDirectories: true)
@@ -480,7 +493,8 @@ final class AppModel {
         let destination = chained ? chain?.destination : nil
         switch id.kind {
         case .convert:
-            guard let job = jobs[id] else { break }
+            // A run reads its files, and where they go, as it gets to each.
+            guard let job = jobs[id], !job.isRunning else { break }
             // An editor holds one file; a chained step holds just what the step before made.
             if job.isEditor { job.replace(with: first) } else if chained { job.replace(with: urls) } else { job.add(urls) }
             job.fromChain = chained

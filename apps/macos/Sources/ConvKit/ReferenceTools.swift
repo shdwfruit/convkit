@@ -214,7 +214,8 @@ struct MarkdownNotes: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(blocks, id: \.self) { b in
+            // By place: a changelog can say the same line twice.
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, b in
                 switch b {
                 case .heading(let t):
                     Text(t).font(.headline).padding(.top, 4)

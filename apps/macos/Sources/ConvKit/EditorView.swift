@@ -43,6 +43,7 @@ final class MediaPreview {
             if fileExt(url) == "gif" { loadGIFTiming(url) }
         } else {
             await loadAV(url)
+            guard url == self.url else { return }
         }
         range = 0...max(duration, 0)
     }
@@ -88,12 +89,17 @@ final class MediaPreview {
         let asset = AVURLAsset(url: url)
         let p = AVPlayer(playerItem: AVPlayerItem(asset: asset))
         player = p
-        duration = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? 0
+        // After each wait, another file may have taken this one's place.
+        let seconds = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? 0
+        guard player === p else { return }
+        duration = seconds
         if let track = try? await asset.loadTracks(withMediaType: .video).first,
            let loaded = try? await track.load(.naturalSize, .preferredTransform) {
+            guard player === p else { return }
             let r = CGRect(origin: .zero, size: loaded.0).applying(loaded.1)
             size = CGSize(width: abs(r.width), height: abs(r.height))
         }
+        guard player === p else { return }
         observer = p.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 30), queue: .main) { [weak self] t in
             self?.tick(CMTimeGetSeconds(t))
         }
@@ -288,7 +294,7 @@ struct EditorView: View {
                 }
             }
             .dropDestination(for: URL.self) { urls, _ in
-                guard let first = urls.first else { return false }
+                guard !job.isRunning, let first = urls.first(where: \.isFileURL) else { return false }
                 model.open(job.tool, with: [first])
                 return true
             } isTargeted: { dropHover = $0 }
@@ -313,10 +319,12 @@ struct EditorView: View {
         ToolbarItemGroup(placement: .primaryAction) {
             Button { choose() } label: { Label("Open", systemImage: "folder") }
                 .help("Open a file to edit (⌘O)")
+                .disabled(job.isRunning)
             Button {
                 Task { if let first = await model.pasteURLs().first { model.open(job.tool, with: [first]) } }
             } label: { Label("Paste", systemImage: "doc.on.clipboard") }
                 .help("Edit a file copied in Finder, or a copied picture")
+                .disabled(job.isRunning)
             ThenMenu(tools: nextTools, disabled: job.readyCount == 0 || job.isRunning) { next in
                 Task { await model.chain(job, to: next) }
             }
@@ -358,6 +366,7 @@ struct EditorView: View {
                                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
                         } else if cropRect != nil {
                             CropOverlay(rect: cropBinding(k: k, shown: shown), bounds: disp, aspect: aspect)
+                                .disabled(job.isRunning)
                         }
                     }
                     .frame(width: disp.width, height: disp.height)
@@ -469,6 +478,7 @@ struct EditorView: View {
                 seek: { preview.seek($0) }
             )
             .why(job.reason("--start"))
+            .disabled(job.isRunning)
             Text("\(TrimClock.clock(preview.current)) / \(TrimClock.clock(preview.duration))")
                 .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -568,18 +578,22 @@ struct EditorView: View {
     private var inspector: some View {
         ScrollViewReader { proxy in
             Form {
-                if timed { trimSection.id(EditorSection.trim) }
-                if media != .audio {
-                    cropSection.id(EditorSection.crop)
-                    turnSection.id(EditorSection.turn)
+                Group {
+                    if timed { trimSection.id(EditorSection.trim) }
+                    if media != .audio {
+                        cropSection.id(EditorSection.crop)
+                        turnSection.id(EditorSection.turn)
+                    }
+                    if timed { speedSection.id(EditorSection.speed) }
+                    if timed { soundSection.id(EditorSection.sound) }
+                    if media == .video { subtitlesSection.id(EditorSection.subtitles) }
+                    if media != .audio { sizeSection.id(EditorSection.size) }
+                    formatSection
+                    privacySection
+                    saveSection
                 }
-                if timed { speedSection.id(EditorSection.speed) }
-                if timed { soundSection.id(EditorSection.sound) }
-                if media == .video { subtitlesSection.id(EditorSection.subtitles) }
-                if media != .audio { sizeSection.id(EditorSection.size) }
-                formatSection
-                privacySection
-                saveSection
+                // What's being saved is what these say.
+                .disabled(job.isRunning)
             }
             .formStyle(.grouped)
             .onAppear {

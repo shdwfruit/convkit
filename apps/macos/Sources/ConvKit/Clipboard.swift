@@ -18,13 +18,15 @@ enum Clipboard {
             ?? FileManager.default.homeDirectoryForCurrentUser
     }
 
+    /// On the main actor: it reads the pasteboard and writes `pastedPictures`.
+    @MainActor
     static func take(conv: URL) async -> Result<[URL], Problem> {
         let files = (NSPasteboard.general.readObjects(
             forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
         if !files.isEmpty { return .success(files) }
 
-        let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("convkit-paste-\(UUID().uuidString)", isDirectory: true)
+        // Kept until the next launch, since a tool may still be using the picture.
+        let folder = appTemp.appendingPathComponent("convkit-paste-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         } catch {
@@ -32,6 +34,7 @@ enum Clipboard {
         }
         // `conv --paste` alone saves a copied picture as it is, as clipboard.EXT here.
         guard let out = try? await Conv.run(conv, ["--paste", "--json", "--no-install"], in: folder) else {
+            try? FileManager.default.removeItem(at: folder)
             return .failure(Problem(message: "conv didn't answer."))
         }
         let resp = out.decode(RunResponse.self)
@@ -40,6 +43,7 @@ enum Clipboard {
             pastedPictures.insert(url)
             return .success([url])
         }
+        try? FileManager.default.removeItem(at: folder)
         let err = resp?.results?.first?.error ?? resp?.error
         return .failure(Problem(message: err.map(AppModel.friendly) ?? Conv.stderrMessage(out.stderr)))
     }
