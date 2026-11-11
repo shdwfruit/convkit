@@ -1874,6 +1874,7 @@ pub(crate) fn make_lo_profile_dir(what: &str, counter: &AtomicUsize) -> std::io:
     loop {
         let n = counter.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("convkit-lo-{what}{pid}-{n}"));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut dir = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
