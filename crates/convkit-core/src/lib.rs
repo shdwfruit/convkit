@@ -66,3 +66,31 @@ pub use video::{
     confirmation_error as upscale_confirmation_error, resolve as resolve_video, Enlargement,
     ResolvedVideo,
 };
+
+/// `#[serde(serialize_with)]` for a path field: its text, with any byte that
+/// is not UTF-8 replaced, where serde's own `Path` impl fails and `json!`
+/// turns the failure into a panic. `lossy_paths` and `lossy_opt_path` are
+/// the same for a list and an option.
+pub fn lossy_path<S: serde::Serializer>(
+    p: &std::path::Path,
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_str(&p.to_string_lossy())
+}
+
+pub fn lossy_paths<S: serde::Serializer>(
+    paths: &[std::path::PathBuf],
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    s.collect_seq(paths.iter().map(|p| p.to_string_lossy()))
+}
+
+pub fn lossy_opt_path<S: serde::Serializer>(
+    p: &Option<std::path::PathBuf>,
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    match p {
+        Some(p) => s.serialize_some(&p.to_string_lossy()),
+        None => s.serialize_none(),
+    }
+}

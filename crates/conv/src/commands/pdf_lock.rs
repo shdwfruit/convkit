@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use convkit_core::pdf::{self, PdfOutcome, PdfPlan, Rewrite};
-use convkit_core::{ConvError, ErrorCode, Format, ResolvedBackend};
+use convkit_core::{Backend, ConvError, ErrorCode, Format, ResolvedBackend};
 use serde_json::json;
 
 use crate::cli::Cli;
@@ -21,7 +21,7 @@ use crate::commands::convert::copy_outputs;
 use crate::commands::pdf_support;
 use crate::input::{self, collision_key, expand_globs, is_extension_shorthand};
 use crate::password::{self, Opener};
-use crate::{paste, render};
+use crate::{install_prompt, paste, render};
 
 /// Whether this run locks or unlocks PDFs.
 pub fn wanted(cli: &Cli) -> bool {
@@ -63,12 +63,6 @@ struct Job {
 
 fn invalid(message: String) -> ConvError {
     ConvError::new(ErrorCode::InvalidInvocation, message)
-}
-
-fn name_of(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| p.display().to_string())
 }
 
 /// `report.pdf` + `locked` -> `report-locked.pdf`, keeping the extension's
@@ -128,7 +122,7 @@ fn check_pdf(p: &Path, way: &Way) -> Result<(), ConvError> {
         "{} {}s PDFs, and {} is not one",
         way.flag,
         way.verb,
-        name_of(p)
+        render::file_name_of(p)
     ));
     // Anything else is locked by putting it in a zip.
     if way.flag != "--password" {
@@ -214,7 +208,7 @@ fn plan_paths(
                     return Err(invalid(format!(
                         "{} writes a PDF; {} is not one",
                         way.flag,
-                        name_of(out)
+                        render::file_name_of(out)
                     )));
                 }
                 let output = input::in_outdir(out, outdir)?;
@@ -352,20 +346,20 @@ pub fn run(cli: &Cli) -> i32 {
             return e.code.exit_code();
         }
     };
-    let subject = |job: &Job| json!({ "input": job.input, "output": job.output });
+    let subject = |job: &Job| json!({ "input": job.input.to_string_lossy(), "output": job.output.to_string_lossy() });
     // Check the inputs before offering to install qpdf.
     if let Some(missing) = jobs.iter().find(|j| !j.input.is_file()) {
         let e = ConvError::new(
             ErrorCode::InputNotFound,
             format!("input not found: {}", missing.input.display()),
         );
-        let name = name_of(&missing.input);
+        let name = render::file_name_of(&missing.input);
         return pdf_support::print_failure(cli, subject(missing), &name, &e, cli.dry_run);
     }
-    let qpdf = match pdf_support::resolve_qpdf(cli, !cli.dry_run) {
+    let qpdf = match install_prompt::resolve_offering(cli, Backend::Qpdf, !cli.dry_run) {
         Ok(q) => q,
         Err(e) => {
-            let name = name_of(&jobs[0].input);
+            let name = render::file_name_of(&jobs[0].input);
             return pdf_support::print_failure(cli, subject(&jobs[0]), &name, &e, cli.dry_run);
         }
     };
@@ -388,7 +382,7 @@ pub fn run(cli: &Cli) -> i32 {
                 Ok(info) if batch && way.how == Rewrite::Unlock && !info.encrypted => {
                     Fate::Skipped(format!(
                         "{} has no password or restrictions, so it was left as it is.",
-                        name_of(&job.input)
+                        render::file_name_of(&job.input)
                     ))
                 }
                 Ok(info) => match pdf::plan::rewrite_plan(&info, &job.output, way.how) {
@@ -402,7 +396,7 @@ pub fn run(cli: &Cli) -> i32 {
         .collect();
     if plans.iter().any(|(_, f)| matches!(f, Fate::Done(_))) {
         let what = match plans.as_slice() {
-            [(job, _)] => name_of(&job.output),
+            [(job, _)] => render::file_name_of(&job.output),
             _ => format!("the {} PDFs", way.done),
         };
         match password::lock_for(cli.password, &cli.restrict, &what, cli.dry_run) {
@@ -497,10 +491,14 @@ fn dry_run(
     for (job, fate) in plans {
         match fate {
             Fate::Done(plan) => print!("{}", render::pdf_plan_human(plan)),
-            Fate::Skipped(why) => println!("note: {why}"),
+            Fate::Skipped(why) => println!("note: {}", render::safe_for_terminal(why)),
             Fate::Failed(e) => eprint!(
                 "{}",
-                render::failure_human(&name_of(&job.input), e, render::stderr_styled())
+                render::failure_human(
+                    &render::file_name_of(&job.input),
+                    e,
+                    render::stderr_styled()
+                )
             ),
         }
     }
@@ -539,13 +537,20 @@ fn report(
         .collect();
     let code = exit_code(done.iter().map(|(_, f)| f.error()));
     // One file outside a batch reads like a conversion. It is never
-    // skipped: with nothing to do, it is refused instead.
-    if let ([(job, fate)], false) = (done.as_slice(), batch) {
+    // skipped: with nothing to do, it is refused instead. Its JSON is the
+    // batch's, which carries --copy.
+    if let ([(job, fate)], false, false) = (done.as_slice(), batch, cli.json) {
         match fate {
             Fate::Done(o) => pdf_support::print_success(cli, subject(job), o, elapsed),
             Fate::Skipped(_) => {}
             Fate::Failed(e) => {
-                pdf_support::print_failure(cli, subject(job), &name_of(&job.input), e, false);
+                pdf_support::print_failure(
+                    cli,
+                    subject(job),
+                    &render::file_name_of(&job.input),
+                    e,
+                    false,
+                );
             }
         }
         copy(cli, &written);
@@ -573,7 +578,7 @@ fn report(
             Fate::Done(o) => {
                 counts.0 += 1;
                 eprint!("{}", render::pdf_warnings_human(o, render::stderr_styled()));
-                let name = name_of(&job.input);
+                let name = render::file_name_of(&job.input);
                 notes.extend(o.notes.iter().map(|n| format!("{name}: {n}")));
             }
             Fate::Skipped(why) => {
@@ -588,7 +593,11 @@ fn report(
                 }
                 eprint!(
                     "{}",
-                    render::failure_human(&name_of(&job.input), e, render::stderr_styled())
+                    render::failure_human(
+                        &render::file_name_of(&job.input),
+                        e,
+                        render::stderr_styled()
+                    )
                 );
             }
         }

@@ -165,9 +165,16 @@ pub fn run_each(
         true => num_cpus_or_one().min(PDF_PAGES_AT_ONCE),
         false => num_cpus_or_one(),
     };
+    // No more threads than jobs; and a count the system won't give (`-j
+    // 5000`) runs on the default pool rather than panicking.
+    let threads = cli
+        .jobs
+        .unwrap_or_else(default_jobs)
+        .clamp(1, jobs.len().max(1));
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(cli.jobs.unwrap_or_else(default_jobs))
+        .num_threads(threads)
         .build()
+        .or_else(|_| rayon::ThreadPoolBuilder::new().build())
         .expect("thread pool");
 
     // Same ANSI gate as `single_job_spinner`: indicatif draws by rewriting
@@ -540,6 +547,25 @@ mod tests {
         assert!(results[1].result.is_ok(), "{:?}", results[1].result);
         let e = results[2].result.as_ref().unwrap_err();
         assert!(e.message.contains("lossless"), "{}", e.message);
+    }
+
+    /// `-j 5000` asked for more threads than the system gives, and the
+    /// pool's refusal was a panic.
+    #[test]
+    fn a_huge_jobs_count_still_runs_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = test_cli(magick_stub(dir.path()));
+        cli.jobs = Some(5000);
+        let input = dir.path().join("a.png");
+        std::fs::write(&input, b"x").unwrap();
+        let job = Job {
+            inputs: vec![input],
+            output: dir.path().join("a.jpg"),
+            from: Format::Png,
+            to: Format::Jpg,
+        };
+        let (results, code, _) = run(vec![job], &cli, false);
+        assert_eq!(code, 0, "{:?}", results[0].result);
     }
 
     /// Part 2's own wiring: a real (stubbed-backend) successful job must

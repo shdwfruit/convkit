@@ -80,7 +80,7 @@ pub fn run(cli: &Cli, paths: &[PathBuf]) -> i32 {
         }
     } else {
         for problem in &problems {
-            eprintln!("error: {problem}");
+            eprintln!("error: {}", render::safe_for_terminal(problem));
         }
         if !cli.quiet {
             let styled = render::stdout_styled();
@@ -149,7 +149,9 @@ fn block(info: &FileInfo, styled: bool) -> String {
     }
 
     let mut s = format!("{}\n", render::bold(&info.path, styled));
+    // Tags, titles and names are the file's say, not conv's.
     for (label, value) in rows {
+        let value = render::safe_for_terminal(&value);
         s.push_str(&format!("  {label:<LABEL$}{value}\n"));
     }
     s
@@ -635,6 +637,25 @@ mod tests {
         );
         assert!(
             text.contains("  Missing       ffprobe not found, so streams, duration and bitrate are not shown. Try: "),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_tag_cannot_reach_the_terminal() {
+        let mut f = file(Some(Format::Mp3));
+        f.path = "a\u{1b}]0;x\u{7}.mp3".into();
+        let mut m = MediaInfo::default();
+        m.tags
+            .insert("title".into(), "x\u{1b}]52;c;aGk=\u{7}y".into());
+        f.media = Some(m);
+        let text = block(&f, true);
+        assert!(
+            !text.contains('\u{7}') && !text.contains("\u{1b}]"),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("Title         x\\u{1b}]52;c;aGk=\\u{7}y\n"),
             "{text}"
         );
     }

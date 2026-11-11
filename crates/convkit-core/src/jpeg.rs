@@ -20,6 +20,7 @@ const APP14: u8 = 0xEE;
 const COM: u8 = 0xFE;
 
 const EXIF_HEADER: &[u8] = b"Exif\0\0";
+const XMP_HEADER: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 
 const TAG_ORIENTATION: u16 = 0x0112;
 const TAG_X_RESOLUTION: u16 = 0x011A;
@@ -253,10 +254,18 @@ fn exif_tiff<'a>(segs: &[Segment<'a>]) -> Option<Tiff<'a>> {
 }
 
 /// Whether the JPEG records where it was taken: an EXIF GPS block with a
-/// latitude.
+/// latitude, or a GPSLatitude in its XMP packet.
 pub(crate) fn has_location(bytes: &[u8]) -> bool {
     let segs = header_segments(bytes);
-    let Some(tiff) = exif_tiff(&segs) else {
+    segs.iter().any(|s| {
+        s.marker == APP1
+            && s.payload.starts_with(XMP_HEADER)
+            && crate::exif::find(s.payload, b"GPSLatitude").is_some()
+    }) || exif_has_location(&segs)
+}
+
+fn exif_has_location(segs: &[Segment<'_>]) -> bool {
+    let Some(tiff) = exif_tiff(segs) else {
         return false;
     };
     let Some(ifd0) = tiff.ifd0() else {
@@ -437,6 +446,12 @@ mod tests {
         // An XMP packet that mentions TIFF tags is not EXIF.
         let xmp = segment(APP1, b"http://ns.adobe.com/xap/1.0/\0<x:xmpmeta MM\0*>");
         assert!(!has_location(&jpeg(&[xmp], &[0x12; 64], &[])));
+        // ...but a GPS latitude written in XMP is a location.
+        let xmp = segment(
+            APP1,
+            b"http://ns.adobe.com/xap/1.0/\0<x:xmpmeta exif:GPSLatitude=\"1,2N\"/>",
+        );
+        assert!(has_location(&jpeg(&[xmp], &[0x12; 64], &[])));
     }
 
     /// A photo's metadata is all in front of its image data, so that is all

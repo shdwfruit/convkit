@@ -246,6 +246,24 @@ fn a_billion_laughs_is_stopped() {
 }
 
 #[test]
+fn aliases_nesting_past_the_depth_limit_are_refused() {
+    let deep = "- ".repeat(510);
+    let yaml = format!("a0: &a0 x\na1: &a1\n  {deep}*a0\na2: &a2\n  {deep}*a1\n");
+    let e = conv(&yaml, Lang::Yaml, Lang::Json).unwrap_err();
+    assert_eq!(e.kind, DataErrorKind::TooBig);
+    assert!(e.message.contains("nested more than"), "{e:?}");
+}
+
+#[test]
+fn aliases_are_charged_for_their_text() {
+    let yaml = format!("a: &a {}\nb:\n{}", "x".repeat(8192), "  - *a\n".repeat(20));
+    TEST_LIMIT.with(|l| l.set(Some(64 * 1024)));
+    let r = conv(&yaml, Lang::Yaml, Lang::Json);
+    TEST_LIMIT.with(|l| l.set(None));
+    assert_eq!(r.unwrap_err().kind, DataErrorKind::TooBig);
+}
+
+#[test]
 fn yaml_documents_become_a_list_or_are_refused_by_toml() {
     let yaml = "---\na: 1\n---\na: 2\n";
     let (json, report) = conv(yaml, Lang::Yaml, Lang::Json).unwrap();
@@ -290,6 +308,28 @@ fn yaml_one_one_booleans_are_noted() {
     // As a key, `on` means nothing else, and says nothing.
     let (_, report) = conv("on: push\n", Lang::Yaml, Lang::Json).unwrap();
     assert!(report.notes.is_empty(), "{:?}", report.notes);
+}
+
+#[test]
+fn yaml_one_one_octal_is_noted() {
+    let (json, report) = conv("mode: 0644\n", Lang::Yaml, Lang::Json).unwrap();
+    assert_eq!(json, "{\n  \"mode\": 644\n}\n");
+    assert!(
+        report.notes.iter().any(|n| n.contains("leading 0")),
+        "{:?}",
+        report.notes
+    );
+}
+
+#[test]
+fn a_key_long_once_quoted_is_written_as_an_explicit_key() {
+    let json = format!("{{\"{}\": 1}}", "'".repeat(999));
+    let yaml = ok(&json, Lang::Json, Lang::Yaml);
+    assert!(yaml.starts_with("? "), "{}", &yaml[..20]);
+    assert_eq!(
+        ok(&yaml, Lang::Yaml, Lang::Json),
+        ok(&json, Lang::Json, Lang::Json)
+    );
 }
 
 #[test]
@@ -557,6 +597,24 @@ fn toml_refuses_what_it_cannot_hold() {
 }
 
 #[test]
+fn toml_refuses_a_float_past_64_bits() {
+    let e = conv(r#"{"a": 1e400}"#, Lang::Json, Lang::Toml).unwrap_err();
+    assert!(e.message.contains("64-bit, and a is 1e400"), "{e:?}");
+    assert!(ok(r#"{"a": 1e-400}"#, Lang::Json, Lang::Toml).contains("1e-400"));
+}
+
+#[test]
+fn toml_errors_in_a_list_of_tables_name_the_item() {
+    let e = conv(
+        r#"{"k": [{"a": 1}, {"a": 2}, {"a": null}]}"#,
+        Lang::Json,
+        Lang::Toml,
+    )
+    .unwrap_err();
+    assert_eq!(e.message, "TOML has no null, and k[2].a is null");
+}
+
+#[test]
 fn json_refuses_nan_and_infinity_with_the_path() {
     let e = conv("x: [1, .nan]\n", Lang::Yaml, Lang::Json).unwrap_err();
     assert_eq!(e.message, "JSON has no NaN, and x[1] is nan");
@@ -632,6 +690,23 @@ fn run_bytes(bytes: &[u8], from: Lang, to: Lang) -> (String, Report) {
     let mut out = Plain(Vec::new());
     let report = transform(&Source::Text(bytes), from, to, &opts, &mut out).unwrap();
     (String::from_utf8(out.0).unwrap(), report)
+}
+
+#[test]
+fn a_cr_only_csv_sampled_inside_a_character_is_still_utf8() {
+    let mut csv = b"name,city\r".to_vec();
+    csv.extend(b"a,b\r".repeat(16_000));
+    // The sample's last byte is the first of ü's two.
+    let pad = 65_535 - csv.len() - 3;
+    csv.extend(format!("x,{}Zürich\r", "y".repeat(pad)).as_bytes());
+    csv.extend(b"a,b\r".repeat(10));
+    let (json, report) = run_bytes(&csv, Lang::Csv, Lang::Json);
+    assert!(json.contains("Zürich\""), "{:?}", report.notes);
+    assert!(
+        report.notes.iter().all(|n| !n.contains("1252")),
+        "{:?}",
+        report.notes
+    );
 }
 
 #[test]

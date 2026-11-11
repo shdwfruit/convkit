@@ -127,9 +127,6 @@ pub(crate) fn pack(
         }
         ArchiveFormat::SevenZ | ArchiveFormat::Rar => unreachable!("refused above"),
     }
-    if opts.overwrite && cfg!(windows) && output.exists() {
-        let _ = std::fs::remove_file(output);
-    }
     std::fs::rename(&temp.path, output).map_err(wrote)?;
     temp.keep = true;
 

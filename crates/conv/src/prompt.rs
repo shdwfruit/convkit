@@ -18,7 +18,7 @@ pub fn is_interactive_session() -> bool {
 /// prompt.
 pub fn ask(message: &str) -> bool {
     let mut stderr = std::io::stderr();
-    let _ = write!(stderr, "{message}");
+    let _ = write!(stderr, "{}", crate::render::safe_for_terminal(message));
     let _ = stderr.flush();
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {

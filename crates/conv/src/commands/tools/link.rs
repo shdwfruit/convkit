@@ -59,14 +59,21 @@ pub fn run(cli: &Cli, args: &Args) -> i32 {
         let (cleaned, mut found) = l::clean_text(&text);
         let mut out = cleaned;
         if args.follow {
+            // Links sit in `out` in order, so each is found after the last one.
+            let mut at = 0;
             for c in &mut found {
-                let before = c.output.clone();
+                let start = at + out[at..].find(&c.output).unwrap_or(0);
+                let end = start + c.output.len();
+                at = end;
+                // Only short links: any other link may be a one-time link a request would use up.
+                if !c.short {
+                    continue;
+                }
                 if follow(cli, c).is_err() {
                     code = 1;
                 }
-                if c.output != before {
-                    out = out.replacen(&before, &c.output, 1);
-                }
+                out.replace_range(start..end, &c.output);
+                at = start + c.output.len();
             }
         }
         if found.is_empty() {

@@ -309,7 +309,7 @@ fn is_month_or_day(s: &str) -> bool {
         "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "SEPT", "OCT", "NOV", "DEC",
         "MON", "TUE", "WED", "THU", "FRI", "SAT",
     ];
-    NAMES.contains(&s) || s == "SUN"
+    NAMES.contains(&s) || s == "SUN" || MONTHS.iter().any(|m| m.eq_ignore_ascii_case(s))
 }
 
 /// `+02:00`, `+0200`, `+02`, `-0530`.
@@ -435,7 +435,7 @@ fn numeric_date(s: &str) -> Result<Option<DateTime>, String> {
     let year: i16 = y.parse().map_err(|_| "bad year".to_string())?;
     let (month, day) = if sep == '.' || a > 12 {
         (b, a)
-    } else if b > 12 || a == b {
+    } else if b > 12 || a == b || a == 0 || b == 0 {
         (a, b)
     } else {
         return Err(format!(
@@ -675,6 +675,17 @@ mod tests {
 
     fn utc(s: &str) -> String {
         at(s).at.to_string()
+    }
+
+    #[test]
+    fn a_zero_month_or_day_is_an_error_not_a_panic() {
+        assert!(read("0/5/2024", None, &ny(), now()).is_err());
+        assert!(read("5/0/2024", None, &ny(), now()).is_err());
+    }
+
+    #[test]
+    fn month_names_in_capitals_are_not_time_zones() {
+        assert_eq!(utc("1 APRIL 2024"), utc("1 April 2024"));
     }
 
     #[test]

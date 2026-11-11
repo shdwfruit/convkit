@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::procutil::{magick_frame, path_arg};
 use crate::video::ResolvedVideo;
 use crate::Backend;
 
@@ -508,8 +509,8 @@ pub struct Recipe {
 }
 
 impl Step {
-    /// Render this step's argv. Paths are rendered lossily via `to_string_lossy`
-    /// for display and snapshotting; `exec` passes real `OsStr` values.
+    /// Render this step's argv. Paths are rendered as text (`path_arg`), and
+    /// `exec::run` refuses a path that is not valid UTF-8, so none is lost.
     ///
     /// # Preconditions
     ///
@@ -551,6 +552,11 @@ impl Step {
     ) -> Rendered {
         let mut argv = Vec::with_capacity(self.args.len());
         let mut path_args = Vec::new();
+        // ImageMagick reads `%d` in a name it writes as a pattern, and `%%` as `%`.
+        let written = |p: &Path| match self.backend {
+            Backend::Magick => path_arg(p).replace('%', "%%"),
+            _ => path_arg(p),
+        };
         for arg in self.args {
             match arg {
                 Arg::Lit(s) => argv.push((*s).to_string()),
@@ -645,22 +651,22 @@ impl Step {
                         }
                     };
                     path_args.push(argv.len());
-                    argv.push(pick.pattern(output, ext));
+                    argv.push(pick.pattern(Path::new(&path_arg(output)), ext));
                 }
                 Arg::FramesDir => {
                     path_args.push(argv.len());
-                    argv.push(output.to_string_lossy().into_owned());
+                    argv.push(written(output));
                 }
                 // Not a path position: the long-path rewriter would hand
                 // ImageMagick a pattern in extended form, which it does not
                 // expand.
                 Arg::InputFrames(ext) => argv.push(format!(
                     "{}/*.{ext}",
-                    crate::stills::folder_text(&inputs[0].to_string_lossy())
+                    crate::stills::folder_text(&path_arg(inputs[0]))
                 )),
                 Arg::Input => {
                     path_args.push(argv.len());
-                    argv.push(inputs[0].to_string_lossy().into_owned());
+                    argv.push(path_arg(inputs[0]));
                 }
                 Arg::InputFirstFrame => {
                     // magick's frame selector rides on the token itself
@@ -680,16 +686,16 @@ impl Step {
                     // `magick "\\?\C:\...\p.heic[0]" out.jpg` exits 0 on a
                     // 270-character input that fails without the prefix.
                     path_args.push(argv.len());
-                    argv.push(format!("{}[0]", inputs[0].to_string_lossy()));
+                    argv.push(magick_frame(inputs[0], 0).to_string_lossy().into_owned());
                 }
                 // A path, for the same reason `InputFirstFrame` is.
                 Arg::InputChosenFrame => {
                     path_args.push(argv.len());
-                    argv.push(format!(
-                        "{}[{}]",
-                        inputs[0].to_string_lossy(),
-                        video.frame.unwrap_or(0)
-                    ));
+                    argv.push(
+                        magick_frame(inputs[0], video.frame.unwrap_or(0))
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
                 }
                 Arg::Density(default) => argv.push(
                     video
@@ -722,7 +728,7 @@ impl Step {
                     let dir = inputs[0].parent().filter(|p| !p.as_os_str().is_empty());
                     path_args.push(argv.len());
                     argv.push(match dir {
-                        Some(d) => d.to_string_lossy().into_owned(),
+                        Some(d) => path_arg(d),
                         None => ".".to_string(),
                     });
                 }
@@ -730,9 +736,9 @@ impl Step {
                     for input in inputs {
                         path_args.push(argv.len());
                         argv.push(if first_frame_only(input) {
-                            format!("{}[0]", input.to_string_lossy())
+                            magick_frame(input, 0).to_string_lossy().into_owned()
                         } else {
-                            input.to_string_lossy().into_owned()
+                            path_arg(input)
                         });
                     }
                 }
@@ -744,23 +750,19 @@ impl Step {
                         ));
                     }
                     path_args.push(argv.len());
-                    argv.push(output.to_string_lossy().into_owned());
+                    argv.push(written(output));
                 }
                 Arg::OutDir => {
                     let dir = output.parent().filter(|p| !p.as_os_str().is_empty());
                     path_args.push(argv.len());
                     argv.push(match dir {
-                        Some(d) => d.to_string_lossy().into_owned(),
+                        Some(d) => path_arg(d),
                         None => ".".to_string(),
                     });
                 }
                 Arg::TypstLayout => {
                     path_args.push(argv.len());
-                    argv.push(
-                        crate::layout::layout_path(output)
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
+                    argv.push(path_arg(&crate::layout::layout_path(output)));
                 }
                 // Not a filesystem path in the sense `path_args` means: it is
                 // a placeholder the executor swaps for a resolved executable,
@@ -768,7 +770,7 @@ impl Step {
                 Arg::BackendPath(backend) => argv.push(backend.path_placeholder()),
                 Arg::Staged(staged) => {
                     path_args.push(argv.len());
-                    argv.push(staged_path(output, *staged).to_string_lossy().into_owned());
+                    argv.push(path_arg(&staged_path(output, *staged)));
                 }
                 Arg::Voice(flag) => {
                     if let Some(voice) = &video.voice {
@@ -776,8 +778,10 @@ impl Step {
                         // A Piper voice is a file.
                         if crate::speech::is_piper_voice(voice) {
                             path_args.push(argv.len());
+                            argv.push(path_arg(Path::new(voice)));
+                        } else {
+                            argv.push(voice.clone());
                         }
-                        argv.push(voice.clone());
                     }
                 }
                 Arg::Rate(style) => {
@@ -1150,6 +1154,24 @@ mod tests {
             );
         }
         assert_eq!(r.path_args.len(), 2, "{:?}", r.path_args);
+    }
+
+    #[test]
+    fn a_percent_is_doubled_where_imagemagick_reads_a_pattern_and_nowhere_else() {
+        let magick = Step {
+            backend: Backend::Magick,
+            args: &[Arg::InputFirstFrame, Arg::Input, Arg::Output],
+            output: OutputMode::Path,
+            intermediate_ext: None,
+        };
+        let argv = magick.render(&[Path::new("a%03d.png")], Path::new("w%03d.jpg"));
+        assert_eq!(argv, ["a%%03d.png[0]", "a%03d.png", "w%%03d.jpg"]);
+        let ffmpeg = Step {
+            backend: Backend::Ffmpeg,
+            args: &[Arg::Output],
+            ..magick
+        };
+        assert_eq!(ffmpeg.render(&[], Path::new("w%03d.mp4")), ["w%03d.mp4"]);
     }
 
     #[test]

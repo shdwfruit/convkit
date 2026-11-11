@@ -75,10 +75,11 @@ pub fn run(cli: &Cli) -> i32 {
         }
         Ok(Pasted::DryRun(path, bytes)) => {
             if cli.json {
-                let v = json!({ "dry_run": true, "input": PASTED, "output": path, "bytes": bytes });
+                let v = json!({ "dry_run": true, "input": PASTED, "output": path.to_string_lossy(), "bytes": bytes });
                 println!("{}", serde_json::to_string_pretty(&v).unwrap());
             } else {
-                println!("would save {PASTED} as {} ({bytes} bytes)", path.display());
+                let path = render::safe_for_terminal(&path.display().to_string());
+                println!("would save {PASTED} as {path} ({bytes} bytes)");
             }
             0
         }
@@ -119,7 +120,7 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
                 };
                 let formats: Vec<Option<Format>> =
                     files.iter().map(|f| Format::from_path(f)).collect();
-                return Err(say_what(&held, &formats));
+                return Err(say_what(&held, &formats, &typed_args()));
             }
             run.paths = files.into_iter().chain(cli.paths.iter().cloned()).collect();
             return Ok(Pasted::Inputs(Box::new(run), None));
@@ -158,7 +159,7 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
     let keeps = input::keeps_own_format(cli);
     if target.is_none() && cli.paths.is_empty() && cli.to.is_none() && !keeps && !plain {
         let held = format!("a {} picture", format.ext().to_uppercase());
-        return Err(say_what(&held, &[Some(format)]));
+        return Err(say_what(&held, &[Some(format)], &typed_args()));
     }
     // Nothing to change: the picture is saved as it came, under the name
     // asked for or as clipboard.EXT.
@@ -188,8 +189,8 @@ fn pasted(cli: &Cli) -> Result<Pasted, ConvError> {
 
 /// The refusal when `--paste` was given nothing to make: what the
 /// clipboard's `formats` can all become, and the command typed again with
-/// one of them.
-fn say_what(held: &str, formats: &[Option<Format>]) -> ConvError {
+/// one of them. `typed` is the command line, without the program name.
+fn say_what(held: &str, formats: &[Option<Format>], typed: &[String]) -> ConvError {
     let pairs = registry::all_pairs();
     let can = |from: &Option<Format>| -> Vec<Format> {
         from.map(|f| pairs.iter().filter(|p| p.0 == f).map(|p| p.1).collect())
@@ -241,10 +242,6 @@ fn say_what(held: &str, formats: &[Option<Format>]) -> ConvError {
         );
     };
     let list: Vec<&str> = targets.iter().map(|t| t.ext()).collect();
-    let typed: Vec<String> = typed_args()
-        .into_iter()
-        .map(|a| if a.contains(' ') { format!("'{a}'") } else { a })
-        .collect();
     ConvError {
         code: ErrorCode::InvalidInvocation,
         message: format!(
@@ -255,8 +252,8 @@ fn say_what(held: &str, formats: &[Option<Format>]) -> ConvError {
         remediation: Some(convkit_core::Remediation {
             managed: None,
             manual: Some(format!(
-                "e.g. `conv {} .{}`",
-                typed.join(" "),
+                "e.g. `{} .{}`",
+                render::command_line_human("conv", typed),
                 example.ext()
             )),
         }),
@@ -281,7 +278,7 @@ impl CopyReport {
             let line = format!("warning  {}", self.message);
             eprintln!("{}", render::paint_warning(&line, render::stderr_styled()));
         } else if !cli.quiet {
-            eprintln!("{}", self.message);
+            eprintln!("{}", render::safe_for_terminal(&self.message));
         }
     }
 }
@@ -1186,10 +1183,15 @@ fn print_each(
             .map(|r| match &r.result {
                 Ok(o) => {
                     let mut v = render::outcome_json(o);
-                    v["input"] = json!(r.input);
+                    v["input"] = json!(r.input.to_string_lossy());
                     v
                 }
-                Err(e) => json!({ "ok": false, "input": r.input, "output": r.output, "error": e }),
+                Err(e) => json!({
+                    "ok": false,
+                    "input": r.input.to_string_lossy(),
+                    "output": r.output.to_string_lossy(),
+                    "error": e,
+                }),
             })
             .collect();
         let ok = results.iter().all(|r| r.result.is_ok());
@@ -1304,12 +1306,12 @@ mod tests {
 
     #[test]
     fn a_paste_with_no_target_lists_what_it_can_become() {
-        let e = say_what("clip.mov", &[Some(Format::Mov)]);
+        let e = say_what("clip.mov", &[Some(Format::Mov)], &["--paste".into()]);
         assert!(e.message.contains("which can become mp4"), "{}", e.message);
         let hint = e.remediation.unwrap().manual.unwrap();
         assert!(hint.ends_with(" .mp4`"), "{hint}");
         // Several files: only what they can all become.
-        let e = say_what("2 files", &[Some(Format::Png), Some(Format::Heic)]);
+        let e = say_what("2 files", &[Some(Format::Png), Some(Format::Heic)], &[]);
         assert!(
             e.message.contains("jpg") && !e.message.contains("heic,"),
             "{}",
@@ -1317,9 +1319,19 @@ mod tests {
         );
         // Nothing in common. (A video and a document now share the sound
         // targets: a docx is read aloud into mp3.)
-        let e = say_what("2 files", &[Some(Format::Mov), Some(Format::Xlsx)]);
+        let e = say_what("2 files", &[Some(Format::Mov), Some(Format::Xlsx)], &[]);
         assert_eq!(e.code, ErrorCode::UnsupportedPair);
         assert!(e.message.contains("can't make them all into one format"));
+    }
+
+    /// The command to try is quoted as the shell needs it, quotes and all.
+    #[test]
+    fn the_paste_hint_quotes_what_was_typed() {
+        let typed = ["--paste".to_string(), "-o".into(), "Rick's out".into()];
+        let e = say_what("clip.mov", &[Some(Format::Mov)], &typed);
+        let hint = e.remediation.unwrap().manual.unwrap();
+        let quoted = render::shell_quote("Rick's out");
+        assert_eq!(hint, format!("e.g. `conv --paste -o {quoted} .mp4`"));
     }
     use std::io::Write;
     use std::path::{Path, PathBuf};

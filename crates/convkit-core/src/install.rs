@@ -110,8 +110,12 @@ fn read_capped(mut r: impl Read) -> std::io::Result<Vec<u8>> {
 /// URLs redirect once, to S3 or Azure blob storage, which `ureq` follows
 /// transparently.
 fn download(url: &str) -> Result<Vec<u8>> {
-    let resp = ureq::get(url)
-        .timeout(std::time::Duration::from_secs(300))
+    // No overall timeout: in ureq 2 that would cap the whole body, failing slow links.
+    let resp = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .timeout_read(std::time::Duration::from_secs(60))
+        .build()
+        .get(url)
         .call()
         .map_err(|e| download_err(url, e))?;
     read_capped(resp.into_reader()).map_err(|e| download_err(url, e))
@@ -298,12 +302,13 @@ fn finalize(dest: &Path) -> Result<()> {
 }
 
 /// The sibling path `fetch_and_install` writes and finalizes into before
-/// renaming over `dest` — same directory, same filename plus a `.part`
-/// suffix, so the rename is a same-filesystem, same-directory rename and
-/// therefore atomic on every platform this crate targets.
+/// renaming over `dest` — same directory, same filename plus a
+/// `.part-<pid>` suffix, so the rename is a same-filesystem, same-directory
+/// rename and therefore atomic on every platform this crate targets.
 fn temp_path_for(dest: &Path) -> PathBuf {
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
-    name.push(".part");
+    // Per process, so two concurrent installs don't write the same file.
+    name.push(format!(".part-{}", std::process::id()));
     dest.with_file_name(name)
 }
 
@@ -736,6 +741,15 @@ fn install_verified(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_temp_file_is_per_process() {
+        let name = temp_path_for(Path::new("/x/typst")).display().to_string();
+        assert!(
+            name.ends_with(&format!(".part-{}", std::process::id())),
+            "{name}"
+        );
+    }
 
     #[test]
     fn verify_rejects_a_hash_mismatch() {

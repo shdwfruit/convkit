@@ -141,7 +141,7 @@ fn title(text: &str) -> String {
         let first = word_at.first().copied();
         let last = word_at.last().copied();
         for (i, token) in tokens.iter().enumerate() {
-            if !word_at.contains(&i) || keeps_case(token) {
+            if word_at.binary_search(&i).is_err() || keeps_case(token) {
                 out.push_str(token);
                 continue;
             }
@@ -247,6 +247,12 @@ fn is_english_i(word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_case_of_one_huge_line_is_linear() {
+        let text = "word ".repeat(200_000);
+        assert!(convert(&text, Style::Title).starts_with("Word Word"));
+    }
 
     #[test]
     fn upper_and_lower_follow_unicode() {

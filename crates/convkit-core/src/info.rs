@@ -520,6 +520,10 @@ fn parse_stream(i: usize, s: &serde_json::Value) -> StreamInfo {
 
 /// The bits per sample a pixel format names: `yuv420p10le` is 10.
 fn bit_depth_of(pix_fmt: &str) -> Option<u32> {
+    // The digits of nv12 are its subsampling, not a depth.
+    if ["nv12", "nv16", "nv21", "nv24"].contains(&pix_fmt) {
+        return Some(8);
+    }
     let digits: String = pix_fmt
         .trim_end_matches("le")
         .trim_end_matches("be")
@@ -533,7 +537,7 @@ fn bit_depth_of(pix_fmt: &str) -> Option<u32> {
     match digits.parse::<u32>().ok() {
         Some(d @ (9 | 10 | 12 | 14 | 16)) => Some(d),
         // `yuv420p` and friends name no depth: 8 bits.
-        _ if pix_fmt.starts_with("yuv") || pix_fmt.starts_with("nv12") => Some(8),
+        _ if pix_fmt.starts_with("yuv") => Some(8),
         _ => None,
     }
 }
@@ -561,10 +565,11 @@ const IMAGE_FORMAT: &str = "%m\t%w\t%h\t%z\t%[colorspace]\t%A\t%[orientation]\t\
 
 fn read_image(magick: &Path, input: &Path, format: Format) -> Option<ImageInfo> {
     let run = |ping: bool, first_only: bool| -> Option<String> {
-        let mut target = input.as_os_str().to_owned();
-        if first_only {
-            target.push("[0]");
-        }
+        let target = if first_only {
+            crate::procutil::magick_frame(input, 0)
+        } else {
+            crate::procutil::path_arg_os(input)
+        };
         let mut cmd = backend_command(magick);
         if ping {
             cmd.arg("-ping");
@@ -579,6 +584,10 @@ fn read_image(magick: &Path, input: &Path, format: Format) -> Option<ImageInfo> 
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
     let mut image = parse_image(&run(true, false)?)?;
+    // ImageMagick reads no GPS from XMP.
+    if format == Format::Jpg && crate::jpeg::file_has_location(input) {
+        image.location = true;
+    }
     // A WebP's `-ping` stops before its EXIF and colour profile, so its
     // first frame is read whole for them.
     if format == Format::Webp {
@@ -701,7 +710,7 @@ fn mismatch_note(format: Format, coder: &str) -> Option<String> {
         "TIFF" => Format::Tiff,
         "BMP" | "BMP2" | "BMP3" => Format::Bmp,
         "ICO" => Format::Ico,
-        "HEIC" | "HEIF" => return None,
+        "HEIC" | "HEIF" => Format::Heic,
         _ => return None,
     };
     (actual != format && !(format == Format::Heic || format == Format::Heif)).then(|| {
@@ -802,6 +811,8 @@ mod tests {
         assert_eq!(bit_depth_of("p010le"), Some(10));
         assert_eq!(bit_depth_of("yuv444p12be"), Some(12));
         assert_eq!(bit_depth_of("rgb24"), None);
+        assert_eq!(bit_depth_of("nv12"), Some(8));
+        assert_eq!(bit_depth_of("nv16"), Some(8));
     }
 
     #[test]
@@ -857,6 +868,7 @@ mod tests {
         );
         assert_eq!(mismatch_note(Format::Jpg, "JPEG"), None);
         assert_eq!(mismatch_note(Format::Heif, "HEIC"), None);
+        assert!(mismatch_note(Format::Jpg, "HEIC").is_some());
         assert_eq!(mismatch_note(Format::Svg, "SVG"), None);
     }
 

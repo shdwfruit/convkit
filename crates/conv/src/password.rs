@@ -26,12 +26,47 @@ pub fn env_password() -> Option<String> {
 }
 
 /// Reads a password without showing it.
-fn ask_hidden(question: &str) -> Option<String> {
-    eprint!("{question}");
-    console::Term::stderr()
-        .read_secure_line()
-        .ok()
-        .filter(|p| !p.is_empty())
+pub(crate) fn ask_hidden(question: &str) -> Option<String> {
+    eprint!("{}", crate::render::safe_for_terminal(question));
+    #[cfg(unix)]
+    let typed = read_unechoed();
+    #[cfg(not(unix))]
+    let typed = console::Term::stderr().read_secure_line().ok();
+    typed.filter(|p| !p.is_empty())
+}
+
+/// One line from the terminal, unechoed, with signals off as the clipboard
+/// reads it: a Ctrl-C stopping conv in `read_secure_line` left the terminal
+/// without echo, and here it is a byte that ends the question instead.
+#[cfg(unix)]
+fn read_unechoed() -> Option<String> {
+    use crate::clipboard::terminal::{Answer, Tty};
+    let mut tty = Tty::open()?;
+    let answer = tty.answer(std::time::Duration::from_secs(24 * 3600), |buf| {
+        let end = buf.iter().position(|&b| b == b'\r' || b == b'\n')?;
+        Some(typed_line(&buf[..end]))
+    });
+    drop(tty);
+    eprintln!();
+    match answer {
+        Answer::Got(line) => Some(line),
+        Answer::TimedOut | Answer::Stopped => None,
+    }
+}
+
+/// What raw keys typed, with each backspace taking back a character.
+#[cfg(unix)]
+fn typed_line(keys: &[u8]) -> String {
+    let mut s = String::new();
+    for c in String::from_utf8_lossy(keys).chars() {
+        match c {
+            '\u{7f}' | '\u{8}' => {
+                s.pop();
+            }
+            c => s.push(c),
+        }
+    }
+    s
 }
 
 /// `--password hunter2` reads as the flag and a path named `hunter2`. Said
@@ -162,10 +197,7 @@ impl<'a> Opener<'a> {
             *last = None;
             return None;
         }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+        let name = crate::render::file_name_of(path);
         let question = if wrong && last.is_some() {
             "Wrong password. Try again: ".to_string()
         } else {
@@ -181,6 +213,12 @@ impl<'a> Opener<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_backspace_takes_back_what_was_typed() {
+        assert_eq!(typed_line("pa\u{7f}ass\u{8}\u{8}sé".as_bytes()), "pasé");
+    }
 
     fn pw(s: &str) -> Password {
         Password::new(s).unwrap()

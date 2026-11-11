@@ -36,13 +36,10 @@ pub fn get() -> Result<Got, ConvError> {
     clipboard::get().map_err(|e| refused(format!("couldn't paste: {e}")))
 }
 
-/// Writes a pasted picture as clipboard.EXT in a folder of its own.
+/// Writes a pasted picture as clipboard.EXT in a folder only this user can
+/// open.
 pub fn keep(format: convkit_core::Format, bytes: &[u8]) -> Result<Pasted, ConvError> {
-    let folder = tempfile::Builder::new()
-        .prefix("conv-paste")
-        .tempdir()
-        .map_err(|e| refused(format!("couldn't make a folder for the picture: {e}")))?;
-    let path = folder.path().join(format!("clipboard.{}", format.ext()));
+    let (folder, path) = crate::output::private_temp(&format!("clipboard.{}", format.ext()))?;
     std::fs::write(&path, bytes)
         .map_err(|e| refused(format!("couldn't keep the pasted picture: {e}")))?;
     Ok(Pasted {
@@ -73,5 +70,20 @@ pub fn from(got: Got, command: &str) -> Result<Pasted, ConvError> {
         Got::Text(_) => Err(refused(
             "the clipboard holds text, not a picture or a file".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pasted_picture_is_kept_where_only_this_user_can_read_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let kept = keep(convkit_core::Format::Png, b"x").unwrap();
+        let folder = kept.path.parent().unwrap();
+        let mode = std::fs::metadata(folder).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "{mode:o}");
     }
 }

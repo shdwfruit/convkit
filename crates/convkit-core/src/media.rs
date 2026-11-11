@@ -20,6 +20,7 @@
 use std::path::Path;
 
 use crate::probe::MediaProbe;
+use crate::procutil::path_arg;
 use crate::trim::Cut;
 use crate::video::ResolvedVideo;
 use crate::{registry, Format};
@@ -28,7 +29,7 @@ use crate::{registry, Format};
 /// apply to the input that follows them. See `Cut::input_args`.
 fn input_args(cut: Option<&Cut>, input: &Path) -> Vec<String> {
     let mut argv = cut.map_or_else(Vec::new, Cut::input_args);
-    argv.extend(["-i".to_string(), input.to_string_lossy().into_owned()]);
+    argv.extend(["-i".to_string(), path_arg(input)]);
     argv
 }
 
@@ -529,7 +530,7 @@ fn mapped_invocation(
         push(&mut argv, &["-movflags", "+faststart"]);
     }
     push(&mut argv, &["-y"]);
-    argv.push(output.to_string_lossy().into_owned());
+    argv.push(path_arg(output));
 
     Some(MediaInvocation { argv, warnings })
 }
@@ -885,7 +886,7 @@ pub(crate) fn same_format_copy(
     input: &Path,
     output: &Path,
 ) -> MediaInvocation {
-    let mut argv: Vec<String> = vec!["-i".into(), input.to_string_lossy().into_owned()];
+    let mut argv: Vec<String> = vec!["-i".into(), path_arg(input)];
     let mut warnings = Vec::new();
     push(&mut argv, &["-map", "0", "-map", "-0:d"]);
     if to == Format::Mkv && probe.is_none() {
@@ -912,7 +913,7 @@ pub(crate) fn same_format_copy(
         push(&mut argv, &["-movflags", "+faststart"]);
     }
     push(&mut argv, &["-y"]);
-    argv.push(output.to_string_lossy().into_owned());
+    argv.push(path_arg(output));
     MediaInvocation { argv, warnings }
 }
 
@@ -992,7 +993,7 @@ pub(crate) fn audio_copy_invocation(
         argv.extend(cut.output_args());
     }
     push(&mut argv, &["-y"]);
-    argv.push(output.to_string_lossy().into_owned());
+    argv.push(path_arg(output));
 
     let mut warnings = Vec::new();
     if audios.len() > 1 {

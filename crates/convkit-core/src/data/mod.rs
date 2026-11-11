@@ -832,6 +832,11 @@ fn yaml_notes(found: &yaml::Found, to: Lang, report: &mut Report) {
             "yes, no, on and off are read as text, as YAML 1.2 reads them; YAML 1.1 readers such as PyYAML and Ansible take them as true and false.".to_string()
         });
     }
+    if found.yaml11_octal {
+        report.notes.push(
+            "Numbers with a leading 0, like 0644, are read as decimal, as YAML 1.2 reads them; YAML 1.1 readers such as PyYAML and Ansible take them as octal.".to_string(),
+        );
+    }
 }
 
 fn comments_note(report: &mut Report, opts: &Options, from: Lang) {

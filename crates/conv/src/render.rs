@@ -50,11 +50,61 @@ pub(crate) fn shell_quote(token: &str) -> String {
     if cfg!(windows) {
         // A literal `"` cannot occur in a Windows path, so this only ever
         // fires on a token a caller constructed; `""` is how both shells
-        // spell an escaped quote inside a quoted string.
-        format!("\"{}\"", token.replace('"', "\"\""))
+        // spell an escaped quote inside a quoted string. Neither shell can
+        // spell a control character, so one is shown escaped instead.
+        format!("\"{}\"", safe_for_terminal(&token.replace('"', "\"\"")))
+    } else if token.chars().any(acts_on_terminal) {
+        // `$'...'` spells a control character as an escape, so the line is
+        // safe to print and still pastes as the same bytes.
+        let mut s = String::from("$'");
+        for c in token.chars() {
+            match c {
+                '\\' => s.push_str(r"\\"),
+                '\'' => s.push_str(r"\'"),
+                '\u{1b}' => s.push_str(r"\e"),
+                c if acts_on_terminal(c) => {
+                    for b in c.encode_utf8(&mut [0; 4]).bytes() {
+                        s.push_str(&format!("\\x{b:02x}"));
+                    }
+                }
+                c => s.push(c),
+            }
+        }
+        s.push('\'');
+        s
     } else {
         format!("'{}'", token.replace('\'', r"'\''"))
     }
+}
+
+/// Characters a terminal acts on rather than shows: the controls, and the
+/// ones that reorder text.
+fn acts_on_terminal(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// `text` with every character a terminal would act on shown as an escape,
+/// for text conv did not write (file names, tags, codes, messages that
+/// quote them) on its way to a terminal. Newlines and tabs are kept.
+pub(crate) fn safe_for_terminal(text: &str) -> String {
+    let mut s = String::with_capacity(text.len());
+    for c in text.chars() {
+        if acts_on_terminal(c) && c != '\n' && c != '\t' {
+            s.extend(c.escape_unicode());
+        } else {
+            s.push(c);
+        }
+    }
+    s
+}
+
+/// A path's file name, or the whole path when it has none, for messages.
+/// Lossy, as it is only shown; not yet cleaned for a terminal, as messages
+/// also go into `--json`.
+pub(crate) fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 /// Renders a plan as the command lines it stands for.
@@ -112,7 +162,7 @@ pub fn plan_human(plan: &ConversionPlan) -> String {
             convkit_core::sized::dry_run_note(sz)
         ));
     }
-    s
+    safe_for_terminal(&s)
 }
 
 /// The user's own command with only the `--max-size` value replaced, for a
@@ -229,7 +279,7 @@ pub fn verbose_report_human(backend_name: &str, report: &str) -> String {
         s.push_str(line);
         s.push('\n');
     }
-    s
+    safe_for_terminal(&s)
 }
 
 pub fn error_human(e: &ConvError) -> String {
@@ -242,7 +292,7 @@ pub fn error_human(e: &ConvError) -> String {
             s.push_str(&format!("  or:  {m}\n"));
         }
     }
-    s
+    safe_for_terminal(&s)
 }
 
 /// The `{"ok": false, "error": ...}` envelope every top-level (pre-job)
@@ -279,7 +329,7 @@ pub fn print_error(json: bool, e: &ConvError) {
 pub fn outcome_json(o: &Outcome) -> serde_json::Value {
     let mut v = json!({
         "ok": true,
-        "output": o.output,
+        "output": o.output.to_string_lossy(),
         "bytes": o.bytes,
         "remuxed": o.remuxed,
         "warnings": o.warnings,
@@ -450,10 +500,11 @@ pub fn paint_warning(line: &str, styled: bool) -> String {
 }
 
 fn paint(text: &str, style: Style, enabled: bool) -> String {
+    let text = safe_for_terminal(text);
     if enabled {
         format!("{}{text}{}", style.render(), style.render_reset())
     } else {
-        text.to_string()
+        text
     }
 }
 
@@ -490,10 +541,12 @@ fn human_elapsed(elapsed: Duration) -> String {
 /// never has a failure mode worth handling beyond falling back to the path
 /// exactly as given.
 fn absolute_display(p: &Path) -> String {
-    std::path::absolute(p)
-        .unwrap_or_else(|_| p.to_path_buf())
-        .display()
-        .to_string()
+    safe_for_terminal(
+        &std::path::absolute(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .display()
+            .to_string(),
+    )
 }
 
 /// Renders one job's success for a real (non-`--dry-run`) conversion:
@@ -515,11 +568,7 @@ fn absolute_display(p: &Path) -> String {
 /// registry emits at most one warning, so this bound holds in fact as well
 /// as in intent).
 pub fn conversion_success_human(o: &Outcome, styled: bool) -> String {
-    let name = o
-        .output
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| o.output.display().to_string());
+    let name = file_name_of(&o.output);
     let sep = if styled { " \u{b7} " } else { " - " };
 
     // A PDF made smaller says what it was.
@@ -575,7 +624,7 @@ pub fn conversion_success_human(o: &Outcome, styled: bool) -> String {
     };
     s.push_str(&glyph);
     s.push(' ');
-    s.push_str(&fields.join(sep));
+    s.push_str(&safe_for_terminal(&fields.join(sep)));
     s.push('\n');
 
     s.push_str(&format!("  {}\n", absolute_display(&o.output)));
@@ -599,8 +648,7 @@ pub fn failure_human(header: &str, e: &ConvError, styled: bool) -> String {
         "FAIL".to_string()
     };
     s.push_str(&glyph);
-    s.push_str(&format!(" {header}\n"));
-    s.push_str(&format!("  {}\n", e.message));
+    s.push_str(&safe_for_terminal(&format!(" {header}\n  {}\n", e.message)));
     if let Some(r) = &e.remediation {
         let hint = r.managed.as_deref().or(r.manual.as_deref());
         if let Some(hint) = hint {
@@ -618,11 +666,7 @@ pub fn failure_human(header: &str, e: &ConvError, styled: bool) -> String {
 /// 12 files · 3.4 MB · 0.2s`. A folder's name ends in the separator, so an
 /// unpacked folder reads as one.
 pub fn archive_success_human(o: &Outcome, folder: bool, holds: &str, styled: bool) -> String {
-    let mut name = o
-        .output
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| o.output.display().to_string());
+    let mut name = file_name_of(&o.output);
     if folder {
         name.push(std::path::MAIN_SEPARATOR);
     }
@@ -640,7 +684,7 @@ pub fn archive_success_human(o: &Outcome, folder: bool, holds: &str, styled: boo
     };
     let mut s = format!(
         "{glyph} {}\n  {}\n",
-        fields.join(sep),
+        safe_for_terminal(&fields.join(sep)),
         absolute_display(&o.output)
     );
     for w in &o.warnings {
@@ -653,7 +697,10 @@ pub fn archive_success_human(o: &Outcome, folder: bool, holds: &str, styled: boo
 
 /// One line of an archive `--dry-run`: what would be made, from what.
 pub fn archive_plan_human(verb: &str, from: &str, to: &Path, detail: &str) -> String {
-    format!("{verb} {from} -> {} ({detail})\n", absolute_display(to))
+    safe_for_terminal(&format!(
+        "{verb} {from} -> {} ({detail})\n",
+        absolute_display(to)
+    ))
 }
 
 /// Renders one job's failure for a real (non-`--dry-run`) conversion:
@@ -673,10 +720,7 @@ pub fn archive_plan_human(verb: &str, from: &str, to: &Path, detail: &str) -> St
 /// target format alone, mirroring how a person would describe the
 /// conversion they asked for out loud.
 pub fn conversion_failure_human(input: &Path, to_ext: &str, e: &ConvError, styled: bool) -> String {
-    let name = input
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| input.display().to_string());
+    let name = file_name_of(input);
     let arrow = if styled { "\u{2192}" } else { "->" };
     failure_human(&format!("{name} {arrow} {to_ext}"), e, styled)
 }
@@ -719,7 +763,7 @@ pub fn clips_success_human(
     };
     let mut s = format!(
         "{glyph} {}\n  {}\n",
-        fields.join(sep),
+        safe_for_terminal(&fields.join(sep)),
         absolute_display(&o.output)
     );
     for n in &o.notes {
@@ -728,12 +772,6 @@ pub fn clips_success_human(
         s.push('\n');
     }
     s
-}
-
-fn file_name_of(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| p.display().to_string())
 }
 
 fn pages_text(n: usize) -> String {
@@ -759,7 +797,7 @@ pub fn pdf_plan_human(plan: &convkit_core::pdf::PdfPlan) -> String {
     for n in &plan.notes {
         s.push_str(&format!("note: {n}\n"));
     }
-    s
+    safe_for_terminal(&s)
 }
 
 /// One `plans` element for `--dry-run --json`. Notes go in `warnings` and
@@ -778,13 +816,13 @@ pub fn pdf_plan_json(plan: &convkit_core::pdf::PdfPlan) -> serde_json::Value {
         "locked": plan.lock.is_some(),
     });
     if plan.writes_one_file() {
-        v["output"] = json!(plan.outputs[0].path);
+        v["output"] = json!(plan.outputs[0].path.to_string_lossy());
         v["pages"] = json!(plan.outputs[0].pages.len());
     } else {
         v["outputs"] = plan
             .outputs
             .iter()
-            .map(|o| json!({ "path": o.path, "pages": o.pages }))
+            .map(|o| json!({ "path": o.path.to_string_lossy(), "pages": o.pages }))
             .collect();
     }
     v
@@ -842,7 +880,11 @@ pub fn pdf_success_human(
     } else {
         "OK".to_string()
     };
-    let mut s = format!("{glyph} {}\n  {location}\n", fields.join(sep));
+    let mut s = format!(
+        "{glyph} {}\n  {}\n",
+        safe_for_terminal(&fields.join(sep)),
+        safe_for_terminal(&location)
+    );
     for n in &o.notes {
         s.push_str("  ");
         s.push_str(&paint(&format!("note  {n}"), dim(), styled));
@@ -876,13 +918,15 @@ pub fn pdf_outcome_json(o: &convkit_core::pdf::PdfOutcome, elapsed: Duration) ->
         "locked": o.locked,
     });
     if o.one_file {
-        v["output"] = json!(o.outputs[0].path);
+        v["output"] = json!(o.outputs[0].path.to_string_lossy());
         v["pages"] = json!(o.outputs[0].pages.len());
     } else {
         v["outputs"] = o
             .outputs
             .iter()
-            .map(|w| json!({ "path": w.path, "pages": w.pages, "bytes": w.bytes }))
+            .map(
+                |w| json!({ "path": w.path.to_string_lossy(), "pages": w.pages, "bytes": w.bytes }),
+            )
             .collect();
     }
     v
@@ -1276,6 +1320,24 @@ mod tests {
     fn an_empty_token_is_quoted_rather_than_vanishing() {
         let quoted = shell_quote("");
         assert!(quoted.len() == 2, "{quoted}");
+    }
+
+    /// A control character is spelled as an escape: nothing reaches the
+    /// terminal, and the pasted line names the same file.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_with_an_escape_is_quoted_safe_to_print_and_paste() {
+        assert_eq!(
+            shell_quote("a\u{1b}]0;x\u{7}'b\\.png"),
+            r"$'a\e]0;x\x07\'b\\.png'"
+        );
+    }
+
+    #[test]
+    fn a_failure_line_cannot_reach_the_terminal() {
+        let e = ConvError::new(ErrorCode::ConversionFailed, "bad \u{1b}]0;x\u{7}");
+        let s = conversion_failure_human(Path::new("a\u{1b}]0;x\u{7}.png"), "jpg", &e, false);
+        assert!(!s.contains('\u{1b}') && !s.contains('\u{7}'), "{s:?}");
     }
 
     // --- styling gate (F163) --------------------------------------------------

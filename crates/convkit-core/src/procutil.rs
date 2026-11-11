@@ -1,8 +1,47 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
+
+/// `p` as a backend argument. Backends read a relative path whose first
+/// part starts with `-` as an option, with `@` as a file of more arguments
+/// (qpdf, ImageMagick), and with a `:` in it as a protocol or a format
+/// (ffmpeg's `concat:`, ImageMagick's `png:`, pandoc's `http:`), so such a
+/// path is given as `./-name`. Every other path comes back as it is,
+/// absolute or not, a Windows drive's (`C:\x`, `C:x`) among them.
+pub(crate) fn path_arg_os(p: &Path) -> OsString {
+    let risky = match p.components().next() {
+        Some(Component::Normal(first)) => {
+            let first = first.to_string_lossy();
+            first.starts_with(['-', '@']) || first.contains(':')
+        }
+        _ => false,
+    };
+    let mut arg = OsString::from(if risky { "./" } else { "" });
+    arg.push(p);
+    arg
+}
+
+/// `path_arg_os` as text, for an argv kept as `String`s. `exec::run`
+/// refuses a path that is not valid UTF-8, so a plan's paths lose nothing.
+pub(crate) fn path_arg(p: &Path) -> String {
+    path_arg_os(p).to_string_lossy().into_owned()
+}
+
+/// `p[frame]`, ImageMagick's frame selector on `p` as `path_arg_os` gives
+/// it. With a selector ImageMagick reads `%d` in the name as a pattern and
+/// `%%` as `%`, so a `%` is doubled.
+pub(crate) fn magick_frame(p: &Path, frame: impl std::fmt::Display) -> OsString {
+    let arg = path_arg_os(p);
+    let mut arg = match arg.to_str() {
+        Some(s) => OsString::from(s.replace('%', "%%")),
+        // shortcut: a non-UTF-8 name keeps its `%` single, upgrade if one with `%d` shows up.
+        None => arg,
+    };
+    arg.push(format!("[{frame}]"));
+    arg
+}
 
 /// Builds a `Command` for spawning `path` as a backend subprocess, with
 /// Windows' console-window suppression applied unconditionally.
@@ -127,6 +166,35 @@ pub(crate) fn qpdf_with_args_on_stdin(qpdf: &Path, args: &[OsString]) -> std::io
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_a_backend_would_read_as_something_else_gets_a_dot_slash() {
+        let arg = |s: &str| path_arg(Path::new(s));
+        assert_eq!(arg("-d.md"), "./-d.md");
+        assert_eq!(arg("@list.pdf"), "./@list.pdf");
+        assert_eq!(arg("clip-10:30.mp4"), "./clip-10:30.mp4");
+        assert_eq!(arg("take:2/out.mp3"), "./take:2/out.mp3");
+        assert_eq!(arg("my report.pdf"), "my report.pdf");
+        assert_eq!(arg("dir/-x.pdf"), "dir/-x.pdf");
+        assert_eq!(arg("./-x.pdf"), "./-x.pdf");
+        if cfg!(windows) {
+            assert_eq!(arg(r"C:\x\a.mp4"), r"C:\x\a.mp4");
+            assert_eq!(arg("C:a.mp4"), "C:a.mp4");
+        } else {
+            assert_eq!(arg("/tmp/-x:y.mp4"), "/tmp/-x:y.mp4");
+        }
+        assert_eq!(magick_frame(Path::new("-a%03d.png"), 0), "./-a%%03d.png[0]");
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let raw = Path::new(OsStr::from_bytes(b"-\xff.mp4"));
+            assert_eq!(
+                path_arg_os(raw).as_bytes(),
+                b"./-\xff.mp4",
+                "not made lossy"
+            );
+        }
+    }
 
     #[test]
     fn qpdf_is_given_its_arguments_on_stdin_only_for_a_wildcard_on_windows() {

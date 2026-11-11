@@ -5264,6 +5264,26 @@ fn merge_of_videos_end_to_end_copies_or_says_why_not() {
         );
 }
 
+/// `merge --max-size` joins the clips in a folder of its own: a file beside
+/// the output with the old joined file's name is left alone, and nothing
+/// else is left behind.
+#[test]
+#[ignore = "requires ffmpeg; run with --ignored"]
+fn a_sized_merge_leaves_the_output_folder_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    make_clip(dir.path(), "a.mp4", "320x180");
+    make_clip(dir.path(), "b.mp4", "320x180");
+    let mine = dir.path().join(".ab.convkit-joined.mkv");
+    std::fs::write(&mine, b"mine").unwrap();
+    conv()
+        .current_dir(dir.path())
+        .args(["merge", "a.mp4", "b.mp4", "ab.mp4", "--max-size", "5mb"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 4);
+}
+
 #[test]
 #[ignore = "requires qpdf, typst and ffmpeg; run with --ignored"]
 fn merge_of_pdfs_and_pictures_end_to_end() {
@@ -5543,6 +5563,28 @@ fn lock_and_unlock_end_to_end_with_the_environment_password() {
         2,
         "not encrypted"
     );
+}
+
+/// One locked file's `--copy --json` says how the copy went, as a batch's
+/// does. Linux only: with no display the copy fails, so no clipboard is
+/// touched.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires qpdf; run with --ignored"]
+fn one_locked_pdf_reports_its_copy_in_json() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(sample_pdf(), dir.path().join("report.pdf")).unwrap();
+    let out = conv()
+        .current_dir(dir.path())
+        .env("CONVKIT_PASSWORD", "pw")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["report.pdf", "--password", "--copy", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["results"][0]["output"], "report-locked.pdf");
+    assert_eq!(v["clipboard"]["ok"], false, "{v}");
 }
 
 #[test]
@@ -7009,4 +7051,74 @@ fn password_on_neither_a_pdf_nor_a_zip_points_at_a_zip() {
         .code(2)
         .stderr(contains("--password locks PDFs, and in.mp4 is not one"))
         .stderr(contains("conv in.mp4 .zip --password"));
+}
+
+/// A file's name is anyone's: an escape in one is shown, never sent to the
+/// terminal, wherever conv lists, plans or reports the file.
+#[cfg(unix)]
+#[test]
+fn an_escape_in_a_file_name_never_reaches_the_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    let stub = write_magick_stub(tools.path());
+    std::fs::write(dir.path().join("p\u{1b}]0;x\u{7}.png"), b"x").unwrap();
+    let runs: [&[&str]; 4] = [
+        &["scan", "."],
+        &["info", "."],
+        &[".", "--to", "jpg", "--dry-run", "--magick-path"],
+        &[".", "--to", "jpg", "--magick-path"],
+    ];
+    for args in runs {
+        let mut cmd = conv();
+        cmd.current_dir(dir.path()).args(args);
+        if args.contains(&"--magick-path") {
+            cmd.arg(&stub);
+        }
+        let out = cmd.output().unwrap();
+        let all = [out.stdout, out.stderr].concat();
+        let text = String::from_utf8_lossy(&all);
+        assert!(
+            !all.contains(&0x1b) && !all.contains(&0x07),
+            "{args:?}: {text:?}"
+        );
+        assert!(text.contains("]0;x"), "{args:?} names the file: {text}");
+    }
+}
+
+/// A name that is not UTF-8 is shown with a replacement character rather
+/// than panicking `json!`, which a merge reached even without `--json`.
+#[cfg(unix)]
+#[test]
+fn a_name_that_is_not_utf8_never_panics() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let bad = |s: &[u8]| OsString::from_vec(s.to_vec());
+    let dir = tempfile::tempdir().unwrap();
+    let runs: [Vec<OsString>; 4] = [
+        vec!["--json".into(), bad(b"a\xff.png"), "out.jpg".into()],
+        vec![
+            "--json".into(),
+            "--dry-run".into(),
+            bad(b"a\xff.png"),
+            "out.jpg".into(),
+        ],
+        vec![
+            "qr".into(),
+            "--read".into(),
+            bad(b"q\xff.png"),
+            "--json".into(),
+        ],
+        vec![
+            "merge".into(),
+            bad(b"a\xff.pdf"),
+            "b.pdf".into(),
+            "out.pdf".into(),
+        ],
+    ];
+    for args in runs {
+        let out = conv().current_dir(dir.path()).args(&args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(101), "{args:?}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+    }
 }

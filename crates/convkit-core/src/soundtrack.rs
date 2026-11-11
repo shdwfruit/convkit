@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use crate::error::{ConvError, ErrorCode, Result};
 use crate::probe::MediaProbe;
-use crate::procutil::backend_command;
+use crate::procutil::{backend_command, path_arg, path_arg_os};
 use crate::{registry, Backend, Format, Kind};
 
 /// How loud the new sound is under the video's own in a mix, in percent of
@@ -80,6 +80,7 @@ pub struct Read {
 /// What `--json` says about a new sound.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AudioReport {
+    #[serde(serialize_with = "crate::lossy_path")]
     pub file: PathBuf,
     /// `replace` or `mix`.
     pub mode: &'static str,
@@ -121,7 +122,7 @@ impl Soundtrack {
         if let Some(ms) = self.limit_ms {
             argv.extend(["-t".to_string(), seconds(ms)]);
         }
-        argv.extend(["-i".to_string(), self.path.to_string_lossy().into_owned()]);
+        argv.extend(["-i".to_string(), path_arg(&self.path)]);
         argv
     }
 
@@ -423,7 +424,7 @@ pub fn attach(
 fn loudness(ffmpeg: &Path, path: &Path) -> Option<i32> {
     let out = backend_command(ffmpeg)
         .args(["-hide_banner", "-nostats", "-i"])
-        .arg(path)
+        .arg(path_arg_os(path))
         .args([
             "-map",
             "0:a:0",

@@ -143,7 +143,7 @@ pub fn run(cli: &Cli, paths: &[PathBuf]) -> i32 {
         }
     } else {
         for problem in &problems {
-            eprintln!("error: {problem}");
+            eprintln!("error: {}", render::safe_for_terminal(problem));
         }
         if !cli.quiet {
             print_human(&rows);
@@ -247,7 +247,12 @@ fn truncate_name(s: &str, width: usize) -> String {
 fn print_human(rows: &[Row]) {
     let names: Vec<String> = rows
         .iter()
-        .map(|r| truncate_name(&display_name(&r.path), NAME_COLUMN))
+        .map(|r| {
+            // The name alone: the listing is about a folder, and --json has
+            // the whole path.
+            let name = render::safe_for_terminal(&render::file_name_of(&r.path));
+            truncate_name(&name, NAME_COLUMN)
+        })
         .collect();
     let name_width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
 
@@ -295,20 +300,6 @@ fn print_human(rows: &[Row]) {
             return;
         }
     }
-}
-
-/// The file name alone when there is one -- the listing is about what is in
-/// a directory, so repeating the directory on every row is noise. Falls back
-/// to the whole path for anything without a final component.
-///
-/// The trade is real and worth naming: with several roots the rows are
-/// concatenated with no header, so two files sharing a base name render as
-/// two identical lines. `--json` carries the full path for anything that
-/// needs to address the file.
-fn display_name(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Serialising a `Path` directly is a panic waiting for a file name that is

@@ -2108,6 +2108,8 @@ const WORKBOOK_TO_CSV: Recipe = Recipe {
 /// docs/readme.md out.docx` run from anywhere but `docs/` silently dropped
 /// every image (pandoc still exits 0, merely printing "Could not fetch
 /// resource" to stderr).
+/// The offline filter (`offline`) keeps a .docx from taking in a picture
+/// on the web or outside the document's folder.
 macro_rules! pandoc_step {
     () => {
         step!(
@@ -2117,6 +2119,8 @@ macro_rules! pandoc_step {
                 Arg::Lit("--standalone"),
                 Arg::Lit("--resource-path"),
                 Arg::InputDir,
+                Arg::Lit("--lua-filter"),
+                Arg::Staged(Staged::OfflineFilter),
                 Arg::Lit("-o"),
                 Arg::Output
             ]
@@ -2130,6 +2134,8 @@ macro_rules! pandoc_step {
                 Arg::Lit("--standalone"),
                 Arg::Lit("--resource-path"),
                 Arg::InputDir,
+                Arg::Lit("--lua-filter"),
+                Arg::Staged(Staged::OfflineFilter),
                 Arg::Lit("-o"),
                 Arg::Output,
             ],

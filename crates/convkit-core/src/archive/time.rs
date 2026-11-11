@@ -15,11 +15,13 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
     }
 }
 
-pub(crate) fn from_unix_secs(secs: i64) -> SystemTime {
+/// None where the platform's clock cannot hold it (Windows stops far
+/// below `i64::MAX`).
+pub(crate) fn from_unix_secs(secs: i64) -> Option<SystemTime> {
     if secs >= 0 {
-        UNIX_EPOCH + Duration::from_secs(secs as u64)
+        UNIX_EPOCH.checked_add(Duration::from_secs(secs as u64))
     } else {
-        UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs())
+        UNIX_EPOCH.checked_sub(Duration::from_secs(secs.unsigned_abs()))
     }
 }
 
@@ -132,7 +134,7 @@ pub(crate) fn from_dos(dt: zip::DateTime) -> Option<SystemTime> {
         u32::from(dt.minute()),
         u32::from(dt.second()),
     );
-    from_local_parts(p).map(from_unix_secs)
+    from_local_parts(p).and_then(from_unix_secs)
 }
 
 #[cfg(test)]
@@ -142,14 +144,14 @@ mod tests {
     #[test]
     fn a_dos_time_round_trips_to_the_even_second() {
         // 2024-03-05 14:07:22 UTC, an even second, which DOS can hold.
-        let t = from_unix_secs(1_709_647_642);
+        let t = from_unix_secs(1_709_647_642).unwrap();
         let back = from_dos(to_dos(t)).unwrap();
         assert_eq!(unix_secs(back), 1_709_647_642);
     }
 
     #[test]
     fn a_time_before_1980_is_clamped_to_1980() {
-        let dt = to_dos(from_unix_secs(0));
+        let dt = to_dos(from_unix_secs(0).unwrap());
         assert_eq!(dt.year(), 1980);
     }
 

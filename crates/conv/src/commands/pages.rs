@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use convkit_core::pdf::{self, PageEdit};
-use convkit_core::{ConvError, ErrorCode, Format, Remediation};
+use convkit_core::{Backend, ConvError, ErrorCode, Format, Remediation};
 use serde_json::json;
 
 use crate::cli::{Cli, PagesArgs};
 use crate::commands::pdf_support;
-use crate::input;
 use crate::password::{self, Opener};
 use crate::render;
+use crate::{input, install_prompt};
 
 pub fn run(cli: &Cli, args: &PagesArgs) -> i32 {
     let (input, edit, output) = match check_args(args) {
@@ -22,8 +22,8 @@ pub fn run(cli: &Cli, args: &PagesArgs) -> i32 {
             return e.code.exit_code();
         }
     };
-    let subject = json!({ "input": input });
-    let header = name_of(&input);
+    let subject = json!({ "input": input.to_string_lossy() });
+    let header = render::file_name_of(&input);
     // Check the input before offering to install qpdf.
     if !input.is_file() {
         let e = ConvError::new(
@@ -32,7 +32,7 @@ pub fn run(cli: &Cli, args: &PagesArgs) -> i32 {
         );
         return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run);
     }
-    let qpdf = match pdf_support::resolve_qpdf(cli, !args.dry_run) {
+    let qpdf = match install_prompt::resolve_offering(cli, Backend::Qpdf, !args.dry_run) {
         Ok(q) => q,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
@@ -49,7 +49,7 @@ pub fn run(cli: &Cli, args: &PagesArgs) -> i32 {
         &mut |p, wrong| opener.next(p, wrong),
     )
     .and_then(|plan| {
-        let what = name_of(&plan.outputs[0].path);
+        let what = render::file_name_of(&plan.outputs[0].path);
         pdf_support::locked(plan, &args.lock, &what, args.dry_run)
     });
     let plan = match planned {
@@ -119,12 +119,6 @@ pub fn rotate_hint(cli: &Cli) -> Option<ConvError> {
     })
 }
 
-fn name_of(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| p.display().to_string())
-}
-
 fn invalid(message: String) -> ConvError {
     ConvError::new(ErrorCode::InvalidInvocation, message)
 }
@@ -175,7 +169,7 @@ fn check_args(args: &PagesArgs) -> Result<(PathBuf, PageEdit, Option<PathBuf>), 
     if Format::from_path(&input) != Some(Format::Pdf) {
         return Err(invalid(format!(
             "pages takes a PDF file; {} is not one",
-            name_of(&input)
+            render::file_name_of(&input)
         )));
     }
     if args.lock.password {

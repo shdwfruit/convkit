@@ -251,8 +251,8 @@ fn decode_webp(bytes: &[u8]) -> Result<Picture> {
 /// that says so (144 dpi at 2x). Text is not drawn (resvg is built without
 /// fonts).
 fn decode_svg(bytes: &[u8], scale: u32) -> Result<Picture> {
-    let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default())
-        .map_err(unreadable)?;
+    let tree =
+        resvg::usvg::Tree::from_data(bytes, &ascii::image::svg_options()).map_err(unreadable)?;
     let size = tree.size();
     let side = (size.width().max(size.height()) * scale as f32).round() as u32;
     let image = ascii::from_svg(bytes, side.clamp(1, SVG_MAX_SIDE))?;

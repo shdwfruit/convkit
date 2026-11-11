@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::error::{ConvError, ErrorCode, Result};
 use crate::probe::MediaProbe;
-use crate::procutil::backend_command;
+use crate::procutil::{backend_command, magick_frame, path_arg_os};
 use crate::rotate::Turn;
 use crate::{Backend, Format, Kind};
 
@@ -402,8 +402,7 @@ pub fn attach(
 /// EXIF says, as every image recipe does with `-auto-orient`. A GIF's canvas,
 /// which its first frame may not fill.
 fn image_size(magick: &Path, from: Format, input: &Path) -> Result<(u32, u32)> {
-    let mut target = input.as_os_str().to_owned();
-    target.push("[0]");
+    let target = magick_frame(input, 0);
     let format = if from == Format::Gif {
         "%W %H TopLeft\n"
     } else {
@@ -460,11 +459,9 @@ const CORNERS_APART: f64 = 0.18;
 fn detect_border(magick: &Path, from: Format, input: &Path) -> Result<Found> {
     let mut cmd = backend_command(magick);
     if from == Format::Gif {
-        cmd.arg(input).arg("-coalesce");
+        cmd.arg(path_arg_os(input)).arg("-coalesce");
     } else {
-        let mut first = input.as_os_str().to_owned();
-        first.push("[0]");
-        cmd.arg(first).arg("-auto-orient");
+        cmd.arg(magick_frame(input, 0)).arg("-auto-orient");
     }
     let format = format!("%w %h %@ {CORNERS}\n");
     let out = cmd
@@ -557,7 +554,7 @@ fn detect_bars(ffmpeg: &Path, input: &Path, probe: &MediaProbe) -> Result<Found>
         let filter = format!("cropdetect=limit={BLACK_LIMIT}:round=2:reset=0:skip=0");
         let out = cmd
             .arg("-i")
-            .arg(input)
+            .arg(path_arg_os(input))
             .args([
                 "-map", "0:v:0", "-vf", &filter, "-an", "-sn", "-f", "null", "-",
             ])

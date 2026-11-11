@@ -521,7 +521,7 @@ fn decode(dict: &Dict, raw: &[u8]) -> Option<Vec<u8>> {
 /// Undoes PNG row predictors over rows of `columns` bytes, each led by its
 /// filter type byte, as cross-reference streams use them.
 fn unpredict_png(data: &[u8], columns: usize) -> Option<Vec<u8>> {
-    if columns == 0 {
+    if columns == 0 || columns > data.len() {
         return None;
     }
     let mut out = Vec::with_capacity(data.len());
@@ -586,10 +586,16 @@ struct Pdf {
     trailer: Dict,
     streams: HashMap<u32, Vec<(u32, usize)>>,
     stream_data: HashMap<u32, Vec<u8>>,
+    /// Bytes read again for objects that did not parse at first.
+    reread: u64,
 }
 
 /// The most objects a stream may claim to hold.
 const MAX_OBJSTM_OBJECTS: usize = 1 << 20;
+
+/// Reading again at a larger size stops after this many bytes in all,
+/// since a read that fails for any reason, junk included, is retried.
+const MAX_REREAD: u64 = 64 << 20;
 
 impl Pdf {
     fn open(file: File) -> Option<Pdf> {
@@ -599,6 +605,7 @@ impl Pdf {
             trailer: Dict::default(),
             streams: HashMap::new(),
             stream_data: HashMap::new(),
+            reread: 0,
         };
         let from_xref = pdf.start_xref().is_some_and(|at| pdf.load_xref(at));
         // An encrypted file's catalog may sit in an object stream that
@@ -655,7 +662,10 @@ impl Pdf {
             let parsed = Lexer::new(&buf, 0).indirect().map(|(_, p)| p);
             match parsed {
                 Some(p) => return Some((buf, p)),
-                None if full && n < (8 << 20) => n *= 4,
+                None if full && n < (8 << 20) && self.reread < MAX_REREAD => {
+                    n *= 4;
+                    self.reread += n as u64;
+                }
                 None => return None,
             }
         }
@@ -812,7 +822,7 @@ impl Pdf {
                 };
                 let b = field(r, widths[0], widths[1]);
                 let c = field(r, widths[0] + widths[1], widths[2]);
-                let Ok(num) = u32::try_from(first + i) else {
+                let Some(num) = first.checked_add(i).and_then(|n| u32::try_from(n).ok()) else {
                     continue;
                 };
                 let entry = match kind {
@@ -921,6 +931,8 @@ impl Pdf {
     }
 
     fn load_object_stream(&mut self, stm: u32) -> Option<()> {
+        // Marked as loading first: its /Length may name an object inside it.
+        self.streams.insert(stm, Vec::new());
         let Entry::At(at) = *self.xref.get(&stm)? else {
             return None;
         };
@@ -940,7 +952,7 @@ impl Pdf {
         for _ in 0..n {
             let num = u32::try_from(lx.uint()?).ok()?;
             let off = usize::try_from(lx.uint()?).ok()?;
-            table.push((num, first + off));
+            table.push((num, first.checked_add(off)?));
         }
         self.streams.insert(stm, table);
         self.stream_data.insert(stm, data);
@@ -997,7 +1009,15 @@ impl Pdf {
             .and_then(|c| u64::try_from(c).ok());
         let mut sizes = Vec::new();
         let mut seen = HashSet::new();
-        self.walk(pages, Inherited::default(), &mut sizes, &mut seen, 0);
+        let mut empty = 0;
+        self.walk(
+            pages,
+            Inherited::default(),
+            &mut sizes,
+            &mut seen,
+            &mut empty,
+            0,
+        );
         info.page_size = sizes.first().copied();
         info.mixed_sizes = sizes.iter().any(|s| {
             let f = sizes[0];
@@ -1006,15 +1026,18 @@ impl Pdf {
     }
 
     /// Collects each page's shown size, in page order, up to `MAX_PAGES`.
+    /// `empty` counts the kids that gave no page (unreadable, or without a
+    /// size), which count toward `MAX_PAGES` too.
     fn walk(
         &mut self,
         node: Dict,
         mut inh: Inherited,
         sizes: &mut Vec<PageSize>,
         seen: &mut HashSet<u32>,
+        empty: &mut usize,
         depth: usize,
     ) {
-        if depth > MAX_DEPTH || sizes.len() >= MAX_PAGES {
+        if depth > MAX_DEPTH || sizes.len() + *empty >= MAX_PAGES {
             return;
         }
         if let Some(b) = node.get(b"MediaBox").and_then(|b| self.rect(b)) {
@@ -1046,7 +1069,7 @@ impl Pdf {
             }
         };
         for kid in kids {
-            if sizes.len() >= MAX_PAGES {
+            if sizes.len() + *empty >= MAX_PAGES {
                 return;
             }
             if let Obj::Ref(n, _) = kid {
@@ -1054,8 +1077,12 @@ impl Pdf {
                     continue;
                 }
             }
+            let before = sizes.len();
             if let Some(d) = self.dict(Some(&kid)) {
-                self.walk(d, inh, sizes, seen, depth + 1);
+                self.walk(d, inh, sizes, seen, empty, depth + 1);
+            }
+            if sizes.len() == before {
+                *empty += 1;
             }
         }
     }
@@ -1280,6 +1307,75 @@ pub(crate) mod tests {
         assert_eq!(info.pages, Some(2));
         assert_eq!(info.page_size.unwrap().paper(), Some("Letter"));
         assert_eq!(info.producer.as_deref(), Some("Packed"));
+    }
+
+    fn in_memory(bytes: &[u8]) -> Pdf {
+        Pdf {
+            src: Source::Memory(bytes.to_vec()),
+            xref: HashMap::new(),
+            trailer: Dict::default(),
+            streams: HashMap::new(),
+            stream_data: HashMap::new(),
+            reread: 0,
+        }
+    }
+
+    #[test]
+    fn an_object_stream_whose_length_is_inside_it_is_read_once() {
+        let mut pdf = in_memory(
+            b"3 0 obj\n<< /Type /ObjStm /N 2 /First 9 /Length 2 0 R >>\nstream\n\
+              1 0 2 21 << /Type /Catalog >> 7 \nendstream\nendobj\n",
+        );
+        pdf.xref.insert(1, Entry::InStream(3, 0));
+        pdf.xref.insert(2, Entry::InStream(3, 1));
+        pdf.xref.insert(3, Entry::At(0));
+        // The length can't be known, so the data runs to `endstream`.
+        assert!(matches!(pdf.object(1), Some(Obj::Dict(_))));
+    }
+
+    #[test]
+    fn a_predictor_wider_than_its_data_is_refused() {
+        assert_eq!(unpredict_png(&[2, 1, 2], i64::MAX as usize), None);
+    }
+
+    #[test]
+    fn junk_kids_and_rereads_are_bounded() {
+        // MAX_PAGES kids that lead nowhere stop the walk before the page.
+        let kids: Vec<String> = (0..MAX_PAGES).map(|i| format!("{} 0 R", i + 100)).collect();
+        let info = read_bytes(&classic(
+            &[
+                "<< /Type /Catalog /Pages 2 0 R >>",
+                &format!(
+                    "<< /Type /Pages /Kids [{} 3 0 R] /Count 1 >>",
+                    kids.join(" ")
+                ),
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+            ],
+            "/Root 1 0 R",
+        ));
+        assert_eq!(info.page_size, None);
+        // Reads that fail on junk stop growing once the budget is spent.
+        let mut pdf = in_memory(&vec![1u8; 2 << 20]);
+        for at in 0..100 {
+            assert!(pdf.parse_at(at * 1000).is_none());
+        }
+        assert!(pdf.reread < MAX_REREAD + (8 << 20), "{}", pdf.reread);
+    }
+
+    #[test]
+    fn numbers_past_their_range_in_an_xref_or_object_stream_are_skipped() {
+        let mut pdf = in_memory(
+            b"9 0 obj\n<< /Type /XRef /Size 3 /W [1 1 1] /Index [0 1 9223372036854775807 2] \
+              /Length 9 >>\nstream\n\x00\x00\x00\x01\x09\x00\x01\x09\x00\nendstream\nendobj\n",
+        );
+        assert!(pdf.xref_section(0).is_some());
+        assert_eq!(pdf.xref.len(), 0);
+        let mut pdf = in_memory(
+            b"3 0 obj\n<< /Type /ObjStm /N 1 /First 9223372036854775807 /Length 23 >>\nstream\n\
+              1 18446744073709551615 \nendstream\nendobj\n",
+        );
+        pdf.xref.insert(3, Entry::At(0));
+        assert_eq!(pdf.load_object_stream(3), None);
     }
 
     #[test]

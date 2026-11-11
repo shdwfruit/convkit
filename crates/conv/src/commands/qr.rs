@@ -349,8 +349,8 @@ fn read_all(cli: &Cli, paths: &[PathBuf]) -> i32 {
         let arr: Vec<serde_json::Value> = results
             .iter()
             .map(|(p, r)| match r {
-                Ok(codes) => json!({ "ok": true, "input": p, "codes": codes }),
-                Err(e) => json!({ "ok": false, "input": p, "error": e }),
+                Ok(codes) => json!({ "ok": true, "input": p.to_string_lossy(), "codes": codes }),
+                Err(e) => json!({ "ok": false, "input": p.to_string_lossy(), "error": e }),
             })
             .collect();
         let ok = results.iter().all(|(_, r)| r.is_ok());
@@ -388,16 +388,12 @@ fn print_read(cli: &Cli, results: &[(PathBuf, Result<Vec<Code>, ConvError>)]) {
         match result {
             Ok(codes) => {
                 for code in codes {
-                    let text = if tty {
-                        safe_for_terminal(&code.text)
-                    } else {
-                        code.text.clone()
-                    };
+                    let mut line = format!("{label}{}", code.text);
+                    if tty {
+                        line = render::safe_for_terminal(&line);
+                    }
                     // A closed pipe (`| head -1`) is not worth a panic.
-                    if writeln!(out, "{label}{text}")
-                        .and_then(|_| out.flush())
-                        .is_err()
-                    {
+                    if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
                         return;
                     }
                     if let (Some(w), false) = (&code.wifi, cli.quiet) {
@@ -410,7 +406,7 @@ fn print_read(cli: &Cli, results: &[(PathBuf, Result<Vec<Code>, ConvError>)]) {
                 if labelled && !e.message.contains(&path.display().to_string()) {
                     msg = msg.replacen("error: ", &format!("error: {label}"), 1);
                 }
-                eprint!("{msg}");
+                eprint!("{}", render::safe_for_terminal(&msg));
             }
         }
     }
@@ -430,23 +426,7 @@ fn wifi_human(w: &reader::Wifi) -> String {
     if w.hidden {
         s.push_str("  hidden: yes, so join it by name\n");
     }
-    s
-}
-
-/// `text` with control characters, and the ones that reorder text, shown
-/// as escapes: a code can hold anything, and a terminal would act on them.
-/// Newlines and tabs are kept.
-fn safe_for_terminal(text: &str) -> String {
-    let mut s = String::with_capacity(text.len());
-    for c in text.chars() {
-        let reorders = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
-        if (c.is_control() && c != '\n' && c != '\t') || reorders {
-            s.push_str(&c.escape_unicode().to_string());
-        } else {
-            s.push(c);
-        }
-    }
-    s
+    render::safe_for_terminal(&s)
 }
 
 /// The codes in one picture. conv decodes png, jpg, gif, webp and svg
@@ -559,9 +539,18 @@ mod tests {
     #[test]
     fn control_characters_are_shown_not_sent_to_the_terminal() {
         assert_eq!(
-            safe_for_terminal("a\u{1b}[31mb\tc\nd\u{202e}"),
+            render::safe_for_terminal("a\u{1b}[31mb\tc\nd\u{202e}"),
             "a\\u{1b}[31mb\tc\nd\\u{202e}"
         );
+    }
+
+    #[test]
+    fn a_wifi_code_cannot_reach_the_terminal() {
+        let w =
+            reader::parse_wifi("WIFI:S:a\u{1b}]52\\;c\\;aGk=\u{7};T:WPA;P:p\u{1b}[2J;;").unwrap();
+        let s = wifi_human(&w);
+        assert!(!s.contains('\u{1b}') && !s.contains('\u{7}'), "{s:?}");
+        assert!(s.contains(r"a\u{1b}]52;c;aGk=\u{7}"), "{s}");
     }
 
     #[test]

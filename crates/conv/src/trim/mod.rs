@@ -153,9 +153,8 @@ fn trim(cli: &Cli, args: &Args) -> Result<i32, ConvError> {
     };
     let size = probe.display_dimensions().filter(|_| has_video);
     let info = Info {
-        name: file
-            .file_name()
-            .map_or_else(|| name.to_string(), |n| n.to_string_lossy().into_owned()),
+        // Drawn into the trim screen.
+        name: render::safe_for_terminal(&render::file_name_of(file)),
         size,
         fps: probe.frame_rate.filter(|_| has_video).map(fps_words),
     };

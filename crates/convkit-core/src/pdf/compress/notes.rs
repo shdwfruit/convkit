@@ -275,11 +275,12 @@ fn copy_name(name: &str, out: &str) -> String {
 }
 
 pub(crate) fn signature_dropped(name: &str, out: &str) -> String {
-    let copy = copy_name(name, out);
-    let mut s =
-        format!("{copy} is not validly signed: the signature on {name} does not carry over.");
-    s[..1].make_ascii_uppercase();
-    s
+    let copy = if name == out {
+        "The smaller copy".to_string()
+    } else {
+        out.to_string()
+    };
+    format!("{copy} is not validly signed: the signature on {name} does not carry over.")
 }
 
 pub(crate) fn usage_rights_dropped(name: &str, out: &str) -> String {
@@ -391,6 +392,14 @@ mod tests {
             "The smaller copy is not validly signed: the signature on a.pdf does not carry over."
         );
         assert!(usage_rights_dropped("f.pdf", "f.pdf").contains("which the smaller copy loses"));
+    }
+
+    #[test]
+    fn a_signature_warning_names_the_copy_as_it_is() {
+        assert_eq!(
+            signature_dropped("élan.pdf", "élan-compressed.pdf"),
+            "élan-compressed.pdf is not validly signed: the signature on élan.pdf does not carry over."
+        );
     }
 
     #[test]

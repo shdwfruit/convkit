@@ -9,6 +9,7 @@ use super::{
     failed, name_of, password_needed, time, wrong_password, ArchiveFormat, Expansion, Listed,
     Listing,
 };
+use crate::tools::plural;
 use crate::Result;
 
 /// What reading found beyond the entries themselves.
@@ -93,16 +94,12 @@ pub(crate) fn extract(
     })
 }
 
-pub(crate) fn plural(n: u64, one: &str, many: &str) -> String {
-    if n == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{n} {many}")
-    }
-}
-
 /// Names entries without writing them.
-struct Lister(Vec<Listed>);
+struct Lister {
+    entries: Vec<Listed>,
+    /// False for tar, whose reader skips what is not read.
+    drain: bool,
+}
 
 impl Sink for Lister {
     fn wants_data(&self) -> bool {
@@ -115,10 +112,11 @@ impl Sink for Lister {
             EntryKind::Symlink(_) => "link",
             EntryKind::Other => "other",
         };
-        // A compressed tar has to be read through to reach the next entry;
-        // the size the header gives is what is counted.
-        let _ = std::io::copy(data, &mut std::io::sink());
-        self.0.push(Listed {
+        // The size the header gives is what is counted.
+        if self.drain {
+            let _ = std::io::copy(data, &mut std::io::sink());
+        }
+        self.entries.push(Listed {
             name: entry.display(),
             kind,
             size: entry.size,
@@ -132,11 +130,14 @@ pub(crate) fn list(
     format: ArchiveFormat,
     password: Option<&str>,
 ) -> Result<Listing> {
-    let mut lister = Lister(Vec::new());
+    let mut lister = Lister {
+        entries: Vec::new(),
+        drain: matches!(format, ArchiveFormat::Zip | ArchiveFormat::SevenZ),
+    };
     let info = read(archive, format, password, &mut lister)?;
     Ok(Listing {
         format,
-        entries: lister.0,
+        entries: lister.entries,
         encrypted: info.encrypted,
     })
 }
@@ -216,7 +217,7 @@ fn read_zip(archive: &Path, password: Option<&str>, sink: &mut dyn Sink) -> Resu
                 zip::ExtraField::ExtendedTimestamp(t) => t.mod_time(),
                 _ => None,
             })
-            .map(|s| time::from_unix_secs(i64::from(s)))
+            .and_then(|s| time::from_unix_secs(i64::from(s)))
             .or_else(|| f.last_modified().and_then(time::from_dos));
         let size = f.size();
         let kind = if f.is_dir() {
@@ -289,7 +290,7 @@ fn read_tar(archive: &Path, format: ArchiveFormat, sink: &mut dyn Sink) -> Resul
         let mtime = header
             .mtime()
             .ok()
-            .map(|s| time::from_unix_secs(i64::try_from(s).unwrap_or(i64::MAX)));
+            .and_then(|s| time::from_unix_secs(i64::try_from(s).unwrap_or(i64::MAX)));
         let size = header.size().unwrap_or(0);
         let link = || -> Result<PathBuf> {
             Ok(entry
@@ -337,7 +338,12 @@ fn read_7z(archive: &Path, password: Option<&str>, sink: &mut dyn Sink) -> Resul
         }
         Err(e) => return Err(damaged(archive, "a 7z", e)),
     };
-    let total: u64 = reader.archive().files.iter().map(|f| f.size).sum();
+    let total: u64 = reader
+        .archive()
+        .files
+        .iter()
+        .map(|f| f.size)
+        .fold(0, u64::saturating_add);
     let encrypted = reader.archive().blocks.iter().any(|b| {
         b.coders
             .iter()

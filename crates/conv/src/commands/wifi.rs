@@ -61,7 +61,7 @@ fn show(cli: &Cli) -> Result<(), ConvError> {
             println!("{}", serde_json::to_string_pretty(&v).unwrap());
         } else {
             for n in &saved {
-                println!("{n}");
+                println!("{}", render::safe_for_terminal(n));
             }
         }
         return Ok(());
@@ -104,13 +104,14 @@ fn show(cli: &Cli) -> Result<(), ConvError> {
             let mut v =
                 json!({ "ok": true, "dry_run": true, "network": name, "command": cmd.display() });
             if let Some((path, _)) = &target {
-                v["output"] = json!(path);
+                v["output"] = json!(path.to_string_lossy());
             }
             println!("{}", serde_json::to_string_pretty(&v).unwrap());
         } else {
-            println!("{}", cmd.display());
+            println!("{}", render::safe_for_terminal(&cmd.display()));
             if let Some((path, _)) = &target {
-                println!("would write {}", path.display());
+                let path = render::safe_for_terminal(&path.display().to_string());
+                println!("would write {path}");
             }
         }
         return Ok(());
@@ -143,7 +144,7 @@ fn show(cli: &Cli) -> Result<(), ConvError> {
         );
         return Ok(());
     }
-    let reveal = *show_password || std::io::stdout().is_terminal();
+    let reveal = shows_password(*show_password, cli.json, std::io::stdout().is_terminal());
     let copied = copy.then(|| copy_password(&network));
     if cli.json {
         let mut v = json!({
@@ -174,10 +175,16 @@ fn show(cli: &Cli) -> Result<(), ConvError> {
             let line = format!("warning  {message}");
             eprintln!("{}", render::paint_warning(&line, render::stderr_styled()));
         } else if !cli.quiet {
-            eprintln!("{message}");
+            eprintln!("{}", render::safe_for_terminal(&message));
         }
     }
     Ok(())
+}
+
+/// Whether the password is printed: when asked, or on a terminal, but
+/// never into `--json` unasked, as the help says.
+fn shows_password(asked: bool, json: bool, terminal: bool) -> bool {
+    asked || (!json && terminal)
 }
 
 /// Finds the network to read (NAME, the one this computer is on, or the
@@ -288,7 +295,7 @@ fn numbered(saved: &[String]) -> String {
     saved
         .iter()
         .enumerate()
-        .map(|(i, n)| format!("  {:>w$}  {n}\n", i + 1))
+        .map(|(i, n)| format!("  {:>w$}  {}\n", i + 1, render::safe_for_terminal(n)))
         .collect()
 }
 
@@ -373,7 +380,10 @@ fn human(n: &Network, reveal: bool) -> String {
         (None, Security::Open) => rows.push(("password", "none, it's open".to_string())),
         _ => {}
     }
-    rows.iter().map(|(k, v)| format!("{k:<9} {v}\n")).collect()
+    // Names and passwords are whatever was saved, escapes and all.
+    rows.iter()
+        .map(|(k, v)| format!("{k:<9} {}\n", render::safe_for_terminal(v)))
+        .collect()
 }
 
 /// Copies the password and says so, never with the password in the note.
@@ -429,6 +439,25 @@ mod tests {
         let json = network_json(&n, false).to_string();
         assert!(!json.contains("hunter22"), "{json}");
         assert_eq!(network_json(&n, true)["password"], "hunter22");
+    }
+
+    #[test]
+    fn json_leaves_the_password_out_unless_asked() {
+        assert!(!shows_password(false, true, true));
+        assert!(shows_password(true, true, true));
+        assert!(shows_password(false, false, true));
+        assert!(!shows_password(false, false, false));
+    }
+
+    #[test]
+    fn a_saved_name_cannot_reach_the_terminal() {
+        let mut n = net(Security::Wpa, Some("p\u{1b}[2J"));
+        n.name = "a\u{1b}]52;c;aGk=\u{7}".to_string();
+        let text = human(&n, true) + &numbered(&[n.name.clone()]);
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "{text:?}"
+        );
     }
 
     #[test]

@@ -34,24 +34,13 @@ use std::path::Path;
 use std::process::{Output, Stdio};
 
 use crate::procutil::backend_command;
+pub(crate) use crate::procutil::path_arg;
 
 /// A path's file name for messages, or the whole path when it has none.
 pub(crate) fn display_name(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| p.display().to_string())
-}
-
-/// `p` as a qpdf argument. qpdf reads a leading `-` as an option and a
-/// leading `@` as "read more arguments from this file", so a relative path
-/// starting with either is passed as `./-name.pdf`.
-pub(crate) fn path_arg(p: &Path) -> String {
-    let s = p.to_string_lossy().into_owned();
-    if s.starts_with('-') || s.starts_with('@') {
-        format!("./{s}")
-    } else {
-        s
-    }
 }
 
 /// Why a qpdf call failed: its own `qpdf: ...` line without that prefix,
@@ -118,14 +107,6 @@ pub(crate) fn qpdf_output(
 mod tests {
     use super::*;
     use std::path::Path;
-
-    #[test]
-    fn a_path_qpdf_would_read_as_an_option_or_an_argument_file_gets_a_dot_slash() {
-        assert_eq!(path_arg(Path::new("-cover.pdf")), "./-cover.pdf");
-        assert_eq!(path_arg(Path::new("@list.pdf")), "./@list.pdf");
-        assert_eq!(path_arg(Path::new("my report.pdf")), "my report.pdf");
-        assert_eq!(path_arg(Path::new("dir/-x.pdf")), "dir/-x.pdf");
-    }
 
     #[test]
     fn qpdf_reason_prefers_its_own_qpdf_line() {

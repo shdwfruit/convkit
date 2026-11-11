@@ -24,9 +24,18 @@ pub(crate) fn unpack(
 ) -> Result<Report> {
     // The scratch folder sits beside the result so the final move is a
     // rename on one disk, never a copy.
+    // The folders this run makes on the way, removed again if it fails.
+    let mut made = Scratch {
+        path: PathBuf::new(),
+        keep: false,
+    };
     let (work_dir, into) = match dest {
         Destination::Beside(dir) => (dir.clone(), None),
-        Destination::Into(out) if out.is_dir() => (out.clone(), Some(out.clone())),
+        Destination::Into(out) if out.is_dir() => {
+            // A link to a folder: `move_into` looks at the link itself.
+            let out = out.canonicalize().unwrap_or_else(|_| out.clone());
+            (out.clone(), Some(out))
+        }
         Destination::Into(out) => {
             if std::fs::symlink_metadata(out).is_ok() {
                 return Err(ConvError::new(
@@ -35,6 +44,12 @@ pub(crate) fn unpack(
                 ));
             }
             let parent = super::parent_dir(out);
+            made.path = parent
+                .ancestors()
+                .take_while(|a| !a.exists())
+                .last()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
             std::fs::create_dir_all(&parent)
                 .map_err(|e| failed(format!("cannot make the folder {}: {e}", parent.display())))?;
             (parent, Some(out.clone()))
@@ -90,9 +105,10 @@ pub(crate) fn unpack(
     if replaced > 0 {
         notes.push(format!(
             "Replaced {} already there.",
-            read::plural(replaced, "file", "files")
+            crate::tools::plural(replaced, "file", "files")
         ));
     }
+    made.keep = true;
     let bytes = opened.bytes;
     Ok(Report {
         output: to,
@@ -114,6 +130,13 @@ fn children(dir: &Path) -> Result<Vec<std::ffi::OsString>> {
         .map(|e| e.file_name())
         .collect();
     names.sort();
+    // macOS's `._X` copy of X's extended attributes, on disks without them.
+    let all = names.clone();
+    names.retain(|n| {
+        n.to_string_lossy()
+            .strip_prefix("._")
+            .is_none_or(|x| !all.iter().any(|o| o == x))
+    });
     Ok(names)
 }
 
@@ -159,12 +182,17 @@ fn move_into(from: &Path, to: &Path, overwrite: bool) -> Result<(u64, bool)> {
                     ),
                 ));
             }
-            merge(from, to)?;
+            let mut moved = Vec::new();
+            if let Err(e) = merge(from, to, &mut moved) {
+                // Half an archive in the folder is worse than none.
+                for (src, dst) in moved.iter().rev() {
+                    let _ = std::fs::rename(dst, src);
+                }
+                return Err(e);
+            }
             Ok((taken.len() as u64, true))
         }
         (false, false) if overwrite => {
-            std::fs::remove_file(to)
-                .map_err(|e| failed(format!("cannot replace {}: {e}", to.display())))?;
             std::fs::rename(from, to)
                 .map_err(|e| failed(format!("cannot move into {}: {e}", to.display())))?;
             Ok((1, false))
@@ -217,22 +245,22 @@ fn conflicts(from: &Path, to: &Path, taken: &mut Vec<PathBuf>, clash: &mut Optio
 /// Moves everything in `from` into the folder `to`, replacing the files
 /// `conflicts` found (already allowed). A link already in `to` is
 /// replaced, never followed.
-fn merge(from: &Path, to: &Path) -> Result<()> {
-    let entries = std::fs::read_dir(from)
-        .map_err(|e| failed(format!("cannot read {}: {e}", from.display())))?;
-    for e in entries.flatten() {
+fn merge(from: &Path, to: &Path, moved: &mut Vec<(PathBuf, PathBuf)>) -> Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(from)
+        .map_err(|e| failed(format!("cannot read {}: {e}", from.display())))?
+        .flatten()
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
         let src = e.path();
         let dst = to.join(e.file_name());
         if is_real_dir(&src) && is_real_dir(&dst) {
-            merge(&src, &dst)?;
+            merge(&src, &dst, moved)?;
             continue;
-        }
-        if std::fs::symlink_metadata(&dst).is_ok() {
-            std::fs::remove_file(&dst)
-                .map_err(|e| failed(format!("cannot replace {}: {e}", dst.display())))?;
         }
         std::fs::rename(&src, &dst)
             .map_err(|e| failed(format!("cannot move into {}: {e}", dst.display())))?;
+        moved.push((src, dst));
     }
     Ok(())
 }

@@ -83,13 +83,13 @@ pub enum Format {
 /// work while `Format::is_read_only_ext` keeps the other one honest.
 const TABLE: &[(Format, Kind, &[&str], &[&str])] = &[
     (Format::Mp4, Kind::Video, &["mp4", "m4v"], &[]),
-    (Format::Mov, Kind::Video, &["mov", "qt"], &[]),
+    (Format::Mov, Kind::Video, &["mov"], &["qt"]),
     (Format::Mkv, Kind::Video, &["mkv"], &[]),
     (Format::Webm, Kind::Video, &["webm"], &[]),
     (Format::Avi, Kind::Video, &["avi"], &[]),
     (Format::Mp3, Kind::Audio, &["mp3"], &[]),
     (Format::M4a, Kind::Audio, &["m4a", "aac"], &[]),
-    (Format::Wav, Kind::Audio, &["wav", "wave"], &[]),
+    (Format::Wav, Kind::Audio, &["wav"], &["wave"]),
     (Format::Flac, Kind::Audio, &["flac"], &[]),
     (Format::Opus, Kind::Audio, &["opus"], &[]),
     (Format::Ogg, Kind::Audio, &["ogg", "oga"], &[]),
@@ -256,6 +256,14 @@ mod tests {
         assert!(!Format::is_read_only_ext("jpg"));
         assert!(!Format::is_read_only_ext("jpeg"));
         assert_eq!(Format::Jpg.ext(), "jpg");
+    }
+
+    /// ffmpeg has no muxer for these names, so they are read-only too.
+    #[test]
+    fn qt_and_wave_are_read_only_aliases() {
+        assert!(Format::is_read_only_ext("qt") && Format::is_read_only_ext("wave"));
+        assert_eq!(Format::from_ext("qt"), Some(Format::Mov));
+        assert_eq!(Format::from_ext("wave"), Some(Format::Wav));
     }
 
     /// The two columns must stay disjoint: an extension that is both

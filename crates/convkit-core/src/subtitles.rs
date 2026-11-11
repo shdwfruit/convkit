@@ -143,9 +143,9 @@ fn decode(bytes: &[u8]) -> (String, Option<&'static str>) {
     if let Some(rest) = bytes.strip_prefix(b"\xFE\xFF") {
         return (utf16(rest, false), Some("UTF-16"));
     }
-    match std::str::from_utf8(bytes) {
-        Ok(s) => (s.to_string(), None),
-        Err(_) => (
+    match crate::table::utf8_text(bytes) {
+        Some(s) => (s, None),
+        None => (
             bytes.iter().map(|&b| cp1252(b)).collect(),
             Some("Windows-1252"),
         ),
@@ -183,6 +183,12 @@ pub fn parse(text: &str, kind: Kind) -> Vec<Cue> {
 /// notes, styles and regions are no timing line, and are passed over.
 fn parse_blocks(text: &str, kind: Kind) -> Vec<Cue> {
     let mut cues = Vec::new();
+    // A "blank" line holding spaces still ends a cue.
+    let text: String = text
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
     for block in text.split("\n\n") {
         let lines: Vec<&str> = block.lines().collect();
         let Some(at) = lines.iter().position(|l| l.contains("-->")) else {
@@ -220,7 +226,22 @@ fn clock_ms(text: &str) -> Option<u64> {
     let (whole, frac) = s.split_once([',', '.']).unwrap_or((s, ""));
     let digits: String = frac.chars().chain("000".chars()).take(3).collect();
     let frac_ms = if frac.is_empty() { 0 } else { num(&digits)? };
-    Some(((num(h)? * 60 + num(m)?) * 60 + num(whole)?) * 1000 + frac_ms)
+    let secs = num(h)?
+        .checked_mul(60)?
+        .checked_add(num(m)?)?
+        .checked_mul(60)?
+        .checked_add(num(whole)?)?;
+    secs.checked_mul(1000)?.checked_add(frac_ms)
+}
+
+/// Whether what follows a `<` is a tag: a name, a closing slash, or a WebVTT
+/// timestamp. "I <3 you" is text.
+fn starts_tag(mut after: impl Iterator<Item = char>) -> bool {
+    match after.next() {
+        Some(c) if c.is_alphabetic() || c == '/' => true,
+        Some(c) if c.is_ascii_digit() => after.take_while(|&c| c != '>').any(|c| c == ':'),
+        _ => false,
+    }
 }
 
 /// SRT and WebVTT text, with its HTML-like tags: `<i>` and `<b>` kept as
@@ -241,7 +262,7 @@ fn markup(body: &str, kind: Kind) -> Vec<Line> {
         };
         while let Some(c) = chars.next() {
             match c {
-                '<' => {
+                '<' if starts_tag(chars.clone()) => {
                     let tag: String = chars.by_ref().take_while(|&c| c != '>').collect();
                     let tag = tag.trim().to_ascii_lowercase();
                     let (closing, name) = match tag.strip_prefix('/') {
@@ -519,7 +540,7 @@ impl Serialize for Render {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut st = s.serialize_struct("Render", 4)?;
-        st.serialize_field("file", &self.file)?;
+        st.serialize_field("file", &self.file.to_string_lossy())?;
         st.serialize_field("size", &[self.width, self.height])?;
         st.serialize_field("font_px", &self.style.font_px)?;
         st.serialize_field(
@@ -613,6 +634,7 @@ pub(crate) fn burn_path(output: &Path) -> PathBuf {
 /// What `--json` says about burned-in subtitles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SubtitlesReport {
+    #[serde(serialize_with = "crate::lossy_path")]
     pub file: PathBuf,
     /// How many of the file's subtitles were drawn.
     pub drawn: usize,
@@ -1518,6 +1540,17 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn odd_input_does_not_panic_or_merge_cues() {
+        assert_eq!(clock_ms("99999999999999999:00:00,000"), None);
+        let cues = parse_blocks(
+            "1\n00:00:01,000 --> 00:00:02,000\nI <3 you so much\n \n2\n00:00:03,000 --> 00:00:04,000\nB\n",
+            Kind::Srt,
+        );
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].lines[0][0].text, "I <3 you so much");
+    }
 
     fn plain(text: &str) -> Span {
         Span {

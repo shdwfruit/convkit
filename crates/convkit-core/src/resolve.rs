@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -288,26 +288,25 @@ impl Resolver {
         VERSION_PROBE_TIMEOUT
     }
 
-    /// Where `conv install` places managed binaries.
-    pub fn managed_dir() -> PathBuf {
+    /// Where `conv install` places managed binaries. `None` when no absolute
+    /// base is available: a relative or empty env value would make this a
+    /// folder under the current directory, and `/tmp` is not ours.
+    pub fn managed_dir() -> Option<PathBuf> {
         #[cfg(windows)]
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let base = absolute_env("LOCALAPPDATA");
         #[cfg(not(windows))]
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+        let base = absolute_env("XDG_DATA_HOME")
+            .or_else(|| absolute_env("HOME").map(|h| h.join(".local/share")));
 
-        base.unwrap_or_else(std::env::temp_dir)
-            .join("convkit")
-            .join("bin")
+        base.map(|b| b.join("convkit").join("bin"))
     }
 
     /// `managed_dir_override` when a test has set one, otherwise the real
     /// `managed_dir()`. The only thing `candidates`/`resolve_managed_only`
     /// should call.
-    fn managed_dir_for(&self) -> PathBuf {
+    fn managed_dir_for(&self) -> Option<PathBuf> {
         if let Some(dir) = &self.managed_dir_override {
-            return dir.clone();
+            return Some(dir.clone());
         }
         Self::managed_dir()
     }
@@ -337,8 +336,8 @@ impl Resolver {
     /// write. Always the real, global `managed_dir()`; test isolation for
     /// *resolving* is `with_managed_dir`, but `conv install` itself always
     /// writes to the one real managed directory regardless of that.
-    pub fn managed_path(backend: Backend) -> PathBuf {
-        Self::managed_dir().join(Self::managed_filename(backend))
+    pub fn managed_path(backend: Backend) -> Option<PathBuf> {
+        Self::managed_dir().map(|d| d.join(Self::managed_filename(backend)))
     }
 
     /// Environment variable consulted for this backend, e.g. `CONVKIT_FFMPEG`.
@@ -454,8 +453,9 @@ impl Resolver {
             let p = Self::console_soffice(&p).unwrap_or(p);
             out.push((p, Source::Env));
         }
-        let managed = self.managed_dir_for().join(Self::managed_filename(backend));
-        out.push((managed, Source::Managed));
+        if let Some(dir) = self.managed_dir_for() {
+            out.push((dir.join(Self::managed_filename(backend)), Source::Managed));
+        }
         if let Ok(p) = Self::which_backend(backend, exe) {
             out.push((p, Source::Path));
         }
@@ -591,7 +591,9 @@ impl Resolver {
     /// states with different exit codes, and only this method's caller
     /// knows which one applies.
     pub fn resolve_managed_only(&self, backend: Backend) -> Option<ResolvedBackend> {
-        let path = self.managed_dir_for().join(Self::managed_filename(backend));
+        let path = self
+            .managed_dir_for()?
+            .join(Self::managed_filename(backend));
         if !path.is_file() {
             return None;
         }
@@ -769,13 +771,11 @@ impl Resolver {
         let mut cmd = crate::procutil::backend_command(path);
         cmd.arg(flag);
 
-        let profile = (backend == Backend::Soffice).then(|| {
-            std::env::temp_dir().join(format!(
-                "convkit-lo-version-probe-{}-{}",
-                std::process::id(),
-                VERSION_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed)
-            ))
-        });
+        let profile = (backend == Backend::Soffice)
+            .then(|| {
+                crate::exec::make_lo_profile_dir("version-probe-", &VERSION_PROBE_COUNTER).ok()
+            })
+            .flatten();
         if let Some(profile) = &profile {
             if let Ok(url) = crate::exec::user_installation_url(profile) {
                 cmd.arg(format!("-env:UserInstallation={url}"));
@@ -836,6 +836,15 @@ impl Resolver {
     }
 }
 
+/// The env var as a path, only when it is absolute.
+fn absolute_env(name: &str) -> Option<PathBuf> {
+    absolute(std::env::var_os(name))
+}
+
+fn absolute(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.map(PathBuf::from).filter(|p| p.is_absolute())
+}
+
 /// Picks the first whitespace-separated token on `line` that contains a
 /// digit, rather than returning the whole banner line. A naive whole-line
 /// return blew out `doctor`'s tabular version column — ffmpeg's own first
@@ -860,9 +869,18 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    fn empty_and_relative_env_values_are_not_a_base_dir() {
+        assert_eq!(absolute(Some("".into())), None);
+        assert_eq!(absolute(Some("convkit/bin".into())), None);
+        assert_eq!(absolute(None), None);
+        let abs = std::env::temp_dir();
+        assert_eq!(absolute(Some(abs.clone().into_os_string())), Some(abs));
+    }
+
+    #[test]
     fn a_folder_backend_resolves_to_the_program_inside_its_folder() {
         let exe = if cfg!(windows) { "qpdf.exe" } else { "qpdf" };
-        let p = Resolver::managed_path(Backend::Qpdf);
+        let p = Resolver::managed_path(Backend::Qpdf).unwrap();
         assert!(
             p.ends_with(Path::new("qpdf").join("bin").join(exe)),
             "{}",
@@ -870,7 +888,7 @@ mod tests {
         );
         assert_eq!(
             p.parent().and_then(Path::parent).and_then(Path::parent),
-            Some(Resolver::managed_dir().as_path())
+            Some(Resolver::managed_dir().unwrap().as_path())
         );
     }
 
@@ -922,7 +940,7 @@ mod tests {
                 .0;
             assert_eq!(
                 managed_candidate.file_name(),
-                Resolver::managed_path(backend).file_name(),
+                Resolver::managed_path(backend).unwrap().file_name(),
                 "{backend:?}: managed_path and the Managed candidate disagree on filename"
             );
         }

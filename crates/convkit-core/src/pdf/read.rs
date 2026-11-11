@@ -163,7 +163,14 @@ pub fn parse_read(input: &Path, code: Option<i32>, stdout: &[u8], stderr: &str) 
         |reason: &str| qpdf_error(format!("{name} could not be read as a PDF: {reason}"));
     match code {
         Some(0) | Some(3) => {}
-        Some(2) if stderr.contains("invalid password") => return Err(password_needed(input)),
+        // The line's end only: the file's own name may say "invalid password".
+        Some(2)
+            if stderr
+                .lines()
+                .any(|l| l.trim_end().ends_with(": invalid password")) =>
+        {
+            return Err(password_needed(input))
+        }
         _ => {
             let reason = qpdf_reason(stderr);
             let prefix = format!("{}: ", path_arg(input));
@@ -354,6 +361,14 @@ mod tests {
             "fake.pdf could not be read as a PDF: \
              unable to find trailer dictionary while recovering damaged file"
         );
+    }
+
+    #[test]
+    fn a_file_named_invalid_password_is_not_taken_for_a_locked_one() {
+        let stderr = "WARNING: invalid password.pdf: can't find PDF header\n\
+                      qpdf: invalid password.pdf: unable to find trailer dictionary while recovering damaged file\n";
+        let e = parse_read(Path::new("invalid password.pdf"), Some(2), b"", stderr).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConversionFailed);
     }
 
     #[test]

@@ -159,14 +159,15 @@ pub fn inspect(text: &str) -> Report {
                 base: cps[0].1,
                 emoji,
                 first_in_text: at == 0,
-                cjk_line: cjk_lines.contains(&line),
+                cjk_line: cjk_lines.binary_search(&line).is_ok(),
             };
+            // Both lists are in text order, so a binary search finds the entry.
             let flag = mixed
-                .iter()
-                .find(|(pos, _)| *pos == at)
-                .map(|(_, note)| Flag {
+                .binary_search_by_key(&at, |(pos, _)| *pos)
+                .ok()
+                .map(|i| Flag {
                     kind: Kind::Lookalike,
-                    note: note.clone(),
+                    note: mixed[i].1.clone(),
                 })
                 .or_else(|| flag_for(c, &ctx));
             let (category, category_name) = category(c);
@@ -608,6 +609,11 @@ fn category(c: char) -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn many_cjk_lines_are_inspected_in_linear_time() {
+        assert_eq!(inspect(&"漢\n".repeat(100_000)).clusters.len(), 200_000);
+    }
 
     fn flags(text: &str) -> Vec<(char, Kind)> {
         inspect(text)

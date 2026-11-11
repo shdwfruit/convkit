@@ -237,6 +237,7 @@ fn fmt(cli: &Cli, args: &FmtArgs) -> Result<i32, Failure> {
             } else {
                 "OK"
             };
+            let name = render::safe_for_terminal(&name);
             println!("{glyph} {name} is valid {}", from.name());
             eprint!(
                 "{}",
@@ -386,7 +387,7 @@ fn read_input(paste: bool, path: Option<&Path>) -> Result<(Input, String, bool),
             )),
             Got::Files(files) => match files.as_slice() {
                 [one] => {
-                    let name = file_name(one);
+                    let name = render::file_name_of(one);
                     Ok((Input::File(one.clone()), name, false))
                 }
                 many => Err(usage(format!(
@@ -407,7 +408,7 @@ fn read_input(paste: bool, path: Option<&Path>) -> Result<(Input, String, bool),
             ErrorCode::InputNotFound,
             format!("input not found: {}", p.display()),
         ))),
-        Some(p) => Ok((Input::File(p.to_path_buf()), file_name(p), false)),
+        Some(p) => Ok((Input::File(p.to_path_buf()), render::file_name_of(p), false)),
         None if !std::io::stdin().is_terminal() => stdin_input(),
         None => Err(Failure::Usage(ConvError {
             code: ErrorCode::InvalidInvocation,
@@ -438,13 +439,6 @@ fn stdin_input() -> Result<(Input, String, bool), Failure> {
     std::io::copy(&mut stdin, &mut spool).map_err(read)?;
     spool.flush().map_err(read)?;
     Ok((Input::Spooled(spool), name, false))
-}
-
-fn file_name(p: &Path) -> String {
-    p.file_name().map_or_else(
-        || p.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    )
 }
 
 /// The file to write, if any: OUT as typed, a bare `.ext` for the input's
@@ -625,7 +619,7 @@ fn copy_json(c: &CopyResult) -> serde_json::Value {
 
 fn print_copy(cli: &Cli, c: &CopyResult) {
     match c {
-        Ok(m) if !cli.quiet => eprintln!("{m}"),
+        Ok(m) if !cli.quiet => eprintln!("{}", render::safe_for_terminal(m)),
         Ok(_) => {}
         Err(m) => {
             let line = format!("warning  couldn't copy it: {m}");

@@ -13,10 +13,10 @@ use convkit_core::{
 use serde_json::json;
 
 use crate::cli::{Cli, MergeArgs};
-use crate::commands::{install, pdf_support};
+use crate::commands::pdf_support;
 use crate::password::{self, Opener};
 use crate::prompt::{self, Gate};
-use crate::{input, install_prompt, render};
+use crate::{input, install_prompt, output, render};
 
 /// What the output is made from, by its extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +91,8 @@ pub fn run(cli: &Cli, args: &MergeArgs) -> i32 {
         render::print_error(cli.json, &e);
         return e.code.exit_code();
     }
-    let subject = json!({ "inputs": inputs, "output": output });
-    let header = name_of(&output);
+    let subject = json!({ "inputs": lossy(&inputs), "output": output.to_string_lossy() });
+    let header = render::file_name_of(&output);
     // Checked before offering to install anything.
     if let Some(missing) = inputs.iter().find(|p| !p.is_file()) {
         let e = ConvError::new(
@@ -129,15 +129,15 @@ fn refused_knob(args: &MergeArgs, family: Family, output: &Path) -> Option<ConvE
         Family::Video => return None,
         Family::Pdf => format!(
             "{flag} works on a merge of videos, not on {}",
-            name_of(output)
+            render::file_name_of(output)
         ),
         Family::Audio if flag == "--max-size" => format!(
             "--max-size works on a merge of videos; {} holds only sound",
-            name_of(output)
+            render::file_name_of(output)
         ),
         Family::Audio => format!(
             "{flag} sets the picture, and {} holds only sound",
-            name_of(output)
+            render::file_name_of(output)
         ),
     };
     Some(invalid(why))
@@ -157,7 +157,7 @@ fn refused_lock(
     match family {
         Family::Video | Family::Audio => Some(invalid(format!(
             "--password locks a PDF, and {} is not one",
-            name_of(output)
+            render::file_name_of(output)
         ))),
         Family::Pdf if inputs.iter().all(|p| pages::is_picture(p)) => Some(ConvError {
             remediation: Some(Remediation {
@@ -178,9 +178,9 @@ fn refused_lock(
 }
 
 fn run_pdfs(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path) -> i32 {
-    let subject = json!({ "inputs": inputs, "output": output });
-    let header = name_of(output);
-    let qpdf = match pdf_support::resolve_qpdf(cli, !args.dry_run) {
+    let subject = json!({ "inputs": lossy(inputs), "output": output.to_string_lossy() });
+    let header = render::file_name_of(output);
+    let qpdf = match install_prompt::resolve_offering(cli, Backend::Qpdf, !args.dry_run) {
         Ok(q) => q,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
@@ -230,9 +230,9 @@ fn run_pictures(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path) 
 }
 
 fn run_pages(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path) -> i32 {
-    let subject = json!({ "inputs": inputs, "output": output });
-    let header = name_of(output);
-    let qpdf = match pdf_support::resolve_qpdf(cli, !args.dry_run) {
+    let subject = json!({ "inputs": lossy(inputs), "output": output.to_string_lossy() });
+    let header = render::file_name_of(output);
+    let qpdf = match install_prompt::resolve_offering(cli, Backend::Qpdf, !args.dry_run) {
         Ok(q) => q,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
@@ -272,12 +272,12 @@ fn run_pages(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path) -> 
             let layouts: Vec<_> = plan
                 .layouts()
                 .into_iter()
-                .map(|(path, contents)| json!({ "path": path, "contents": contents }))
+                .map(|(path, contents)| json!({ "path": path.to_string_lossy(), "contents": contents }))
                 .collect();
             let v = json!({ "ok": true, "dry_run": true, "plans": [{
                 "ok": true,
-                "inputs": inputs,
-                "output": output,
+                "inputs": lossy(inputs),
+                "output": output.to_string_lossy(),
                 "pages": plan.pages(),
                 "commands": commands,
                 "layouts": layouts,
@@ -297,11 +297,11 @@ fn run_pages(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path) -> 
             for n in &notes {
                 s.push_str(&format!("note: {n}\n"));
             }
-            print!("{s}");
+            print!("{}", render::safe_for_terminal(&s));
         }
         return 0;
     }
-    let typst = match resolve_offering(cli, Backend::Typst, true) {
+    let typst = match install_prompt::resolve_offering(cli, Backend::Typst, true) {
         Ok(t) => t,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, false),
     };
@@ -321,7 +321,7 @@ fn run_pages(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path) -> 
         Ok(o) => {
             if cli.json {
                 let mut v = render::pdf_outcome_json(&o, start.elapsed());
-                v["inputs"] = json!(inputs);
+                v["inputs"] = json!(lossy(inputs));
                 v["backends"] = json!([
                     { "backend": Backend::Typst, "version": typst.version },
                     { "backend": Backend::Qpdf, "version": o.version },
@@ -338,9 +338,9 @@ fn run_pages(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path) -> 
 }
 
 fn run_clips(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path, to: Format) -> i32 {
-    let subject = json!({ "inputs": inputs, "output": output });
-    let header = name_of(output);
-    let ffprobe = match resolve_offering(cli, Backend::Ffprobe, !args.dry_run) {
+    let subject = json!({ "inputs": lossy(inputs), "output": output.to_string_lossy() });
+    let header = render::file_name_of(output);
+    let ffprobe = match install_prompt::resolve_offering(cli, Backend::Ffprobe, !args.dry_run) {
         Ok(p) => p,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
     };
@@ -360,7 +360,7 @@ fn run_clips(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path, to:
         print_clips_dry_run(cli, &plan, None);
         return 0;
     }
-    let ffmpeg = match resolve_offering(cli, Backend::Ffmpeg, true) {
+    let ffmpeg = match install_prompt::resolve_offering(cli, Backend::Ffmpeg, true) {
         Ok(f) => f,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, false),
     };
@@ -379,7 +379,7 @@ fn run_clips(cli: &Cli, args: &MergeArgs, inputs: &[PathBuf], output: &Path, to:
 }
 
 /// `--max-size`: the clips are joined first, copied when they match and
-/// otherwise encoded near losslessly, into a file beside the output, which
+/// otherwise encoded near losslessly, into a temporary file, which
 /// is then fitted under the size as `conv joined.mkv out.mp4 --max-size`
 /// would fit it. The sizes can only be chosen once the joined file exists,
 /// so a size too small to look good is asked about after the join.
@@ -391,15 +391,15 @@ fn run_clips_sized(
     to: Format,
     ffprobe: &ResolvedBackend,
 ) -> i32 {
-    let subject = json!({ "inputs": inputs, "output": output });
-    let header = name_of(output);
-    let joined = output.with_file_name(format!(
-        ".{}.convkit-joined.mkv",
-        output
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
+    let subject = json!({ "inputs": lossy(inputs), "output": output.to_string_lossy() });
+    let header = render::file_name_of(output);
+    // A folder of its own, so the joined file can't replace one of the
+    // user's or be left beside the output; it is only read, never renamed.
+    let stem = output.file_stem().unwrap_or_default().to_string_lossy();
+    let (_joined_dir, joined) = match output::private_temp(&format!("{stem}-joined.mkv")) {
+        Ok(t) => t,
+        Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, args.dry_run),
+    };
     // An encode here is fed to another, so it keeps nearly everything:
     // CRF 16 rather than the usual 20.
     let opts = clips::Options {
@@ -417,9 +417,9 @@ fn run_clips_sized(
             "Then fitted under {} into {}, as conv {} {} --max-size {} does; the sizes are \
              chosen once the clips are joined.",
             max.spelling,
-            name_of(output),
-            name_of(&joined),
-            name_of(output),
+            render::file_name_of(output),
+            render::file_name_of(&joined),
+            render::file_name_of(output),
             max.spelling
         );
         print_clips_dry_run(cli, &plan, Some(&then));
@@ -432,12 +432,11 @@ fn run_clips_sized(
         );
         return failed(cli, args, subject, &header, e);
     }
-    let ffmpeg = match resolve_offering(cli, Backend::Ffmpeg, true) {
+    let ffmpeg = match install_prompt::resolve_offering(cli, Backend::Ffmpeg, true) {
         Ok(f) => f,
         Err(e) => return pdf_support::print_failure(cli, subject, &header, &e, false),
     };
     let start = Instant::now();
-    let _cleanup = RemoveOnDrop(joined.clone());
     let progress = Progress::new(cli, args.verbose);
     let mut on_event = |e: Event| progress.event(e);
     let join = clips::run(&plan, &ffmpeg, true, &mut on_event);
@@ -516,7 +515,7 @@ fn run_clips_sized(
     o.backend_output.splice(0..0, join.backend_output.clone());
     if cli.json {
         let mut v = render::outcome_json(&o);
-        v["inputs"] = json!(inputs);
+        v["inputs"] = json!(lossy(inputs));
         let envelope = json!({ "ok": true, "results": [v] });
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
         return 0;
@@ -535,16 +534,6 @@ fn run_clips_sized(
     0
 }
 
-/// Removes a file when dropped: the joined file `--max-size` fits, on every
-/// way out.
-struct RemoveOnDrop(PathBuf);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 fn print_clips_dry_run(cli: &Cli, plan: &clips::ClipsPlan, then: Option<&str>) {
     let commands = plan.commands();
     let list = plan.list();
@@ -557,12 +546,12 @@ fn print_clips_dry_run(cli: &Cli, plan: &clips::ClipsPlan, then: Option<&str>) {
         notes.extend(then.map(str::to_string));
         let v = json!({ "ok": true, "dry_run": true, "plans": [{
             "ok": true,
-            "inputs": plan.inputs,
-            "output": plan.output,
+            "inputs": lossy(&plan.inputs),
+            "output": plan.output.to_string_lossy(),
             "remuxed": plan.copied,
             "duration_ms": plan.duration_ms,
             "commands": commands,
-            "list": list.map(|(path, contents)| json!({ "path": path, "contents": contents })),
+            "list": list.map(|(path, contents)| json!({ "path": path.to_string_lossy(), "contents": contents })),
             "warnings": notes,
             "notes": plan.warnings,
         }]});
@@ -586,15 +575,15 @@ fn print_clips_dry_run(cli: &Cli, plan: &clips::ClipsPlan, then: Option<&str>) {
     for n in plan.notes.iter().map(String::as_str).chain(then) {
         s.push_str(&format!("note: {n}\n"));
     }
-    print!("{s}");
+    print!("{}", render::safe_for_terminal(&s));
 }
 
 fn print_clips_success(cli: &Cli, o: &clips::ClipsOutcome, elapsed: std::time::Duration) {
     if cli.json {
         let mut v = json!({
             "ok": true,
-            "inputs": o.inputs,
-            "output": o.output,
+            "inputs": lossy(&o.inputs),
+            "output": o.output.to_string_lossy(),
             "bytes": o.bytes,
             "duration_ms": o.duration_ms,
             "remuxed": o.copied,
@@ -648,28 +637,6 @@ fn failed(
         });
     }
     pdf_support::print_failure(cli, subject, header, &e, false)
-}
-
-/// `backend`, resolved the usual way. When it is missing and `offer` is
-/// set, the same install prompt a conversion gives (`--yes` installs,
-/// `--no-install`, `--json` and `-q` never prompt).
-fn resolve_offering(
-    cli: &Cli,
-    backend: Backend,
-    offer: bool,
-) -> Result<ResolvedBackend, ConvError> {
-    match cli.resolver().resolve(backend) {
-        Ok(b) => Ok(b),
-        Err(e)
-            if e.code == ErrorCode::BackendMissing
-                && offer
-                && install_prompt::should_install(cli, backend) =>
-        {
-            install::install_backend(cli, backend)?;
-            cli.resolver().resolve(backend)
-        }
-        Err(e) => Err(e),
-    }
 }
 
 /// A spinner naming the backend running, for a single merge that can take
@@ -737,10 +704,13 @@ fn invalid(message: String) -> ConvError {
     ConvError::new(ErrorCode::InvalidInvocation, message)
 }
 
-fn name_of(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| p.display().to_string())
+/// Paths for `--json`, lossy, as a name that is not UTF-8 would panic
+/// `json!`.
+fn lossy(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
 }
 
 const SHAPE: &str = "expected files and then an output, e.g. `conv merge a.pdf b.pdf out.pdf` or \
@@ -780,7 +750,7 @@ fn split_paths(typed: &[PathBuf]) -> Result<(Vec<PathBuf>, PathBuf, Format), Con
         return Err(invalid(format!(
             "the merged file must be a .pdf, a video (.mp4, .mov, .mkv, .webm) or an audio \
              file (.mp3, .m4a, .wav, .flac, .opus, .ogg), got {}{hint}",
-            name_of(output)
+            render::file_name_of(output)
         )));
     };
 
@@ -815,7 +785,7 @@ fn not_taken(
     to: Format,
     typed: &[PathBuf],
 ) -> ConvError {
-    let name = name_of(p);
+    let name = render::file_name_of(p);
     let mut e = match family {
         Family::Pdf => invalid(format!(
             "a merge into a PDF takes PDFs and pictures; {name} is neither"

@@ -18,7 +18,7 @@
 //! Modes keep the archive's read and execute bits, always with read and
 //! write for the owner, and never setuid, setgid or sticky.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -26,13 +26,18 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
-use super::{failed, human_size, name_of, ASK_ABOVE_BYTES, ASK_ABOVE_RATIO};
+use super::{failed, name_of, ASK_ABOVE_BYTES, ASK_ABOVE_RATIO};
+use crate::size::human as human_size;
 use crate::{ConvError, ErrorCode, Result};
+
+/// What an entry costs on disk beyond its bytes, for the zip-bomb question.
+const ENTRY_COST: u64 = 512;
 
 /// How much an archive grows when unpacked, for the question `unpack`
 /// asks before a likely zip bomb.
 #[derive(Debug, Clone, Serialize)]
 pub struct Expansion {
+    #[serde(serialize_with = "crate::lossy_path")]
     pub archive: PathBuf,
     /// The archive's own size.
     pub packed: u64,
@@ -86,6 +91,19 @@ thread_local! {
     /// Lower lines for a test, so a zip bomb can be a few kilobytes.
     pub(crate) static TEST_LIMITS: std::cell::Cell<Option<(u64, u64)>> =
         const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes every hard link fail, as on a disk that has none.
+    pub(crate) static TEST_NO_HARDLINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn link_fails() -> bool {
+    #[cfg(test)]
+    return TEST_NO_HARDLINKS.with(|c| c.get());
+    #[cfg(not(test))]
+    false
 }
 
 fn limits() -> (u64, u64) {
@@ -179,6 +197,11 @@ pub(crate) struct Extractor<'a> {
     archive: PathBuf,
     packed: u64,
     written: u64,
+    /// Entries seen, each counted as `ENTRY_COST` toward the question.
+    entries: u64,
+    /// Names written so far, to tell a repeated entry from a name that
+    /// only matches another in a different case.
+    seen: HashSet<PathBuf>,
     asked: bool,
     confirm: &'a mut dyn FnMut(&Expansion) -> bool,
     links: Vec<(PathBuf, PathBuf, String)>,
@@ -203,6 +226,8 @@ impl<'a> Extractor<'a> {
             archive: archive.to_path_buf(),
             packed: std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0),
             written: 0,
+            entries: 0,
+            seen: HashSet::new(),
             asked: false,
             confirm,
             links: Vec::new(),
@@ -219,6 +244,16 @@ impl<'a> Extractor<'a> {
 
     pub(crate) fn written(&self) -> u64 {
         self.written
+    }
+
+    /// What has been written so far, with a header's worth per entry, so a
+    /// million empty files are asked about too.
+    fn ask_written(&mut self) -> Result<()> {
+        self.ask(
+            self.written
+                .saturating_add(self.entries.saturating_mul(ENTRY_COST)),
+            false,
+        )
     }
 
     fn ask(&mut self, unpacked: u64, listed: bool) -> Result<()> {
@@ -260,8 +295,27 @@ impl<'a> Extractor<'a> {
 
     /// Clears a file a repeated entry left, so the later one wins, as tar
     /// does. A folder in the way is an error: the archive holds both.
-    fn clear(&self, path: &Path, rel: &Path) -> Result<()> {
-        match std::fs::symlink_metadata(path) {
+    fn clear(&mut self, path: &Path, rel: &Path) -> Result<()> {
+        let existing = std::fs::symlink_metadata(path);
+        // On a disk that ignores case, a different name already took this one.
+        if existing.is_ok() && !self.seen.contains(rel) {
+            let lower = rel.to_string_lossy().to_lowercase();
+            if let Some(first) = self
+                .seen
+                .iter()
+                .find(|s| s.to_string_lossy().to_lowercase() == lower)
+            {
+                return Err(failed(format!(
+                    "{} holds both {} and {}, which are the same name on this disk; \
+                     one would replace the other, so nothing was unpacked",
+                    name_of(&self.archive),
+                    first.display(),
+                    rel.display()
+                )));
+            }
+        }
+        self.seen.insert(rel.to_path_buf());
+        match existing {
             Ok(m) if m.is_dir() => Err(failed(format!(
                 "{} holds {} as both a file and a folder",
                 name_of(&self.archive),
@@ -290,7 +344,7 @@ impl<'a> Extractor<'a> {
                 Err(e) => return Err(read_error(&self.archive, &entry.display(), &e)),
             };
             self.written += n as u64;
-            self.ask(self.written, false)?;
+            self.ask_written()?;
             out.write_all(&buf[..n])
                 .map_err(|e| failed(format!("cannot write {}: {e}", path.display())))?;
         }
@@ -317,9 +371,14 @@ impl<'a> Extractor<'a> {
             }
             let dst = self.parent_of(&rel)?;
             self.clear(&dst, &rel)?;
-            std::fs::hard_link(&src, &dst)
-                .or_else(|_| std::fs::copy(&src, &dst).map(|_| ()))
-                .map_err(|e| failed(format!("cannot write {}: {e}", dst.display())))?;
+            if link_fails() || std::fs::hard_link(&src, &dst).is_err() {
+                // A disk without hard links (exFAT, SMB) gets a copy, which
+                // counts as written like any file.
+                let n = std::fs::copy(&src, &dst)
+                    .map_err(|e| failed(format!("cannot write {}: {e}", dst.display())))?;
+                self.written = self.written.saturating_add(n);
+                self.ask_written()?;
+            }
             self.files += 1;
         }
         let links = std::mem::take(&mut self.links);
@@ -408,6 +467,7 @@ impl Sink for Extractor<'_> {
             self.mac_skipped += 1;
             return Ok(());
         }
+        self.entries += 1;
         match &entry.kind {
             EntryKind::File => self.write_file(&rel, &entry, data)?,
             EntryKind::Dir => {
@@ -439,7 +499,7 @@ impl Sink for Extractor<'_> {
             }
             EntryKind::Other => self.other_skipped += 1,
         }
-        Ok(())
+        self.ask_written()
     }
 }
 
