@@ -73,11 +73,10 @@ pub fn from(got: Got, command: &str) -> Result<Pasted, ConvError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn a_pasted_picture_is_kept_where_only_this_user_can_read_it() {
         use std::os::unix::fs::PermissionsExt;
